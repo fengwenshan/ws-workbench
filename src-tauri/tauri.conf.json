@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "OA部署打包工具",
+  "productName": "project-manage-tools",
   "version": "1.0.0",
   "identifier": "com.dist-cli.app",
   "build": {

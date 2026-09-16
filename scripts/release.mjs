@@ -5,7 +5,12 @@
  * 用法：
  *   node scripts/release.mjs                 # 构建当前平台 + 发布
  *   node scripts/release.mjs --no-publish    # 只构建，产物落在 release/
+ *   node scripts/release.mjs --dmg           # macOS 额外生成 dmg
  *   node scripts/release.mjs --target x86_64-pc-windows-msvc   # 交叉编译 Windows
+ *
+ * 环境变量：
+ *   TAURI_BUNDLES=app  只打 app、跳过 Tauri 的 dmg 打包脚本
+ *                      （受限环境无法挂载 /Volumes 或写裸盘时必需，配合 --dmg 使用）
  *
  * 两个平台分别在各自可用的环境里执行即可：脚本会把本平台条目「合并」进
  * updates/latest.json，不会覆盖另一个平台。
@@ -21,12 +26,17 @@ import { execFileSync } from 'node:child_process'
 import {
   existsSync,
   mkdirSync,
+  mkdtempSync,
   readFileSync,
   readdirSync,
   copyFileSync,
   writeFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
 } from 'node:fs'
 import { join, dirname } from 'node:path'
+import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -54,6 +64,8 @@ function argValue(flag) {
 }
 
 const TARGET = process.env.TAURI_TARGET || argValue('--target') || ''
+/** 额外生成 macOS 的 dmg 安装包（见 createDmg 的说明） */
+const WANT_DMG = process.argv.includes('--dmg')
 
 function log(msg) {
   console.log(`\x1b[36m[release]\x1b[0m ${msg}`)
@@ -80,7 +92,7 @@ function resolvePlatform() {
       // 优先 NSIS 的 -setup.exe，其次 MSI
       matchBundle: (f) => f.endsWith('-setup.exe') || f.endsWith('.msi'),
       matchSig: (f) => f.endsWith('-setup.exe.sig') || f.endsWith('.msi.sig'),
-      assetFile: 'demo-tools-setup.exe',
+      assetFile: 'project-manage-tools-setup.exe',
       label: 'Windows',
     }
   }
@@ -91,7 +103,7 @@ function resolvePlatform() {
       bundleSubdir: 'macos',
       matchBundle: (f) => f.endsWith('.app.tar.gz'),
       matchSig: (f) => f.endsWith('.app.tar.gz.sig'),
-      assetFile: 'demo-tools.app.tar.gz',
+      assetFile: 'project-manage-tools.app.tar.gz',
       label: 'macOS',
     }
   }
@@ -104,10 +116,70 @@ function bundleDir(platform) {
     : join(TAURI_DIR, 'target/release/bundle', platform.bundleSubdir)
 }
 
+function readConf() {
+  return JSON.parse(readFileSync(join(TAURI_DIR, 'tauri.conf.json'), 'utf8'))
+}
+
 function readVersion() {
-  const conf = JSON.parse(readFileSync(join(TAURI_DIR, 'tauri.conf.json'), 'utf8'))
+  const conf = readConf()
   if (!conf.version) fail('tauri.conf.json 里没有 version 字段')
   return conf.version
+}
+
+/**
+ * 用 hdiutil makehybrid 生成 dmg。
+ *
+ * Tauri 自带的 bundle_dmg.sh 需要挂载临时卷到 /Volumes 并写裸盘设备，
+ * 在受限环境（如沙箱）里会失败。makehybrid 直接从目录生成镜像，
+ * 不挂载、不写裸盘，再用 convert 压缩，可绕过该限制。
+ * 产物缺少「拖入应用程序」的美化背景，但功能完全正常。
+ */
+function createDmg(platform, version) {
+  if (!platform.key.startsWith('darwin-')) return null
+
+  const dir = bundleDir(platform)
+  const appName = readdirSync(dir).find((f) => f.endsWith('.app'))
+  if (!appName) {
+    log('未找到 .app，跳过 dmg 生成')
+    return null
+  }
+
+  const product = readConf().productName || 'app'
+  const arch = platform.key.replace('darwin-', '')
+  const outDir = join(TAURI_DIR, 'target/release/bundle/dmg')
+  mkdirSync(outDir, { recursive: true })
+  const outBase = join(outDir, `${product}_${version}_${arch}`)
+
+  // 暂存目录：.app + 指向 /Applications 的快捷方式
+  const stage = mkdtempSync(join(tmpdir(), 'dmg-stage-'))
+  const raw = join(tmpdir(), `dmg-raw-${Date.now()}.dmg`)
+  try {
+    execFileSync('cp', ['-R', join(dir, appName), join(stage, appName)], { stdio: 'inherit' })
+    symlinkSync('/Applications', join(stage, 'Applications'))
+
+    log('生成 dmg（makehybrid + UDZO 压缩）…')
+    execFileSync(
+      'hdiutil',
+      ['makehybrid', '-hfs', '-hfs-volume-name', product, '-o', raw, stage],
+      { stdio: 'inherit' }
+    )
+    execFileSync('hdiutil', ['convert', raw, '-format', 'UDZO', '-o', outBase], {
+      stdio: 'inherit',
+    })
+
+    const dmgPath = `${outBase}.dmg`
+    if (!existsSync(dmgPath)) {
+      log('dmg 未生成')
+      return null
+    }
+    const mb = (statSync(dmgPath).size / 1048576).toFixed(1)
+    log(`已生成 dmg: ${dmgPath} (${mb}MB)`)
+    copyFileSync(dmgPath, join(OUT_DIR, `${product}_${version}_${arch}.dmg`))
+    return dmgPath
+  } finally {
+    rmSync(stage, { recursive: true, force: true })
+    rmSync(raw, { force: true })
+  }
 }
 
 function build() {
@@ -233,6 +305,8 @@ async function main() {
   mkdirSync(OUT_DIR, { recursive: true })
   copyFileSync(bundlePath, join(OUT_DIR, platform.assetFile))
   log(`已导出 release/${platform.assetFile}`)
+
+  if (WANT_DMG) createDmg(platform, version)
 
   // 合并已提交的其他平台条目
   const published = readPublishedManifest()
