@@ -1,0 +1,122 @@
+name: Release
+
+# 合并到 main 即自动发版：递增版本号 → 构建 macOS 与 Windows 安装包
+# → 上传到 Gitee 发行版 → 提交更新清单。
+# 也可在 Actions 页面手动触发（workflow_dispatch）。
+#
+# ─────────────────────────────────────────────────────────────
+# 一次性配置（必须做完，否则跑不起来）
+#
+# 1) 仓库密钥（Settings → Secrets and variables → Actions → New repository secret）
+#      TAURI_SIGNING_PRIVATE_KEY  更新签名私钥的**内容**
+#                                 （即本机 ~/.tauri/demo-tools.key 的全文）
+#      GITEE_TOKEN                Gitee 私人令牌，权限范围需含 projects
+#
+# 2) 让代码能同时到达 GitHub（Action 的触发源）与 Gitee（发布目标）
+#    在本机执行一次，之后一条 git push 即同时推到两个仓库：
+#      git remote set-url --add --push origin git@gitee.com:feng_wenshan/project-manage.git
+#      git remote set-url --add --push origin git@github.com:fengwenshan/project-manage.git
+#    （也可用 Gitee 的「仓库镜像 → 推送镜像」自动同步，但需确认镜像推送能触发 Action）
+#
+# 3) 版本号规则
+#    取 tauri.conf.json 里的 major.minor，patch 位用 GitHub 运行序号：
+#    1.0.0 → 1.0.<run_number>。通过 tauri build --config 注入，
+#    不改动源文件，因此不会产生提交回环。
+# ─────────────────────────────────────────────────────────────
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# 同分支排队执行，避免两次发布并发写同一个发行版
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    # macOS runner：一台机器同时产出 macOS 安装包与（交叉编译的）Windows 安装包。
+    # 公开仓库使用标准 GitHub 托管 runner 是免费的（官方计费文档：
+    # "free for public repositories that use standard GitHub-hosted runners"）。
+    runs-on: macos-14
+
+    steps:
+      - name: 拉取代码（需要完整历史来生成 Changelog）
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 安装 pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: 安装 Rust（含 Windows 交叉编译目标）
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-pc-windows-msvc
+
+      - name: 安装交叉编译依赖
+        # llvm 提供 llvm-rc（Tauri 用它编译 Windows 资源文件），nsis 提供 makensis
+        run: |
+          brew install nsis llvm
+          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+          cargo install --locked cargo-xwin
+
+      - name: 缓存 Rust 构建产物
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: 安装前端依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 计算版本号
+        id: version
+        run: |
+          BASE=$(node -p "require('./src-tauri/tauri.conf.json').version.split('.').slice(0,2).join('.')")
+          VERSION="${BASE}.${{ github.run_number }}"
+          echo "value=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "本次发布版本：$VERSION"
+
+      - name: 把 origin 指向 Gitee
+        # 更新清单需要提交回 Gitee；GitHub 会自动屏蔽日志里出现的密钥
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+        run: |
+          git remote set-url origin "https://feng_wenshan:${GITEE_TOKEN}@gitee.com/feng_wenshan/project-manage.git"
+          git config user.name "冯文山"
+          git config user.email "fengwenshan@example.com"
+
+      - name: 构建并发布 macOS（含 dmg）
+        # TAURI_BUNDLES=app 跳过 Tauri 自带的 bundle_dmg.sh，改用 --dmg 的
+        # hdiutil makehybrid 路径（本地已实测通过）。
+        # 若想用 Tauri 原生 dmg（带"拖入应用程序"美化背景），
+        # 去掉 TAURI_BUNDLES 与 --dmg 两个参数即可。
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+        run: |
+          TAURI_BUNDLES=app node scripts/release.mjs --dmg --version "${{ steps.version.outputs.value }}"
+
+      - name: 构建并发布 Windows（交叉编译）
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+        run: node scripts/release.mjs --target x86_64-pc-windows-msvc --version "${{ steps.version.outputs.value }}"
+
+      - name: 保存产物供人工检查
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installers-${{ steps.version.outputs.value }}
+          path: release/*
+          if-no-files-found: warn
+          retention-days: 14

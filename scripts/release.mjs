@@ -71,6 +71,11 @@ function argValue(flag) {
 const TARGET = process.env.TAURI_TARGET || argValue('--target') || ''
 /** 额外生成 macOS 的 dmg 安装包（见 createDmg 的说明） */
 const WANT_DMG = process.argv.includes('--dmg')
+/**
+ * 版本号覆盖：CI 自动递增版本时用，避免修改文件造成的提交回环。
+ * 通过 tauri build --config 注入，构建出的 app 与清单版本保持一致。
+ */
+const VERSION_OVERRIDE = argValue('--version') || process.env.RELEASE_VERSION || ''
 
 function log(msg) {
   console.log(`\x1b[36m[release]\x1b[0m ${msg}`)
@@ -131,6 +136,7 @@ function readConf() {
 }
 
 function readVersion() {
+  if (VERSION_OVERRIDE) return VERSION_OVERRIDE
   const conf = readConf()
   if (!conf.version) fail('tauri.conf.json 里没有 version 字段')
   return conf.version
@@ -195,14 +201,27 @@ function createDmg(platform, version) {
 }
 
 function build() {
-  if (!existsSync(KEY_PATH)) {
-    fail(
-      `找不到签名私钥: ${KEY_PATH}\n` +
-        '先执行: npx tauri signer generate -w ~/.tauri/demo-tools.key'
-    )
+  // 签名私钥：CI 里通过环境变量传入内容；本地则从 ~/.tauri 下的文件读取。
+  // 注意打包器只识别 TAURI_SIGNING_PRIVATE_KEY（内容或路径），
+  // TAURI_SIGNING_PRIVATE_KEY_PATH 不生效，实测会报 "no private key"。
+  let privateKey = process.env.TAURI_SIGNING_PRIVATE_KEY || ''
+  if (privateKey) {
+    log('使用环境变量中的签名私钥')
+  } else {
+    if (!existsSync(KEY_PATH)) {
+      fail(
+        `找不到签名私钥: ${KEY_PATH}\n` +
+          '先执行: npx tauri signer generate -w ~/.tauri/demo-tools.key'
+      )
+    }
+    privateKey = readFileSync(KEY_PATH, 'utf8')
+    log(`使用签名私钥: ${KEY_PATH}`)
   }
+
   const args = ['tauri', 'build']
   if (TARGET) args.push('--target', TARGET)
+  // 版本覆盖（合并到默认配置里，不改动源文件）
+  if (VERSION_OVERRIDE) args.push('--config', JSON.stringify({ version: VERSION_OVERRIDE }))
   // 可用 TAURI_BUNDLES=app 跳过 dmg（例如受限环境无法创建 dmg 时）；
   // 更新通道只需要 .app.tar.gz，不依赖 dmg。
   if (process.env.TAURI_BUNDLES) args.push('--bundles', process.env.TAURI_BUNDLES)
@@ -211,15 +230,9 @@ function build() {
     args.push('--runner', 'cargo-xwin')
   }
 
-  log(`使用签名私钥: ${KEY_PATH}`)
   log(`开始构建: pnpm ${args.join(' ')}`)
 
-  const env = {
-    ...process.env,
-    // 打包器只识别 TAURI_SIGNING_PRIVATE_KEY（内容或路径），
-    // TAURI_SIGNING_PRIVATE_KEY_PATH 不生效，实测会报 "no private key"。
-    TAURI_SIGNING_PRIVATE_KEY: readFileSync(KEY_PATH, 'utf8'),
-  }
+  const env = { ...process.env, TAURI_SIGNING_PRIVATE_KEY: privateKey }
 
   // 交叉编译 Windows 需要 llvm-rc（Tauri 用它编译资源文件）和 makensis。
   // Homebrew 的 llvm 是 keg-only，不在默认 PATH 里，这里自动补上，避免每次手动 export。
