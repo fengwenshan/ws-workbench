@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * 发布脚本：构建（含更新签名）→ 生成/合并 latest.json → 提交到 Gitee updates/ 目录
+ * 发布脚本：构建（含更新签名）→ 上传安装包到 Gitee 发行版 → 生成/合并 latest.json 并提交
  *
  * 用法：
  *   node scripts/release.mjs                 # 构建当前平台 + 发布
@@ -11,11 +11,14 @@
  * 环境变量：
  *   TAURI_BUNDLES=app  只打 app、跳过 Tauri 的 dmg 打包脚本
  *                      （受限环境无法挂载 /Volumes 或写裸盘时必需，配合 --dmg 使用）
+ *   TAURI_SIGNING_PRIVATE_KEY  签名私钥的内容；不设时回退读 ~/.tauri 下的密钥文件
+ *   GITEE_TOKEN                Gitee 私人令牌，上传发行版附件时必需
  *
  * 两个平台分别在各自可用的环境里执行即可：脚本会把本平台条目「合并」进
  * updates/latest.json，不会覆盖另一个平台。
  *
- * 发布不需要任何 API 令牌：产物通过 git push 提交，客户端走 Gitee raw 地址拉取。
+ * 发布需要 GITEE_TOKEN（Gitee 私人令牌，权限范围含 projects）：安装包作为发行版附件上传，
+ * 更新清单提交到 updates/，客户端从固定地址匿名读取。
  *
  * 为什么不用 GitLab / GitHub：
  *   内网 GitLab 项目无法设为公开，客户端拿不到文件；
@@ -38,6 +41,7 @@ import {
 import { join, dirname } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
+import { request as httpsRequest } from 'node:https'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const TAURI_DIR = join(ROOT, 'src-tauri')
@@ -312,8 +316,10 @@ async function findRelease(tag) {
   return gitee(`/repos/${REPO}/releases/tags/${encodeURIComponent(tag)}`)
 }
 
-/** 生成更新说明：上一个 tag 到本次 tag 之间的提交 */
+/** 生成更新说明：上一个 tag 到当前 HEAD 之间的提交 */
 function buildChangelog(tag) {
+  // 注意区间终点必须用 HEAD：本函数是在发行版创建「之前」调用的，
+  // 此刻 tag 还不存在于本地，写成 ${prev}..${tag} 会因未知版本号而报错。
   let prev = ''
   try {
     const tags = git(['tag', '--sort=-creatordate']).trim().split('\n').filter(Boolean)
@@ -321,7 +327,7 @@ function buildChangelog(tag) {
   } catch {
     // 没有 tag 时忽略
   }
-  const range = prev ? `${prev}..${tag}` : tag
+  const range = prev ? `${prev}..HEAD` : 'HEAD'
   let lines = ''
   try {
     lines = git(['log', '--no-merges', '--pretty=format:* %s (%h)', range]).trim()
@@ -346,17 +352,91 @@ function collectAssets(platform) {
   return assets
 }
 
-async function uploadAttachment(releaseId, name, filePath) {
-  const form = new FormData()
-  form.append('file', new Blob([readFileSync(filePath)]), name)
-  const res = await fetch(
-    `${API_BASE}/repos/${REPO}/releases/${releaseId}/attach_files?access_token=${GITEE_TOKEN}`,
-    { method: 'POST', body: form }
-  )
-  if (!res.ok) {
-    fail(`上传附件 ${name} 失败 (${res.status}): ${(await res.text()).slice(0, 300)}`)
+/** 名单里已有的附件，删掉同名项（Gitee 不允许重复文件名） */
+async function removeAttachment(releaseId, name) {
+  try {
+    const existing = (await gitee(`/repos/${REPO}/releases/${releaseId}/attach_files`)) || []
+    for (const a of existing) {
+      if (a.id && a.name === name) {
+        await gitee(`/repos/${REPO}/releases/${releaseId}/attach_files/${a.id}`, { method: 'DELETE' })
+        log(`已移除旧附件 ${a.name}`)
+      }
+    }
+  } catch (err) {
+    log(`清理附件 ${name} 失败（忽略）：${err.message}`)
   }
-  log(`已上传附件 ${name}`)
+}
+
+/**
+ * 上传单个附件到发行版。
+ *
+ * 这里刻意不用 fetch：GitHub 的 runner 在境外，向 Gitee 上行很慢
+ * （实测 6MB 要 5 分钟以上），而 undici 的 headersTimeout 默认只有 300s，
+ * 会把正常上传误判成超时（UND_ERR_HEADERS_TIMEOUT）。
+ * https.request 默认不设超时，这里只加一个 30 分钟的兜底空闲超时。
+ */
+function uploadAttachment(releaseId, name, filePath) {
+  const boundary = `----distCli${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`
+  const body = Buffer.concat([
+    Buffer.from(
+      `--${boundary}\r\n` +
+        `Content-Disposition: form-data; name="file"; filename="${name}"\r\n` +
+        'Content-Type: application/octet-stream\r\n\r\n'
+    ),
+    readFileSync(filePath),
+    Buffer.from(`\r\n--${boundary}--\r\n`),
+  ])
+
+  const url = new URL(`${API_BASE}/repos/${REPO}/releases/${releaseId}/attach_files`)
+  url.searchParams.set('access_token', GITEE_TOKEN)
+
+  return new Promise((resolve, reject) => {
+    const req = httpsRequest(
+      {
+        method: 'POST',
+        hostname: url.hostname,
+        path: url.pathname + url.search,
+        headers: {
+          'Content-Type': `multipart/form-data; boundary=${boundary}`,
+          'Content-Length': body.length,
+        },
+      },
+      (res) => {
+        let data = ''
+        res.setEncoding('utf8')
+        res.on('data', (c) => (data += c))
+        res.on('end', () => {
+          if (res.statusCode >= 200 && res.statusCode < 300) {
+            log(`已上传附件 ${name}`)
+            resolve()
+          } else {
+            reject(new Error(`上传附件 ${name} 失败 (${res.statusCode}): ${data.slice(0, 300)}`))
+          }
+        })
+      }
+    )
+    req.setTimeout(1800000, () => {
+      req.destroy(new Error(`上传附件 ${name} 超时（30 分钟无响应）`))
+    })
+    req.on('error', reject)
+    req.end(body)
+  })
+}
+
+/** 上传带上重试：境外上行偶发中断时，清掉半成品再重来 */
+async function uploadWithRetry(releaseId, asset, attempts = 3) {
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      await uploadAttachment(releaseId, asset.name, asset.path)
+      return
+    } catch (err) {
+      if (i === attempts) throw err
+      log(`第 ${i} 次上传 ${asset.name} 失败：${err.message}`)
+      log(`等待后重试（${i}/${attempts - 1}）…`)
+      await removeAttachment(releaseId, asset.name)
+      await new Promise((r) => setTimeout(r, 15000 * i))
+    }
+  }
 }
 
 /**
@@ -390,17 +470,10 @@ async function publish(version, platform, manifest) {
 
   const assets = collectAssets(platform)
 
-  // Gitee 不允许同名附件，先删掉旧的
-  const existing = (await gitee(`/repos/${REPO}/releases/${release.id}/attach_files`)) || []
-  for (const a of existing) {
-    if (a.id && assets.some((x) => x.name === a.name)) {
-      await gitee(`/repos/${REPO}/releases/${release.id}/attach_files/${a.id}`, { method: 'DELETE' })
-      log(`已移除旧附件 ${a.name}`)
-    }
-  }
-
   for (const a of assets) {
-    await uploadAttachment(release.id, a.name, a.path)
+    // Gitee 不允许同名附件，先删掉旧的
+    await removeAttachment(release.id, a.name)
+    await uploadWithRetry(release.id, a)
   }
 
   // 更新清单（体积很小，提交到仓库由客户端从固定地址读取）
@@ -471,7 +544,7 @@ async function main() {
     log('已指定 --no-publish，跳过提交')
     return
   }
-  publish(version, platform, manifest)
+  await publish(version, platform, manifest)
 }
 
 main().catch((err) => fail(err.message))
