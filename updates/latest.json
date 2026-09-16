@@ -1,10 +1,10 @@
 {
   "version": "1.0.0",
   "notes": "OA 部署打包工具 v1.0.0",
-  "pub_date": "2026-09-16T04:56:14Z",
+  "pub_date": "2026-09-16T05:01:11Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVE0rL3NzZVMwbkxZUlVpcEFDaEU1Z1g4azlBdWYwdXlxRHBYOTFPVmw1dGJ6YmliMmlVdmJxSGk1cnBEZUlrN3NGSEJndUgwVUFrUjVsZkdwQkZpZUNVVm5uKzB1N3dBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg5NTMzMjAxCWZpbGU6T0Hpg6jnvbLmiZPljIXlt6XlhbdfMS4wLjBfeDY0LXNldHVwLmV4ZQpZZ0JteHhwVE1ZNkNlcHNKdTdEaXhEWllvSTB2dkVaWTlnTUNOaEJjTTB3Rlh6VWpMZ2s3NzA5YWk2NDFFN1BiTkcxMTAzOXVvUDB3dlJHdWhSK05Bdz09Cg==",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVE0rL3NzZVMwbkpSYzNhNS9XMEppMTZ2cUp2RGVVSEhLcEJhTjQyVlBWZ1VXZUdUQllUeDAyaWxMTDJnVEdTVmJ3MStzK2h2YjVsSlp1cXQ1WGVlUTVOTlB0bWVuU1FBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg5NTM0ODcxCWZpbGU6cHJvamVjdC1tYW5hZ2UtdG9vbHNfMS4wLjBfeDY0LXNldHVwLmV4ZQpiVXpPenFEbWV3aHlFeFptV3JoaWhWMDJNaXZSNjZ6clNkTWxENTVzR3JrWGhzNndiK3Q4eDhIbXloeWZUbUtWV1RMbklzbFdCZVhYRFdERE1scjhBZz09Cg==",
       "url": "https://gitee.com/feng_wenshan/project-manage/raw/main/updates/project-manage-tools-setup.exe"
     },
     "darwin-aarch64": {
