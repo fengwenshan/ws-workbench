@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * 发布脚本：构建（含更新签名）→ 生成/合并 latest.json → 发布到 GitHub Release
+ * 发布脚本：构建（含更新签名）→ 生成/合并 latest.json → 提交到 Gitee updates/ 目录
  *
  * 用法：
  *   node scripts/release.mjs                 # 构建当前平台 + 发布
@@ -8,16 +8,14 @@
  *   node scripts/release.mjs --target x86_64-pc-windows-msvc   # 交叉编译 Windows
  *
  * 两个平台分别在各自可用的环境里执行即可：脚本会把本平台条目「合并」进
- * 同一个 Release 的 latest.json，不会覆盖另一个平台。
+ * updates/latest.json，不会覆盖另一个平台。
  *
- * 需要的环境变量（发布时必填）：
- *   GITHUB_TOKEN     GitHub 个人访问令牌，需 repo（或 Contents: Read and write）权限
- *   GITHUB_REPO      默认 fengwenshan/project-manage
+ * 发布不需要任何 API 令牌：产物通过 git push 提交，客户端走 Gitee raw 地址拉取。
  *
- * 为什么用 GitHub 而不是内网 GitLab：
- *   内网 GitLab 项目无法设为公开，客户端拿不到任何文件；
- *   GitHub 公开仓库的 Release 资源可匿名下载，且 releases/latest/download 是
- *   Tauri 官方的标准更新地址。
+ * 为什么不用 GitLab / GitHub：
+ *   内网 GitLab 项目无法设为公开，客户端拿不到文件；
+ *   GitHub 的 github.com 与 raw.githubusercontent.com 在你们网络下被拦（实测超时），
+ *   Gitee 的 raw 地址实测匿名可读。
  */
 import { execFileSync } from 'node:child_process'
 import {
@@ -34,19 +32,21 @@ import { fileURLToPath } from 'node:url'
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const TAURI_DIR = join(ROOT, 'src-tauri')
 const OUT_DIR = join(ROOT, 'release')
+/** 更新产物在仓库里的目录（会被提交，客户端通过 raw 地址读取） */
+const UPDATES_DIR = 'updates'
 
-const REPO = process.env.GITHUB_REPO || 'fengwenshan/project-manage'
-const TOKEN = process.env.GITHUB_TOKEN || process.env.GH_TOKEN || ''
+const REPO = process.env.GITEE_REPO || 'feng_wenshan/project-manage'
+const BRANCH = process.env.GITEE_BRANCH || 'main'
 const SKIP_PUBLISH = process.argv.includes('--no-publish')
+
+/** 客户端读取更新文件的地址前缀（公开仓库，无需凭据） */
+const RAW_BASE = `https://gitee.com/${REPO}/raw/${BRANCH}/${UPDATES_DIR}`
 
 const KEY_PATH =
   process.env.TAURI_SIGNING_PRIVATE_KEY_PATH || join(process.env.HOME || '', '.tauri/demo-tools.key')
 
 /** 更新清单的固定文件名 */
 const ASSET_MANIFEST = 'latest.json'
-
-/** 更新清单的公开地址（公开仓库，无需凭据） */
-const MANIFEST_URL = `https://github.com/${REPO}/releases/latest/download/${ASSET_MANIFEST}`
 
 function argValue(flag) {
   const i = process.argv.indexOf(flag)
@@ -119,6 +119,9 @@ function build() {
   }
   const args = ['tauri', 'build']
   if (TARGET) args.push('--target', TARGET)
+  // 可用 TAURI_BUNDLES=app 跳过 dmg（例如受限环境无法创建 dmg 时）；
+  // 更新通道只需要 .app.tar.gz，不依赖 dmg。
+  if (process.env.TAURI_BUNDLES) args.push('--bundles', process.env.TAURI_BUNDLES)
   // 在非 Windows 主机上交叉编译 Windows：需要 cargo-xwin + nsis + llvm
   if (TARGET.includes('windows') && process.platform !== 'win32') {
     args.push('--runner', 'cargo-xwin')
@@ -168,137 +171,48 @@ function findArtifacts(platform) {
   return { bundlePath: join(dir, bundle), sigPath: join(dir, sig) }
 }
 
-function ghHeaders(extra = {}) {
-  return {
-    Authorization: `Bearer ${TOKEN}`,
-    Accept: 'application/vnd.github+json',
-    'X-GitHub-Api-Version': '2022-11-28',
-    ...extra,
-  }
-}
-
-async function gh(path, options = {}) {
-  const res = await fetch(`https://api.github.com/repos/${REPO}${path}`, {
-    ...options,
-    headers: ghHeaders(options.headers),
-  })
-  if (!res.ok) {
-    const text = await res.text()
-    let hint = ''
-    if (res.status === 401) {
-      hint = '\n提示：GITHUB_TOKEN 无效或已过期，请重新生成。'
-    } else if (res.status === 403) {
-      hint =
-        '\n提示：令牌权限不足。创建 Release 需要 repo 权限（细粒度令牌需 Contents: Read and write）。'
-    } else if (res.status === 404) {
-      hint = `\n提示：仓库 ${REPO} 不存在，或令牌无权访问。`
-    }
-    const err = new Error(`GitHub API ${res.status} ${path}: ${text.slice(0, 300)}${hint}`)
-    err.status = res.status
-    throw err
-  }
-  return res.status === 204 ? null : res.json()
-}
-
-/** 上传 Release 资源（走单独的 uploads 域名） */
-async function uploadAsset(releaseId, filePath, fileName) {
-  const res = await fetch(
-    `https://uploads.github.com/repos/${REPO}/releases/${releaseId}/assets?name=${encodeURIComponent(fileName)}`,
-    {
-      method: 'POST',
-      headers: ghHeaders({ 'Content-Type': 'application/octet-stream' }),
-      body: readFileSync(filePath),
-    }
-  )
-  if (!res.ok) {
-    const text = await res.text()
-    fail(`上传 ${fileName} 失败 (${res.status}): ${text.slice(0, 300)}`)
-  }
-  log(`已上传 ${fileName}`)
-}
-
-async function getReleaseByTag(tag) {
-  const res = await fetch(`https://api.github.com/repos/${REPO}/releases/tags/${tag}`, {
-    headers: ghHeaders(),
-  })
-  if (res.status === 404) return null
-  if (!res.ok) fail(`读取 Release ${tag} 失败: ${res.status} ${(await res.text()).slice(0, 200)}`)
-  return res.json()
-}
-
-/** 取回已发布的 latest.json，用于把另一个平台的条目合并进来 */
-async function fetchPublishedManifest(release) {
-  if (!release) return null
+/** 读取已提交的 latest.json，用于把另一个平台的条目合并进来 */
+function readPublishedManifest() {
+  const p = join(ROOT, UPDATES_DIR, ASSET_MANIFEST)
+  if (!existsSync(p)) return null
   try {
-    const assets = await gh(`/releases/${release.id}/assets`)
-    const m = assets.find((a) => a.name === ASSET_MANIFEST)
-    if (!m) return null
-    const res = await fetch(m.url, {
-      headers: ghHeaders({ Accept: 'application/octet-stream' }),
-    })
-    if (!res.ok) return null
-    return await res.json()
+    return JSON.parse(readFileSync(p, 'utf8'))
   } catch {
     return null
   }
 }
 
-/** 构建前的令牌校验，避免白等一次构建 */
-function assertPublishToken() {
-  if (SKIP_PUBLISH) return
-  if (!TOKEN) {
-    fail(
-      '发布需要 GITHUB_TOKEN 环境变量。\n' +
-        '  生成地址：https://github.com/settings/tokens\n' +
-        '  经典令牌勾选 repo；细粒度令牌需 Contents: Read and write'
-    )
-  }
-  if (TOKEN.startsWith('glpat-') || TOKEN.startsWith('gldt-')) {
-    fail(
-      '检测到 GitLab 令牌，但当前发布目标是 GitHub。\n' +
-        `  目标仓库: ${REPO}\n` +
-        '  请设置 GITHUB_TOKEN 为 GitHub 令牌。'
-    )
-  }
+function git(args, opts = {}) {
+  return execFileSync('git', args, { cwd: ROOT, encoding: 'utf8', ...opts })
 }
 
-async function publish(version, platform, manifest) {
-  const tag = `v${version}`
-  let release = await getReleaseByTag(tag)
+/** 发布：把产物写进 updates/ 并推送到远端（无需任何 Token） */
+function publish(version, platform, manifest) {
+  const dest = join(ROOT, UPDATES_DIR)
+  mkdirSync(dest, { recursive: true })
+  copyFileSync(join(OUT_DIR, platform.assetFile), join(dest, platform.assetFile))
+  copyFileSync(join(OUT_DIR, ASSET_MANIFEST), join(dest, ASSET_MANIFEST))
+  log(`已写入 ${UPDATES_DIR}/`)
 
-  if (!release) {
-    log(`创建 Release ${tag} …`)
-    release = await gh('/releases', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        tag_name: tag,
-        name: tag,
-        body: `版本 ${version}\n\n下载对应的安装包即可，客户端会自动检查更新。`,
-        draft: false,
-        prerelease: false,
-      }),
-    })
-  } else {
-    log(`Release ${tag} 已存在，替换本平台产物 …`)
+  git(['add', UPDATES_DIR], { stdio: 'inherit' })
+
+  const staged = git(['diff', '--cached', '--name-only']).trim()
+  if (!staged) {
+    log('updates/ 内容无变化，跳过提交')
+    return
   }
 
-  // 同名资源需先删除，否则 GitHub 会拒绝重复上传
-  const assets = await gh(`/releases/${release.id}/assets`)
-  for (const a of assets) {
-    if (a.name === ASSET_MANIFEST || a.name === platform.assetFile) {
-      await gh(`/releases/assets/${a.id}`, { method: 'DELETE' })
-      log(`已移除旧资源 ${a.name}`)
-    }
-  }
-
-  await uploadAsset(release.id, join(OUT_DIR, platform.assetFile), platform.assetFile)
-  await uploadAsset(release.id, join(OUT_DIR, ASSET_MANIFEST), ASSET_MANIFEST)
+  git(
+    ['commit', '-m', `release: v${version} (${platform.key})`, '--', UPDATES_DIR],
+    { stdio: 'inherit' }
+  )
+  log('推送到远端 …')
+  git(['push', 'origin', `HEAD:${BRANCH}`], { stdio: 'inherit' })
 
   log(`\x1b[32m发布完成\x1b[0m v${version} (${platform.key})`)
   log('本次包含平台: ' + Object.keys(manifest.platforms).join(', '))
   log('客户端更新地址（公开，无需凭据）:')
-  log(`  ${MANIFEST_URL}`)
+  log(`  ${RAW_BASE}/${ASSET_MANIFEST}`)
 }
 
 async function main() {
@@ -307,10 +221,8 @@ async function main() {
 
   log(`版本: ${version}`)
   log(`平台: ${platform.key} (${platform.label})`)
-  log(`仓库: ${REPO}`)
+  log(`仓库: ${REPO}  分支: ${BRANCH}`)
   if (TARGET) log(`构建目标: ${TARGET}`)
-
-  assertPublishToken()
 
   build()
 
@@ -322,19 +234,16 @@ async function main() {
   copyFileSync(bundlePath, join(OUT_DIR, platform.assetFile))
   log(`已导出 release/${platform.assetFile}`)
 
-  // 合并已发布的其他平台条目
-  let platforms = {}
-  if (TOKEN && !SKIP_PUBLISH) {
-    const existing = await fetchPublishedManifest(await getReleaseByTag(`v${version}`))
-    if (existing?.platforms) {
-      platforms = { ...existing.platforms }
-      log(`已读取到现有平台条目: ${Object.keys(platforms).join(', ')}`)
-    }
+  // 合并已提交的其他平台条目
+  const published = readPublishedManifest()
+  const platforms = published?.platforms ? { ...published.platforms } : {}
+  if (published?.platforms) {
+    log(`已读取到现有平台条目: ${Object.keys(platforms).join(', ')}`)
   }
 
   platforms[platform.key] = {
     signature,
-    url: `https://github.com/${REPO}/releases/latest/download/${platform.assetFile}`,
+    url: `${RAW_BASE}/${platform.assetFile}`,
   }
 
   const manifest = {
@@ -347,10 +256,10 @@ async function main() {
   log(`已生成 release/${ASSET_MANIFEST}（平台: ${Object.keys(platforms).join(', ')}）`)
 
   if (SKIP_PUBLISH) {
-    log('已指定 --no-publish，跳过上传')
+    log('已指定 --no-publish，跳过提交')
     return
   }
-  await publish(version, platform, manifest)
+  publish(version, platform, manifest)
 }
 
 main().catch((err) => fail(err.message))

@@ -29,7 +29,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDlDQjRFNEIxRUNFRjMzNTMKUldSVE0rL3NzZVMwbk9uRHJ2TENlSVdrMEcvbjJBeTVJTmRPbTk3Q1NmTUF4cERmRWZwMEl6L2oK",
       "endpoints": [
-        "https://github.com/fengwenshan/project-manage/releases/latest/download/latest.json"
+        "https://gitee.com/feng_wenshan/project-manage/raw/main/updates/latest.json"
       ]
     }
   },
