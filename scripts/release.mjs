@@ -170,7 +170,20 @@ async function api(path, options = {}) {
   })
   if (!res.ok) {
     const text = await res.text()
-    const err = new Error(`GitLab API ${res.status} ${path}: ${text.slice(0, 400)}`)
+    let hint = ''
+    if (res.status === 401) {
+      hint =
+        '\n提示：部署令牌（gldt- 前缀）只认 HTTP Basic 认证，不能用 PRIVATE-TOKEN 头。' +
+        '\n     发布需要「个人访问令牌」或「项目访问令牌」。'
+    } else if (res.status === 403) {
+      hint =
+        '\n提示：令牌缺少 api 权限。' +
+        '\n     部署令牌只能用于克隆仓库与镜像库，无法创建 Release / 上传文件。' +
+        '\n     请改用权限范围勾选了 api 的个人访问令牌或项目访问令牌。'
+    } else if (res.status === 409) {
+      hint = '\n提示：Release 已存在。请提升版本号，或先在 GitLab 上删除该 Release。'
+    }
+    const err = new Error(`GitLab API ${res.status} ${path}: ${text.slice(0, 300)}${hint}`)
     err.status = res.status
     throw err
   }
@@ -277,6 +290,22 @@ async function publish(version, platform, manifest) {
   log(`更新清单: https://${HOST}/${PROJECT}/-/releases/permalink/latest/downloads/${ASSET_MANIFEST}`)
 }
 
+/** 构建前的令牌校验，避免白等一次构建 */
+function assertPublishToken() {
+  if (SKIP_PUBLISH) return
+  if (!TOKEN) {
+    fail('发布需要 GITLAB_TOKEN 环境变量（个人访问令牌 / 项目访问令牌，权限范围勾选 api）')
+  }
+  if (TOKEN.startsWith('gldt-')) {
+    fail(
+      '检测到部署令牌（gldt- 前缀），它没有 api 权限，无法创建 Release 或上传文件。\n' +
+        '部署令牌只能用于克隆仓库与镜像库，请改用：\n' +
+        '  个人访问令牌：右上角头像 → 编辑个人资料 → 访问令牌\n' +
+        '  项目访问令牌：项目 → 设置 → 访问令牌（角色 Developer 以上 + api 范围）'
+    )
+  }
+}
+
 async function main() {
   const version = readVersion()
   const platform = resolvePlatform()
@@ -284,6 +313,8 @@ async function main() {
   log(`版本: ${version}`)
   log(`平台: ${platform.key} (${platform.label})`)
   if (TARGET) log(`构建目标: ${TARGET}`)
+
+  assertPublishToken()
 
   build()
 
