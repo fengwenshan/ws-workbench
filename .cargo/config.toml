@@ -1,0 +1,6 @@
+[source.crates-io]
+replace-with = "ustc"
+
+# 中国科学技术大学 (sparse 协议)
+[source.ustc]
+registry = "sparse+https://mirrors.ustc.edu.cn/crates.io-index/"
