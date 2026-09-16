@@ -11,7 +11,7 @@ name: Release
 #      TAURI_SIGNING_PRIVATE_KEY  更新签名私钥的**内容**
 #                                 （即本机 ~/.tauri/demo-tools.key 的全文）
 #      GITEE_TOKEN                Gitee 私人令牌，权限范围需含 projects
-#    开头的「预检」步骤会检查这两项，缺了会直接秒退并给出明确提示。
+#    两个 job 开头的「预检」步骤都会检查这两项，缺了会直接秒退并给出明确提示。
 #
 # 2) 让代码能同时到达 GitHub（Action 的触发源）与 Gitee（发布目标）
 #    在本机执行一次，之后一条 git push 即同时推到两个仓库：
@@ -25,6 +25,13 @@ name: Release
 #
 # 关于提交回环：CI 提交更新清单时带上 [skip ci]，job 上另有守卫条件，
 # 所以 CI 自己推的提交不会再次触发构建。
+#
+# 为什么拆成两个并行 job：
+#   两边构建互不依赖，串行跑纯属白等；拆开后墙钟时间约等于较慢的那个。
+#   Windows 侧仍是交叉编译（cargo-xwin + nsis + llvm），那条链路已验证可用。
+#   代价是两个 job 会同时改 updates/latest.json —— 脚本里用
+#   「快进到远端最新 → 以远端为基线合并本平台条目 → 推送被拒就撤销重试」
+#   来保证谁先谁后都不会互相顶掉（已用双克隆确定性复现并验证）。
 # ─────────────────────────────────────────────────────────────
 
 on:
@@ -32,24 +39,22 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# CI 需要把更新清单的提交推回 GitHub（清单必须同时落到两个远端，见下方说明）
+# CI 需要把更新清单的提交推回 GitHub 与 Gitee
 permissions:
   contents: write
 
-# 同分支排队执行，避免两次发布并发写同一个发行版
+# 同一分支排队执行，避免两次运行并发写同一个发行版
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  release:
+  macos:
     # CI 自己提交清单时会带上 [skip ci]，这里再兜一层，避免自触发死循环
     if: ${{ github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip ci]') }}
-    # macOS runner：一台机器同时产出 macOS 安装包与（交叉编译的）Windows 安装包。
-    # 公开仓库使用标准 GitHub 托管 runner 是免费的（官方计费文档：
-    # "free for public repositories that use standard GitHub-hosted runners"）。
+    # 公开仓库使用标准 GitHub 托管 runner 免费（官方计费文档：
+    # "free for public repositories that use standard GitHub-hosted runners"）
     runs-on: macos-14
-
     steps:
       # 放在最前面：密钥没配就直接退出，避免白等几分钟工具链安装。
       # 只打印长度、不打印内容，不会泄漏密钥。
@@ -89,22 +94,14 @@ jobs:
           node-version: 22
           cache: pnpm
 
-      - name: 安装 Rust（含 Windows 交叉编译目标）
+      - name: 安装 Rust
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-darwin,x86_64-pc-windows-msvc
-
-      - name: 安装交叉编译依赖
-        # llvm 提供 llvm-rc（Tauri 用它编译 Windows 资源文件），nsis 提供 makensis
-        run: |
-          brew install nsis llvm
-          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
-          cargo install --locked cargo-xwin
 
       - name: 缓存 Rust 构建产物
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          key: macos
 
       - name: 安装前端依赖
         run: pnpm install --frozen-lockfile
@@ -142,6 +139,94 @@ jobs:
         run: |
           TAURI_BUNDLES=app node scripts/release.mjs --dmg --version "${{ steps.version.outputs.value }}"
 
+      - name: 保存产物供人工检查
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installers-macos-${{ steps.version.outputs.value }}
+          path: release/*
+          if-no-files-found: warn
+          retention-days: 14
+
+  windows:
+    if: ${{ github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip ci]') }}
+    runs-on: macos-14
+    steps:
+      - name: 预检（仓库密钥是否已配置）
+        env:
+          SIGN_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+        run: |
+          missing=0
+          if [ -z "$SIGN_KEY" ]; then
+            echo "::error::缺少仓库密钥 TAURI_SIGNING_PRIVATE_KEY（Settings → Secrets and variables → Actions）"
+            missing=1
+          else
+            echo "TAURI_SIGNING_PRIVATE_KEY 已配置：${#SIGN_KEY} 字节"
+          fi
+          if [ -z "$GITEE_TOKEN" ]; then
+            echo "::error::缺少仓库密钥 GITEE_TOKEN"
+            missing=1
+          else
+            echo "GITEE_TOKEN 已配置：${#GITEE_TOKEN} 字符"
+          fi
+          exit $missing
+
+      - name: 拉取代码（需要完整历史来生成 Changelog）
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 安装 pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: 安装 Rust（含 Windows 交叉编译目标）
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: 安装交叉编译依赖
+        # nsis 提供 makensis（打 Windows 安装包），llvm 提供 llvm-rc（编译资源文件）；
+        # 两者都只在这个 job 里需要，macOS job 不必等它们。
+        run: |
+          brew install nsis llvm
+          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+          cargo install --locked cargo-xwin
+
+      - name: 缓存 Rust 构建产物
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: windows
+
+      - name: 安装前端依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 计算版本号
+        id: version
+        run: |
+          BASE=$(node -p "require('./src-tauri/tauri.conf.json').version.split('.').slice(0,2).join('.')")
+          VERSION="${BASE}.${{ github.run_number }}"
+          echo "value=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "本次发布版本：$VERSION"
+
+      - name: 配置清单推送目标（GitHub + Gitee 都推）
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+        run: |
+          git remote set-url --add --push origin "https://github.com/fengwenshan/code-manage.git"
+          git remote set-url --add --push origin "https://feng_wenshan:${GITEE_TOKEN}@gitee.com/feng_wenshan/project-manage.git"
+          git config user.name "冯文山"
+          git config user.email "fengwenshan@example.com"
+
       - name: 构建并发布 Windows（交叉编译）
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -152,7 +237,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: installers-${{ steps.version.outputs.value }}
+          name: installers-windows-${{ steps.version.outputs.value }}
           path: release/*
           if-no-files-found: warn
           retention-days: 14

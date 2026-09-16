@@ -283,6 +283,15 @@ function readPublishedManifest() {
   }
 }
 
+/** 读取某个 ref 上的 latest.json；文件或 ref 不存在时返回 null */
+function readManifestAt(ref) {
+  try {
+    return JSON.parse(git(['show', `${ref}:${UPDATES_DIR}/${ASSET_MANIFEST}`]))
+  } catch {
+    return null
+  }
+}
+
 function git(args, opts = {}) {
   return execFileSync('git', args, { cwd: ROOT, encoding: 'utf8', ...opts })
 }
@@ -311,7 +320,7 @@ async function gitee(path, options = {}) {
   return res.json()
 }
 
-/** 找到 tag 对应的发行版；不存在时返回 null */
+/** 找到 tag 对应的发行版；不存在时返回 null（Gitee 对不存在的 tag 返回 200 + null） */
 async function findRelease(tag) {
   return gitee(`/repos/${REPO}/releases/tags/${encodeURIComponent(tag)}`)
 }
@@ -440,11 +449,83 @@ async function uploadWithRetry(releaseId, asset, attempts = 3) {
 }
 
 /**
+ * 以远端（origin/<branch>）的清单为基线，合入本平台条目并写成文件。
+ * 返回合并后的清单以及是否真的有改动。
+ */
+function stageManifest(version, platform, entry) {
+  const base = readManifestAt(`origin/${BRANCH}`) || { platforms: {} }
+  const manifest = {
+    version,
+    notes: `OA 部署打包工具 v${version}`,
+    pub_date: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
+    platforms: { ...(base.platforms || {}), [platform.key]: entry },
+  }
+  mkdirSync(join(ROOT, UPDATES_DIR), { recursive: true })
+  writeFileSync(join(ROOT, UPDATES_DIR, ASSET_MANIFEST), JSON.stringify(manifest, null, 2) + '\n')
+  git(['add', UPDATES_DIR])
+  const changed = Boolean(git(['diff', '--cached', '--name-only']).trim())
+  return { manifest, changed }
+}
+
+/**
+ * 提交更新清单。
+ *
+ * macOS 与 Windows 是两个并行 job，会同时改同一个文件。所以每次提交前都先把
+ * HEAD 快进到远端最新、以远端版本为基线合并本平台条目；推送被拒就把这次提交
+ * 撤销后重来。这样两个 job 不论谁先完成都不会互相顶掉，也不会留下多余提交。
+ */
+async function commitManifest(version, platform, entry) {
+  const rel = `${UPDATES_DIR}/${ASSET_MANIFEST}`
+  const msg = `release: v${version} (${platform.key}) [skip ci]`
+
+  for (let attempt = 1; attempt <= 6; attempt++) {
+    // 只回滚清单文件本身，不碰工作区里其他改动（本地手动发布时才安全）
+    try {
+      git(['checkout', 'HEAD', '--', rel])
+    } catch {
+      // 清单还没被跟踪过，忽略
+    }
+    git(['fetch', 'origin', BRANCH])
+    try {
+      git(['merge', '--ff-only', `origin/${BRANCH}`])
+    } catch {
+      // 本地已有分叉（手动发布时可能出现），下面以远端为基线合并即可
+    }
+
+    const { manifest, changed } = stageManifest(version, platform, entry)
+    if (changed) {
+      git(['commit', '-m', msg, '--', UPDATES_DIR])
+      log('推送更新清单 …')
+    }
+
+    try {
+      // 两个远端都要推：只推 Gitee 会让 GitHub 的 main 停在旧提交，
+      // 下一轮 CI 从旧提交签出后就会非快进被拒。
+      git(['push', 'origin', `HEAD:${BRANCH}`], { stdio: 'inherit' })
+      log(`清单已包含平台: ${Object.keys(manifest.platforms).join(', ')}`)
+      return manifest
+    } catch (err) {
+      // 撤销本次提交（改动留在暂存区，下一轮会连同新基线一起重写）
+      if (changed) git(['reset', '--soft', 'HEAD~1'])
+      else log(`推送清单失败：${String(err.message).split('\n')[0]}`)
+      if (attempt === 6) {
+        fail(
+          `更新清单推送连续 ${attempt} 次失败，放弃\n` +
+            '若在本机手动发布：先 git pull 同步远端，并确认没有未提交的改动。'
+        )
+      }
+      log(`第 ${attempt} 次推送被拒（另一个平台可能刚推过），${5 * attempt}s 后重试 …`)
+      await new Promise((r) => setTimeout(r, 5000 * attempt))
+    }
+  }
+}
+
+/**
  * 发布：产物上传到 Gitee 发行版附件，更新清单提交到 updates/ 目录。
  * 清单必须留在固定地址上（Gitee 没有 releases/latest 这种路径），
  * 而它里面的下载地址指向带 tag 的发行版附件，长期稳定。
  */
-async function publish(version, platform, manifest) {
+async function publish(version, platform, entry) {
   if (!GITEE_TOKEN) {
     fail('发布需要 GITEE_TOKEN 环境变量（Gitee 私人令牌，权限范围需含 projects）')
   }
@@ -453,17 +534,25 @@ async function publish(version, platform, manifest) {
   let release = await findRelease(tag)
   if (!release) {
     log(`创建发行版 ${tag} …`)
-    release = await gitee(`/repos/${REPO}/releases`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        tag_name: tag,
-        name: tag,
-        body: buildChangelog(tag),
-        target_commitish: BRANCH,
-        prerelease: false,
-      }),
-    })
+    try {
+      release = await gitee(`/repos/${REPO}/releases`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          tag_name: tag,
+          name: tag,
+          body: buildChangelog(tag),
+          target_commitish: BRANCH,
+          prerelease: false,
+        }),
+      })
+    } catch (err) {
+      // 两个平台并行时可能同时判定「不存在」而都想创建，
+      // Gitee 对重复 tag 返回 400，此时复用对方刚建好的那个。
+      release = await findRelease(tag)
+      if (!release) throw err
+      log(`发行版 ${tag} 已由另一个平台创建，复用`)
+    }
   } else {
     log(`发行版 ${tag} 已存在，更新附件 …`)
   }
@@ -476,20 +565,8 @@ async function publish(version, platform, manifest) {
     await uploadWithRetry(release.id, a)
   }
 
-  // 更新清单（体积很小，提交到仓库由客户端从固定地址读取）
-  const dest = join(ROOT, UPDATES_DIR)
-  mkdirSync(dest, { recursive: true })
-  writeFileSync(join(dest, ASSET_MANIFEST), JSON.stringify(manifest, null, 2) + '\n')
-  git(['add', UPDATES_DIR], { stdio: 'inherit' })
-  if (git(['diff', '--cached', '--name-only']).trim()) {
-    git(['commit', '-m', `release: ${tag} (${platform.key}) [skip ci]`, '--', UPDATES_DIR], {
-      stdio: 'inherit',
-    })
-    log('推送更新清单 …')
-    git(['push', 'origin', `HEAD:${BRANCH}`], { stdio: 'inherit' })
-  } else {
-    log('更新清单无变化，跳过提交')
-  }
+  // 更新清单：两个平台 job 会同时改这个文件，交给 commitManifest 做同步 + 重试
+  const manifest = await commitManifest(version, platform, entry)
 
   log(`\x1b[32m发布完成\x1b[0m ${tag} (${platform.key})`)
   log('本次包含平台: ' + Object.keys(manifest.platforms).join(', '))
@@ -519,18 +596,15 @@ async function main() {
 
   if (WANT_DMG) createDmg(platform, version)
 
-  // 合并已提交的其他平台条目
-  const published = readPublishedManifest()
-  const platforms = published?.platforms ? { ...published.platforms } : {}
-  if (published?.platforms) {
-    log(`已读取到现有平台条目: ${Object.keys(platforms).join(', ')}`)
-  }
-
-  platforms[platform.key] = {
+  // 本平台在更新清单里的条目
+  const entry = {
     signature,
     url: `${RELEASE_DOWNLOAD}/v${version}/${platform.assetFile}`,
   }
 
+  // 供本地查看 / CI 存档的合并视图；真正提交的内容以 commitManifest 拉到的远端版本为准
+  const published = readPublishedManifest()
+  const platforms = { ...(published?.platforms || {}), [platform.key]: entry }
   const manifest = {
     version,
     notes: `OA 部署打包工具 v${version}`,
@@ -544,7 +618,7 @@ async function main() {
     log('已指定 --no-publish，跳过提交')
     return
   }
-  await publish(version, platform, manifest)
+  await publish(version, platform, entry)
 }
 
 main().catch((err) => fail(err.message))
