@@ -49,8 +49,13 @@ const REPO = process.env.GITEE_REPO || 'feng_wenshan/project-manage'
 const BRANCH = process.env.GITEE_BRANCH || 'main'
 const SKIP_PUBLISH = process.argv.includes('--no-publish')
 
-/** 客户端读取更新文件的地址前缀（公开仓库，无需凭据） */
+/** 更新清单的公开地址（公开仓库，无需凭据） */
 const RAW_BASE = `https://gitee.com/${REPO}/raw/${BRANCH}/${UPDATES_DIR}`
+/** 发行版附件的下载地址前缀；URL 带 tag，长期稳定 */
+const RELEASE_DOWNLOAD = `https://gitee.com/${REPO}/releases/download`
+/** Gitee 私人令牌：创建发行版与上传附件必需（权限范围需含 projects） */
+const GITEE_TOKEN = process.env.GITEE_TOKEN || ''
+const API_BASE = 'https://gitee.com/api/v5'
 
 const KEY_PATH =
   process.env.TAURI_SIGNING_PRIVATE_KEY_PATH || join(process.env.HOME || '', '.tauri/demo-tools.key')
@@ -106,6 +111,9 @@ function resolvePlatform(product) {
       matchBundle: (f) => f.startsWith(product) && f.endsWith('.app.tar.gz'),
       matchSig: (f) => f.startsWith(product) && f.endsWith('.app.tar.gz.sig'),
       assetFile: 'project-manage-tools.app.tar.gz',
+      // macOS 额外提供 dmg 作为人工安装包（更新载荷用的是 .app.tar.gz）
+      installerSubdir: 'dmg',
+      matchInstaller: (f) => f.startsWith(product) && f.endsWith('.dmg'),
       label: 'macOS',
     }
   }
@@ -262,33 +270,145 @@ function git(args, opts = {}) {
   return execFileSync('git', args, { cwd: ROOT, encoding: 'utf8', ...opts })
 }
 
-/** 发布：把产物写进 updates/ 并推送到远端（无需任何 Token） */
-function publish(version, platform, manifest) {
-  const dest = join(ROOT, UPDATES_DIR)
-  mkdirSync(dest, { recursive: true })
-  copyFileSync(join(OUT_DIR, platform.assetFile), join(dest, platform.assetFile))
-  copyFileSync(join(OUT_DIR, ASSET_MANIFEST), join(dest, ASSET_MANIFEST))
-  log(`已写入 ${UPDATES_DIR}/`)
+// ===== Gitee 发行版 =====
 
-  git(['add', UPDATES_DIR], { stdio: 'inherit' })
+/** 调用 Gitee API（access_token 走查询参数，官方支持的形式） */
+async function gitee(path, options = {}) {
+  const sep = path.includes('?') ? '&' : '?'
+  const res = await fetch(`${API_BASE}${path}${sep}access_token=${GITEE_TOKEN}`, options)
+  if (!res.ok) {
+    const text = await res.text()
+    let hint = ''
+    if (res.status === 401 || res.status === 403) {
+      hint = '\n提示：GITEE_TOKEN 无效，或权限范围缺少 projects。'
+    } else if (res.status === 404) {
+      hint = `\n提示：仓库 ${REPO} 不存在，或令牌无权访问。`
+    }
+    const err = new Error(
+      `Gitee API ${res.status} ${path.split('?')[0]}: ${text.slice(0, 300)}${hint}`
+    )
+    err.status = res.status
+    throw err
+  }
+  if (res.status === 204 || res.headers.get('content-length') === '0') return null
+  return res.json()
+}
 
-  const staged = git(['diff', '--cached', '--name-only']).trim()
-  if (!staged) {
-    log('updates/ 内容无变化，跳过提交')
-    return
+/** 找到 tag 对应的发行版；不存在时返回 null */
+async function findRelease(tag) {
+  return gitee(`/repos/${REPO}/releases/tags/${encodeURIComponent(tag)}`)
+}
+
+/** 生成更新说明：上一个 tag 到本次 tag 之间的提交 */
+function buildChangelog(tag) {
+  let prev = ''
+  try {
+    const tags = git(['tag', '--sort=-creatordate']).trim().split('\n').filter(Boolean)
+    prev = tags.find((t) => t !== tag) || ''
+  } catch {
+    // 没有 tag 时忽略
+  }
+  const range = prev ? `${prev}..${tag}` : tag
+  let lines = ''
+  try {
+    lines = git(['log', '--no-merges', '--pretty=format:* %s (%h)', range]).trim()
+  } catch {
+    lines = git(['log', '--no-merges', '-10', '--pretty=format:* %s (%h)']).trim()
+  }
+  const head = prev ? `自 ${prev} 以来的变更：` : '首次发布，包含以下提交：'
+  return `${head}\n\n${lines || '（无提交记录）'}`
+}
+
+/** 本次要上传到发行版的附件 */
+function collectAssets(platform) {
+  const assets = [{ name: platform.assetFile, path: join(OUT_DIR, platform.assetFile) }]
+  // macOS 额外上传 dmg（人工安装包；更新载荷用的是 .app.tar.gz）
+  if (platform.installerSubdir) {
+    const dir = bundleDir({ ...platform, bundleSubdir: platform.installerSubdir })
+    if (existsSync(dir)) {
+      const f = readdirSync(dir).find(platform.matchInstaller)
+      if (f) assets.push({ name: f, path: join(dir, f) })
+    }
+  }
+  return assets
+}
+
+async function uploadAttachment(releaseId, name, filePath) {
+  const form = new FormData()
+  form.append('file', new Blob([readFileSync(filePath)]), name)
+  const res = await fetch(
+    `${API_BASE}/repos/${REPO}/releases/${releaseId}/attach_files?access_token=${GITEE_TOKEN}`,
+    { method: 'POST', body: form }
+  )
+  if (!res.ok) {
+    fail(`上传附件 ${name} 失败 (${res.status}): ${(await res.text()).slice(0, 300)}`)
+  }
+  log(`已上传附件 ${name}`)
+}
+
+/**
+ * 发布：产物上传到 Gitee 发行版附件，更新清单提交到 updates/ 目录。
+ * 清单必须留在固定地址上（Gitee 没有 releases/latest 这种路径），
+ * 而它里面的下载地址指向带 tag 的发行版附件，长期稳定。
+ */
+async function publish(version, platform, manifest) {
+  if (!GITEE_TOKEN) {
+    fail('发布需要 GITEE_TOKEN 环境变量（Gitee 私人令牌，权限范围需含 projects）')
+  }
+  const tag = `v${version}`
+
+  let release = await findRelease(tag)
+  if (!release) {
+    log(`创建发行版 ${tag} …`)
+    release = await gitee(`/repos/${REPO}/releases`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        tag_name: tag,
+        name: tag,
+        body: buildChangelog(tag),
+        target_commitish: BRANCH,
+        prerelease: false,
+      }),
+    })
+  } else {
+    log(`发行版 ${tag} 已存在，更新附件 …`)
   }
 
-  git(
-    ['commit', '-m', `release: v${version} (${platform.key})`, '--', UPDATES_DIR],
-    { stdio: 'inherit' }
-  )
-  log('推送到远端 …')
-  git(['push', 'origin', `HEAD:${BRANCH}`], { stdio: 'inherit' })
+  const assets = collectAssets(platform)
 
-  log(`\x1b[32m发布完成\x1b[0m v${version} (${platform.key})`)
+  // Gitee 不允许同名附件，先删掉旧的
+  const existing = (await gitee(`/repos/${REPO}/releases/${release.id}/attach_files`)) || []
+  for (const a of existing) {
+    if (a.id && assets.some((x) => x.name === a.name)) {
+      await gitee(`/repos/${REPO}/releases/${release.id}/attach_files/${a.id}`, { method: 'DELETE' })
+      log(`已移除旧附件 ${a.name}`)
+    }
+  }
+
+  for (const a of assets) {
+    await uploadAttachment(release.id, a.name, a.path)
+  }
+
+  // 更新清单（体积很小，提交到仓库由客户端从固定地址读取）
+  const dest = join(ROOT, UPDATES_DIR)
+  mkdirSync(dest, { recursive: true })
+  writeFileSync(join(dest, ASSET_MANIFEST), JSON.stringify(manifest, null, 2) + '\n')
+  git(['add', UPDATES_DIR], { stdio: 'inherit' })
+  if (git(['diff', '--cached', '--name-only']).trim()) {
+    git(['commit', '-m', `release: ${tag} (${platform.key})`, '--', UPDATES_DIR], {
+      stdio: 'inherit',
+    })
+    log('推送更新清单 …')
+    git(['push', 'origin', `HEAD:${BRANCH}`], { stdio: 'inherit' })
+  } else {
+    log('更新清单无变化，跳过提交')
+  }
+
+  log(`\x1b[32m发布完成\x1b[0m ${tag} (${platform.key})`)
   log('本次包含平台: ' + Object.keys(manifest.platforms).join(', '))
-  log('客户端更新地址（公开，无需凭据）:')
-  log(`  ${RAW_BASE}/${ASSET_MANIFEST}`)
+  log(`发行版页面: https://gitee.com/${REPO}/releases`)
+  log(`客户端更新清单: ${RAW_BASE}/${ASSET_MANIFEST}`)
 }
 
 async function main() {
@@ -322,7 +442,7 @@ async function main() {
 
   platforms[platform.key] = {
     signature,
-    url: `${RAW_BASE}/${platform.assetFile}`,
+    url: `${RELEASE_DOWNLOAD}/v${version}/${platform.assetFile}`,
   }
 
   const manifest = {
