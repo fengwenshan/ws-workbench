@@ -19,6 +19,7 @@ pub fn run() {
             commands::pack_to_zip,
             commands::validate_project,
             commands::detect_project_type,
+            commands::detect_vcs,
             commands::open_dir,
             commands::open_parent_dir,
             commands::open_in_vscode,

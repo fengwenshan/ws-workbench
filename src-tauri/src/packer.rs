@@ -511,6 +511,204 @@ pub fn detect_project_type(source_dir: &str) -> ProjectType {
     ProjectType::Unknown
 }
 
+// ===== 版本控制信息检测 =====
+
+/// 从起始目录逐级向上查找版本控制根目录
+/// .git / .svn 可能位于源目录的上级（例如源目录只是仓库的一个子目录）
+fn find_vcs_root(start: &Path) -> Option<(VcsType, PathBuf)> {
+    let mut cursor: Option<&Path> = Some(start);
+    while let Some(dir) = cursor {
+        if dir.join(".git").exists() {
+            return Some((VcsType::Git, dir.to_path_buf()));
+        }
+        if dir.join(".svn").is_dir() {
+            return Some((VcsType::Svn, dir.to_path_buf()));
+        }
+        cursor = dir.parent().filter(|p| !p.as_os_str().is_empty());
+    }
+    None
+}
+
+/// 解析 git config 中的远程地址：优先 origin，否则取第一个 url
+fn parse_git_config_url(content: &str) -> Option<String> {
+    let mut origin: Option<String> = None;
+    let mut first: Option<String> = None;
+    let mut in_origin = false;
+
+    for raw in content.lines() {
+        let line = raw.trim();
+        if line.starts_with('[') {
+            // 只关心 [remote "origin"] 段，其余段内的 url 一律忽略
+            in_origin = line.replace(' ', "") == "[remote\"origin\"]";
+            continue;
+        }
+        let Some(rest) = line.strip_prefix("url") else {
+            continue;
+        };
+        let Some(value) = rest.trim_start().strip_prefix('=') else {
+            continue;
+        };
+        let value = value.trim().to_string();
+        if value.is_empty() {
+            continue;
+        }
+        if first.is_none() {
+            first = Some(value.clone());
+        }
+        if in_origin {
+            origin = Some(value);
+        }
+    }
+
+    origin.or(first)
+}
+
+/// 定位 git 配置文件：普通仓库为 <root>/.git/config，worktree/submodule 下 .git 是文件
+fn git_config_path(root: &Path) -> Option<PathBuf> {
+    let git_path = root.join(".git");
+    if git_path.is_dir() {
+        return Some(git_path.join("config"));
+    }
+    let content = fs::read_to_string(&git_path).ok()?;
+    let git_dir = content.trim().strip_prefix("gitdir:")?.trim();
+    if git_dir.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(git_dir);
+    let abs = if path.is_absolute() {
+        path
+    } else {
+        root.join(path)
+    };
+    Some(abs.join("config"))
+}
+
+const URL_SCHEMES: [&str; 5] = ["svn+ssh://", "svn://", "https://", "http://", "ssh://"];
+
+fn is_url_char(c: char) -> bool {
+    c.is_ascii_alphanumeric()
+        || matches!(
+            c,
+            '-' | '.' | '_' | '~' | ':' | '/' | '?' | '#' | '[' | ']' | '@' | '!' | '$' | '&'
+                | '\'' | '(' | ')' | '*' | '+' | ',' | ';' | '=' | '%'
+        )
+}
+
+/// 去掉 URL 末尾可能粘连的标点（wc.db 中 URL 与后续字段无分隔符时会出现）
+fn trim_url_tail(url: &str) -> &str {
+    url.trim_end_matches(|c| matches!(c, '.' | ',' | ';' | '\'' | '"' | ')' | ']' | '}'))
+}
+
+/// 从二进制文本中提取仓库地址：取出现次数最多的一条，次数相同取最先出现的
+fn extract_repo_url(bytes: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(bytes);
+    // (地址, 首次出现位置, 出现次数)
+    let mut candidates: Vec<(String, usize, usize)> = Vec::new();
+
+    for scheme in URL_SCHEMES {
+        let mut from = 0usize;
+        while let Some(offset) = text[from..].find(scheme) {
+            let start = from + offset;
+            let end = text[start..]
+                .char_indices()
+                .find(|(_, c)| !is_url_char(*c))
+                .map(|(i, _)| start + i)
+                .unwrap_or(text.len());
+            let url = trim_url_tail(&text[start..end]);
+            if url.len() > scheme.len() {
+                match candidates.iter_mut().find(|(u, _, _)| u == url) {
+                    Some(entry) => entry.2 += 1,
+                    None => candidates.push((url.to_string(), start, 1)),
+                }
+            }
+            from = if end > start { end } else { start + 1 };
+        }
+    }
+
+    candidates
+        .into_iter()
+        .max_by(|a, b| a.2.cmp(&b.2).then(b.1.cmp(&a.1)))
+        .map(|(url, _, _)| url)
+}
+
+/// 通过 svn 命令行读取工作副本地址
+fn svn_cli_url(root: &Path) -> Option<String> {
+    let output = std::process::Command::new("svn")
+        .arg("info")
+        .arg("--show-item")
+        .arg("url")
+        .arg(root)
+        .output()
+        .ok()?;
+    if output.status.success() {
+        let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !url.is_empty() {
+            return Some(url);
+        }
+    }
+
+    // 兼容不支持 --show-item 的旧版本 svn，退回到解析 info 输出的 URL 行
+    let output = std::process::Command::new("svn")
+        .arg("info")
+        .arg(root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout).lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("URL:")
+            .map(|url| url.trim().to_string())
+            .filter(|url| !url.is_empty())
+    })
+}
+
+/// 获取 svn 工作副本地址：优先命令行，未安装 svn 时退回到工作副本数据库
+fn svn_remote_url(root: &Path) -> Option<String> {
+    if let Some(url) = svn_cli_url(root) {
+        return Some(url);
+    }
+    fs::read(root.join(".svn").join("wc.db"))
+        .ok()
+        .and_then(|bytes| extract_repo_url(&bytes))
+}
+
+/// 检测源目录的版本控制类型与远程仓库地址
+pub fn detect_vcs(source_dir: &str) -> VcsInfo {
+    let none = VcsInfo {
+        vcs_type: VcsType::None,
+        url: String::new(),
+    };
+
+    let source = Path::new(source_dir);
+    if !source.exists() {
+        return none;
+    }
+    // 统一成绝对路径，向上查找才不会被相对路径的 parent() 截断
+    let start = match fs::canonicalize(source) {
+        Ok(path) => path,
+        Err(_) => return none,
+    };
+
+    let Some((vcs_type, root)) = find_vcs_root(&start) else {
+        return none;
+    };
+
+    let url = match vcs_type {
+        VcsType::Git => git_config_path(&root)
+            .and_then(|path| fs::read_to_string(path).ok())
+            .and_then(|content| parse_git_config_url(&content)),
+        VcsType::Svn => svn_remote_url(&root),
+        VcsType::None => None,
+    };
+
+    VcsInfo {
+        vcs_type,
+        url: url.unwrap_or_default(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -672,5 +870,97 @@ mod tests {
             "旧输出目录内容被扫进来了: {:?}",
             entries
         );
+    }
+
+    /// git config 解析：优先取 origin 的地址
+    #[test]
+    fn parse_git_config_prefers_origin() {
+        let content = "\
+[core]
+\trepositoryformatversion = 0
+[remote \"upstream\"]
+\turl = https://example.com/upstream.git
+[remote \"origin\"]
+\turl = git@example.com:team/app.git
+\tfetch = +refs/heads/*:refs/remotes/origin/*
+";
+        assert_eq!(
+            parse_git_config_url(content),
+            Some("git@example.com:team/app.git".to_string())
+        );
+    }
+
+    /// git config 解析：没有 origin 时取第一个远程地址
+    #[test]
+    fn parse_git_config_falls_back_to_first_remote() {
+        let content = "\
+[core]
+\trepositoryformatversion = 0
+[remote \"upstream\"]
+\turl = https://example.com/upstream.git
+";
+        assert_eq!(
+            parse_git_config_url(content),
+            Some("https://example.com/upstream.git".to_string())
+        );
+    }
+
+    /// 源目录为仓库子目录时，也能向上找到 git 根目录并读出地址
+    #[test]
+    fn detect_vcs_finds_parent_git_repo() {
+        let root = tempfile::tempdir().unwrap();
+        write_file(
+            root.path(),
+            ".git/config",
+            "[remote \"origin\"]\n\turl = git@example.com:team/app.git\n",
+        );
+        let nested = root.path().join("src/pages");
+        fs::create_dir_all(&nested).unwrap();
+
+        let info = detect_vcs(&nested.to_string_lossy());
+        assert_eq!(info.vcs_type, VcsType::Git);
+        assert_eq!(info.url, "git@example.com:team/app.git");
+    }
+
+    /// 非版本控制目录返回 none
+    #[test]
+    fn detect_vcs_returns_none_for_plain_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let info = detect_vcs(&dir.path().to_string_lossy());
+        assert_eq!(info.vcs_type, VcsType::None);
+        assert!(info.url.is_empty());
+    }
+
+    /// 不存在的目录直接返回 none，不 panic
+    #[test]
+    fn detect_vcs_returns_none_for_missing_dir() {
+        let info = detect_vcs("/definitely/not/exists/here");
+        assert_eq!(info.vcs_type, VcsType::None);
+        assert!(info.url.is_empty());
+    }
+
+    /// wc.db 回退解析：取出现次数最多的仓库地址
+    #[test]
+    fn extract_repo_url_picks_most_frequent() {
+        let bytes: &[u8] = b"https://svn.example.com/other/trunk\x00https://svn.example.com/team/app\x00https://svn.example.com/team/app\x00https://svn.example.com/team/app";
+        assert_eq!(
+            extract_repo_url(bytes),
+            Some("https://svn.example.com/team/app".to_string())
+        );
+    }
+
+    /// wc.db 回退解析：去掉粘连在地址尾部的标点
+    #[test]
+    fn extract_repo_url_trims_trailing_punctuation() {
+        assert_eq!(
+            extract_repo_url(b"svn://svn.example.com/team/app,"),
+            Some("svn://svn.example.com/team/app".to_string())
+        );
+    }
+
+    /// wc.db 中没有合法 scheme 时返回 None
+    #[test]
+    fn extract_repo_url_returns_none_without_scheme() {
+        assert_eq!(extract_repo_url(b"/local/path/only"), None);
     }
 }

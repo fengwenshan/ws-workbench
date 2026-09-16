@@ -57,3 +57,11 @@ export interface ProjectValidation {
 }
 
 export type ProjectType = 'layui' | 'vue' | 'unknown'
+
+export type VcsType = 'git' | 'svn' | 'none'
+
+export interface VcsInfo {
+  vcs_type: VcsType
+  /** 远程仓库地址，未检测到为空字符串 */
+  url: string
+}

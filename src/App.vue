@@ -198,11 +198,18 @@ const newProjectName = ref('')
 const newProjectSource = ref('')
 const newProjectOutput = ref('')
 
-// 从路径中提取最后一层目录名
+// 从路径中提取最后一层目录名（兼容 Windows 反斜杠与 POSIX 斜杠）
 function getLastDirName(path: string): string {
-  const trimmed = path.replace(/\/+$/, '')
-  const parts = trimmed.split('/')
-  return parts[parts.length - 1] || ''
+  const trimmed = path.replace(/[\\/]+$/, '')
+  const idx = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'))
+  return idx >= 0 ? trimmed.slice(idx + 1) : trimmed
+}
+
+// 拼接子路径：沿用源目录的分隔符风格，避免 Windows 下出现 D:\a\b/dist
+function joinPath(dir: string, name: string): string {
+  const trimmed = dir.replace(/[\\/]+$/, '')
+  const sep = trimmed.includes('\\') ? '\\' : '/'
+  return `${trimmed}${sep}${name}`
 }
 
 async function selectNewSource() {
@@ -212,7 +219,7 @@ async function selectNewSource() {
     newProjectSource.value = sourceDir
     // 源目录改变时，强制更新项目名称和输出目录
     newProjectName.value = getLastDirName(sourceDir)
-    newProjectOutput.value = sourceDir.replace(/\/+$/, '') + '/dist'
+    newProjectOutput.value = joinPath(sourceDir, 'dist')
   }
 }
 
@@ -243,7 +250,7 @@ async function handleAdd() {
   // 项目名称为空时，自动用源目录最后一层名字
   const projectName = newProjectName.value.trim() || getLastDirName(sourceDir)
   // 输出目录为空时，自动追加 /dist
-  const outputDir = newProjectOutput.value.trim() || (sourceDir.replace(/\/+$/, '') + '/dist')
+  const outputDir = newProjectOutput.value.trim() || joinPath(sourceDir, 'dist')
 
   if (!projectName) {
     addLog('warn', '请填写项目名称')

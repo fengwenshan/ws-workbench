@@ -106,3 +106,21 @@ pub enum ProjectType {
     Vue,
     Unknown,
 }
+
+/// 版本控制类型
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum VcsType {
+    Git,
+    Svn,
+    None,
+}
+
+/// 源目录版本控制信息
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VcsInfo {
+    pub vcs_type: VcsType,
+    /// 远程仓库地址，未检测到则为空字符串
+    #[serde(default)]
+    pub url: String,
+}

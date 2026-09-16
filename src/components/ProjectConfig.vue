@@ -2,7 +2,7 @@
 import { ref, watch, computed, nextTick } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
-import type { ProjectConfig, ProjectType } from '@/types'
+import type { ProjectConfig, ProjectType, VcsInfo } from '@/types'
 import ExcludeRules from './ExcludeRules.vue'
 
 const sourceTextarea = ref<HTMLTextAreaElement | null>(null)
@@ -60,10 +60,11 @@ watch(
   }
 )
 
-// 源目录变化时检测项目类型
+// 源目录变化时检测项目类型与版本控制信息
 let detectTimer: any = null
 let pendingDetect = 0
 const detecting = ref(false)
+const vcsInfo = ref<VcsInfo | null>(null)
 
 watch(
   () => localProject.value?.source_dir,
@@ -71,9 +72,11 @@ watch(
     if (detectTimer) clearTimeout(detectTimer)
     // 先重置为未知，避免旧类型残留导致误操作
     projectType.value = 'unknown'
+    vcsInfo.value = null
     if (!dir) return
     detectTimer = setTimeout(() => {
       detectProjectType(dir)
+      detectVcs(dir)
     }, 250)
   },
   { immediate: true }
@@ -105,6 +108,25 @@ async function detectProjectType(dir: string) {
   }
 }
 
+// 检测源目录的版本控制类型与远程仓库地址
+async function detectVcs(dir: string) {
+  if (!dir) {
+    vcsInfo.value = null
+    return
+  }
+  try {
+    const info = await invoke<VcsInfo>('detect_vcs', { sourceDir: dir })
+    // 防止异步返回时目录已变化
+    if (localProject.value?.source_dir === dir) {
+      vcsInfo.value = info && info.vcs_type !== 'none' ? info : null
+    }
+  } catch (err) {
+    if (localProject.value?.source_dir === dir) {
+      vcsInfo.value = null
+    }
+  }
+}
+
 // 手动触发识别（跳过防抖，立即执行）
 function refreshProjectType() {
   if (detectTimer) {
@@ -114,10 +136,13 @@ function refreshProjectType() {
   const dir = localProject.value?.source_dir || ''
   if (!dir) {
     projectType.value = 'unknown'
+    vcsInfo.value = null
     return
   }
   projectType.value = 'unknown'
+  vcsInfo.value = null
   detectProjectType(dir)
+  detectVcs(dir)
 }
 
 // 是否可手动识别（源目录有值时可用）
@@ -131,6 +156,15 @@ const typeLabel = computed(() => {
     case 'layui': return 'Layui 项目'
     case 'vue': return 'Vue 项目'
     default: return '未知类型项目'
+  }
+})
+
+// 版本控制类型展示名（仅在检测到 git/svn 时展示）
+const vcsTypeLabel = computed(() => {
+  switch (vcsInfo.value?.vcs_type) {
+    case 'git': return 'Git'
+    case 'svn': return 'SVN'
+    default: return ''
   }
 })
 
@@ -162,11 +196,18 @@ function onOutputChange(e: Event) {
 }
 function onExcludeChange() { debouncedSave() }
 
-// 从路径中提取最后一层目录名
+// 从路径中提取最后一层目录名（兼容 Windows 反斜杠与 POSIX 斜杠）
 function getLastDirName(path: string): string {
-  const trimmed = path.replace(/\/+$/, '')
-  const idx = trimmed.lastIndexOf('/')
+  const trimmed = path.replace(/[\\/]+$/, '')
+  const idx = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'))
   return idx >= 0 ? trimmed.slice(idx + 1) : trimmed
+}
+
+// 拼接子路径：沿用源目录的分隔符风格，避免 Windows 下出现 D:\a\b/dist
+function joinPath(dir: string, name: string): string {
+  const trimmed = dir.replace(/[\\/]+$/, '')
+  const sep = trimmed.includes('\\') ? '\\' : '/'
+  return `${trimmed}${sep}${name}`
 }
 
 async function selectSourceDir() {
@@ -181,7 +222,7 @@ async function selectSourceDir() {
     localProject.value.source_dir = sourceDir
     // 源目录改变时，强制更新项目名称和输出目录
     localProject.value.name = getLastDirName(sourceDir)
-    localProject.value.output_dir = sourceDir.replace(/\/+$/, '') + '/dist'
+    localProject.value.output_dir = joinPath(sourceDir, 'dist')
     debouncedSave()
   }
 }
@@ -287,7 +328,7 @@ function resetDefaultRules() {
         <button
           class="btn-refresh-type"
           :disabled="detecting || !canDetect"
-          title="重新识别项目类型"
+          title="重新识别项目类型及版本控制地址"
           @click="refreshProjectType"
         >{{ detecting ? '识别中…' : '识别' }}</button>
         <template v-if="canPack">
@@ -306,6 +347,11 @@ function resetDefaultRules() {
           placeholder="项目名称"
           @input="onNameChange"
         />
+        <div v-if="vcsInfo" class="vcs-info">
+          <span class="vcs-badge" :class="'vcs-' + vcsInfo.vcs_type">{{ vcsTypeLabel }}</span>
+          <span v-if="vcsInfo.url" class="vcs-url" :title="vcsInfo.url">{{ vcsInfo.url }}</span>
+          <span v-else class="vcs-empty">未检测到仓库地址</span>
+        </div>
       </div>
 
       <div class="form-row">
@@ -379,10 +425,7 @@ function resetDefaultRules() {
         </div>
       </div>
 
-      <div v-if="projectType === 'vue'" class="type-tip type-tip-vue">
-        Vue 项目请使用其自身的构建工具（如 Vite / Vue CLI）打包，当前打包功能仅支持 Layui 项目。
-      </div>
-      <div v-else-if="projectType === 'unknown'" class="type-tip type-tip-unknown">
+      <div v-if="projectType === 'unknown'" class="type-tip type-tip-unknown">
         未识别到 Layui 项目特征，打包功能不可用。请确认源目录选择正确。
       </div>
     </div>
@@ -464,11 +507,6 @@ function resetDefaultRules() {
   font-size: 13px;
   line-height: 1.5;
 }
-.type-tip-vue {
-  color: #2f855a;
-  background: rgba(66, 184, 131, 0.1);
-  border: 1px solid rgba(66, 184, 131, 0.3);
-}
 .type-tip-unknown {
   color: var(--text-secondary);
   background: var(--bg-input);
@@ -545,6 +583,44 @@ function resetDefaultRules() {
   border-color: var(--primary);
   color: var(--primary);
   background: #eff6ff;
+}
+.vcs-info {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  margin-top: 6px;
+  font-size: 12px;
+}
+.vcs-badge {
+  flex: none;
+  padding: 2px 6px;
+  border: 1px solid var(--border-color);
+  border-radius: 3px;
+  color: var(--text-secondary);
+}
+.vcs-badge.vcs-git {
+  color: #f05032;
+  border-color: #f05032;
+  background: rgba(240, 80, 50, 0.08);
+}
+.vcs-badge.vcs-svn {
+  color: #809cc9;
+  border-color: #809cc9;
+  background: rgba(128, 156, 201, 0.08);
+}
+.vcs-url {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-secondary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  user-select: text;
+}
+.vcs-empty {
+  color: var(--text-muted);
 }
 .exclude-header {
   display: flex;

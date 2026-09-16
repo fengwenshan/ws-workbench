@@ -47,6 +47,11 @@ pub fn detect_project_type(source_dir: String) -> ProjectType {
     packer::detect_project_type(&source_dir)
 }
 
+#[tauri::command]
+pub fn detect_vcs(source_dir: String) -> VcsInfo {
+    packer::detect_vcs(&source_dir)
+}
+
 // ===== 目录打开相关 =====
 
 /// 查找最近的存在目录：若路径不存在，则逐级向上查找直至找到存在的父目录
