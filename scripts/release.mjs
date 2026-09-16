@@ -75,8 +75,8 @@ function fail(msg) {
   process.exit(1)
 }
 
-/** 当前构建目标的平台信息 */
-function resolvePlatform() {
+/** 当前构建目标的平台信息；product 用于精确匹配产物，避免选中改名前的旧文件 */
+function resolvePlatform(product) {
   const isWindowsTarget = TARGET.includes('windows') || process.platform === 'win32'
   const archRaw = TARGET
     ? TARGET.split('-')[0] // x86_64 / aarch64 / i686
@@ -90,8 +90,10 @@ function resolvePlatform() {
       key: `windows-${arch}`,
       bundleSubdir: 'nsis',
       // 优先 NSIS 的 -setup.exe，其次 MSI
-      matchBundle: (f) => f.endsWith('-setup.exe') || f.endsWith('.msi'),
-      matchSig: (f) => f.endsWith('-setup.exe.sig') || f.endsWith('.msi.sig'),
+      matchBundle: (f) =>
+        f.startsWith(product) && (f.endsWith('-setup.exe') || f.endsWith('.msi')),
+      matchSig: (f) =>
+        f.startsWith(product) && (f.endsWith('-setup.exe.sig') || f.endsWith('.msi.sig')),
       assetFile: 'project-manage-tools-setup.exe',
       label: 'Windows',
     }
@@ -101,8 +103,8 @@ function resolvePlatform() {
     return {
       key: `darwin-${arch}`,
       bundleSubdir: 'macos',
-      matchBundle: (f) => f.endsWith('.app.tar.gz'),
-      matchSig: (f) => f.endsWith('.app.tar.gz.sig'),
+      matchBundle: (f) => f.startsWith(product) && f.endsWith('.app.tar.gz'),
+      matchSig: (f) => f.startsWith(product) && f.endsWith('.app.tar.gz.sig'),
       assetFile: 'project-manage-tools.app.tar.gz',
       label: 'macOS',
     }
@@ -137,14 +139,14 @@ function readVersion() {
 function createDmg(platform, version) {
   if (!platform.key.startsWith('darwin-')) return null
 
+  const product = readConf().productName || 'app'
   const dir = bundleDir(platform)
-  const appName = readdirSync(dir).find((f) => f.endsWith('.app'))
-  if (!appName) {
-    log('未找到 .app，跳过 dmg 生成')
+  const appName = `${product}.app`
+  if (!existsSync(join(dir, appName))) {
+    log(`未找到 ${appName}，跳过 dmg 生成`)
     return null
   }
 
-  const product = readConf().productName || 'app'
   const arch = platform.key.replace('darwin-', '')
   const outDir = join(TAURI_DIR, 'target/release/bundle/dmg')
   mkdirSync(outDir, { recursive: true })
@@ -158,6 +160,8 @@ function createDmg(platform, version) {
     symlinkSync('/Applications', join(stage, 'Applications'))
 
     log('生成 dmg（makehybrid + UDZO 压缩）…')
+    // convert 不会覆盖已存在的输出，重复构建时要先删掉
+    rmSync(`${outBase}.dmg`, { force: true })
     execFileSync(
       'hdiutil',
       ['makehybrid', '-hfs', '-hfs-volume-name', product, '-o', raw, stage],
@@ -289,7 +293,8 @@ function publish(version, platform, manifest) {
 
 async function main() {
   const version = readVersion()
-  const platform = resolvePlatform()
+  const product = readConf().productName || 'app'
+  const platform = resolvePlatform(product)
 
   log(`版本: ${version}`)
   log(`平台: ${platform.key} (${platform.label})`)
