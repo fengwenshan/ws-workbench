@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * 发布脚本：构建（含更新签名）→ 生成/合并 latest.json → 上传到 GitLab Release
+ * 发布脚本：构建（含更新签名）→ 生成/合并 latest.json → 发布到 GitHub Release
  *
  * 用法：
  *   node scripts/release.mjs                 # 构建当前平台 + 发布
@@ -11,9 +11,13 @@
  * 同一个 Release 的 latest.json，不会覆盖另一个平台。
  *
  * 需要的环境变量（发布时必填）：
- *   GITLAB_TOKEN     个人访问令牌，需 api 权限
- *   GITLAB_HOST      默认 gitlab.example.com
- *   GITLAB_PROJECT   默认 example-group/demo-tools
+ *   GITHUB_TOKEN     GitHub 个人访问令牌，需 repo（或 Contents: Read and write）权限
+ *   GITHUB_REPO      默认 fengwenshan/project-manage
+ *
+ * 为什么用 GitHub 而不是内网 GitLab：
+ *   内网 GitLab 项目无法设为公开，客户端拿不到任何文件；
+ *   GitHub 公开仓库的 Release 资源可匿名下载，且 releases/latest/download 是
+ *   Tauri 官方的标准更新地址。
  */
 import { execFileSync } from 'node:child_process'
 import {
@@ -31,17 +35,18 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const TAURI_DIR = join(ROOT, 'src-tauri')
 const OUT_DIR = join(ROOT, 'release')
 
-const HOST = process.env.GITLAB_HOST || 'gitlab.example.com'
-const PROJECT = process.env.GITLAB_PROJECT || 'example-group/demo-tools'
-const PROJECT_ID = encodeURIComponent(PROJECT)
-const TOKEN = process.env.GITLAB_TOKEN || ''
+const REPO = process.env.GITHUB_REPO || 'fengwenshan/project-manage'
+const TOKEN = process.env.GITHUB_TOKEN || process.env.GH_TOKEN || ''
 const SKIP_PUBLISH = process.argv.includes('--no-publish')
 
 const KEY_PATH =
   process.env.TAURI_SIGNING_PRIVATE_KEY_PATH || join(process.env.HOME || '', '.tauri/demo-tools.key')
 
-/** latest.json 在 Release 里的固定文件名 */
+/** 更新清单的固定文件名 */
 const ASSET_MANIFEST = 'latest.json'
+
+/** 更新清单的公开地址（公开仓库，无需凭据） */
+const MANIFEST_URL = `https://github.com/${REPO}/releases/latest/download/${ASSET_MANIFEST}`
 
 function argValue(flag) {
   const i = process.argv.indexOf(flag)
@@ -163,57 +168,74 @@ function findArtifacts(platform) {
   return { bundlePath: join(dir, bundle), sigPath: join(dir, sig) }
 }
 
-async function api(path, options = {}) {
-  const res = await fetch(`https://${HOST}/api/v4/projects/${PROJECT_ID}${path}`, {
+function ghHeaders(extra = {}) {
+  return {
+    Authorization: `Bearer ${TOKEN}`,
+    Accept: 'application/vnd.github+json',
+    'X-GitHub-Api-Version': '2022-11-28',
+    ...extra,
+  }
+}
+
+async function gh(path, options = {}) {
+  const res = await fetch(`https://api.github.com/repos/${REPO}${path}`, {
     ...options,
-    headers: { 'PRIVATE-TOKEN': TOKEN, ...(options.headers || {}) },
+    headers: ghHeaders(options.headers),
   })
   if (!res.ok) {
     const text = await res.text()
     let hint = ''
     if (res.status === 401) {
-      hint =
-        '\n提示：部署令牌（gldt- 前缀）只认 HTTP Basic 认证，不能用 PRIVATE-TOKEN 头。' +
-        '\n     发布需要「个人访问令牌」或「项目访问令牌」。'
+      hint = '\n提示：GITHUB_TOKEN 无效或已过期，请重新生成。'
     } else if (res.status === 403) {
       hint =
-        '\n提示：令牌缺少 api 权限。' +
-        '\n     部署令牌只能用于克隆仓库与镜像库，无法创建 Release / 上传文件。' +
-        '\n     请改用权限范围勾选了 api 的个人访问令牌或项目访问令牌。'
-    } else if (res.status === 409) {
-      hint = '\n提示：Release 已存在。请提升版本号，或先在 GitLab 上删除该 Release。'
+        '\n提示：令牌权限不足。创建 Release 需要 repo 权限（细粒度令牌需 Contents: Read and write）。'
+    } else if (res.status === 404) {
+      hint = `\n提示：仓库 ${REPO} 不存在，或令牌无权访问。`
     }
-    const err = new Error(`GitLab API ${res.status} ${path}: ${text.slice(0, 300)}${hint}`)
+    const err = new Error(`GitHub API ${res.status} ${path}: ${text.slice(0, 300)}${hint}`)
     err.status = res.status
     throw err
   }
-  return res.json()
+  return res.status === 204 ? null : res.json()
 }
 
-async function uploadFile(filePath, fileName) {
-  const form = new FormData()
-  form.append('file', new Blob([readFileSync(filePath)]), fileName)
-  const data = await api('/uploads', { method: 'POST', body: form })
-  log(`已上传 ${fileName}`)
-  return `https://${HOST}${data.full_path}`
-}
-
-async function getRelease(tag) {
+/** 上传 Release 资源（走单独的 uploads 域名） */
+async function uploadAsset(releaseId, filePath, fileName) {
   const res = await fetch(
-    `https://${HOST}/api/v4/projects/${PROJECT_ID}/releases/${encodeURIComponent(tag)}`,
-    { headers: { 'PRIVATE-TOKEN': TOKEN } }
+    `https://uploads.github.com/repos/${REPO}/releases/${releaseId}/assets?name=${encodeURIComponent(fileName)}`,
+    {
+      method: 'POST',
+      headers: ghHeaders({ 'Content-Type': 'application/octet-stream' }),
+      body: readFileSync(filePath),
+    }
   )
+  if (!res.ok) {
+    const text = await res.text()
+    fail(`上传 ${fileName} 失败 (${res.status}): ${text.slice(0, 300)}`)
+  }
+  log(`已上传 ${fileName}`)
+}
+
+async function getReleaseByTag(tag) {
+  const res = await fetch(`https://api.github.com/repos/${REPO}/releases/tags/${tag}`, {
+    headers: ghHeaders(),
+  })
   if (res.status === 404) return null
-  if (!res.ok) fail(`读取 Release ${tag} 失败: ${res.status} ${(await res.text()).slice(0, 300)}`)
+  if (!res.ok) fail(`读取 Release ${tag} 失败: ${res.status} ${(await res.text()).slice(0, 200)}`)
   return res.json()
 }
 
 /** 取回已发布的 latest.json，用于把另一个平台的条目合并进来 */
 async function fetchPublishedManifest(release) {
-  const link = (release?.assets?.links || []).find((l) => l.name === ASSET_MANIFEST)
-  if (!link) return null
+  if (!release) return null
   try {
-    const res = await fetch(link.url)
+    const assets = await gh(`/releases/${release.id}/assets`)
+    const m = assets.find((a) => a.name === ASSET_MANIFEST)
+    if (!m) return null
+    const res = await fetch(m.url, {
+      headers: ghHeaders({ Accept: 'application/octet-stream' }),
+    })
     if (!res.ok) return null
     return await res.json()
   } catch {
@@ -221,89 +243,62 @@ async function fetchPublishedManifest(release) {
   }
 }
 
-async function upsertLink(tag, release, link) {
-  const existing = (release.assets.links || []).find((l) => l.name === link.name)
-  const body = {
-    name: link.name,
-    url: link.url,
-    direct_asset_path: link.filepath,
-    link_type: link.link_type,
-  }
-  if (existing) {
-    await api(`/releases/${encodeURIComponent(tag)}/assets/links/${existing.id}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    })
-    log(`已更新资源链接 ${link.name}`)
-  } else {
-    await api(`/releases/${encodeURIComponent(tag)}/assets/links`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    })
-    log(`已新增资源链接 ${link.name}`)
-  }
-}
-
-async function publish(version, platform, manifest) {
-  if (!TOKEN) {
-    fail('发布需要 GITLAB_TOKEN 环境变量（个人访问令牌，勾选 api 权限）')
-  }
-  const tag = `v${version}`
-
-  const bundleUrl = await uploadFile(join(OUT_DIR, platform.assetFile), platform.assetFile)
-  const manifestUrl = await uploadFile(join(OUT_DIR, ASSET_MANIFEST), ASSET_MANIFEST)
-
-  const release = await getRelease(tag)
-  const links = [
-    { name: ASSET_MANIFEST, url: manifestUrl, filepath: `/${ASSET_MANIFEST}`, link_type: 'other' },
-    {
-      name: platform.assetFile,
-      url: bundleUrl,
-      filepath: `/${platform.assetFile}`,
-      link_type: 'other',
-    },
-  ]
-
-  if (!release) {
-    log(`创建 Release ${tag} …`)
-    await api('/releases', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        name: tag,
-        tag_name: tag,
-        description: `版本 ${version}\n\n安装包与更新清单见下方附件。\n\n当前已包含平台：${platform.key}`,
-        assets: { links },
-      }),
-    })
-  } else {
-    log(`Release ${tag} 已存在，合并 ${platform.key} 条目 …`)
-    for (const link of links) {
-      await upsertLink(tag, release, link)
-    }
-  }
-
-  log(`\x1b[32m发布完成\x1b[0m v${version} (${platform.key})`)
-  log('已包含平台: ' + Object.keys(manifest.platforms).join(', '))
-  log(`更新清单: https://${HOST}/${PROJECT}/-/releases/permalink/latest/downloads/${ASSET_MANIFEST}`)
-}
-
 /** 构建前的令牌校验，避免白等一次构建 */
 function assertPublishToken() {
   if (SKIP_PUBLISH) return
   if (!TOKEN) {
-    fail('发布需要 GITLAB_TOKEN 环境变量（个人访问令牌 / 项目访问令牌，权限范围勾选 api）')
-  }
-  if (TOKEN.startsWith('gldt-')) {
     fail(
-      '检测到部署令牌（gldt- 前缀），它没有 api 权限，无法创建 Release 或上传文件。\n' +
-        '部署令牌只能用于克隆仓库与镜像库，请改用：\n' +
-        '  个人访问令牌：右上角头像 → 编辑个人资料 → 访问令牌\n' +
-        '  项目访问令牌：项目 → 设置 → 访问令牌（角色 Developer 以上 + api 范围）'
+      '发布需要 GITHUB_TOKEN 环境变量。\n' +
+        '  生成地址：https://github.com/settings/tokens\n' +
+        '  经典令牌勾选 repo；细粒度令牌需 Contents: Read and write'
     )
   }
+  if (TOKEN.startsWith('glpat-') || TOKEN.startsWith('gldt-')) {
+    fail(
+      '检测到 GitLab 令牌，但当前发布目标是 GitHub。\n' +
+        `  目标仓库: ${REPO}\n` +
+        '  请设置 GITHUB_TOKEN 为 GitHub 令牌。'
+    )
+  }
+}
+
+async function publish(version, platform, manifest) {
+  const tag = `v${version}`
+  let release = await getReleaseByTag(tag)
+
+  if (!release) {
+    log(`创建 Release ${tag} …`)
+    release = await gh('/releases', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        tag_name: tag,
+        name: tag,
+        body: `版本 ${version}\n\n下载对应的安装包即可，客户端会自动检查更新。`,
+        draft: false,
+        prerelease: false,
+      }),
+    })
+  } else {
+    log(`Release ${tag} 已存在，替换本平台产物 …`)
+  }
+
+  // 同名资源需先删除，否则 GitHub 会拒绝重复上传
+  const assets = await gh(`/releases/${release.id}/assets`)
+  for (const a of assets) {
+    if (a.name === ASSET_MANIFEST || a.name === platform.assetFile) {
+      await gh(`/releases/assets/${a.id}`, { method: 'DELETE' })
+      log(`已移除旧资源 ${a.name}`)
+    }
+  }
+
+  await uploadAsset(release.id, join(OUT_DIR, platform.assetFile), platform.assetFile)
+  await uploadAsset(release.id, join(OUT_DIR, ASSET_MANIFEST), ASSET_MANIFEST)
+
+  log(`\x1b[32m发布完成\x1b[0m v${version} (${platform.key})`)
+  log('本次包含平台: ' + Object.keys(manifest.platforms).join(', '))
+  log('客户端更新地址（公开，无需凭据）:')
+  log(`  ${MANIFEST_URL}`)
 }
 
 async function main() {
@@ -312,6 +307,7 @@ async function main() {
 
   log(`版本: ${version}`)
   log(`平台: ${platform.key} (${platform.label})`)
+  log(`仓库: ${REPO}`)
   if (TARGET) log(`构建目标: ${TARGET}`)
 
   assertPublishToken()
@@ -329,7 +325,7 @@ async function main() {
   // 合并已发布的其他平台条目
   let platforms = {}
   if (TOKEN && !SKIP_PUBLISH) {
-    const existing = await fetchPublishedManifest(await getRelease(`v${version}`))
+    const existing = await fetchPublishedManifest(await getReleaseByTag(`v${version}`))
     if (existing?.platforms) {
       platforms = { ...existing.platforms }
       log(`已读取到现有平台条目: ${Object.keys(platforms).join(', ')}`)
@@ -338,7 +334,7 @@ async function main() {
 
   platforms[platform.key] = {
     signature,
-    url: `https://${HOST}/${PROJECT}/-/releases/permalink/latest/downloads/${platform.assetFile}`,
+    url: `https://github.com/${REPO}/releases/latest/download/${platform.assetFile}`,
   }
 
   const manifest = {
