@@ -23,6 +23,13 @@ name: Release
 #    1.0.0 → 1.0.<run_number>。通过 tauri build --config 注入，
 #    不改动源文件，因此不会产生提交回环。
 #
+# 安装包会同时上传到 Gitee 与 GitHub 两个发行版，两边都能直接下载安装。
+# 但客户端自动更新只走 Gitee（清单里的 url 指向 Gitee）——GitHub 在你们网络下不通，
+# 把地址换过去会让已安装的客户端取不到更新。
+#
+# GitHub 侧用的是 Actions 自动注入的 GITHUB_TOKEN，不用手工加密钥，
+# 只依赖上面那句 permissions: contents: write。
+#
 # 关于提交回环：CI 提交更新清单时带上 [skip ci]，job 上另有守卫条件，
 # 所以 CI 自己推的提交不会再次触发构建。
 #
@@ -136,6 +143,7 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAURI_BUNDLES=app node scripts/release.mjs --dmg --version "${{ steps.version.outputs.value }}"
 
@@ -231,6 +239,7 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: node scripts/release.mjs --target x86_64-pc-windows-msvc --version "${{ steps.version.outputs.value }}"
 
       - name: 保存产物供人工检查

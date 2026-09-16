@@ -13,12 +13,17 @@
  *                      （受限环境无法挂载 /Volumes 或写裸盘时必需，配合 --dmg 使用）
  *   TAURI_SIGNING_PRIVATE_KEY  签名私钥的内容；不设时回退读 ~/.tauri 下的密钥文件
  *   GITEE_TOKEN                Gitee 私人令牌，上传发行版附件时必需
+ *   GITHUB_TOKEN               GitHub 令牌，用于把安装包镜像到 GitHub 发行版；
+ *                              不设时跳过镜像（CI 里用 Actions 自动注入的那个）
  *
  * 两个平台分别在各自可用的环境里执行即可：脚本会把本平台条目「合并」进
  * updates/latest.json，不会覆盖另一个平台。
  *
  * 发布需要 GITEE_TOKEN（Gitee 私人令牌，权限范围含 projects）：安装包作为发行版附件上传，
  * 更新清单提交到 updates/，客户端从固定地址匿名读取。
+ *
+ * 安装包同时会镜像一份到 GitHub 发行版，方便下载。但更新清单里的 url 始终指向 Gitee：
+ * 已安装的客户端读的就是清单里的地址，换成 GitHub 它们会取不到更新。
  *
  * 为什么不用 GitLab / GitHub：
  *   内网 GitLab 项目无法设为公开，客户端拿不到文件；
@@ -60,6 +65,16 @@ const RELEASE_DOWNLOAD = `https://gitee.com/${REPO}/releases/download`
 /** Gitee 私人令牌：创建发行版与上传附件必需（权限范围需含 projects） */
 const GITEE_TOKEN = process.env.GITEE_TOKEN || ''
 const API_BASE = 'https://gitee.com/api/v5'
+
+/**
+ * GitHub 仓库：安装包会同步镜像一份到它的发行版，方便下载。
+ * CI 里用 Actions 自动注入的 GITHUB_TOKEN；本机手动发布会跳过这一步。
+ */
+const GITHUB_REPO = process.env.GITHUB_REPO || 'fengwenshan/code-manage'
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN || ''
+const GITHUB_API = 'https://api.github.com'
+/** GitHub 的资产上传走独立域名 */
+const GITHUB_UPLOAD = 'https://uploads.github.com'
 
 const KEY_PATH =
   process.env.TAURI_SIGNING_PRIVATE_KEY_PATH || join(process.env.HOME || '', '.tauri/demo-tools.key')
@@ -361,7 +376,84 @@ function collectAssets(platform) {
   return assets
 }
 
-/** 名单里已有的附件，删掉同名项（Gitee 不允许重复文件名） */
+/**
+ * 发一个 multipart/form-data POST，Gitee 附件与 GitHub 资产共用。
+ *
+ * 这里刻意不用 fetch：GitHub 的 runner 在境外，向 Gitee 上行很慢
+ * （实测 6MB 要 5 分钟以上），而 undici 的 headersTimeout 默认只有 300s，
+ * 会把正常上传误判成超时（UND_ERR_HEADERS_TIMEOUT）。
+ * https.request 默认不设超时，这里只加一个 30 分钟的兜底空闲超时。
+ */
+function postMultipart(url, name, filePath, extraHeaders = {}) {
+  const boundary = `----distCli${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`
+  const body = Buffer.concat([
+    Buffer.from(
+      `--${boundary}\r\n` +
+        `Content-Disposition: form-data; name="file"; filename="${name}"\r\n` +
+        'Content-Type: application/octet-stream\r\n\r\n'
+    ),
+    readFileSync(filePath),
+    Buffer.from(`\r\n--${boundary}--\r\n`),
+  ])
+
+  return new Promise((resolve, reject) => {
+    const req = httpsRequest(
+      {
+        method: 'POST',
+        hostname: url.hostname,
+        path: url.pathname + url.search,
+        headers: {
+          'Content-Type': `multipart/form-data; boundary=${boundary}`,
+          'Content-Length': body.length,
+          ...extraHeaders,
+        },
+      },
+      (res) => {
+        let data = ''
+        res.setEncoding('utf8')
+        res.on('data', (c) => (data += c))
+        res.on('end', () => {
+          if (res.statusCode >= 200 && res.statusCode < 300) resolve()
+          else reject(new Error(`HTTP ${res.statusCode}: ${data.slice(0, 300)}`))
+        })
+      }
+    )
+    req.setTimeout(1800000, () => {
+      req.destroy(new Error('30 分钟无响应'))
+    })
+    req.on('error', reject)
+    req.end(body)
+  })
+}
+
+/** 上传带上重试：上行偶发中断时，清掉半成品再重来 */
+async function uploadWithRetry(asset, doUpload, doRemove, attempts = 3) {
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      await doUpload(asset)
+      log(`已上传 ${asset.name}`)
+      return
+    } catch (err) {
+      if (i === attempts) throw err
+      log(`第 ${i} 次上传 ${asset.name} 失败：${err.message}`)
+      log(`等待后重试（${i}/${attempts - 1}）…`)
+      await doRemove(asset.name)
+      await new Promise((r) => setTimeout(r, 15000 * i))
+    }
+  }
+}
+
+/** 逐个上传资产：先删同名旧件，再带重试上传 */
+async function pushAssets(assets, doUpload, doRemove) {
+  for (const a of assets) {
+    await doRemove(a.name)
+    await uploadWithRetry(a, doUpload, doRemove)
+  }
+}
+
+// ===== Gitee 发行版附件 =====
+
+/** 发行版里已有的同名附件先删掉（Gitee 不允许重复文件名） */
 async function removeAttachment(releaseId, name) {
   try {
     const existing = (await gitee(`/repos/${REPO}/releases/${releaseId}/attach_files`)) || []
@@ -376,76 +468,112 @@ async function removeAttachment(releaseId, name) {
   }
 }
 
-/**
- * 上传单个附件到发行版。
- *
- * 这里刻意不用 fetch：GitHub 的 runner 在境外，向 Gitee 上行很慢
- * （实测 6MB 要 5 分钟以上），而 undici 的 headersTimeout 默认只有 300s，
- * 会把正常上传误判成超时（UND_ERR_HEADERS_TIMEOUT）。
- * https.request 默认不设超时，这里只加一个 30 分钟的兜底空闲超时。
- */
 function uploadAttachment(releaseId, name, filePath) {
-  const boundary = `----distCli${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`
-  const body = Buffer.concat([
-    Buffer.from(
-      `--${boundary}\r\n` +
-        `Content-Disposition: form-data; name="file"; filename="${name}"\r\n` +
-        'Content-Type: application/octet-stream\r\n\r\n'
-    ),
-    readFileSync(filePath),
-    Buffer.from(`\r\n--${boundary}--\r\n`),
-  ])
-
   const url = new URL(`${API_BASE}/repos/${REPO}/releases/${releaseId}/attach_files`)
   url.searchParams.set('access_token', GITEE_TOKEN)
-
-  return new Promise((resolve, reject) => {
-    const req = httpsRequest(
-      {
-        method: 'POST',
-        hostname: url.hostname,
-        path: url.pathname + url.search,
-        headers: {
-          'Content-Type': `multipart/form-data; boundary=${boundary}`,
-          'Content-Length': body.length,
-        },
-      },
-      (res) => {
-        let data = ''
-        res.setEncoding('utf8')
-        res.on('data', (c) => (data += c))
-        res.on('end', () => {
-          if (res.statusCode >= 200 && res.statusCode < 300) {
-            log(`已上传附件 ${name}`)
-            resolve()
-          } else {
-            reject(new Error(`上传附件 ${name} 失败 (${res.statusCode}): ${data.slice(0, 300)}`))
-          }
-        })
-      }
-    )
-    req.setTimeout(1800000, () => {
-      req.destroy(new Error(`上传附件 ${name} 超时（30 分钟无响应）`))
-    })
-    req.on('error', reject)
-    req.end(body)
-  })
+  return postMultipart(url, name, filePath)
 }
 
-/** 上传带上重试：境外上行偶发中断时，清掉半成品再重来 */
-async function uploadWithRetry(releaseId, asset, attempts = 3) {
-  for (let i = 1; i <= attempts; i++) {
-    try {
-      await uploadAttachment(releaseId, asset.name, asset.path)
-      return
-    } catch (err) {
-      if (i === attempts) throw err
-      log(`第 ${i} 次上传 ${asset.name} 失败：${err.message}`)
-      log(`等待后重试（${i}/${attempts - 1}）…`)
-      await removeAttachment(releaseId, asset.name)
-      await new Promise((r) => setTimeout(r, 15000 * i))
-    }
+// ===== GitHub 发行版（仅作下载镜像）=====
+
+/** 调用 GitHub API（Bearer 认证走请求头） */
+async function githubApi(path, options = {}) {
+  const res = await fetch(`${GITHUB_API}${path}`, {
+    ...options,
+    headers: {
+      Accept: 'application/vnd.github+json',
+      Authorization: `Bearer ${GITHUB_TOKEN}`,
+      'X-GitHub-Api-Version': '2022-11-28',
+      ...(options.headers || {}),
+    },
+  })
+  const text = await res.text()
+  if (!res.ok) {
+    const err = new Error(
+      `GitHub API ${res.status} ${path.split('?')[0]}: ${text.slice(0, 300)}`
+    )
+    err.status = res.status
+    throw err
   }
+  return text ? JSON.parse(text) : null
+}
+
+/** 找到 tag 对应的发行版；不存在时返回 null（GitHub 这里返回 404，与 Gitee 不同） */
+async function findGithubRelease(tag) {
+  try {
+    return await githubApi(`/repos/${GITHUB_REPO}/releases/tags/${encodeURIComponent(tag)}`)
+  } catch (err) {
+    if (err.status === 404) return null
+    throw err
+  }
+}
+
+async function ensureGithubRelease(tag) {
+  const existing = await findGithubRelease(tag)
+  if (existing) {
+    log(`GitHub 发行版 ${tag} 已存在，更新资产 …`)
+    return existing
+  }
+  log(`创建 GitHub 发行版 ${tag} …`)
+  try {
+    return await githubApi(`/repos/${GITHUB_REPO}/releases`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        tag_name: tag,
+        name: tag,
+        body: buildChangelog(tag),
+        target_commitish: BRANCH,
+        prerelease: false,
+      }),
+    })
+  } catch (err) {
+    // 两个平台并行时可能同时判定「不存在」而都想创建（返回 422），复用对方建好的
+    const release = await findGithubRelease(tag)
+    if (!release) throw err
+    log(`GitHub 发行版 ${tag} 已由另一个平台创建，复用`)
+    return release
+  }
+}
+
+async function removeGithubAsset(releaseId, name) {
+  try {
+    const assets = (await githubApi(`/repos/${GITHUB_REPO}/releases/${releaseId}/assets`)) || []
+    for (const a of assets) {
+      if (a.id && a.name === name) {
+        await githubApi(`/repos/${GITHUB_REPO}/releases/assets/${a.id}`, { method: 'DELETE' })
+        log(`已移除旧资产 ${a.name}`)
+      }
+    }
+  } catch (err) {
+    log(`清理资产 ${name} 失败（忽略）：${err.message}`)
+  }
+}
+
+function uploadGithubAsset(releaseId, name, filePath) {
+  const url = new URL(`${GITHUB_UPLOAD}/repos/${GITHUB_REPO}/releases/${releaseId}/assets`)
+  url.searchParams.set('name', name)
+  return postMultipart(url, name, filePath, { Authorization: `Bearer ${GITHUB_TOKEN}` })
+}
+
+/**
+ * 把安装包镜像到 GitHub 发行版，方便下载。
+ *
+ * 注意这里只做「下载镜像」：更新清单里的 url 仍然指向 Gitee，不改。
+ * 已安装的客户端读的是清单里的地址，换掉会让它们取不到更新。
+ */
+async function publishToGithub(tag, assets) {
+  if (!GITHUB_TOKEN) {
+    log('未提供 GITHUB_TOKEN，跳过 GitHub 发行版镜像')
+    return
+  }
+  const release = await ensureGithubRelease(tag)
+  await pushAssets(
+    assets,
+    (a) => uploadGithubAsset(release.id, a.name, a.path),
+    (n) => removeGithubAsset(release.id, n)
+  )
+  log(`GitHub 发行版已更新: https://github.com/${GITHUB_REPO}/releases/tag/${tag}`)
 }
 
 /**
@@ -559,14 +687,19 @@ async function publish(version, platform, entry) {
 
   const assets = collectAssets(platform)
 
-  for (const a of assets) {
-    // Gitee 不允许同名附件，先删掉旧的
-    await removeAttachment(release.id, a.name)
-    await uploadWithRetry(release.id, a)
-  }
+  // 主发布目标：Gitee。客户端的更新下载走这里，必须成功。
+  await pushAssets(
+    assets,
+    (a) => uploadAttachment(release.id, a.name, a.path),
+    (n) => removeAttachment(release.id, n)
+  )
 
-  // 更新清单：两个平台 job 会同时改这个文件，交给 commitManifest 做同步 + 重试
+  // 更新清单：两个平台 job 会同时改这个文件，交给 commitManifest 做同步 + 重试。
+  // 放在镜像之前，这样 GitHub 侧出问题也不会影响更新链路。
   const manifest = await commitManifest(version, platform, entry)
+
+  // 再镜像一份到 GitHub 发行版，供人工下载（该地址不写入更新清单）
+  await publishToGithub(tag, assets)
 
   log(`\x1b[32m发布完成\x1b[0m ${tag} (${platform.key})`)
   log('本次包含平台: ' + Object.keys(manifest.platforms).join(', '))
