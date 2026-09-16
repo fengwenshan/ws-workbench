@@ -1,0 +1,9 @@
+spec:
+  inputs:
+    message:
+      default: hello from demo-tools
+---
+
+placeholder:
+  script:
+    - echo "$[[ inputs.message ]]"
