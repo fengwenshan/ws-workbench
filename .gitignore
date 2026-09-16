@@ -4,6 +4,10 @@ node_modules/
 # 前端构建产物
 dist/
 
+# 构建缓存
+.vite/
+*.tsbuildinfo
+
 # Rust 构建产物
 src-tauri/target/
 src-tauri/gen/schemas/
