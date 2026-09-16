@@ -42,6 +42,28 @@ jobs:
     runs-on: macos-14
 
     steps:
+      # 放在最前面：密钥没配就直接退出，避免白等几分钟工具链安装。
+      # 只打印长度、不打印内容，不会泄漏密钥。
+      - name: 预检（仓库密钥是否已配置）
+        env:
+          SIGN_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+        run: |
+          missing=0
+          if [ -z "$SIGN_KEY" ]; then
+            echo "::error::缺少仓库密钥 TAURI_SIGNING_PRIVATE_KEY（Settings → Secrets and variables → Actions）"
+            missing=1
+          else
+            echo "TAURI_SIGNING_PRIVATE_KEY 已配置：${#SIGN_KEY} 字节"
+          fi
+          if [ -z "$GITEE_TOKEN" ]; then
+            echo "::error::缺少仓库密钥 GITEE_TOKEN"
+            missing=1
+          else
+            echo "GITEE_TOKEN 已配置：${#GITEE_TOKEN} 字符"
+          fi
+          exit $missing
+
       - name: 拉取代码（需要完整历史来生成 Changelog）
         uses: actions/checkout@v4
         with:
