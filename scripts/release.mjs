@@ -482,7 +482,7 @@ async function publish(version, platform, manifest) {
   writeFileSync(join(dest, ASSET_MANIFEST), JSON.stringify(manifest, null, 2) + '\n')
   git(['add', UPDATES_DIR], { stdio: 'inherit' })
   if (git(['diff', '--cached', '--name-only']).trim()) {
-    git(['commit', '-m', `release: ${tag} (${platform.key})`, '--', UPDATES_DIR], {
+    git(['commit', '-m', `release: ${tag} (${platform.key}) [skip ci]`, '--', UPDATES_DIR], {
       stdio: 'inherit',
     })
     log('推送更新清单 …')
