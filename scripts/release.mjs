@@ -377,36 +377,21 @@ function collectAssets(platform) {
 }
 
 /**
- * 发一个 multipart/form-data POST，Gitee 附件与 GitHub 资产共用。
+ * 发一个 POST 请求，body 已经构造好。
  *
  * 这里刻意不用 fetch：GitHub 的 runner 在境外，向 Gitee 上行很慢
  * （实测 6MB 要 5 分钟以上），而 undici 的 headersTimeout 默认只有 300s，
  * 会把正常上传误判成超时（UND_ERR_HEADERS_TIMEOUT）。
  * https.request 默认不设超时，这里只加一个 30 分钟的兜底空闲超时。
  */
-function postMultipart(url, name, filePath, extraHeaders = {}) {
-  const boundary = `----distCli${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`
-  const body = Buffer.concat([
-    Buffer.from(
-      `--${boundary}\r\n` +
-        `Content-Disposition: form-data; name="file"; filename="${name}"\r\n` +
-        'Content-Type: application/octet-stream\r\n\r\n'
-    ),
-    readFileSync(filePath),
-    Buffer.from(`\r\n--${boundary}--\r\n`),
-  ])
-
+function postBody(url, body, extraHeaders = {}) {
   return new Promise((resolve, reject) => {
     const req = httpsRequest(
       {
         method: 'POST',
         hostname: url.hostname,
         path: url.pathname + url.search,
-        headers: {
-          'Content-Type': `multipart/form-data; boundary=${boundary}`,
-          'Content-Length': body.length,
-          ...extraHeaders,
-        },
+        headers: { 'Content-Length': body.length, ...extraHeaders },
       },
       (res) => {
         let data = ''
@@ -424,6 +409,23 @@ function postMultipart(url, name, filePath, extraHeaders = {}) {
     req.on('error', reject)
     req.end(body)
   })
+}
+
+/** 构造 multipart/form-data 的请求体（Gitee 的附件接口要这个格式） */
+function multipartBody(name, filePath) {
+  const boundary = `----distCli${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`
+  return {
+    boundary,
+    body: Buffer.concat([
+      Buffer.from(
+        `--${boundary}\r\n` +
+          `Content-Disposition: form-data; name="file"; filename="${name}"\r\n` +
+          'Content-Type: application/octet-stream\r\n\r\n'
+      ),
+      readFileSync(filePath),
+      Buffer.from(`\r\n--${boundary}--\r\n`),
+    ]),
+  }
 }
 
 /** 上传带上重试：上行偶发中断时，清掉半成品再重来 */
@@ -471,7 +473,8 @@ async function removeAttachment(releaseId, name) {
 function uploadAttachment(releaseId, name, filePath) {
   const url = new URL(`${API_BASE}/repos/${REPO}/releases/${releaseId}/attach_files`)
   url.searchParams.set('access_token', GITEE_TOKEN)
-  return postMultipart(url, name, filePath)
+  const { boundary, body } = multipartBody(name, filePath)
+  return postBody(url, body, { 'Content-Type': `multipart/form-data; boundary=${boundary}` })
 }
 
 // ===== GitHub 发行版（仅作下载镜像）=====
@@ -553,7 +556,13 @@ async function removeGithubAsset(releaseId, name) {
 function uploadGithubAsset(releaseId, name, filePath) {
   const url = new URL(`${GITHUB_UPLOAD}/repos/${GITHUB_REPO}/releases/${releaseId}/assets`)
   url.searchParams.set('name', name)
-  return postMultipart(url, name, filePath, { Authorization: `Bearer ${GITHUB_TOKEN}` })
+  // GitHub 的资产接口要的是裸字节：文件名走 ?name=，body 就是文件本身。
+  // 传 multipart 不会报错，但会把整个 body（连边界和报头）原样存成资产，
+  // 下载下来是个坏文件——实测 size 会多出约 200 字节，content_type 显示 boundary。
+  return postBody(url, readFileSync(filePath), {
+    Authorization: `Bearer ${GITHUB_TOKEN}`,
+    'Content-Type': 'application/octet-stream',
+  })
 }
 
 /**
