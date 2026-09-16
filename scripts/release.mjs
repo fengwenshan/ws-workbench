@@ -121,14 +121,28 @@ function build() {
 
   log(`使用签名私钥: ${KEY_PATH}`)
   log(`开始构建: pnpm ${args.join(' ')}`)
-  // 打包器只识别 TAURI_SIGNING_PRIVATE_KEY（内容或路径），
-  // TAURI_SIGNING_PRIVATE_KEY_PATH 不生效，实测会报 "no private key"。
-  const privateKey = readFileSync(KEY_PATH, 'utf8')
-  execFileSync('pnpm', args, {
-    cwd: ROOT,
-    stdio: 'inherit',
-    env: { ...process.env, TAURI_SIGNING_PRIVATE_KEY: privateKey },
-  })
+
+  const env = {
+    ...process.env,
+    // 打包器只识别 TAURI_SIGNING_PRIVATE_KEY（内容或路径），
+    // TAURI_SIGNING_PRIVATE_KEY_PATH 不生效，实测会报 "no private key"。
+    TAURI_SIGNING_PRIVATE_KEY: readFileSync(KEY_PATH, 'utf8'),
+  }
+
+  // 交叉编译 Windows 需要 llvm-rc（Tauri 用它编译资源文件）和 makensis。
+  // Homebrew 的 llvm 是 keg-only，不在默认 PATH 里，这里自动补上，避免每次手动 export。
+  if (TARGET.includes('windows') && process.platform !== 'win32') {
+    const extra = [
+      '/opt/homebrew/opt/llvm/bin',
+      '/usr/local/opt/llvm/bin',
+      '/opt/homebrew/bin',
+      '/usr/local/bin',
+    ].filter(existsSync)
+    env.PATH = [...extra, env.PATH].join(':')
+    log(`已补充 PATH: ${extra.join(', ')}`)
+  }
+
+  execFileSync('pnpm', args, { cwd: ROOT, stdio: 'inherit', env })
 }
 
 function findArtifacts(platform) {
