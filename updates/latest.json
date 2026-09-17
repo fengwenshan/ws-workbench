@@ -1,15 +1,15 @@
 {
-  "version": "1.0.9",
-  "notes": "demo-tools v1.0.9",
-  "pub_date": "2026-09-17T02:06:23Z",
+  "version": "1.0.10",
+  "notes": "demo-tools v1.0.10",
+  "pub_date": "2026-09-17T02:16:15Z",
   "platforms": {
     "windows-x86_64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVE0rL3NzZVMwbkozT1E3bUMwRjkvUDlnMDFpcHdLUTAwd3ROeWZ5VW9iL0prNnV0dHNvZlRUWVF1b3p2OFFxbTBFUDVrU0p2SDc3ZHY5YUlWTnh1Y0twUWI2TE9CRndFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg5NjEwNzA1CWZpbGU6cmlzZW4tdG9vbHNfMS4wLjlfeDY0LXNldHVwLmV4ZQpsb1VhUnZ2WHZnS0cyTEdSNDdPSit3ZnQ3VDZpNXA0anAybXVyQXp3R3hnUVEzYWwxZmJRejcvZzZFSzZjY1JTU29yeGFWNFEvc3ZNbm1KUnlwUldDUT09Cg==",
       "url": "https://gitee.com/feng_wenshan/demo-tools/releases/download/v1.0.9/demo-tools-setup.exe"
     },
     "darwin-aarch64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVE0rL3NzZVMwbklFT05MdHNRUkxFbkhGT0FkZUp1R2F3cU1HbFJkUXZyanBBUkpCbHVoam91TjdJdkFrdGZ0czZ3OGVkOEtERUhEaEQxODRwZGFBL21XN3BmZGFvWEFvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg5NjEwMzYzCWZpbGU6cmlzZW4tdG9vbHMuYXBwLnRhci5negpJRHJUMzNuQUhab3hCWlh0aWtGUy91NFcrTE5mMWRyOUh2WERnczlmYVRPS2RqYnphdEZlREM5Nm5XUzRST2duUFJnTUhSelZTVU5KZktDMkRxbHJCQT09Cg==",
-      "url": "https://gitee.com/feng_wenshan/demo-tools/releases/download/v1.0.9/demo-tools.app.tar.gz"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVE0rL3NzZVMwbkNkaVJvU2FWSFpMUkh2SFo4Qk5UTnlxb1hHa0YxNGRjVjJ1akJnZUUxcEoydTdIeDhRa0RaTE1OQjQzcXZqTks4dFI0N084S2pmaDFnYlo4eUREUHdVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg5NjExMDg3CWZpbGU6cmlzZW4tdG9vbHMuYXBwLnRhci5negpvZndTWnBGZDE1bnZvODQ1NzdhZm1RcHpWclV2a3BrU29DcHB0dXpWUkQzZlZ1SytqVHlaUEowdWVJWFRRWjkrSVllTEdOL3hKSWdkSzAzeDR1dThBQT09Cg==",
+      "url": "https://gitee.com/feng_wenshan/demo-tools/releases/download/v1.0.10/demo-tools.app.tar.gz"
     }
   }
 }
