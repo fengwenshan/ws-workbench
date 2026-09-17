@@ -1,11 +1,11 @@
 {
-  "version": "1.0.13",
-  "notes": "demo-tools v1.0.13",
-  "pub_date": "2026-09-17T11:19:29Z",
+  "version": "1.0.14",
+  "notes": "demo-tools v1.0.14",
+  "pub_date": "2026-09-17T15:34:50Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVE0rL3NzZVMwbk56WTZieU0xdkRDOEFEc29CeU9FcnJvSjZ4YkJIaEVxOTd5dFRNVVdoRlMrS2ZOUkVJeXJGVy9nZjd3cEZXZDQwa1ZjUU5DdXlhYjFHeWw2aHNjalE0PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg5NjI4MjkzCWZpbGU6cmlzZW4tdG9vbHNfMS4wLjExX3g2NC1zZXR1cC5leGUKZ21jQ0lTckRwL0p4KzU4UjQrNmhkbGVaa3p4bFpENEhleVJIYmF0QTIxZTY0MDVScHhsOFNhSGhtREdyUHV6TEIxTE9ZKzBYVE5lME4velhLeThXQ3c9PQo=",
-      "url": "https://gitee.com/feng_wenshan/demo-tools/releases/download/v1.0.11/demo-tools-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVE0rL3NzZVMwblBtOUFvYm5Bd2FaSEpadDV5U213U2F0RHRITFBYUmR1U0FCamFaNXU2MEZQNHlxQmRDZHpOK2FVdnVPZFY1OEFXQlFkOHY4M1hWcDRBbTBSQkt5Q1EwPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg5NjU4ODI1CWZpbGU6cmlzZW4tdG9vbHNfMS4wLjE0X3g2NC1zZXR1cC5leGUKcXdSYVhuVGdqN3FTSDFHSm44Q0xibWRpZmpaK1RBMnI1TktuZkdQV2VGK3RzWXAweVNNOWIyeTE4OTVpMXF4cjA4SjU4eWNnSjA5S25xZ09uR2o5RGc9PQo=",
+      "url": "https://gitee.com/feng_wenshan/demo-tools/releases/download/v1.0.14/demo-tools-setup.exe"
     },
     "darwin-aarch64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVE0rL3NzZVMwbkdTdzIwU3FZRG0wMktaaGJ1alY3eUI1c0poSW4xd1F1MWdRYnF5ZU9UNy9DeXJyVTllbE1LazYwcHd5UTgyMzVmZU5TWUtIbTRoZjQ4RTB1cFM2RGdNPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg5NjQyOTA0CWZpbGU6cmlzZW4tdG9vbHMuYXBwLnRhci5negovMk5sd3lDZk1Id2U1UVVoYnIvWUE4djBUZDhLeHdXaSs5Nk1CMkpwQVc0cTh3MEhhd2RxaWxZOEs1U1A5bWJkUEpZMk56blRDZWtidUdmU1F1c1JDQT09Cg==",
