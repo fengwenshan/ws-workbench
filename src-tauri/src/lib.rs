@@ -138,14 +138,24 @@ pub fn run() {
 
     app.run(|app_handle, event| {
         // macOS 点 Dock 图标时把窗口重新显示出来
-        if let tauri::RunEvent::Reopen {
-            has_visible_windows,
-            ..
-        } = event
+        // 注意：RunEvent::Reopen 只存在于 macOS，其他平台编译时需要整段排除
+        #[cfg(target_os = "macos")]
         {
-            if !has_visible_windows {
-                show_main_window(app_handle);
+            if let tauri::RunEvent::Reopen {
+                has_visible_windows,
+                ..
+            } = event
+            {
+                if !has_visible_windows {
+                    show_main_window(app_handle);
+                }
             }
+        }
+
+        // 非 macOS 平台没有 Reopen 事件，这里显式忽略参数避免 unused 警告
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (app_handle, event);
         }
     });
 }
