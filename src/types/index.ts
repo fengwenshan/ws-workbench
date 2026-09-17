@@ -57,7 +57,16 @@ export interface ProjectValidation {
   warnings: string[]
 }
 
-export type ProjectType = 'layui' | 'vue' | 'unknown'
+export type ProjectType =
+  | 'vue2'
+  | 'vue3'
+  | 'react'
+  | 'layui'
+  | 'springboot'
+  | 'spring'
+  | 'struts2'
+  | 'java'
+  | 'unknown'
 
 export type VcsType = 'git' | 'svn' | 'none'
 

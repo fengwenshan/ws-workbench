@@ -133,6 +133,63 @@ fn copy_files(
     (copied, skipped, errors)
 }
 
+/// zip 头部的 UTF-8 标志位（general purpose bit 11）
+const ZIP_UTF8_FLAG: u16 = 0x0800;
+
+fn read_u16(bytes: &[u8], at: usize) -> usize {
+    u16::from_le_bytes([bytes[at], bytes[at + 1]]) as usize
+}
+
+fn read_u32(bytes: &[u8], at: usize) -> usize {
+    u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]) as usize
+}
+
+/// 清掉某个头部里的 UTF-8 标志位
+fn clear_utf8_bit(bytes: &mut [u8], at: usize) {
+    let flags = u16::from_le_bytes([bytes[at], bytes[at + 1]]) & !ZIP_UTF8_FLAG;
+    bytes[at..at + 2].copy_from_slice(&flags.to_le_bytes());
+}
+
+/// 清掉 zip 里所有头部的 UTF-8 标志位（本地文件头 + 中央目录），与 macOS「压缩」一致。
+///
+/// zip crate 遇到非 ASCII 文件名会自动置位 bit 11，解压端（Linux 的 unzip）看到置位就会把
+/// 名字按「UTF-8 → 本地字符集」转换，服务器 LANG 不是 UTF-8 时就转成乱码；不置位则原样落盘。
+/// 只改标志位、不动名字字节，因此不会影响任何长度与偏移。
+fn clear_utf8_flags(zip_path: &Path) -> Result<(), String> {
+    let mut bytes = fs::read(zip_path).map_err(|e| format!("读取 zip 失败: {}", e))?;
+
+    // 中央目录结束记录在文件末尾；注释字段长度可变，所以从后往前找签名
+    let eocd = bytes
+        .windows(4)
+        .rposition(|w| w == b"PK\x05\x06")
+        .ok_or_else(|| "zip 缺少中央目录结束记录".to_string())?;
+    if eocd + 22 > bytes.len() {
+        return Err("zip 中央目录结束记录不完整".to_string());
+    }
+
+    let entries = read_u16(&bytes, eocd + 10);
+    let mut pos = read_u32(&bytes, eocd + 16);
+
+    for _ in 0..entries {
+        if bytes.get(pos..pos + 4) != Some(b"PK\x01\x02".as_ref()) {
+            return Err("zip 中央目录结构异常".to_string());
+        }
+        clear_utf8_bit(&mut bytes, pos + 8);
+
+        let name_len = read_u16(&bytes, pos + 28);
+        let extra_len = read_u16(&bytes, pos + 30);
+        let comment_len = read_u16(&bytes, pos + 32);
+        let local = read_u32(&bytes, pos + 42);
+        if bytes.get(local..local + 4) == Some(b"PK\x03\x04".as_ref()) {
+            clear_utf8_bit(&mut bytes, local + 6);
+        }
+
+        pos += 46 + name_len + extra_len + comment_len;
+    }
+
+    fs::write(zip_path, bytes).map_err(|e| format!("写回 zip 失败: {}", e))
+}
+
 /// 打包项目：提取文件到输出目录（执行"开始打包"）
 pub fn pack_project(
     app: &AppHandle,
@@ -315,6 +372,8 @@ fn pack_to_zip_inner(
     let zip_file = fs::File::create(&zip_path)
         .map_err(|e| format!("创建 zip 文件失败: {}", e))?;
     let mut zip = zip::ZipWriter::new(zip_file);
+    // 条目名一律写成 UTF-8 字节；zip crate 会给非 ASCII 名置 UTF-8 标志位(bit 11)，
+    // 打包结束后由 clear_utf8_flags 统一清掉（与 macOS「压缩」一致，原因见该函数注释）
     let options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated);
 
@@ -369,6 +428,11 @@ fn pack_to_zip_inner(
 
     if let Err(e) = zip.finish() {
         errors.push(format!("完成 zip 文件失败: {}", e));
+    }
+
+    // 与 macOS「压缩」（Finder）对齐：名字是 UTF-8 字节，但不置 UTF-8 标志位
+    if let Err(e) = clear_utf8_flags(&zip_path) {
+        errors.push(format!("清理 zip 的 UTF-8 标志失败: {}", e));
     }
 
     emit_progress(app, PackProgress {
@@ -438,6 +502,198 @@ fn count_files(path: &Path) -> u64 {
     count
 }
 
+/// 从 package.json 里取出某个依赖的版本号（粗略解析，够用即可）
+fn dep_version(content: &str, name: &str) -> Option<String> {
+    let key = format!("\"{}\"", name);
+    let idx = content.find(&key)?;
+    let rest = content[idx + key.len()..].trim_start();
+    let rest = rest.strip_prefix(':')?.trim_start();
+    let rest = rest.strip_prefix('"')?;
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
+}
+
+/// 检测前端项目：Vue2 / Vue3 / React
+/// 版本优先看 package.json 的依赖声明，没有声明时用构建配置与入口文件兜底
+fn detect_frontend(source: &Path) -> Option<ProjectType> {
+    if let Ok(content) = fs::read_to_string(source.join("package.json")) {
+        if let Some(version) = dep_version(&content, "vue") {
+            // 主版本号是 3 → Vue3，其余（含 ^2 / ~2 / workspace:* 之类）按 Vue2
+            let major_is_3 = version
+                .trim_start_matches(|c: char| !c.is_ascii_digit())
+                .starts_with('3');
+            return Some(if major_is_3 {
+                ProjectType::Vue3
+            } else {
+                ProjectType::Vue2
+            });
+        }
+        if dep_version(&content, "react").is_some() {
+            return Some(ProjectType::React);
+        }
+    }
+
+    // 没有依赖声明时的兜底：Vue CLI 的 vue.config.* 按 Vue2，其余有 .vue 入口的按 Vue3
+    if source.join("vue.config.js").exists() || source.join("vue.config.ts").exists() {
+        return Some(ProjectType::Vue2);
+    }
+    if source.join("src/App.vue").exists() {
+        return Some(ProjectType::Vue3);
+    }
+    if ["src/App.jsx", "src/App.tsx", "src/main.jsx", "src/main.tsx"]
+        .iter()
+        .any(|f| source.join(f).exists())
+    {
+        return Some(ProjectType::React);
+    }
+
+    None
+}
+
+/// 找出 Java 项目的构建文件内容（pom.xml / build.gradle），供判断框架用
+fn read_java_build_file(dir: &Path) -> Option<String> {
+    for name in ["pom.xml", "build.gradle", "build.gradle.kts"] {
+        let path = dir.join(name);
+        if path.is_file() {
+            if let Ok(content) = fs::read_to_string(&path) {
+                return Some(content.to_lowercase());
+            }
+        }
+    }
+    None
+}
+
+/// Java 项目的特征文件（没有构建文件的老项目靠这些认出来）
+#[derive(Default)]
+struct JavaMarkers {
+    java: bool,
+    spring: bool,
+    struts: bool,
+}
+
+/// 浅层扫描（最多 3 层）Java 项目的特征文件
+fn scan_java_markers(path: &Path, depth: usize, markers: &mut JavaMarkers) {
+    if depth > 3 {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(path) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let child = entry.path();
+        let name = entry.file_name().to_string_lossy().to_lowercase();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_dir() {
+            if matches!(
+                name.as_str(),
+                "node_modules" | "target" | "out" | ".git" | ".svn" | ".idea"
+            ) {
+                continue;
+            }
+            if name == "web-inf" || (name == "java" && child.ends_with(Path::new("src/main/java"))) {
+                markers.java = true;
+            }
+            scan_java_markers(&child, depth + 1, markers);
+        } else {
+            match name.as_str() {
+                "struts.xml" => markers.struts = true,
+                "web.xml" | ".classpath" | "pom.xml" => markers.java = true,
+                _ => {
+                    if name.ends_with(".xml")
+                        && (name.contains("context") || name.contains("dispatcher"))
+                    {
+                        markers.spring = true;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// 检测 Java 项目：Spring Boot / Struts2 / Spring / 纯 Java
+///
+/// 源目录也可能只是项目里的一个子目录（如 src/main/webapp），所以构建文件允许往上找 3 层。
+fn detect_java(source: &Path) -> Option<ProjectType> {
+    let mut cursor: Option<&Path> = Some(source);
+    let mut depth = 0;
+    while let Some(dir) = cursor {
+        if let Some(build) = read_java_build_file(dir) {
+            if build.contains("spring-boot") {
+                return Some(ProjectType::SpringBoot);
+            }
+            if build.contains("struts") {
+                return Some(ProjectType::Struts2);
+            }
+            if build.contains("spring") {
+                return Some(ProjectType::Spring);
+            }
+            return Some(ProjectType::Java);
+        }
+        if depth >= 3 {
+            break;
+        }
+        cursor = dir.parent();
+        depth += 1;
+    }
+
+    let mut markers = JavaMarkers::default();
+    scan_java_markers(source, 0, &mut markers);
+    if markers.struts {
+        return Some(ProjectType::Struts2);
+    }
+    if markers.spring {
+        return Some(ProjectType::Spring);
+    }
+    if markers.java {
+        return Some(ProjectType::Java);
+    }
+
+    None
+}
+
+/// 查找 layui 相关文件，最多往下找 3 层
+fn find_layui(path: &Path, depth: usize) -> bool {
+    if depth > 3 {
+        return false;
+    }
+    if let Ok(entries) = fs::read_dir(path) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if let Ok(ft) = entry.file_type() {
+                if ft.is_file() {
+                    let name = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("")
+                        .to_lowercase();
+                    if (name.starts_with("layui") && name.ends_with(".js"))
+                        || (name.starts_with("layui") && name.ends_with(".css"))
+                        || name == "layui.all.js"
+                    {
+                        return true;
+                    }
+                } else if ft.is_dir() {
+                    let dir_name = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("")
+                        .to_lowercase();
+                    // 跳过 node_modules
+                    if dir_name == "node_modules" {
+                        continue;
+                    }
+                    if find_layui(&path, depth + 1) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
 /// 检测项目类型
 pub fn detect_project_type(source_dir: &str) -> ProjectType {
     let source = Path::new(source_dir);
@@ -445,67 +701,16 @@ pub fn detect_project_type(source_dir: &str) -> ProjectType {
         return ProjectType::Unknown;
     }
 
-    // 检测 Vue 项目（仅使用 Vue 特有的强特征，避免误判 Layui 项目）
-    let pkg_path = source.join("package.json");
-    if pkg_path.exists() {
-        if let Ok(content) = fs::read_to_string(&pkg_path) {
-            if content.contains("\"vue\"") {
-                return ProjectType::Vue;
-            }
-        }
-    }
-    if source.join("vite.config.js").exists()
-        || source.join("vite.config.ts").exists()
-        || source.join("vite.config.mjs").exists()
-        || source.join("vue.config.js").exists()
-        || source.join("vue.config.ts").exists()
-        || source.join("src/App.vue").exists()
-    {
-        return ProjectType::Vue;
-    }
-
-    // 检测 Layui 项目
-    // 查找 layui 相关文件，最多往下找 3 层
-    fn find_layui(path: &Path, depth: usize) -> bool {
-        if depth > 3 {
-            return false;
-        }
-        if let Ok(entries) = fs::read_dir(path) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if let Ok(ft) = entry.file_type() {
-                    if ft.is_file() {
-                        let name = path.file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("")
-                            .to_lowercase();
-                        if (name.starts_with("layui") && name.ends_with(".js"))
-                            || (name.starts_with("layui") && name.ends_with(".css"))
-                            || name == "layui.all.js"
-                        {
-                            return true;
-                        }
-                    } else if ft.is_dir() {
-                        let dir_name = path.file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("")
-                            .to_lowercase();
-                        // 跳过 node_modules
-                        if dir_name == "node_modules" {
-                            continue;
-                        }
-                        if find_layui(&path, depth + 1) {
-                            return true;
-                        }
-                    }
-                }
-            }
-        }
-        false
+    if let Some(kind) = detect_frontend(source) {
+        return kind;
     }
 
     if find_layui(source, 0) {
         return ProjectType::Layui;
+    }
+
+    if let Some(kind) = detect_java(source) {
+        return kind;
     }
 
     ProjectType::Unknown
@@ -809,6 +1014,42 @@ mod tests {
         assert_eq!(result.skipped_files, 0);
     }
 
+    /// 条目名必须是 UTF-8 字节，且**不置** UTF-8 标志位(bit 11)——与 macOS「压缩」一致。
+    /// 置位时 Linux 的 unzip 会把名字按本地字符集转换，服务器 LANG 非 UTF-8 就会乱码。
+    #[test]
+    fn zip_entry_names_are_utf8_without_flag() {
+        let src = tempfile::tempdir().unwrap();
+        write_file(src.path(), "中文目录/中文文件.js", "var a=1;");
+
+        let out_parent = tempfile::tempdir().unwrap();
+        let output_dir = out_parent.path().join("corp-dist");
+        let project = make_project(src.path(), &output_dir);
+
+        let result = pack_to_zip_inner(None, &project, &[]).unwrap();
+        assert!(result.success, "打包失败: {:?}", result.errors);
+
+        let bytes = fs::read(output_dir.with_extension("zip")).unwrap();
+        assert_eq!(&bytes[0..4], b"PK\x03\x04", "不是 zip 本地文件头");
+
+        // 名字仍是 UTF-8 字节
+        let name_len = read_u16(&bytes, 26);
+        let name = std::str::from_utf8(&bytes[30..30 + name_len]).unwrap();
+        assert_eq!(name, "corp-dist/中文目录/中文文件.js");
+
+        // 本地文件头与中央目录都不能置 UTF-8 标志位
+        assert_eq!(
+            u16::from_le_bytes([bytes[6], bytes[7]]) & ZIP_UTF8_FLAG,
+            0,
+            "本地头不应置 UTF-8 标志(bit 11)"
+        );
+        let c = bytes.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
+        assert_eq!(
+            u16::from_le_bytes([bytes[c + 8], bytes[c + 9]]) & ZIP_UTF8_FLAG,
+            0,
+            "中央目录不应置 UTF-8 标志(bit 11)"
+        );
+    }
+
     /// 源目录自身含空格时，不应把所有文件都过滤掉
     #[test]
     fn source_dir_with_space_keeps_files() {
@@ -910,6 +1151,98 @@ mod tests {
             );
         }
         assert_eq!(result.total_files, 2, "条目: {:?}", entries);
+    }
+
+    fn type_of(dir: &Path) -> ProjectType {
+        detect_project_type(&dir.to_string_lossy())
+    }
+
+    /// 前端：按 package.json 里的 vue 主版本区分 Vue2 / Vue3，react 识别为 React
+    #[test]
+    fn detects_frontend_projects() {
+        let vue3 = tempfile::tempdir().unwrap();
+        write_file(vue3.path(), "package.json", "{ \"dependencies\": { \"vue\": \"^3.4.0\" } }");
+        assert_eq!(type_of(vue3.path()), ProjectType::Vue3);
+
+        let vue2 = tempfile::tempdir().unwrap();
+        write_file(vue2.path(), "package.json", "{ \"dependencies\": { \"vue\": \"^2.6.14\" } }");
+        assert_eq!(type_of(vue2.path()), ProjectType::Vue2);
+
+        let react = tempfile::tempdir().unwrap();
+        write_file(react.path(), "package.json", "{ \"dependencies\": { \"react\": \"^18.2.0\" } }");
+        assert_eq!(type_of(react.path()), ProjectType::React);
+    }
+
+    /// 前端兜底：没有 package.json 时靠 vue.config.* / .vue / jsx 入口判断
+    #[test]
+    fn detects_frontend_without_package_json() {
+        let cli = tempfile::tempdir().unwrap();
+        write_file(cli.path(), "vue.config.js", "module.exports = {}");
+        write_file(cli.path(), "src/App.vue", "<template></template>");
+        assert_eq!(type_of(cli.path()), ProjectType::Vue2);
+
+        let vite = tempfile::tempdir().unwrap();
+        write_file(vite.path(), "vite.config.ts", "export default {}");
+        write_file(vite.path(), "src/App.vue", "<template></template>");
+        assert_eq!(type_of(vite.path()), ProjectType::Vue3);
+
+        let react = tempfile::tempdir().unwrap();
+        write_file(react.path(), "src/App.jsx", "export default () => null");
+        assert_eq!(type_of(react.path()), ProjectType::React);
+    }
+
+    /// Java：按构建文件里的依赖区分 Spring Boot / Struts2 / Spring / 纯 Java
+    #[test]
+    fn detects_java_projects_by_build_file() {
+        let boot = tempfile::tempdir().unwrap();
+        write_file(boot.path(), "pom.xml", "<artifactId>spring-boot-starter-web</artifactId>");
+        assert_eq!(type_of(boot.path()), ProjectType::SpringBoot);
+
+        let struts = tempfile::tempdir().unwrap();
+        write_file(struts.path(), "pom.xml", "<artifactId>struts2-core</artifactId>");
+        assert_eq!(type_of(struts.path()), ProjectType::Struts2);
+
+        let spring = tempfile::tempdir().unwrap();
+        write_file(spring.path(), "pom.xml", "<artifactId>spring-webmvc</artifactId>");
+        assert_eq!(type_of(spring.path()), ProjectType::Spring);
+
+        let plain = tempfile::tempdir().unwrap();
+        write_file(plain.path(), "pom.xml", "<artifactId>jakarta.servlet-api</artifactId>");
+        assert_eq!(type_of(plain.path()), ProjectType::Java);
+
+        let gradle = tempfile::tempdir().unwrap();
+        write_file(gradle.path(), "build.gradle", "implementation 'spring-boot-starter'");
+        assert_eq!(type_of(gradle.path()), ProjectType::SpringBoot);
+    }
+
+    /// Java：源目录只是子目录时靠上级构建文件判断；没有构建文件时靠特征文件
+    #[test]
+    fn detects_java_from_parent_dir_and_markers() {
+        let root = tempfile::tempdir().unwrap();
+        write_file(root.path(), "pom.xml", "<artifactId>spring-boot-starter</artifactId>");
+        let webapp = root.path().join("src/main/webapp");
+        fs::create_dir_all(&webapp).unwrap();
+        assert_eq!(type_of(&webapp), ProjectType::SpringBoot);
+
+        let legacy = tempfile::tempdir().unwrap();
+        write_file(legacy.path(), "src/main/webapp/WEB-INF/web.xml", "<web-app/>");
+        assert_eq!(type_of(legacy.path()), ProjectType::Java);
+
+        let struts2 = tempfile::tempdir().unwrap();
+        write_file(struts2.path(), "src/main/resources/struts.xml", "<struts/>");
+        assert_eq!(type_of(struts2.path()), ProjectType::Struts2);
+    }
+
+    /// 其它：layui 仍可识别，都不是则未知
+    #[test]
+    fn detects_layui_and_unknown() {
+        let layui = tempfile::tempdir().unwrap();
+        write_file(layui.path(), "js/layui.js", "// layui");
+        assert_eq!(type_of(layui.path()), ProjectType::Layui);
+
+        let other = tempfile::tempdir().unwrap();
+        write_file(other.path(), "readme.txt", "hi");
+        assert_eq!(type_of(other.path()), ProjectType::Unknown);
     }
 
     /// git config 解析：优先取 origin 的地址

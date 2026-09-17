@@ -30,9 +30,21 @@ const dragProjectId = ref<string | null>(null)
 const hoverGroupIndex = ref<number | null>(null)
 const hoverProjectInfo = ref<{ groupId: string; index: number } | null>(null)
 
+// 每次开始拖拽先清掉上一次残留的悬停位置，避免指示线张冠李戴
+function clearHover() {
+  hoverGroupIndex.value = null
+  hoverProjectInfo.value = null
+}
+
 // ========== 分组拖拽 ==========
 
 function onGroupDragStart(e: DragEvent, groupId: string) {
+  // 只有从分组标题上发起的拖拽才算分组拖拽。
+  // 用「正向判定」而不是「排除项目行」：拖项目时若事件冒泡到这里（或引擎上报的目标
+  // 不是标题），这里直接拒绝，绝不会把拖项目变成调分组顺序。
+  const target = e.target as HTMLElement | null
+  if (!target?.closest?.('.group-header')) return
+  clearHover()
   dragType.value = 'group'
   dragGroupId.value = groupId
   if (e.dataTransfer) {
@@ -109,7 +121,24 @@ function onGroupListDrop(e: DragEvent) {
 
 // ========== 项目拖拽 ==========
 
+// 声明「这里可以投放」。
+// WebKit（Tauri 用的 WKWebView）要求 dragenter 也 preventDefault，否则 drop 不会触发；
+// Chromium 只看 dragover，所以只在浏览器里测会漏掉这个问题。
+function acceptDrop(e: DragEvent) {
+  if (dragType.value !== 'project' && dragType.value !== 'group') return
+  e.preventDefault()
+  if (e.dataTransfer) {
+    e.dataTransfer.dropEffect = 'move'
+  }
+}
+
 function onProjectDragStart(e: DragEvent, projectId: string, groupId: string) {
+  // 只有从项目行上发起的拖拽才算项目拖拽（正向判定，见 onGroupDragStart 的说明）
+  const target = e.target as HTMLElement | null
+  if (!target?.closest?.('.list-item')) return
+  // 阻止冒泡：分组也监听 dragstart，别让它把这里的状态覆盖掉
+  e.stopPropagation()
+  clearHover()
   dragType.value = 'project'
   dragProjectId.value = projectId
   dragGroupId.value = groupId
@@ -136,10 +165,10 @@ function onProjectDragLeave() {
 }
 
 function onProjectDrop(e: DragEvent, toGroupId: string, toIndex: number) {
+  // 分组拖拽不在这里处理：不拦截，继续冒泡给分组的落点逻辑
+  if (dragType.value !== 'project' || !dragProjectId.value || !dragGroupId.value) return
   e.preventDefault()
   e.stopPropagation()
-
-  if (dragType.value !== 'project' || !dragProjectId.value || !dragGroupId.value) return
 
   const fromGroupId = dragGroupId.value
   const projectId = dragProjectId.value
@@ -172,10 +201,12 @@ function onProjectDrop(e: DragEvent, toGroupId: string, toIndex: number) {
   resetDrag()
 }
 
-// 拖到分组区域的空白处（追加到末尾）
+// 拖到分组区域的空白处或分组头部（追加到该分组末尾）
 function onGroupProjectsDrop(e: DragEvent, groupId: string) {
-  e.preventDefault()
+  // 分组拖拽不在这里处理：不拦截，继续冒泡给分组的落点逻辑
   if (dragType.value !== 'project' || !dragProjectId.value || !dragGroupId.value) return
+  e.preventDefault()
+  e.stopPropagation()
 
   const group = props.groups.find(g => g.id === groupId)
   if (!group) {
@@ -208,6 +239,9 @@ function onGroupProjectsDrop(e: DragEvent, groupId: string) {
 function onGroupProjectsDragOver(e: DragEvent, groupId: string) {
   if (dragType.value !== 'project') return
   e.preventDefault()
+  if (e.dataTransfer) {
+    e.dataTransfer.dropEffect = 'move'
+  }
   const group = props.groups.find(g => g.id === groupId)
   if (group) {
     hoverProjectInfo.value = { groupId, index: group.projects.length }
@@ -289,21 +323,27 @@ function cancelRename() {
       <template v-for="(group, groupIndex) in groups" :key="group.id">
         <!-- 分组上方插入指示线 -->
         <div
-          v-if="isGroupHoverAbove(groupIndex)"
+          v-if="dragType === 'group' && isGroupHoverAbove(groupIndex)"
           class="group-drop-indicator"
         ></div>
 
         <div
           class="group-section"
           :class="{ 'dragging': isDraggingGroup(group.id) }"
-          :draggable="editingGroupId !== group.id"
-          @dragstart="onGroupDragStart($event, group.id)"
+          @dragenter="acceptDrop"
           @dragover="onGroupDragOver($event, groupIndex)"
           @dragleave="onGroupDragLeave"
           @drop="onGroupDrop($event, groupIndex)"
-          @dragend="onDragEnd"
         >
-          <div class="group-header">
+          <div
+            class="group-header"
+            :draggable="editingGroupId !== group.id"
+            @dragstart="onGroupDragStart($event, group.id)"
+            @dragend="onDragEnd"
+            @dragenter="acceptDrop"
+            @dragover="onGroupProjectsDragOver($event, group.id)"
+            @drop="onGroupProjectsDrop($event, group.id)"
+          >
             <span class="group-drag-handle" title="拖拽排序">⋮⋮</span>
             <input
               v-if="editingGroupId === group.id"
@@ -343,13 +383,14 @@ function cancelRename() {
           </div>
           <div
             class="group-projects"
+            @dragenter="acceptDrop"
             @dragover="onGroupProjectsDragOver($event, group.id)"
             @drop="onGroupProjectsDrop($event, group.id)"
           >
             <template v-for="(project, projIndex) in group.projects" :key="project.id">
               <!-- 项目上方插入指示线 -->
               <div
-                v-if="isProjectHoverAbove(group.id, projIndex)"
+                v-if="dragType === 'project' && isProjectHoverAbove(group.id, projIndex)"
                 class="project-drop-indicator"
               ></div>
 
@@ -362,6 +403,7 @@ function cancelRename() {
                 draggable="true"
                 @click="emit('select', project.id)"
                 @dragstart="onProjectDragStart($event, project.id, group.id)"
+                @dragenter="acceptDrop"
                 @dragover="onProjectDragOver($event, group.id, projIndex)"
                 @dragleave="onProjectDragLeave"
                 @drop="onProjectDrop($event, group.id, projIndex)"
@@ -380,7 +422,7 @@ function cancelRename() {
 
             <!-- 分组末尾插入指示线（拖到最后一个位置） -->
             <div
-              v-if="hoverProjectInfo?.groupId === group.id && hoverProjectInfo?.index === group.projects.length && group.projects.length > 0"
+              v-if="dragType === 'project' && hoverProjectInfo?.groupId === group.id && hoverProjectInfo?.index === group.projects.length && group.projects.length > 0"
               class="project-drop-indicator"
             ></div>
 
@@ -391,7 +433,7 @@ function cancelRename() {
 
       <!-- 最后一个分组下方的指示线 -->
       <div
-        v-if="hoverGroupIndex === groups.length && groups.length > 0"
+        v-if="dragType === 'group' && hoverGroupIndex === groups.length && groups.length > 0"
         class="group-drop-indicator"
       ></div>
 

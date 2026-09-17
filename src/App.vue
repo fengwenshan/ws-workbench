@@ -439,7 +439,7 @@ async function openOutputDir() {
       <div v-if="showAddForm" class="add-form-overlay">
         <div class="add-form">
           <h3>添加项目</h3>
-          <div class="form-row">
+          <div v-if="newProjectSource" class="form-row">
             <label>项目名称</label>
             <input
               v-model="newProjectName"
@@ -460,15 +460,17 @@ async function openOutputDir() {
                 选择
               </button>
             </div>
+            <p v-if="!newProjectSource" class="form-hint">
+              选完源目录会自动带出项目名称与输出目录，两者之后都能改
+            </p>
           </div>
-          <div class="form-row">
+          <div v-if="newProjectSource" class="form-row">
             <label>输出目录 (可选，默认为源目录-dist)</label>
             <div class="dir-row">
               <input
                 v-model="newProjectOutput"
                 class="form-input"
                 placeholder="选择输出目录"
-                readonly
               />
               <button class="btn btn-pick" @click="selectNewOutput">
                 选择
@@ -678,6 +680,13 @@ async function openOutputDir() {
 }
 .add-form-sm {
   width: 360px;
+}
+/* 表单内的说明文字 */
+.form-hint {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-muted);
 }
 .add-form h3 {
   margin-bottom: 20px;
