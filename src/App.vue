@@ -512,6 +512,7 @@ async function openOutputDir() {
           @update="handleUpdate"
           @pack="handlePack"
           @open-output="openOutputDir"
+          @log="addLog"
           @update-default-exclude="handleUpdateDefaultExclude"
         />
       </div>

@@ -2,7 +2,7 @@
 import { ref, watch, computed, nextTick } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
-import type { ProjectConfig, ProjectType, VcsInfo } from '@/types'
+import type { LogLevel, ProjectConfig, ProjectType, VcsInfo } from '@/types'
 import ExcludeRules from './ExcludeRules.vue'
 
 const sourceTextarea = ref<HTMLTextAreaElement | null>(null)
@@ -23,7 +23,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   update: [id: string, data: Partial<ProjectConfig>]
   pack: [project: ProjectConfig, asZip: boolean]
-  log: [level: string, message: string]
+  log: [level: LogLevel, message: string]
   updateDefaultExclude: [rules: string[]]
 }>()
 
