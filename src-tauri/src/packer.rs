@@ -134,61 +134,18 @@ fn copy_files(
 }
 
 /// zip 头部的 UTF-8 标志位（general purpose bit 11）
+#[cfg(test)]
 const ZIP_UTF8_FLAG: u16 = 0x0800;
 
+#[cfg(test)]
 fn read_u16(bytes: &[u8], at: usize) -> usize {
     u16::from_le_bytes([bytes[at], bytes[at + 1]]) as usize
 }
 
-fn read_u32(bytes: &[u8], at: usize) -> usize {
-    u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]) as usize
-}
-
-/// 清掉某个头部里的 UTF-8 标志位
-fn clear_utf8_bit(bytes: &mut [u8], at: usize) {
-    let flags = u16::from_le_bytes([bytes[at], bytes[at + 1]]) & !ZIP_UTF8_FLAG;
-    bytes[at..at + 2].copy_from_slice(&flags.to_le_bytes());
-}
-
-/// 清掉 zip 里所有头部的 UTF-8 标志位（本地文件头 + 中央目录），与 macOS「压缩」一致。
-///
-/// zip crate 遇到非 ASCII 文件名会自动置位 bit 11，解压端（Linux 的 unzip）看到置位就会把
-/// 名字按「UTF-8 → 本地字符集」转换，服务器 LANG 不是 UTF-8 时就转成乱码；不置位则原样落盘。
-/// 只改标志位、不动名字字节，因此不会影响任何长度与偏移。
-fn clear_utf8_flags(zip_path: &Path) -> Result<(), String> {
-    let mut bytes = fs::read(zip_path).map_err(|e| format!("读取 zip 失败: {}", e))?;
-
-    // 中央目录结束记录在文件末尾；注释字段长度可变，所以从后往前找签名
-    let eocd = bytes
-        .windows(4)
-        .rposition(|w| w == b"PK\x05\x06")
-        .ok_or_else(|| "zip 缺少中央目录结束记录".to_string())?;
-    if eocd + 22 > bytes.len() {
-        return Err("zip 中央目录结束记录不完整".to_string());
-    }
-
-    let entries = read_u16(&bytes, eocd + 10);
-    let mut pos = read_u32(&bytes, eocd + 16);
-
-    for _ in 0..entries {
-        if bytes.get(pos..pos + 4) != Some(b"PK\x01\x02".as_ref()) {
-            return Err("zip 中央目录结构异常".to_string());
-        }
-        clear_utf8_bit(&mut bytes, pos + 8);
-
-        let name_len = read_u16(&bytes, pos + 28);
-        let extra_len = read_u16(&bytes, pos + 30);
-        let comment_len = read_u16(&bytes, pos + 32);
-        let local = read_u32(&bytes, pos + 42);
-        if bytes.get(local..local + 4) == Some(b"PK\x03\x04".as_ref()) {
-            clear_utf8_bit(&mut bytes, local + 6);
-        }
-
-        pos += 46 + name_len + extra_len + comment_len;
-    }
-
-    fs::write(zip_path, bytes).map_err(|e| format!("写回 zip 失败: {}", e))
-}
+// 条目名一律写成 UTF-8 字节，并保留 zip crate 自动置上的 UTF-8 标志位(bit 11)。
+// 这是 ZIP 规格推荐做法：标准 Info-ZIP unzip 只有看到该标志位才知道名字是 UTF-8，
+// 缺标志位时它会按 CP437 转码，中文就成乱码（macOS 自带 unzip 是 Apple 定制版，
+// 对缺标志位的名字原样落盘，所以在 macOS 上复现不出来）。
 
 /// 打包项目：提取文件到输出目录（执行"开始打包"）
 pub fn pack_project(
@@ -373,7 +330,7 @@ fn pack_to_zip_inner(
         .map_err(|e| format!("创建 zip 文件失败: {}", e))?;
     let mut zip = zip::ZipWriter::new(zip_file);
     // 条目名一律写成 UTF-8 字节；zip crate 会给非 ASCII 名置 UTF-8 标志位(bit 11)，
-    // 打包结束后由 clear_utf8_flags 统一清掉（与 macOS「压缩」一致，原因见该函数注释）
+    // 该标志位保持置位（原因见文件上方注释）
     let options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated);
 
@@ -428,11 +385,6 @@ fn pack_to_zip_inner(
 
     if let Err(e) = zip.finish() {
         errors.push(format!("完成 zip 文件失败: {}", e));
-    }
-
-    // 与 macOS「压缩」（Finder）对齐：名字是 UTF-8 字节，但不置 UTF-8 标志位
-    if let Err(e) = clear_utf8_flags(&zip_path) {
-        errors.push(format!("清理 zip 的 UTF-8 标志失败: {}", e));
     }
 
     emit_progress(app, PackProgress {
@@ -1014,10 +966,10 @@ mod tests {
         assert_eq!(result.skipped_files, 0);
     }
 
-    /// 条目名必须是 UTF-8 字节，且**不置** UTF-8 标志位(bit 11)——与 macOS「压缩」一致。
-    /// 置位时 Linux 的 unzip 会把名字按本地字符集转换，服务器 LANG 非 UTF-8 就会乱码。
+    /// 条目名必须是 UTF-8 字节，并置 UTF-8 标志位(bit 11)。
+    /// 标准 Info-ZIP unzip 靠该标志位识别 UTF-8 名字；缺标志位时它按 CP437 转码，中文会乱码。
     #[test]
-    fn zip_entry_names_are_utf8_without_flag() {
+    fn zip_entry_names_are_utf8_flagged() {
         let src = tempfile::tempdir().unwrap();
         write_file(src.path(), "中文目录/中文文件.js", "var a=1;");
 
@@ -1036,17 +988,17 @@ mod tests {
         let name = std::str::from_utf8(&bytes[30..30 + name_len]).unwrap();
         assert_eq!(name, "corp-dist/中文目录/中文文件.js");
 
-        // 本地文件头与中央目录都不能置 UTF-8 标志位
-        assert_eq!(
+        // 本地文件头与中央目录都要置 UTF-8 标志位
+        assert_ne!(
             u16::from_le_bytes([bytes[6], bytes[7]]) & ZIP_UTF8_FLAG,
             0,
-            "本地头不应置 UTF-8 标志(bit 11)"
+            "本地头应置 UTF-8 标志(bit 11)"
         );
         let c = bytes.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
-        assert_eq!(
+        assert_ne!(
             u16::from_le_bytes([bytes[c + 8], bytes[c + 9]]) & ZIP_UTF8_FLAG,
             0,
-            "中央目录不应置 UTF-8 标志(bit 11)"
+            "中央目录应置 UTF-8 标志(bit 11)"
         );
     }
 
