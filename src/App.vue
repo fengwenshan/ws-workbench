@@ -359,6 +359,11 @@ async function openOutputDir() {
           <span class="version-value">v{{ appVersion || "—" }}</span>
         </div>
 
+        <div v-if="updateStatus === 'available'" class="version-row">
+          <span class="version-label">最新版本</span>
+          <span class="version-value version-value-new">v{{ updateInfo?.version }}</span>
+        </div>
+
         <div v-if="updateStatus === 'downloading'" class="update-progress">
           <div
             class="update-progress-inner"
@@ -374,9 +379,6 @@ async function openOutputDir() {
         </p>
         <p v-else-if="updateStatus === 'installed'" class="update-hint">
           安装完成，点击上方按钮重启
-        </p>
-        <p v-else-if="updateStatus === 'available'" class="update-hint">
-          {{ updateInfo?.notes || "发现可用更新，点击上方按钮下载安装" }}
         </p>
       </div>
     </aside>
@@ -563,6 +565,10 @@ async function openOutputDir() {
 .version-value {
   color: var(--text-secondary);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.version-value-new {
+  color: var(--primary);
+  font-weight: 500;
 }
 .update-btn {
   width: 100%;

@@ -44,6 +44,8 @@ function onGroupDragStart(e: DragEvent, groupId: string) {
 function onGroupDragOver(e: DragEvent, index: number) {
   if (dragType.value !== 'group') return
   e.preventDefault()
+  // 阻止冒泡到 .list-body 的末尾投放区，否则位置会被覆盖成「列表末尾」
+  e.stopPropagation()
   if (e.dataTransfer) {
     e.dataTransfer.dropEffect = 'move'
   }
@@ -56,6 +58,8 @@ function onGroupDragLeave() {
 
 function onGroupDrop(e: DragEvent, targetIndex: number) {
   e.preventDefault()
+  // 防止继续冒泡到 .list-body 的末尾投放区，造成二次处理
+  e.stopPropagation()
   if (dragType.value !== 'group' || !dragGroupId.value) return
 
   const fromIndex = props.groups.findIndex(g => g.id === dragGroupId.value)
@@ -66,7 +70,38 @@ function onGroupDrop(e: DragEvent, targetIndex: number) {
 
   const newGroups = [...props.groups]
   const [removed] = newGroups.splice(fromIndex, 1)
-  newGroups.splice(targetIndex, 0, removed)
+  // 指示线画在被悬停分组的「上方」，而源元素移除后其后的索引都会前移一位，
+  // 所以向下拖（fromIndex < targetIndex）时要减 1，否则会落到指示线下方一格。
+  const actualToIndex = fromIndex < targetIndex ? targetIndex - 1 : targetIndex
+  newGroups.splice(actualToIndex, 0, removed)
+
+  emit('reorderGroups', newGroups)
+  resetDrag()
+}
+
+// 拖到分组列表的空白区域（最后一个分组之后）→ 追加到末尾
+function onGroupListDragOver(e: DragEvent) {
+  if (dragType.value !== 'group') return
+  e.preventDefault()
+  if (e.dataTransfer) {
+    e.dataTransfer.dropEffect = 'move'
+  }
+  hoverGroupIndex.value = props.groups.length
+}
+
+function onGroupListDrop(e: DragEvent) {
+  if (dragType.value !== 'group' || !dragGroupId.value) return
+  e.preventDefault()
+
+  const fromIndex = props.groups.findIndex(g => g.id === dragGroupId.value)
+  if (fromIndex === -1 || fromIndex === props.groups.length - 1) {
+    resetDrag()
+    return
+  }
+
+  const newGroups = [...props.groups]
+  const [removed] = newGroups.splice(fromIndex, 1)
+  newGroups.push(removed)
 
   emit('reorderGroups', newGroups)
   resetDrag()
@@ -87,6 +122,9 @@ function onProjectDragStart(e: DragEvent, projectId: string, groupId: string) {
 function onProjectDragOver(e: DragEvent, groupId: string, index: number) {
   if (dragType.value !== 'project') return
   e.preventDefault()
+  // 必须阻止冒泡：父级 .group-projects 上还有一个 dragover 处理器，
+  // 它会把位置覆盖成「分组末尾」，导致指示线和实际落点对不上。
+  e.stopPropagation()
   if (e.dataTransfer) {
     e.dataTransfer.dropEffect = 'move'
   }
@@ -247,7 +285,7 @@ function cancelRename() {
     <div class="list-header">
       <span>项目分组</span>
     </div>
-    <div class="list-body" @dragover.prevent>
+    <div class="list-body" @dragover="onGroupListDragOver" @drop="onGroupListDrop">
       <template v-for="(group, groupIndex) in groups" :key="group.id">
         <!-- 分组上方插入指示线 -->
         <div
