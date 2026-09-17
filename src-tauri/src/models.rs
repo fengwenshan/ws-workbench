@@ -123,8 +123,14 @@ pub struct ProjectValidation {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum ProjectType {
+    Vue2,
+    Vue3,
+    React,
     Layui,
-    Vue,
+    SpringBoot,
+    Spring,
+    Struts2,
+    Java,
     Unknown,
 }
 

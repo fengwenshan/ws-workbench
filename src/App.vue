@@ -58,6 +58,9 @@ onMounted(async () => {
   }
 });
 
+// macOS 用 Overlay 标题栏：顶部留出 28px 空白给红黄绿按钮，并作为窗口拖动区
+const isMac = navigator.userAgent.includes("Macintosh");
+
 const updateBusy = computed(
   () =>
     updateStatus.value === "checking" || updateStatus.value === "downloading",
@@ -323,7 +326,10 @@ async function openOutputDir() {
 </script>
 
 <template>
-  <div class="app-layout">
+  <div class="app-layout" :class="{ 'mac-overlay-titlebar': isMac }">
+    <!-- macOS Overlay 标题栏：顶部这条空白区可拖动窗口，红黄绿按钮浮在它上面 -->
+    <div v-if="isMac" class="titlebar-drag" data-tauri-drag-region></div>
+
     <!-- 左侧：项目分组列表 -->
     <aside class="sidebar">
       <ProjectList
@@ -439,7 +445,7 @@ async function openOutputDir() {
       <div v-if="showAddForm" class="add-form-overlay">
         <div class="add-form">
           <h3>添加项目</h3>
-          <div class="form-row">
+          <div v-if="newProjectSource" class="form-row">
             <label>项目名称</label>
             <input
               v-model="newProjectName"
@@ -460,15 +466,17 @@ async function openOutputDir() {
                 选择
               </button>
             </div>
+            <p v-if="!newProjectSource" class="form-hint">
+              选完源目录会自动带出项目名称与输出目录，两者之后都能改
+            </p>
           </div>
-          <div class="form-row">
+          <div v-if="newProjectSource" class="form-row">
             <label>输出目录 (可选，默认为源目录-dist)</label>
             <div class="dir-row">
               <input
                 v-model="newProjectOutput"
                 class="form-input"
                 placeholder="选择输出目录"
-                readonly
               />
               <button class="btn btn-pick" @click="selectNewOutput">
                 选择
@@ -546,6 +554,20 @@ async function openOutputDir() {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+/* macOS Overlay 标题栏：左右两栏内容下移 28px，顶部露出可拖拽的空白条 */
+.mac-overlay-titlebar .sidebar,
+.mac-overlay-titlebar .main-content {
+  padding-top: 28px;
+}
+/* 顶部拖拽区（透明，仅占 28px，不遮挡下方内容） */
+.titlebar-drag {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 28px;
+  z-index: 50;
 }
 
 /* 软件更新栏 */
@@ -679,6 +701,13 @@ async function openOutputDir() {
 }
 .add-form-sm {
   width: 360px;
+}
+/* 表单内的说明文字 */
+.form-hint {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-muted);
 }
 .add-form h3 {
   margin-bottom: 20px;

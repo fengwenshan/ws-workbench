@@ -154,7 +154,13 @@ const canPack = computed(() => projectType.value === 'layui')
 const typeLabel = computed(() => {
   switch (projectType.value) {
     case 'layui': return 'Layui 项目'
-    case 'vue': return 'Vue 项目'
+    case 'vue2': return 'Vue2 项目'
+    case 'vue3': return 'Vue3 项目'
+    case 'react': return 'React 项目'
+    case 'springboot': return 'Spring Boot 项目'
+    case 'spring': return 'Spring 项目'
+    case 'struts2': return 'Struts2 项目'
+    case 'java': return 'Java 项目'
     default: return '未知类型项目'
   }
 })
@@ -467,10 +473,32 @@ async function resetDefaultRules() {
   border-color: #16a34a;
   background: rgba(22, 163, 74, 0.08);
 }
-.type-badge.type-vue {
+.type-badge.type-vue2,
+.type-badge.type-vue3 {
   color: #42b883;
   border-color: #42b883;
   background: rgba(66, 184, 131, 0.08);
+}
+.type-badge.type-react {
+  color: #087ea4;
+  border-color: #087ea4;
+  background: rgba(8, 126, 164, 0.08);
+}
+.type-badge.type-spring,
+.type-badge.type-springboot {
+  color: #6db33f;
+  border-color: #6db33f;
+  background: rgba(109, 179, 63, 0.08);
+}
+.type-badge.type-struts2 {
+  color: #d22128;
+  border-color: #d22128;
+  background: rgba(210, 33, 40, 0.08);
+}
+.type-badge.type-java {
+  color: #e76f00;
+  border-color: #e76f00;
+  background: rgba(231, 111, 0, 0.08);
 }
 .type-badge.type-unknown {
   color: var(--text-secondary);
