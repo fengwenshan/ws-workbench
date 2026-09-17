@@ -15,8 +15,8 @@ name: Release
 #
 # 2) 让代码能同时到达 GitHub（Action 的触发源）与 Gitee（发布目标）
 #    在本机执行一次，之后一条 git push 即同时推到两个仓库：
-#      git remote set-url --add --push origin git@gitee.com:feng_wenshan/project-manage.git
-#      git remote set-url --add --push origin git@github.com:fengwenshan/code-manage.git
+#      git remote set-url --add --push origin git@gitee.com:feng_wenshan/demo-tools.git
+#      git remote set-url --add --push origin git@github.com:fengwenshan/demo-tools.git
 #
 # 3) 版本号规则
 #    取 tauri.conf.json 里的 major.minor，patch 位用 GitHub 运行序号：
@@ -130,8 +130,8 @@ jobs:
         env:
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
         run: |
-          git remote set-url --add --push origin "https://github.com/fengwenshan/code-manage.git"
-          git remote set-url --add --push origin "https://feng_wenshan:${GITEE_TOKEN}@gitee.com/feng_wenshan/project-manage.git"
+          git remote set-url --add --push origin "https://github.com/fengwenshan/demo-tools.git"
+          git remote set-url --add --push origin "https://feng_wenshan:${GITEE_TOKEN}@gitee.com/feng_wenshan/demo-tools.git"
           git config user.name "冯文山"
           git config user.email "fengwenshan@example.com"
 
@@ -230,8 +230,8 @@ jobs:
         env:
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
         run: |
-          git remote set-url --add --push origin "https://github.com/fengwenshan/code-manage.git"
-          git remote set-url --add --push origin "https://feng_wenshan:${GITEE_TOKEN}@gitee.com/feng_wenshan/project-manage.git"
+          git remote set-url --add --push origin "https://github.com/fengwenshan/demo-tools.git"
+          git remote set-url --add --push origin "https://feng_wenshan:${GITEE_TOKEN}@gitee.com/feng_wenshan/demo-tools.git"
           git config user.name "冯文山"
           git config user.email "fengwenshan@example.com"
 

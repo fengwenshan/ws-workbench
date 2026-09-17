@@ -1,10 +1,10 @@
 [package]
-name = "dist-cli"
+name = "demo-tools"
 version = "1.0.0"
 edition = "2021"
 
 [lib]
-name = "dist_cli_lib"
+name = "demo_tools_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

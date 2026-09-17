@@ -27,7 +27,7 @@ export const DAILY_CHECK_TIMES: ReadonlyArray<readonly [number, number]> = [
 ]
 
 /** 已忽略的版本，避免重启后重复打扰 */
-const DISMISS_KEY = 'dist-cli:dismissed-update-version'
+const DISMISS_KEY = 'demo-tools:dismissed-update-version'
 
 /**
  * 距离下一个校验时间点还有多少毫秒。

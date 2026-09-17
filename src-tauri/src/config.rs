@@ -1,7 +1,7 @@
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager};
 use tauri_plugin_store::StoreExt;
-use crate::models::{AppConfig, ProjectGroup};
+use crate::models::{AppConfig, ProjectGroup, DEFAULT_EXCLUDE_ADDITIONS, DEFAULT_EXCLUDE_VERSION};
 
 const STORE_KEY: &str = "app_config";
 
@@ -73,18 +73,18 @@ fn get_file_candidates(app: &AppHandle) -> Vec<(String, std::path::PathBuf)> {
         candidates.push(("app_config_dir".to_string(), dir));
     }
     if let Ok(home) = app.path().home_dir() {
-        candidates.push(("home/.dist-cli".to_string(), home.join(".dist-cli")));
+        candidates.push(("home/.demo-tools".to_string(), home.join(".demo-tools")));
     }
     if let Ok(home) = env::var("HOME") {
-        let path = PathBuf::from(home).join(".dist-cli");
+        let path = PathBuf::from(home).join(".demo-tools");
         if !candidates.iter().any(|(_, p)| p == &path) {
-            candidates.push(("env_HOME/.dist-cli".to_string(), path));
+            candidates.push(("env_HOME/.demo-tools".to_string(), path));
         }
     }
     if let Ok(temp) = env::var("TMPDIR") {
-        candidates.push(("TMPDIR/dist-cli".to_string(), PathBuf::from(temp).join("dist-cli")));
+        candidates.push(("TMPDIR/demo-tools".to_string(), PathBuf::from(temp).join("demo-tools")));
     }
-    candidates.push(("/tmp/dist-cli".to_string(), PathBuf::from("/tmp/dist-cli")));
+    candidates.push(("/tmp/demo-tools".to_string(), PathBuf::from("/tmp/demo-tools")));
     if let Ok(cwd) = env::current_dir() {
         candidates.push(("cwd/.config".to_string(), cwd.join(".config")));
     }
@@ -222,6 +222,26 @@ fn mark_default_group(config: &mut AppConfig) -> bool {
     false
 }
 
+/// 为旧配置补齐新增的默认排除规则
+/// 返回是否发生了变更
+fn migrate_default_exclude(config: &mut AppConfig) -> bool {
+    if config.default_exclude_version >= DEFAULT_EXCLUDE_VERSION {
+        return false;
+    }
+    for (version, additions) in DEFAULT_EXCLUDE_ADDITIONS {
+        if *version <= config.default_exclude_version {
+            continue;
+        }
+        for rule in additions.iter() {
+            if !config.default_exclude.iter().any(|r| r == rule) {
+                config.default_exclude.push(rule.to_string());
+            }
+        }
+    }
+    config.default_exclude_version = DEFAULT_EXCLUDE_VERSION;
+    true
+}
+
 /// 迁移配置（旧版 projects 字段 -> 分组结构 + 标记默认分组）
 fn migrate_config(app: &AppHandle, mut config: AppConfig) -> AppConfig {
     let mut changed = false;
@@ -245,8 +265,62 @@ fn migrate_config(app: &AppHandle, mut config: AppConfig) -> AppConfig {
         changed = true;
     }
 
+    // 3. 补齐新增的默认排除规则
+    if migrate_default_exclude(&mut config) {
+        changed = true;
+    }
+
     if changed {
         let _ = save_config(app, &config);
     }
     config
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn old_config(rules: &[&str], version: u32) -> AppConfig {
+        AppConfig {
+            groups: vec![],
+            projects: vec![],
+            default_exclude: rules.iter().map(|s| s.to_string()).collect(),
+            default_exclude_version: version,
+        }
+    }
+
+    /// 老配置（无版本号，视为 0）会被补齐新增的默认排除规则
+    #[test]
+    fn migrate_default_exclude_fills_new_rules() {
+        let mut config = old_config(&[".DS_Store", "*.md"], 0);
+        assert!(migrate_default_exclude(&mut config));
+        assert!(config.default_exclude.contains(&".*".to_string()));
+        assert!(config.default_exclude.contains(&".*/**".to_string()));
+        assert_eq!(config.default_exclude_version, DEFAULT_EXCLUDE_VERSION);
+    }
+
+    /// 已是最新版本时不重复补齐
+    #[test]
+    fn migrate_default_exclude_skips_up_to_date_config() {
+        let mut config = old_config(&["*.md"], DEFAULT_EXCLUDE_VERSION);
+        assert!(!migrate_default_exclude(&mut config));
+        assert_eq!(config.default_exclude, vec!["*.md".to_string()]);
+    }
+
+    /// 已存在的规则不会被重复添加
+    #[test]
+    fn migrate_default_exclude_does_not_duplicate() {
+        let mut config = old_config(&[".*"], 0);
+        migrate_default_exclude(&mut config);
+        assert_eq!(config.default_exclude.iter().filter(|r| *r == ".*").count(), 1);
+    }
+
+    /// 新配置（首次启动）直接带上新增规则
+    #[test]
+    fn default_config_contains_new_rules() {
+        let config = AppConfig::default();
+        assert!(config.default_exclude.contains(&".*".to_string()));
+        assert!(config.default_exclude.contains(&".*/**".to_string()));
+        assert_eq!(config.default_exclude_version, DEFAULT_EXCLUDE_VERSION);
+    }
 }

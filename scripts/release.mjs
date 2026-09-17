@@ -54,7 +54,7 @@ const OUT_DIR = join(ROOT, 'release')
 /** 更新产物在仓库里的目录（会被提交，客户端通过 raw 地址读取） */
 const UPDATES_DIR = 'updates'
 
-const REPO = process.env.GITEE_REPO || 'feng_wenshan/project-manage'
+const REPO = process.env.GITEE_REPO || 'feng_wenshan/demo-tools'
 const BRANCH = process.env.GITEE_BRANCH || 'main'
 const SKIP_PUBLISH = process.argv.includes('--no-publish')
 
@@ -70,7 +70,7 @@ const API_BASE = 'https://gitee.com/api/v5'
  * GitHub 仓库：安装包会同步镜像一份到它的发行版，方便下载。
  * CI 里用 Actions 自动注入的 GITHUB_TOKEN；本机手动发布会跳过这一步。
  */
-const GITHUB_REPO = process.env.GITHUB_REPO || 'fengwenshan/code-manage'
+const GITHUB_REPO = process.env.GITHUB_REPO || 'fengwenshan/demo-tools'
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN || ''
 const GITHUB_API = 'https://api.github.com'
 /** GitHub 的资产上传走独立域名 */
@@ -123,7 +123,7 @@ function resolvePlatform(product) {
         f.startsWith(product) && (f.endsWith('-setup.exe') || f.endsWith('.msi')),
       matchSig: (f) =>
         f.startsWith(product) && (f.endsWith('-setup.exe.sig') || f.endsWith('.msi.sig')),
-      assetFile: 'project-manage-tools-setup.exe',
+      assetFile: 'demo-tools-setup.exe',
       label: 'Windows',
     }
   }
@@ -134,7 +134,7 @@ function resolvePlatform(product) {
       bundleSubdir: 'macos',
       matchBundle: (f) => f.startsWith(product) && f.endsWith('.app.tar.gz'),
       matchSig: (f) => f.startsWith(product) && f.endsWith('.app.tar.gz.sig'),
-      assetFile: 'project-manage-tools.app.tar.gz',
+      assetFile: 'demo-tools.app.tar.gz',
       // macOS 额外提供 dmg 作为人工安装包（更新载荷用的是 .app.tar.gz）
       installerSubdir: 'dmg',
       matchInstaller: (f) => f.startsWith(product) && f.endsWith('.dmg'),
@@ -593,7 +593,7 @@ function stageManifest(version, platform, entry) {
   const base = readManifestAt(`origin/${BRANCH}`) || { platforms: {} }
   const manifest = {
     version,
-    notes: `OA 部署打包工具 v${version}`,
+    notes: `demo-tools v${version}`,
     pub_date: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
     platforms: { ...(base.platforms || {}), [platform.key]: entry },
   }
@@ -749,7 +749,7 @@ async function main() {
   const platforms = { ...(published?.platforms || {}), [platform.key]: entry }
   const manifest = {
     version,
-    notes: `OA 部署打包工具 v${version}`,
+    notes: `demo-tools v${version}`,
     pub_date: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
     platforms,
   }
