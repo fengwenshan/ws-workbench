@@ -22,6 +22,13 @@ release/
 *.key.pub
 *.sig
 
+# 本地构建工具链（Rust + MSYS2/MinGW，仅本机验证用，体积很大，切勿提交）
+.toolchain/
+
+# pnpm 本地安装产物（pnpm 11 自动生成，含本机专属开关，不参与 CI 构建）
+.pnpm-store/
+pnpm-workspace.yaml
+
 # 编辑器与系统
 .DS_Store
 .idea/
