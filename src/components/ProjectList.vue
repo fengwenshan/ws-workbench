@@ -312,6 +312,19 @@ function cancelRename() {
   editingGroupId.value = null
   editingName.value = ''
 }
+
+// 分组的展开/收起（仅界面状态，不写入配置）
+const collapsedGroupIds = ref<string[]>([])
+
+function isCollapsed(groupId: string) {
+  return collapsedGroupIds.value.includes(groupId)
+}
+
+function toggleCollapse(groupId: string) {
+  collapsedGroupIds.value = isCollapsed(groupId)
+    ? collapsedGroupIds.value.filter((id) => id !== groupId)
+    : [...collapsedGroupIds.value, groupId]
+}
 </script>
 
 <template>
@@ -344,6 +357,11 @@ function cancelRename() {
             @dragover="onGroupProjectsDragOver($event, group.id)"
             @drop="onGroupProjectsDrop($event, group.id)"
           >
+            <button
+              class="group-toggle"
+              :title="isCollapsed(group.id) ? '展开分组' : '收起分组'"
+              @click.stop="toggleCollapse(group.id)"
+            >{{ isCollapsed(group.id) ? '▸' : '▾' }}</button>
             <span class="group-drag-handle" title="拖拽排序">⋮⋮</span>
             <input
               v-if="editingGroupId === group.id"
@@ -382,6 +400,7 @@ function cancelRename() {
             </template>
           </div>
           <div
+            v-if="!isCollapsed(group.id)"
             class="group-projects"
             @dragenter="acceptDrop"
             @dragover="onGroupProjectsDragOver($event, group.id)"
@@ -420,14 +439,14 @@ function cancelRename() {
               </div>
             </template>
 
-            <!-- 分组末尾插入指示线（拖到最后一个位置） -->
-            <div
-              v-if="dragType === 'project' && hoverProjectInfo?.groupId === group.id && hoverProjectInfo?.index === group.projects.length && group.projects.length > 0"
-              class="project-drop-indicator"
-            ></div>
-
             <button class="add-project-btn" @click="emit('addProject', group.id)">+ 添加项目</button>
           </div>
+
+          <!-- 分组末尾插入指示线（拖到最后一个位置；分组收起时也显示，便于往组里拖） -->
+          <div
+            v-if="dragType === 'project' && hoverProjectInfo?.groupId === group.id && hoverProjectInfo?.index === group.projects.length && group.projects.length > 0"
+            class="project-drop-indicator"
+          ></div>
         </div>
       </template>
 
@@ -488,12 +507,30 @@ function cancelRename() {
   cursor: grabbing;
 }
 .group-drag-handle {
-  font-size: 10px;
-  color: var(--text-muted);
-  opacity: 0.6;
+  font-size: 12px;
+  color: var(--text-secondary);
   user-select: none;
   flex-shrink: 0;
   letter-spacing: -1px;
+}
+.group-drag-handle:hover,
+.project-drag-handle:hover {
+  color: var(--primary);
+}
+/* 展开/收起分组 */
+.group-toggle {
+  flex-shrink: 0;
+  width: 18px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+.group-toggle:hover {
+  color: var(--primary);
 }
 .group-name {
   flex: 1;
@@ -578,9 +615,8 @@ function cancelRename() {
   opacity: 0.4;
 }
 .project-drag-handle {
-  font-size: 10px;
-  color: var(--text-muted);
-  opacity: 0.6;
+  font-size: 12px;
+  color: var(--text-secondary);
   user-select: none;
   flex-shrink: 0;
   cursor: grab;
@@ -647,11 +683,15 @@ function cancelRename() {
   background: var(--primary);
   border-radius: 2px;
   margin: 2px 4px;
+  /* 纯视觉元素，不参与事件，避免挡住落点 */
+  pointer-events: none;
 }
 .project-drop-indicator {
   height: 2px;
   background: var(--primary);
   border-radius: 2px;
   margin: 1px 12px;
+  /* 纯视觉元素，不参与事件，避免挡住落点 */
+  pointer-events: none;
 }
 </style>

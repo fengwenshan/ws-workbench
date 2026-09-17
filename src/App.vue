@@ -58,6 +58,9 @@ onMounted(async () => {
   }
 });
 
+// macOS 用 Overlay 标题栏：顶部留出 28px 空白给红黄绿按钮，并作为窗口拖动区
+const isMac = navigator.userAgent.includes("Macintosh");
+
 const updateBusy = computed(
   () =>
     updateStatus.value === "checking" || updateStatus.value === "downloading",
@@ -323,7 +326,10 @@ async function openOutputDir() {
 </script>
 
 <template>
-  <div class="app-layout">
+  <div class="app-layout" :class="{ 'mac-overlay-titlebar': isMac }">
+    <!-- macOS Overlay 标题栏：顶部这条空白区可拖动窗口，红黄绿按钮浮在它上面 -->
+    <div v-if="isMac" class="titlebar-drag" data-tauri-drag-region></div>
+
     <!-- 左侧：项目分组列表 -->
     <aside class="sidebar">
       <ProjectList
@@ -547,6 +553,20 @@ async function openOutputDir() {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+/* macOS Overlay 标题栏：左右两栏内容下移 28px，顶部露出可拖拽的空白条 */
+.mac-overlay-titlebar .sidebar,
+.mac-overlay-titlebar .main-content {
+  padding-top: 28px;
+}
+/* 顶部拖拽区（透明，仅占 28px，不遮挡下方内容） */
+.titlebar-drag {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 28px;
+  z-index: 50;
 }
 
 /* 软件更新栏 */
