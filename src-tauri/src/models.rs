@@ -24,6 +24,24 @@ pub const DEFAULT_EXCLUDE: &[&str] = &[
     "*.zip",
 ];
 
+/// 各版本新增的默认排除规则：(版本号, 规则列表)
+/// 版本 1 为初版规则集（无新增），版本 2 起为后续新增的规则
+pub const DEFAULT_EXCLUDE_ADDITIONS: &[(u32, &[&str])] = &[(2, &[".*", ".*/**"])];
+
+/// 当前默认排除规则版本号，新增默认规则时递增
+pub const DEFAULT_EXCLUDE_VERSION: u32 = 2;
+
+/// 完整的默认排除规则 = 初版规则 + 各版本新增规则
+pub fn default_exclude_rules() -> Vec<String> {
+    let mut rules: Vec<String> = DEFAULT_EXCLUDE.iter().map(|s| s.to_string()).collect();
+    for (version, additions) in DEFAULT_EXCLUDE_ADDITIONS {
+        if *version <= DEFAULT_EXCLUDE_VERSION {
+            rules.extend(additions.iter().map(|s| s.to_string()));
+        }
+    }
+    rules
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectGroup {
     pub id: String,
@@ -45,6 +63,8 @@ pub struct AppConfig {
     pub projects: Vec<ProjectConfig>,
     #[serde(default)]
     pub default_exclude: Vec<String>,
+    #[serde(default)]
+    pub default_exclude_version: u32,
 }
 
 impl Default for AppConfig {
@@ -52,7 +72,8 @@ impl Default for AppConfig {
         AppConfig {
             groups: vec![],
             projects: vec![],
-            default_exclude: DEFAULT_EXCLUDE.iter().map(|s| s.to_string()).collect(),
+            default_exclude: default_exclude_rules(),
+            default_exclude_version: DEFAULT_EXCLUDE_VERSION,
         }
     }
 }

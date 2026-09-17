@@ -306,14 +306,9 @@ function clearDefaultRules() {
   emit('updateDefaultExclude', [])
 }
 
-// 恢复默认排除规则
-function resetDefaultRules() {
-  const defaults = [
-    '.DS_Store', '*.md', '.git', '.git/**', '.svn', '.svn/**',
-    '.idea', '.idea/**', '.vscode', '.vscode/**', '.claude', '.claude/**',
-    '.trae', '.trae/**', '*.scss', '*.less', '.gitignore',
-    'node_modules', 'node_modules/**', '*.zip'
-  ]
+// 恢复默认排除规则（以后端默认规则为准）
+async function resetDefaultRules() {
+  const defaults = await invoke<string[]>('get_default_exclude_rules')
   localDefaultExclude.value = [...defaults]
   emit('updateDefaultExclude', [...defaults])
 }

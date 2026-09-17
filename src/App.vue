@@ -1,14 +1,15 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
-import { open } from '@tauri-apps/plugin-dialog'
-import { invoke } from '@tauri-apps/api/core'
-import { useConfig } from '@/composables/useConfig'
-import { usePack } from '@/composables/usePack'
-import { useUpdater } from '@/composables/useUpdater'
-import ProjectList from '@/components/ProjectList.vue'
-import ProjectConfig from '@/components/ProjectConfig.vue'
-import PackProgress from '@/components/PackProgress.vue'
-import LogPanel from '@/components/LogPanel.vue'
+import { ref, computed, onMounted, onUnmounted } from "vue";
+import { open } from "@tauri-apps/plugin-dialog";
+import { invoke } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
+import { useConfig } from "@/composables/useConfig";
+import { usePack } from "@/composables/usePack";
+import { useUpdater } from "@/composables/useUpdater";
+import ProjectList from "@/components/ProjectList.vue";
+import ProjectConfig from "@/components/ProjectConfig.vue";
+import PackProgress from "@/components/PackProgress.vue";
+import LogPanel from "@/components/LogPanel.vue";
 
 const {
   config,
@@ -25,17 +26,9 @@ const {
   updateProject,
   deleteProject,
   findProject,
-} = useConfig()
+} = useConfig();
 
-const {
-  packing,
-  progress,
-  result,
-  logs,
-  addLog,
-  clearLogs,
-  pack,
-} = usePack()
+const { packing, progress, result, logs, addLog, clearLogs, pack } = usePack();
 
 const {
   status: updateStatus,
@@ -49,212 +42,234 @@ const {
   startDailyCheck,
   stopDailyCheck,
   dismissCurrent,
-} = useUpdater()
+} = useUpdater();
 
 // 每天 10:00 / 15:00 自动校验更新
-onMounted(startDailyCheck)
-onUnmounted(stopDailyCheck)
+onMounted(startDailyCheck);
+onUnmounted(stopDailyCheck);
 
-const updateBusy = computed(() =>
-  updateStatus.value === 'checking' || updateStatus.value === 'downloading'
-)
+// 客户端版本号（取自 tauri.conf.json）
+const appVersion = ref("");
+onMounted(async () => {
+  try {
+    appVersion.value = await getVersion();
+  } catch (err: any) {
+    addLog("warn", `读取版本号失败: ${err}`);
+  }
+});
+
+const updateBusy = computed(
+  () =>
+    updateStatus.value === "checking" || updateStatus.value === "downloading",
+);
 
 const updateButtonLabel = computed(() => {
   switch (updateStatus.value) {
-    case 'checking': return '检查中…'
-    case 'downloading': return `下载中 ${Math.floor(updatePercentage.value)}%`
-    case 'available': return `更新到 v${updateInfo.value?.version}`
-    case 'up-to-date': return '已是最新版本'
-    case 'installed': return '重启生效'
-    case 'error': return '重试'
-    default: return '检查更新'
+    case "checking":
+      return "检查中…";
+    case "downloading":
+      return `下载中 ${Math.floor(updatePercentage.value)}%`;
+    case "available":
+      return `更新到 v${updateInfo.value?.version}`;
+    case "up-to-date":
+      return "已是最新版本";
+    case "installed":
+      return "重启生效";
+    case "error":
+      return "重试";
+    default:
+      return "检查更新";
   }
-})
+});
 
 async function handleUpdateAction() {
-  if (updateStatus.value === 'available') {
-    addLog('info', `开始下载 v${updateInfo.value?.version} …`)
-    const ok = await installUpdate()
+  if (updateStatus.value === "available") {
+    addLog("info", `开始下载 v${updateInfo.value?.version} …`);
+    const ok = await installUpdate();
     if (ok) {
-      addLog('success', `v${updateInfo.value?.version} 已安装，重启后生效`)
+      addLog("success", `v${updateInfo.value?.version} 已安装，重启后生效`);
     } else {
-      addLog('error', `更新失败: ${updateError.value}`)
+      addLog("error", `更新失败: ${updateError.value}`);
     }
-    return
+    return;
   }
 
-  if (updateStatus.value === 'installed') {
-    await restartApp()
-    return
+  if (updateStatus.value === "installed") {
+    await restartApp();
+    return;
   }
 
-  const found = await checkUpdate()
+  const found = await checkUpdate();
   if (found) {
-    addLog('info', `发现新版本 v${found.version}（当前 v${found.currentVersion}）`)
-  } else if (updateStatus.value === 'up-to-date') {
-    addLog('info', '当前已是最新版本')
+    addLog(
+      "info",
+      `发现新版本 v${found.version}（当前 v${found.currentVersion}）`,
+    );
+  } else if (updateStatus.value === "up-to-date") {
+    addLog("info", "当前已是最新版本");
   } else {
-    addLog('error', `检查更新失败: ${updateError.value}`)
+    addLog("error", `检查更新失败: ${updateError.value}`);
   }
 }
 
 function handleDismissUpdate() {
-  const version = updateInfo.value?.version
-  dismissCurrent()
-  addLog('info', `已忽略 v${version}，本次不再提示`)
+  const version = updateInfo.value?.version;
+  dismissCurrent();
+  addLog("info", `已忽略 v${version}，本次不再提示`);
 }
 
 const selectedProject = computed(() => {
-  if (!selectedProjectId.value) return null
-  return findProject(selectedProjectId.value) || null
-})
+  if (!selectedProjectId.value) return null;
+  return findProject(selectedProjectId.value) || null;
+});
 
 // 新建分组
-const showAddGroupForm = ref(false)
-const newGroupName = ref('')
+const showAddGroupForm = ref(false);
+const newGroupName = ref("");
 
 async function handleAddGroup() {
   if (!newGroupName.value.trim()) {
-    addLog('warn', '请填写分组名称')
-    return
+    addLog("warn", "请填写分组名称");
+    return;
   }
   try {
-    await addGroup(newGroupName.value.trim())
-    addLog('success', `已创建分组: ${newGroupName.value}`)
-    newGroupName.value = ''
-    showAddGroupForm.value = false
+    await addGroup(newGroupName.value.trim());
+    addLog("success", `已创建分组: ${newGroupName.value}`);
+    newGroupName.value = "";
+    showAddGroupForm.value = false;
   } catch (err: any) {
-    addLog('error', `创建分组失败: ${err}`)
+    addLog("error", `创建分组失败: ${err}`);
   }
 }
 
 // 确认弹窗
-const showConfirmDialog = ref(false)
-const confirmTitle = ref('')
-const confirmMessage = ref('')
-let confirmAction: (() => void) | null = null
+const showConfirmDialog = ref(false);
+const confirmTitle = ref("");
+const confirmMessage = ref("");
+let confirmAction: (() => void) | null = null;
 
 function openConfirm(title: string, message: string, onConfirm: () => void) {
-  confirmTitle.value = title
-  confirmMessage.value = message
-  confirmAction = onConfirm
-  showConfirmDialog.value = true
+  confirmTitle.value = title;
+  confirmMessage.value = message;
+  confirmAction = onConfirm;
+  showConfirmDialog.value = true;
 }
 
 function handleConfirmOk() {
   if (confirmAction) {
-    confirmAction()
-    confirmAction = null
+    confirmAction();
+    confirmAction = null;
   }
-  showConfirmDialog.value = false
+  showConfirmDialog.value = false;
 }
 
 function handleConfirmCancel() {
-  confirmAction = null
-  showConfirmDialog.value = false
+  confirmAction = null;
+  showConfirmDialog.value = false;
 }
 
 function handleDeleteGroup(id: string) {
-  const group = config.value.groups.find(g => g.id === id)
-  if (!group) return
+  const group = config.value.groups.find((g) => g.id === id);
+  if (!group) return;
   // 默认分组不允许删除（内部项目仍可单独删除）
   if (group.is_default) {
-    addLog('warn', `默认分组「${group.name}」不可删除`)
-    return
+    addLog("warn", `默认分组「${group.name}」不可删除`);
+    return;
   }
-  const projectCount = group.projects.length
-  const suffix = projectCount > 0 ? `（含 ${projectCount} 个项目）` : ''
+  const projectCount = group.projects.length;
+  const suffix = projectCount > 0 ? `（含 ${projectCount} 个项目）` : "";
   openConfirm(
-    '删除分组',
+    "删除分组",
     `确定要删除分组「${group.name}」${suffix}吗？此操作不可恢复。`,
     async () => {
-      await deleteGroup(id)
-      addLog('info', `已删除分组: ${group.name}`)
-    }
-  )
+      await deleteGroup(id);
+      addLog("info", `已删除分组: ${group.name}`);
+    },
+  );
 }
 
 // 重命名分组（默认分组不允许重命名）
 async function handleRenameGroup(id: string, name: string) {
-  const group = config.value.groups.find(g => g.id === id)
-  if (!group) return
+  const group = config.value.groups.find((g) => g.id === id);
+  if (!group) return;
   if (group.is_default) {
-    addLog('warn', `默认分组「${group.name}」不可重命名`)
-    return
+    addLog("warn", `默认分组「${group.name}」不可重命名`);
+    return;
   }
-  const oldName = group.name
+  const oldName = group.name;
   try {
-    await renameGroup(id, name)
-    addLog('info', `分组已重命名: ${oldName} → ${name}`)
+    await renameGroup(id, name);
+    addLog("info", `分组已重命名: ${oldName} → ${name}`);
   } catch (err: any) {
-    addLog('error', `重命名分组失败: ${err}`)
+    addLog("error", `重命名分组失败: ${err}`);
   }
 }
 
 // 添加项目（在指定分组中）
-const showAddForm = ref(false)
-const targetGroupId = ref<string | null>(null)
-const newProjectName = ref('')
-const newProjectSource = ref('')
-const newProjectOutput = ref('')
+const showAddForm = ref(false);
+const targetGroupId = ref<string | null>(null);
+const newProjectName = ref("");
+const newProjectSource = ref("");
+const newProjectOutput = ref("");
 
 // 从路径中提取最后一层目录名（兼容 Windows 反斜杠与 POSIX 斜杠）
 function getLastDirName(path: string): string {
-  const trimmed = path.replace(/[\\/]+$/, '')
-  const idx = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'))
-  return idx >= 0 ? trimmed.slice(idx + 1) : trimmed
+  const trimmed = path.replace(/[\\/]+$/, "");
+  const idx = Math.max(trimmed.lastIndexOf("/"), trimmed.lastIndexOf("\\"));
+  return idx >= 0 ? trimmed.slice(idx + 1) : trimmed;
 }
 
 // 拼接子路径：沿用源目录的分隔符风格，避免 Windows 下出现 D:\a\b/dist
 function joinPath(dir: string, name: string): string {
-  const trimmed = dir.replace(/[\\/]+$/, '')
-  const sep = trimmed.includes('\\') ? '\\' : '/'
-  return `${trimmed}${sep}${name}`
+  const trimmed = dir.replace(/[\\/]+$/, "");
+  const sep = trimmed.includes("\\") ? "\\" : "/";
+  return `${trimmed}${sep}${name}`;
 }
 
 async function selectNewSource() {
-  const selected = await open({ directory: true, multiple: false })
+  const selected = await open({ directory: true, multiple: false });
   if (selected) {
-    const sourceDir = selected as string
-    newProjectSource.value = sourceDir
+    const sourceDir = selected as string;
+    newProjectSource.value = sourceDir;
     // 源目录改变时，强制更新项目名称和输出目录
-    newProjectName.value = getLastDirName(sourceDir)
-    newProjectOutput.value = joinPath(sourceDir, 'dist')
+    newProjectName.value = getLastDirName(sourceDir);
+    newProjectOutput.value = joinPath(sourceDir, "dist");
   }
 }
 
 async function selectNewOutput() {
-  const selected = await open({ directory: true, multiple: false })
-  if (selected) newProjectOutput.value = selected as string
+  const selected = await open({ directory: true, multiple: false });
+  if (selected) newProjectOutput.value = selected as string;
 }
 
 function openAddForm(groupId: string) {
-  targetGroupId.value = groupId
-  newProjectName.value = ''
-  newProjectSource.value = ''
-  newProjectOutput.value = ''
-  showAddForm.value = true
+  targetGroupId.value = groupId;
+  newProjectName.value = "";
+  newProjectSource.value = "";
+  newProjectOutput.value = "";
+  showAddForm.value = true;
 }
 
 async function handleAdd() {
   if (!targetGroupId.value) {
-    addLog('warn', '未选择分组')
-    return
+    addLog("warn", "未选择分组");
+    return;
   }
   if (!newProjectSource.value.trim()) {
-    addLog('warn', '请选择源目录')
-    return
+    addLog("warn", "请选择源目录");
+    return;
   }
 
-  const sourceDir = newProjectSource.value.trim()
+  const sourceDir = newProjectSource.value.trim();
   // 项目名称为空时，自动用源目录最后一层名字
-  const projectName = newProjectName.value.trim() || getLastDirName(sourceDir)
+  const projectName = newProjectName.value.trim() || getLastDirName(sourceDir);
   // 输出目录为空时，自动追加 /dist
-  const outputDir = newProjectOutput.value.trim() || joinPath(sourceDir, 'dist')
+  const outputDir =
+    newProjectOutput.value.trim() || joinPath(sourceDir, "dist");
 
   if (!projectName) {
-    addLog('warn', '请填写项目名称')
-    return
+    addLog("warn", "请填写项目名称");
+    return;
   }
 
   await addProject(targetGroupId.value, {
@@ -262,47 +277,47 @@ async function handleAdd() {
     source_dir: sourceDir,
     output_dir: outputDir,
     exclude: [],
-  })
-  addLog('success', `已添加项目: ${projectName}`)
-  showAddForm.value = false
+  });
+  addLog("success", `已添加项目: ${projectName}`);
+  showAddForm.value = false;
 }
 
 function handleSelect(id: string) {
-  selectedProjectId.value = id
+  selectedProjectId.value = id;
 }
 
 function handleDelete(id: string) {
-  const project = findProject(id)
+  const project = findProject(id);
   openConfirm(
-    '删除项目',
-    `确定要删除项目「${project?.name ?? ''}」吗？此操作不可恢复。`,
+    "删除项目",
+    `确定要删除项目「${project?.name ?? ""}」吗？此操作不可恢复。`,
     async () => {
-      await deleteProject(id)
-      addLog('info', `已删除项目: ${project?.name}`)
-    }
-  )
+      await deleteProject(id);
+      addLog("info", `已删除项目: ${project?.name}`);
+    },
+  );
 }
 
 async function handleUpdate(id: string, data: any) {
-  await updateProject(id, data)
+  await updateProject(id, data);
 }
 
 async function handleUpdateDefaultExclude(rules: string[]) {
-  config.value.default_exclude = rules
-  await saveConfig()
+  config.value.default_exclude = rules;
+  await saveConfig();
 }
 
 async function handlePack(project: any, asZip: boolean = false) {
-  await pack(project, config.value.default_exclude, asZip)
+  await pack(project, config.value.default_exclude, asZip);
 }
 
 async function openOutputDir() {
-  const project = selectedProject.value
-  if (!project) return
+  const project = selectedProject.value;
+  if (!project) return;
   try {
-    await invoke('open_output_dir', { outputDir: project.output_dir })
+    await invoke("open_output_dir", { outputDir: project.output_dir });
   } catch (err: any) {
-    addLog('error', `打开目录失败: ${err}`)
+    addLog("error", `打开目录失败: ${err}`);
   }
 }
 </script>
@@ -329,19 +344,39 @@ async function openOutputDir() {
       <div class="update-bar">
         <button
           class="update-btn"
-          :class="{ 'update-btn-primary': updateStatus === 'available' || updateStatus === 'installed' }"
+          :class="{
+            'update-btn-primary':
+              updateStatus === 'available' || updateStatus === 'installed',
+          }"
           :disabled="updateBusy"
           @click="handleUpdateAction"
-        >{{ updateButtonLabel }}</button>
+        >
+          {{ updateButtonLabel }}
+        </button>
 
-        <div v-if="updateStatus === 'downloading'" class="update-progress">
-          <div class="update-progress-inner" :style="{ width: updatePercentage + '%' }"></div>
+        <div class="version-row">
+          <span class="version-label">当前版本</span>
+          <span class="version-value">v{{ appVersion || "—" }}</span>
         </div>
 
-        <p v-if="updateStatus === 'error'" class="update-hint update-hint-error">{{ updateError }}</p>
-        <p v-else-if="updateStatus === 'installed'" class="update-hint">安装完成，点击上方按钮重启</p>
+        <div v-if="updateStatus === 'downloading'" class="update-progress">
+          <div
+            class="update-progress-inner"
+            :style="{ width: updatePercentage + '%' }"
+          ></div>
+        </div>
+
+        <p
+          v-if="updateStatus === 'error'"
+          class="update-hint update-hint-error"
+        >
+          {{ updateError }}
+        </p>
+        <p v-else-if="updateStatus === 'installed'" class="update-hint">
+          安装完成，点击上方按钮重启
+        </p>
         <p v-else-if="updateStatus === 'available'" class="update-hint">
-          {{ updateInfo?.notes || '发现可用更新，点击上方按钮下载安装' }}
+          {{ updateInfo?.notes || "发现可用更新，点击上方按钮下载安装" }}
         </p>
       </div>
     </aside>
@@ -352,67 +387,117 @@ async function openOutputDir() {
       <div v-if="hasUpdatePrompt" class="update-banner">
         <span class="update-banner-text">
           发现新版本 <strong>v{{ updateInfo?.version }}</strong>
-          <span class="update-banner-sub">（当前 v{{ updateInfo?.currentVersion }}）</span>
+          <span class="update-banner-sub"
+            >（当前 v{{ updateInfo?.currentVersion }}）</span
+          >
         </span>
         <div class="update-banner-actions">
-          <button class="btn btn-primary" :disabled="updateBusy" @click="handleUpdateAction">
-            {{ updateBusy ? '下载中…' : '立即更新' }}
+          <button
+            class="btn btn-primary"
+            :disabled="updateBusy"
+            @click="handleUpdateAction"
+          >
+            {{ updateBusy ? "下载中…" : "立即更新" }}
           </button>
-          <button class="btn btn-secondary" @click="handleDismissUpdate">稍后</button>
+          <button class="btn btn-secondary" @click="handleDismissUpdate">
+            稍后
+          </button>
         </div>
       </div>
 
       <!-- 新建分组弹窗 -->
-      <div v-if="showAddGroupForm" class="add-form-overlay" @click.self="showAddGroupForm = false">
+      <div
+        v-if="showAddGroupForm"
+        class="add-form-overlay"
+        @click.self="showAddGroupForm = false"
+      >
         <div class="add-form add-form-sm">
           <h3>新建分组</h3>
           <div class="form-row">
-            <input v-model="newGroupName" class="form-input" placeholder="分组名称" @keydown.enter="handleAddGroup" autofocus />
+            <input
+              v-model="newGroupName"
+              class="form-input"
+              placeholder="分组名称"
+              @keydown.enter="handleAddGroup"
+              autofocus
+            />
           </div>
           <div class="form-actions">
-            <button class="btn btn-secondary" @click="showAddGroupForm = false">取消</button>
-            <button class="btn btn-primary" @click="handleAddGroup">确定</button>
+            <button class="btn btn-secondary" @click="showAddGroupForm = false">
+              取消
+            </button>
+            <button class="btn btn-primary" @click="handleAddGroup">
+              确定
+            </button>
           </div>
         </div>
       </div>
 
       <!-- 添加项目表单 -->
-      <div v-if="showAddForm" class="add-form-overlay" @click.self="showAddForm = false">
+      <div v-if="showAddForm" class="add-form-overlay">
         <div class="add-form">
           <h3>添加项目</h3>
           <div class="form-row">
             <label>项目名称</label>
-            <input v-model="newProjectName" class="form-input" placeholder="如：余杭OA" />
+            <input
+              v-model="newProjectName"
+              class="form-input"
+              placeholder="项目名称"
+            />
           </div>
           <div class="form-row">
             <label>源目录</label>
             <div class="dir-row">
-              <input v-model="newProjectSource" class="form-input" placeholder="选择源目录" readonly />
-              <button class="btn btn-pick" @click="selectNewSource">选择</button>
+              <input
+                v-model="newProjectSource"
+                class="form-input"
+                placeholder="选择源目录"
+                readonly
+              />
+              <button class="btn btn-pick" @click="selectNewSource">
+                选择
+              </button>
             </div>
           </div>
           <div class="form-row">
             <label>输出目录 (可选，默认为源目录-dist)</label>
             <div class="dir-row">
-              <input v-model="newProjectOutput" class="form-input" placeholder="选择输出目录" readonly />
-              <button class="btn btn-pick" @click="selectNewOutput">选择</button>
+              <input
+                v-model="newProjectOutput"
+                class="form-input"
+                placeholder="选择输出目录"
+                readonly
+              />
+              <button class="btn btn-pick" @click="selectNewOutput">
+                选择
+              </button>
             </div>
           </div>
           <div class="form-actions">
-            <button class="btn btn-secondary" @click="showAddForm = false">取消</button>
+            <button class="btn btn-secondary" @click="showAddForm = false">
+              取消
+            </button>
             <button class="btn btn-primary" @click="handleAdd">确定</button>
           </div>
         </div>
       </div>
 
       <!-- 确认弹窗 -->
-      <div v-if="showConfirmDialog" class="add-form-overlay" @click.self="handleConfirmCancel">
+      <div
+        v-if="showConfirmDialog"
+        class="add-form-overlay"
+        @click.self="handleConfirmCancel"
+      >
         <div class="confirm-dialog">
           <h3 class="confirm-title">{{ confirmTitle }}</h3>
           <p class="confirm-message">{{ confirmMessage }}</p>
           <div class="form-actions confirm-actions">
-            <button class="btn btn-secondary" @click="handleConfirmCancel">取消</button>
-            <button class="btn btn-danger" @click="handleConfirmOk">确定删除</button>
+            <button class="btn btn-secondary" @click="handleConfirmCancel">
+              取消
+            </button>
+            <button class="btn btn-danger" @click="handleConfirmOk">
+              确定删除
+            </button>
           </div>
         </div>
       </div>
@@ -465,6 +550,19 @@ async function openOutputDir() {
   flex-shrink: 0;
   padding: 10px;
   border-top: 1px solid var(--border-color);
+}
+/* 版本号（位于检查更新按钮下方） */
+.version-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.version-value {
+  color: var(--text-secondary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 .update-btn {
   width: 100%;

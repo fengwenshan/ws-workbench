@@ -21,6 +21,7 @@ export interface AppConfig {
   groups: ProjectGroup[]
   projects: ProjectConfig[]
   default_exclude: string[]
+  default_exclude_version?: number
 }
 
 export interface PackResult {

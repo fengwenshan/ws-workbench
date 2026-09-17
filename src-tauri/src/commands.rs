@@ -20,6 +20,11 @@ pub fn get_config_path(app: AppHandle) -> Result<String, String> {
 }
 
 #[tauri::command]
+pub fn get_default_exclude_rules() -> Vec<String> {
+    default_exclude_rules()
+}
+
+#[tauri::command]
 pub async fn pack_project(
     app: AppHandle,
     project: ProjectConfig,

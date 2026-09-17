@@ -872,6 +872,46 @@ mod tests {
         );
     }
 
+    /// 默认规则中的 ".*" 系列：以 . 开头的文件/文件夹（含子目录里的）全部被排除
+    #[test]
+    fn dot_entries_are_excluded_by_default_rules() {
+        let src = tempfile::tempdir().unwrap();
+        write_file(src.path(), "index.html", "<html></html>");
+        write_file(src.path(), "js/app.js", "var a=1;");
+        write_file(src.path(), ".env", "SECRET=1");
+        write_file(src.path(), ".git/config", "[core]");
+        write_file(src.path(), ".vscode/settings.json", "{}");
+        write_file(src.path(), "js/.cache/tmp.js", "x");
+        write_file(src.path(), "js/lib/.hidden.js", "y");
+
+        let out_parent = tempfile::tempdir().unwrap();
+        let output_dir = out_parent.path().join("dist");
+        let project = make_project(src.path(), &output_dir);
+
+        let excludes = crate::models::default_exclude_rules();
+        let result = pack_to_zip_inner(None, &project, &excludes).unwrap();
+        assert!(result.success, "{:?}", result.errors);
+
+        let entries = zip_entries(&output_dir.with_extension("zip"));
+        for expect in ["dist/index.html", "dist/js/app.js"] {
+            assert!(
+                entries.contains(&expect.to_string()),
+                "缺少条目 {}，实际: {:?}",
+                expect,
+                entries
+            );
+        }
+        for entry in &entries {
+            let rel = entry.strip_prefix("dist/").unwrap_or(entry);
+            assert!(
+                rel.split('/').all(|c| !c.starts_with('.')),
+                "含 . 开头的路径未被排除: {:?}",
+                entries
+            );
+        }
+        assert_eq!(result.total_files, 2, "条目: {:?}", entries);
+    }
+
     /// git config 解析：优先取 origin 的地址
     #[test]
     fn parse_git_config_prefers_origin() {

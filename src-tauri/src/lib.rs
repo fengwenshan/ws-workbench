@@ -15,6 +15,7 @@ pub fn run() {
             commands::get_config,
             commands::save_config,
             commands::get_config_path,
+            commands::get_default_exclude_rules,
             commands::pack_project,
             commands::pack_to_zip,
             commands::validate_project,
