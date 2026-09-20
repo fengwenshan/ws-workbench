@@ -174,6 +174,22 @@ function updateProjectDropTarget(clientY: number) {
 // 监听挂在容器上而不是每个条目上：dragover 由容器连续收到，落点每次重算，
 // 不再有「进入子元素触发 dragleave 清空 → 父容器又设成列表末尾」的来回跳。
 
+/**
+ * 声明「这里可以接收投放」。
+ *
+ * WebKit（macOS 上 Tauri 用的 WKWebView）要求 dragenter 也 preventDefault，
+ * 否则 drop 根本不会触发；Chromium/WebView2 只看 dragover。
+ * main 侧 5f55a70 就是为这个问题加的 acceptDrop，合并时不能丢——
+ * 本实现把投放处理统一收到了 .list-body 上，所以这份「接受」也要挂在容器上。
+ */
+function acceptDrop(e: DragEvent) {
+  if (!dragType.value) return
+  e.preventDefault()
+  if (e.dataTransfer) {
+    e.dataTransfer.dropEffect = 'move'
+  }
+}
+
 function onListDragOver(e: DragEvent) {
   if (!dragType.value) return
   // 不阻止默认行为就不会触发 drop
@@ -367,6 +383,7 @@ function cancelRename() {
     <div
       ref="listBodyEl"
       class="list-body"
+      @dragenter="acceptDrop"
       @dragover="onListDragOver"
       @drop="onListDrop"
     >
@@ -375,6 +392,7 @@ function cancelRename() {
           class="group-section"
           :class="{ 'dragging': isDraggingGroup(group.id) }"
           :draggable="editingGroupId !== group.id"
+          @dragenter="acceptDrop"
           @dragstart="onGroupDragStart($event, group.id)"
           @dragend="onDragEnd"
         >

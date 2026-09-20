@@ -42,7 +42,6 @@ fn save_to_store(app: &AppHandle, config: &AppConfig) -> Result<(), String> {
 /// 从文件系统加载配置（兜底）
 fn load_from_file(app: &AppHandle) -> Option<AppConfig> {
     use std::fs;
-    use std::path::PathBuf;
 
     // 按优先级尝试多个路径
     let candidates = get_file_candidates(app);

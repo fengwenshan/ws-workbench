@@ -237,7 +237,10 @@ function build() {
     log(`使用签名私钥: ${KEY_PATH}`)
   }
 
-  const args = ['tauri', 'build']
+  // 必须带 exec：package.json 里有个同名的 "tauri" 脚本（值为 "tauri dev"），
+  // 直接 `pnpm tauri build` 会被解析成 `tauri dev build` —— 那是 dev 模式，
+  // 起来后永不退出，CI 会一直挂在构建步骤上、出不了安装包。
+  const args = ['exec', 'tauri', 'build']
   if (TARGET) args.push('--target', TARGET)
   // 版本覆盖（合并到默认配置里，不改动源文件）
   if (VERSION_OVERRIDE) args.push('--config', JSON.stringify({ version: VERSION_OVERRIDE }))
