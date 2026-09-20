@@ -48,11 +48,20 @@ export function useConfig() {
       name,
       projects: [],
       is_default: false,
+      collapsed: false,
       created_at: new Date().toISOString(),
     }
     config.value.groups.push(group)
     await saveConfig()
     return group
+  }
+
+  // 展开/折叠分组（折叠状态会随配置一起持久化）
+  async function toggleGroupCollapsed(groupId: string) {
+    const group = config.value.groups.find(g => g.id === groupId)
+    if (!group) return
+    group.collapsed = !group.collapsed
+    await saveConfig()
   }
 
   // 删除分组（默认分组不允许删除，但内部项目可单独删除）
@@ -123,6 +132,8 @@ export function useConfig() {
       updated_at: now,
     }
     group.projects.push(project)
+    // 新项目必须是可见的，避免分组处于折叠态时加完看不到
+    group.collapsed = false
     await saveConfig()
     selectedProjectId.value = project.id
     return project
@@ -160,6 +171,7 @@ export function useConfig() {
     loadConfig,
     saveConfig,
     addGroup,
+    toggleGroupCollapsed,
     deleteGroup,
     renameGroup,
     reorderGroups,

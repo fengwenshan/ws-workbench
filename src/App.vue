@@ -19,6 +19,7 @@ const {
   addGroup,
   deleteGroup,
   renameGroup,
+  toggleGroupCollapsed,
   reorderGroups,
   reorderProjects,
   moveProject,
@@ -339,6 +340,7 @@ async function openOutputDir() {
         @add-group="showAddGroupForm = true"
         @delete-group="handleDeleteGroup"
         @rename-group="handleRenameGroup"
+        @toggle-group="toggleGroupCollapsed"
         @add-project="openAddForm"
         @delete-project="handleDelete"
         @reorder-groups="reorderGroups"

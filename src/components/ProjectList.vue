@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, nextTick } from 'vue'
+import { ref, nextTick, onUnmounted } from 'vue'
 import type { ProjectGroup, ProjectConfig } from '@/types'
 
 const props = defineProps<{
@@ -12,6 +12,7 @@ const emit = defineEmits<{
   addGroup: []
   deleteGroup: [id: string]
   renameGroup: [id: string, name: string]
+  toggleGroup: [id: string]
   addProject: [groupId: string]
   deleteProject: [id: string]
   reorderGroups: [groups: ProjectGroup[]]
@@ -26,119 +27,92 @@ const dragType = ref<DragType>(null)
 const dragGroupId = ref<string | null>(null)
 const dragProjectId = ref<string | null>(null)
 
-// 拖拽悬停指示器位置
-const hoverGroupIndex = ref<number | null>(null)
-const hoverProjectInfo = ref<{ groupId: string; index: number } | null>(null)
+// 指示线只有一条，且用绝对定位绘制：它不参与布局，拖拽过程中列表不会被撑动，
+// 也就不会出现「指示线撑开布局 → 指针落到别的元素 → 指示线跳走 → 布局回弹」的高频抖动。
+const listBodyEl = ref<HTMLElement | null>(null)
+const dropLineY = ref<number | null>(null)
+// 分组落点：0..groups.length，含义是「插到第 index 个分组之前」
+const dropGroupIndex = ref<number | null>(null)
+// 项目落点：目标分组 + 组内插入位置
+const dropProjectTarget = ref<{ groupId: string; index: number } | null>(null)
 
-// 每次开始拖拽先清掉上一次残留的悬停位置，避免指示线张冠李戴
-function clearHover() {
-  hoverGroupIndex.value = null
-  hoverProjectInfo.value = null
+// ========== 落点计算 ==========
+// 落点只由「指针坐标 + 各行静止时的位置」算出来，不再依赖 dragenter/dragleave。
+// 旧实现是给每个分组/项目挂 dragover+dragleave：指针在子元素之间移动会不停触发
+// dragleave 把位置清空，父容器又把它设成「列表末尾」，指示线于是来回跳；再加上
+// 指示线本身是文档流里的元素、出现时会撑开列表，指针底下的元素跟着变，抖动就被放大。
+
+/** 视口坐标 → .list-body 内容坐标（绝对定位指示线用；含滚动偏移） */
+function toContentY(clientY: number): number {
+  const body = listBodyEl.value
+  if (!body) return 0
+  return clientY - body.getBoundingClientRect().top + body.scrollTop
+}
+
+/** 当前渲染出的分组区块，顺序与 props.groups 一致 */
+function groupSections(): HTMLElement[] {
+  const body = listBodyEl.value
+  if (!body) return []
+  return Array.from(body.querySelectorAll<HTMLElement>(':scope > .group-section'))
+}
+
+function projectItemsOf(section: HTMLElement): HTMLElement[] {
+  return Array.from(section.querySelectorAll<HTMLElement>('.group-projects > .list-item'))
+}
+
+/**
+ * 按「中线」定插入位置：指针在某行上半部分就插到它前面，下半部分就插到它后面。
+ * 纯函数式的判断，同一位置反复计算的结果恒定，所以不会抖。
+ */
+function insertionIndex(rects: DOMRect[], clientY: number): number {
+  for (let i = 0; i < rects.length; i++) {
+    if (clientY < rects[i].top + rects[i].height / 2) return i
+  }
+  return rects.length
+}
+
+function clearDropTarget() {
+  dropLineY.value = null
+  dropGroupIndex.value = null
+  dropProjectTarget.value = null
 }
 
 // ========== 分组拖拽 ==========
 
 function onGroupDragStart(e: DragEvent, groupId: string) {
-  // 只有从分组标题上发起的拖拽才算分组拖拽。
-  // 用「正向判定」而不是「排除项目行」：拖项目时若事件冒泡到这里（或引擎上报的目标
-  // 不是标题），这里直接拒绝，绝不会把拖项目变成调分组顺序。
-  const target = e.target as HTMLElement | null
-  if (!target?.closest?.('.group-header')) return
-  clearHover()
+  // 项目自身的 dragstart 会冒泡到这里，那种情况属于项目拖拽，不能改判
+  if (e.target !== e.currentTarget) return
   dragType.value = 'group'
   dragGroupId.value = groupId
+  // 明确标记「这次按下变成了拖拽」，供分组名的 click 判断（见 isDragNotClick）
+  draggingSincePress = true
   if (e.dataTransfer) {
     e.dataTransfer.effectAllowed = 'move'
     e.dataTransfer.setData('text/plain', `group:${groupId}`)
   }
 }
 
-function onGroupDragOver(e: DragEvent, index: number) {
-  if (dragType.value !== 'group') return
-  e.preventDefault()
-  // 阻止冒泡到 .list-body 的末尾投放区，否则位置会被覆盖成「列表末尾」
-  e.stopPropagation()
-  if (e.dataTransfer) {
-    e.dataTransfer.dropEffect = 'move'
-  }
-  hoverGroupIndex.value = index
-}
-
-function onGroupDragLeave() {
-  hoverGroupIndex.value = null
-}
-
-function onGroupDrop(e: DragEvent, targetIndex: number) {
-  e.preventDefault()
-  // 防止继续冒泡到 .list-body 的末尾投放区，造成二次处理
-  e.stopPropagation()
-  if (dragType.value !== 'group' || !dragGroupId.value) return
-
-  const fromIndex = props.groups.findIndex(g => g.id === dragGroupId.value)
-  if (fromIndex === -1 || fromIndex === targetIndex) {
-    resetDrag()
+/** 分组拖拽：落点 = 第 dropGroupIndex 个分组的「上方」 */
+function updateGroupDropTarget(clientY: number) {
+  const sections = groupSections()
+  if (sections.length === 0) {
+    clearDropTarget()
     return
   }
-
-  const newGroups = [...props.groups]
-  const [removed] = newGroups.splice(fromIndex, 1)
-  // 指示线画在被悬停分组的「上方」，而源元素移除后其后的索引都会前移一位，
-  // 所以向下拖（fromIndex < targetIndex）时要减 1，否则会落到指示线下方一格。
-  const actualToIndex = fromIndex < targetIndex ? targetIndex - 1 : targetIndex
-  newGroups.splice(actualToIndex, 0, removed)
-
-  emit('reorderGroups', newGroups)
-  resetDrag()
-}
-
-// 拖到分组列表的空白区域（最后一个分组之后）→ 追加到末尾
-function onGroupListDragOver(e: DragEvent) {
-  if (dragType.value !== 'group') return
-  e.preventDefault()
-  if (e.dataTransfer) {
-    e.dataTransfer.dropEffect = 'move'
-  }
-  hoverGroupIndex.value = props.groups.length
-}
-
-function onGroupListDrop(e: DragEvent) {
-  if (dragType.value !== 'group' || !dragGroupId.value) return
-  e.preventDefault()
-
-  const fromIndex = props.groups.findIndex(g => g.id === dragGroupId.value)
-  if (fromIndex === -1 || fromIndex === props.groups.length - 1) {
-    resetDrag()
-    return
-  }
-
-  const newGroups = [...props.groups]
-  const [removed] = newGroups.splice(fromIndex, 1)
-  newGroups.push(removed)
-
-  emit('reorderGroups', newGroups)
-  resetDrag()
+  const rects = sections.map((el) => el.getBoundingClientRect())
+  const index = insertionIndex(rects, clientY)
+  dropGroupIndex.value = index
+  dropProjectTarget.value = null
+  const lineY = index < rects.length ? rects[index].top : rects[rects.length - 1].bottom
+  dropLineY.value = toContentY(lineY)
 }
 
 // ========== 项目拖拽 ==========
 
-// 声明「这里可以投放」。
-// WebKit（Tauri 用的 WKWebView）要求 dragenter 也 preventDefault，否则 drop 不会触发；
-// Chromium 只看 dragover，所以只在浏览器里测会漏掉这个问题。
-function acceptDrop(e: DragEvent) {
-  if (dragType.value !== 'project' && dragType.value !== 'group') return
-  e.preventDefault()
-  if (e.dataTransfer) {
-    e.dataTransfer.dropEffect = 'move'
-  }
-}
-
 function onProjectDragStart(e: DragEvent, projectId: string, groupId: string) {
-  // 只有从项目行上发起的拖拽才算项目拖拽（正向判定，见 onGroupDragStart 的说明）
-  const target = e.target as HTMLElement | null
-  if (!target?.closest?.('.list-item')) return
-  // 阻止冒泡：分组也监听 dragstart，别让它把这里的状态覆盖掉
+  // 必须阻止冒泡：外层 .group-section 也是 draggable，
+  // 否则它的 dragstart 处理器随后会把这次拖拽改判成「拖分组」。
   e.stopPropagation()
-  clearHover()
   dragType.value = 'project'
   dragProjectId.value = projectId
   dragGroupId.value = groupId
@@ -148,112 +122,147 @@ function onProjectDragStart(e: DragEvent, projectId: string, groupId: string) {
   }
 }
 
-function onProjectDragOver(e: DragEvent, groupId: string, index: number) {
-  if (dragType.value !== 'project') return
-  e.preventDefault()
-  // 必须阻止冒泡：父级 .group-projects 上还有一个 dragover 处理器，
-  // 它会把位置覆盖成「分组末尾」，导致指示线和实际落点对不上。
-  e.stopPropagation()
-  if (e.dataTransfer) {
-    e.dataTransfer.dropEffect = 'move'
-  }
-  hoverProjectInfo.value = { groupId, index }
-}
-
-function onProjectDragLeave() {
-  // 不立即清除，避免闪烁，由 dragover 更新位置
-}
-
-function onProjectDrop(e: DragEvent, toGroupId: string, toIndex: number) {
-  // 分组拖拽不在这里处理：不拦截，继续冒泡给分组的落点逻辑
-  if (dragType.value !== 'project' || !dragProjectId.value || !dragGroupId.value) return
-  e.preventDefault()
-  e.stopPropagation()
-
-  const fromGroupId = dragGroupId.value
-  const projectId = dragProjectId.value
-
-  // 同一分组内排序
-  if (fromGroupId === toGroupId) {
-    const group = props.groups.find(g => g.id === toGroupId)
-    if (!group) {
-      resetDrag()
-      return
-    }
-    const fromIndex = group.projects.findIndex(p => p.id === projectId)
-    if (fromIndex === -1 || fromIndex === toIndex) {
-      resetDrag()
-      return
-    }
-
-    const newProjects = [...group.projects]
-    const [removed] = newProjects.splice(fromIndex, 1)
-    // 计算实际目标位置（删除后索引可能变化）
-    const actualToIndex = fromIndex < toIndex ? toIndex - 1 : toIndex
-    newProjects.splice(actualToIndex, 0, removed)
-
-    emit('reorderProjects', toGroupId, newProjects)
-  } else {
-    // 跨分组移动
-    emit('moveProject', projectId, fromGroupId, toGroupId, toIndex)
-  }
-
-  resetDrag()
-}
-
-// 拖到分组区域的空白处或分组头部（追加到该分组末尾）
-function onGroupProjectsDrop(e: DragEvent, groupId: string) {
-  // 分组拖拽不在这里处理：不拦截，继续冒泡给分组的落点逻辑
-  if (dragType.value !== 'project' || !dragProjectId.value || !dragGroupId.value) return
-  e.preventDefault()
-  e.stopPropagation()
-
-  const group = props.groups.find(g => g.id === groupId)
-  if (!group) {
-    resetDrag()
+/** 项目拖拽：先判断指针落在哪个分组内（含分组标题），再在组内按中线定位 */
+function updateProjectDropTarget(clientY: number) {
+  const sections = groupSections()
+  if (sections.length === 0) {
+    clearDropTarget()
     return
   }
 
-  const toIndex = group.projects.length
-  const fromGroupId = dragGroupId.value
-  const projectId = dragProjectId.value
-
-  if (fromGroupId === groupId) {
-    // 同分组拖到末尾
-    const fromIndex = group.projects.findIndex(p => p.id === projectId)
-    if (fromIndex === -1 || fromIndex === toIndex) {
-      resetDrag()
-      return
+  let sectionIndex = sections.length - 1
+  for (let i = 0; i < sections.length; i++) {
+    const r = sections[i].getBoundingClientRect()
+    if (clientY >= r.top && clientY <= r.bottom) {
+      sectionIndex = i
+      break
     }
-    const newProjects = [...group.projects]
-    const [removed] = newProjects.splice(fromIndex, 1)
-    newProjects.push(removed)
-    emit('reorderProjects', groupId, newProjects)
-  } else {
-    emit('moveProject', projectId, fromGroupId, groupId, toIndex)
   }
 
-  resetDrag()
+  const section = sections[sectionIndex]
+  const group = props.groups[sectionIndex]
+  if (!section || !group) {
+    clearDropTarget()
+    return
+  }
+
+  dropGroupIndex.value = null
+
+  // 折叠分组里看不到项目，落点固定为「追加到该分组末尾」，指示线画在分组标题下方
+  if (group.collapsed) {
+    dropProjectTarget.value = { groupId: group.id, index: group.projects.length }
+    dropLineY.value = toContentY(section.getBoundingClientRect().bottom - 2)
+    return
+  }
+
+  // 空分组：插到第一个位置
+  if (group.projects.length === 0) {
+    const anchor = section.querySelector<HTMLElement>('.group-projects') ?? section
+    dropProjectTarget.value = { groupId: group.id, index: 0 }
+    dropLineY.value = toContentY(anchor.getBoundingClientRect().top + 4)
+    return
+  }
+
+  const rects = projectItemsOf(section).map((el) => el.getBoundingClientRect())
+  const index = insertionIndex(rects, clientY)
+  dropProjectTarget.value = { groupId: group.id, index }
+  const lineY = index < rects.length ? rects[index].top : rects[rects.length - 1].bottom
+  dropLineY.value = toContentY(lineY)
 }
 
-function onGroupProjectsDragOver(e: DragEvent, groupId: string) {
-  if (dragType.value !== 'project') return
+// ========== 列表容器上的统一拖拽处理 ==========
+// 监听挂在容器上而不是每个条目上：dragover 由容器连续收到，落点每次重算，
+// 不再有「进入子元素触发 dragleave 清空 → 父容器又设成列表末尾」的来回跳。
+
+/**
+ * 声明「这里可以接收投放」。
+ *
+ * WebKit（macOS 上 Tauri 用的 WKWebView）要求 dragenter 也 preventDefault，
+ * 否则 drop 根本不会触发；Chromium/WebView2 只看 dragover。
+ * main 侧 5f55a70 就是为这个问题加的 acceptDrop，合并时不能丢——
+ * 本实现把投放处理统一收到了 .list-body 上，所以这份「接受」也要挂在容器上。
+ */
+function acceptDrop(e: DragEvent) {
+  if (!dragType.value) return
   e.preventDefault()
   if (e.dataTransfer) {
     e.dataTransfer.dropEffect = 'move'
   }
-  const group = props.groups.find(g => g.id === groupId)
-  if (group) {
-    hoverProjectInfo.value = { groupId, index: group.projects.length }
+}
+
+function onListDragOver(e: DragEvent) {
+  if (!dragType.value) return
+  // 不阻止默认行为就不会触发 drop
+  e.preventDefault()
+  if (e.dataTransfer) {
+    e.dataTransfer.dropEffect = 'move'
   }
+  if (dragType.value === 'group') updateGroupDropTarget(e.clientY)
+  else updateProjectDropTarget(e.clientY)
+}
+
+function onListDrop(e: DragEvent) {
+  if (!dragType.value) return
+  e.preventDefault()
+  if (dragType.value === 'group') {
+    applyGroupReorder(dropGroupIndex.value)
+  } else {
+    applyProjectMove(dropProjectTarget.value)
+  }
+  resetDrag()
+}
+
+/** 把正在拖的分组插到 targetIndex 之前（取值 0..groups.length） */
+function applyGroupReorder(targetIndex: number | null) {
+  const id = dragGroupId.value
+  if (targetIndex === null || !id) return
+
+  const fromIndex = props.groups.findIndex((g) => g.id === id)
+  if (fromIndex === -1) return
+  // 插到自己前面、或紧跟在自己后面，都等于没动
+  if (targetIndex === fromIndex || targetIndex === fromIndex + 1) return
+
+  const newGroups = [...props.groups]
+  const [removed] = newGroups.splice(fromIndex, 1)
+  // 指示线画在目标分组「上方」，而源元素移除后其后的索引都会前移一位，
+  // 所以向下拖（fromIndex < targetIndex）时要减 1，否则会落到指示线下方一格。
+  const actualToIndex = fromIndex < targetIndex ? targetIndex - 1 : targetIndex
+  newGroups.splice(actualToIndex, 0, removed)
+  emit('reorderGroups', newGroups)
+}
+
+/** 把正在拖的项目放到目标分组的指定位置 */
+function applyProjectMove(target: { groupId: string; index: number } | null) {
+  const projectId = dragProjectId.value
+  const fromGroupId = dragGroupId.value
+  if (!target || !projectId || !fromGroupId) return
+
+  const group = props.groups.find((g) => g.id === target.groupId)
+  if (!group) return
+
+  if (fromGroupId !== target.groupId) {
+    // 跨分组：目标组里本来没有这个项目，索引可直接使用
+    emit('moveProject', projectId, fromGroupId, target.groupId, target.index)
+    return
+  }
+
+  const fromIndex = group.projects.findIndex((p) => p.id === projectId)
+  if (fromIndex === -1) return
+  // 插到自己前面、或紧跟在自己后面，都等于没动
+  if (target.index === fromIndex || target.index === fromIndex + 1) return
+
+  const newProjects = [...group.projects]
+  const [removed] = newProjects.splice(fromIndex, 1)
+  const actualToIndex = fromIndex < target.index ? target.index - 1 : target.index
+  newProjects.splice(actualToIndex, 0, removed)
+  emit('reorderProjects', target.groupId, newProjects)
 }
 
 function resetDrag() {
   dragType.value = null
   dragGroupId.value = null
   dragProjectId.value = null
-  hoverGroupIndex.value = null
-  hoverProjectInfo.value = null
+  clearDropTarget()
 }
 
 function onDragEnd() {
@@ -269,15 +278,67 @@ function isDraggingProject(projectId: string): boolean {
   return dragType.value === 'project' && dragProjectId.value === projectId
 }
 
-// 分组悬停指示位置
-function isGroupHoverAbove(index: number): boolean {
-  return hoverGroupIndex.value === index
+// ========== 分组展开/折叠 ==========
+// 分组名同时承担两个手势：单击展开/折叠、双击重命名。
+// 单击先延迟一小会儿再生效，若期间来了双击就取消，这样重命名时不会先折叠再展开。
+const TOGGLE_DELAY = 200
+let pendingToggle: number | null = null
+// 本次「按下」是否已经变成了一次拖拽。
+// 注意：drop 早于 dragend 触发，onListDrop 里会 resetDrag()，
+// 所以不能在 dragend 里判断「刚才是不是在拖分组」（那时 dragType 已经被清空），
+// 必须在 dragstart 这个确定的时刻置位，并在每次按下时重置。
+let draggingSincePress = false
+let pressPoint: { x: number; y: number } | null = null
+
+function cancelPendingToggle() {
+  if (pendingToggle !== null) {
+    window.clearTimeout(pendingToggle)
+    pendingToggle = null
+  }
 }
 
-// 项目悬停指示位置
-function isProjectHoverAbove(groupId: string, index: number): boolean {
-  return hoverProjectInfo.value?.groupId === groupId && hoverProjectInfo.value?.index === index
+function onGroupToggleMouseDown(e: MouseEvent) {
+  draggingSincePress = false
+  pressPoint = { x: e.clientX, y: e.clientY }
 }
+
+// 拖拽排序后浏览器仍可能补发一次 click；按下后有明显位移的拖拽尝试同理。
+// 两者都不应该被当成「点击折叠」。
+function isDragNotClick(e: MouseEvent): boolean {
+  if (draggingSincePress) return true
+  if (!pressPoint) return false
+  const moved = Math.abs(e.clientX - pressPoint.x) + Math.abs(e.clientY - pressPoint.y)
+  return moved > 6
+}
+
+function onGroupNameClick(e: MouseEvent, group: ProjectGroup) {
+  if (isDragNotClick(e)) return
+  cancelPendingToggle()
+  pendingToggle = window.setTimeout(() => {
+    pendingToggle = null
+    emit('toggleGroup', group.id)
+  }, TOGGLE_DELAY)
+}
+
+// 箭头不做延迟，点一下就切
+function onGroupCaretClick(e: MouseEvent, group: ProjectGroup) {
+  if (isDragNotClick(e)) return
+  cancelPendingToggle()
+  emit('toggleGroup', group.id)
+}
+
+function onGroupNameDblClick(group: ProjectGroup) {
+  cancelPendingToggle()
+  startRename(group)
+}
+
+// 悬停提示：默认分组不可重命名，所以只说折叠/展开
+function groupNameTitle(group: ProjectGroup): string {
+  const action = group.collapsed ? '点击展开' : '点击折叠'
+  return group.is_default ? action : `${action}，双击重命名`
+}
+
+onUnmounted(cancelPendingToggle)
 
 // ========== 分组重命名 ==========
 const editingGroupId = ref<string | null>(null)
@@ -312,19 +373,6 @@ function cancelRename() {
   editingGroupId.value = null
   editingName.value = ''
 }
-
-// 分组的展开/收起（仅界面状态，不写入配置）
-const collapsedGroupIds = ref<string[]>([])
-
-function isCollapsed(groupId: string) {
-  return collapsedGroupIds.value.includes(groupId)
-}
-
-function toggleCollapse(groupId: string) {
-  collapsedGroupIds.value = isCollapsed(groupId)
-    ? collapsedGroupIds.value.filter((id) => id !== groupId)
-    : [...collapsedGroupIds.value, groupId]
-}
 </script>
 
 <template>
@@ -332,36 +380,23 @@ function toggleCollapse(groupId: string) {
     <div class="list-header">
       <span>项目分组</span>
     </div>
-    <div class="list-body" @dragover="onGroupListDragOver" @drop="onGroupListDrop">
-      <template v-for="(group, groupIndex) in groups" :key="group.id">
-        <!-- 分组上方插入指示线 -->
-        <div
-          v-if="dragType === 'group' && isGroupHoverAbove(groupIndex)"
-          class="group-drop-indicator"
-        ></div>
-
+    <div
+      ref="listBodyEl"
+      class="list-body"
+      @dragenter="acceptDrop"
+      @dragover="onListDragOver"
+      @drop="onListDrop"
+    >
+      <template v-for="group in groups" :key="group.id">
         <div
           class="group-section"
           :class="{ 'dragging': isDraggingGroup(group.id) }"
+          :draggable="editingGroupId !== group.id"
           @dragenter="acceptDrop"
-          @dragover="onGroupDragOver($event, groupIndex)"
-          @dragleave="onGroupDragLeave"
-          @drop="onGroupDrop($event, groupIndex)"
+          @dragstart="onGroupDragStart($event, group.id)"
+          @dragend="onDragEnd"
         >
-          <div
-            class="group-header"
-            :draggable="editingGroupId !== group.id"
-            @dragstart="onGroupDragStart($event, group.id)"
-            @dragend="onDragEnd"
-            @dragenter="acceptDrop"
-            @dragover="onGroupProjectsDragOver($event, group.id)"
-            @drop="onGroupProjectsDrop($event, group.id)"
-          >
-            <button
-              class="group-toggle"
-              :title="isCollapsed(group.id) ? '展开分组' : '收起分组'"
-              @click.stop="toggleCollapse(group.id)"
-            >{{ isCollapsed(group.id) ? '▸' : '▾' }}</button>
+          <div class="group-header">
             <span class="group-drag-handle" title="拖拽排序">⋮⋮</span>
             <input
               v-if="editingGroupId === group.id"
@@ -374,13 +409,28 @@ function toggleCollapse(groupId: string) {
               @click.stop
               @dblclick.stop
             />
-            <span
-              v-else
-              class="group-name"
-              :class="{ 'name-readonly': group.is_default }"
-              :title="group.is_default ? '默认分组不可重命名' : '双击重命名'"
-              @dblclick="startRename(group)"
-            >{{ group.name }}</span>
+            <template v-else>
+              <!-- 折叠箭头：单击立即切换，并指示当前展开状态 -->
+              <span
+                class="group-caret"
+                :title="group.collapsed ? '点击展开' : '点击折叠'"
+                @mousedown="onGroupToggleMouseDown"
+                @click.stop="onGroupCaretClick($event, group)"
+              >{{ group.collapsed ? '▸' : '▾' }}</span>
+              <span
+                class="group-name"
+                :title="groupNameTitle(group)"
+                @mousedown="onGroupToggleMouseDown"
+                @click.stop="onGroupNameClick($event, group)"
+                @dblclick.stop="onGroupNameDblClick(group)"
+              >{{ group.name }}</span>
+              <!-- 折叠时给出项目数量，避免看不出里面还有内容 -->
+              <span
+                v-if="group.collapsed && group.projects.length"
+                class="group-count"
+                :title="`${group.projects.length} 个项目`"
+              >{{ group.projects.length }}</span>
+            </template>
             <span
               v-if="group.is_default"
               class="group-default-badge"
@@ -399,66 +449,45 @@ function toggleCollapse(groupId: string) {
               >×</button>
             </template>
           </div>
-          <div
-            v-if="!isCollapsed(group.id)"
-            class="group-projects"
-            @dragenter="acceptDrop"
-            @dragover="onGroupProjectsDragOver($event, group.id)"
-            @drop="onGroupProjectsDrop($event, group.id)"
-          >
-            <template v-for="(project, projIndex) in group.projects" :key="project.id">
-              <!-- 项目上方插入指示线 -->
-              <div
-                v-if="dragType === 'project' && isProjectHoverAbove(group.id, projIndex)"
-                class="project-drop-indicator"
-              ></div>
-
-              <div
-                class="list-item"
-                :class="{
-                  active: project.id === selectedId,
-                  dragging: isDraggingProject(project.id)
-                }"
-                draggable="true"
-                @click="emit('select', project.id)"
-                @dragstart="onProjectDragStart($event, project.id, group.id)"
-                @dragenter="acceptDrop"
-                @dragover="onProjectDragOver($event, group.id, projIndex)"
-                @dragleave="onProjectDragLeave"
-                @drop="onProjectDrop($event, group.id, projIndex)"
-                @dragend="onDragEnd"
-              >
-                <span class="project-drag-handle" title="拖拽排序/移动">⋮⋮</span>
-                <span class="item-name">{{ project.name }}</span>
-                <button
-                  v-if="project.id === selectedId"
-                  class="item-delete"
-                  @click.stop="emit('deleteProject', project.id)"
-                  title="删除项目"
-                >×</button>
-              </div>
-            </template>
+          <div v-if="!group.collapsed" class="group-projects">
+            <div
+              v-for="project in group.projects"
+              :key="project.id"
+              class="list-item"
+              :class="{
+                active: project.id === selectedId,
+                dragging: isDraggingProject(project.id)
+              }"
+              draggable="true"
+              @click="emit('select', project.id)"
+              @dragstart="onProjectDragStart($event, project.id, group.id)"
+              @dragend="onDragEnd"
+            >
+              <span class="project-drag-handle" title="拖拽排序/移动">⋮⋮</span>
+              <span class="item-name">{{ project.name }}</span>
+              <button
+                v-if="project.id === selectedId"
+                class="item-delete"
+                @click.stop="emit('deleteProject', project.id)"
+                title="删除项目"
+              >×</button>
+            </div>
 
             <button class="add-project-btn" @click="emit('addProject', group.id)">+ 添加项目</button>
           </div>
-
-          <!-- 分组末尾插入指示线（拖到最后一个位置；分组收起时也显示，便于往组里拖） -->
-          <div
-            v-if="dragType === 'project' && hoverProjectInfo?.groupId === group.id && hoverProjectInfo?.index === group.projects.length && group.projects.length > 0"
-            class="project-drop-indicator"
-          ></div>
         </div>
       </template>
-
-      <!-- 最后一个分组下方的指示线 -->
-      <div
-        v-if="dragType === 'group' && hoverGroupIndex === groups.length && groups.length > 0"
-        class="group-drop-indicator"
-      ></div>
 
       <div v-if="groups.length === 0" class="empty-tip">
         暂无分组，点击下方新建
       </div>
+
+      <!-- 全列表唯一的插入指示线：绝对定位、不参与布局，拖拽时列表不会被撑动 -->
+      <div
+        v-if="dropLineY !== null"
+        class="drop-line"
+        :style="{ top: dropLineY + 'px' }"
+      ></div>
     </div>
     <button class="add-group-btn" @click="emit('addGroup')">+ 新建分组</button>
   </div>
@@ -479,6 +508,7 @@ function toggleCollapse(groupId: string) {
   border-bottom: 1px solid var(--border-color);
 }
 .list-body {
+  position: relative; /* 插入指示线的定位参照 */
   flex: 1;
   overflow-y: auto;
   padding: 8px;
@@ -507,36 +537,46 @@ function toggleCollapse(groupId: string) {
   cursor: grabbing;
 }
 .group-drag-handle {
-  font-size: 12px;
-  color: var(--text-secondary);
+  font-size: 10px;
+  color: var(--text-muted);
+  opacity: 0.6;
   user-select: none;
   flex-shrink: 0;
   letter-spacing: -1px;
 }
-.group-drag-handle:hover,
-.project-drag-handle:hover {
-  color: var(--primary);
-}
-/* 展开/收起分组 */
-.group-toggle {
+.group-caret {
   flex-shrink: 0;
-  width: 18px;
-  padding: 0;
-  border: none;
-  background: transparent;
-  color: var(--text-secondary);
-  font-size: 13px;
+  width: 12px;
+  font-size: 10px;
   line-height: 1;
+  text-align: center;
+  color: var(--text-muted);
   cursor: pointer;
+  user-select: none;
 }
-.group-toggle:hover {
+.group-caret:hover {
   color: var(--primary);
 }
 .group-name {
   flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
 }
-.name-readonly {
-  cursor: default;
+.group-name:hover {
+  color: var(--text-secondary);
+}
+/* 折叠后藏起来的项目数量 */
+.group-count {
+  flex-shrink: 0;
+  padding: 0 5px;
+  border-radius: 8px;
+  background: var(--bg-tag);
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 14px;
 }
 .group-name-input {
   flex: 1;
@@ -615,8 +655,9 @@ function toggleCollapse(groupId: string) {
   opacity: 0.4;
 }
 .project-drag-handle {
-  font-size: 12px;
-  color: var(--text-secondary);
+  font-size: 10px;
+  color: var(--text-muted);
+  opacity: 0.6;
   user-select: none;
   flex-shrink: 0;
   cursor: grab;
@@ -677,21 +718,27 @@ function toggleCollapse(groupId: string) {
   color: var(--primary);
 }
 
-/* 拖拽插入指示线 */
-.group-drop-indicator {
-  height: 3px;
-  background: var(--primary);
-  border-radius: 2px;
-  margin: 2px 4px;
-  /* 纯视觉元素，不参与事件，避免挡住落点 */
-  pointer-events: none;
-}
-.project-drop-indicator {
+/* 拖拽插入指示线：绝对定位，不占布局、不接收指针事件。
+   这样它既不会把列表撑动（撑动会让指针底下的元素变来变去，产生抖动），
+   也不会自己成为 dragover 的目标。 */
+.drop-line {
+  position: absolute;
+  left: 12px;
+  right: 12px;
   height: 2px;
   background: var(--primary);
   border-radius: 2px;
-  margin: 1px 12px;
-  /* 纯视觉元素，不参与事件，避免挡住落点 */
   pointer-events: none;
+}
+/* 左端小圆点，让落点更醒目 */
+.drop-line::before {
+  content: '';
+  position: absolute;
+  left: -3px;
+  top: -2px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--primary);
 }
 </style>
