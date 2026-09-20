@@ -14,6 +14,8 @@ export interface ProjectGroup {
   projects: ProjectConfig[]
   /** 是否为默认分组（默认分组不允许删除，但内部项目可删除） */
   is_default?: boolean
+  /** 侧栏中该分组是否折叠（仅影响展示，缺省/undefined 视为展开） */
+  collapsed?: boolean
   created_at: string
 }
 

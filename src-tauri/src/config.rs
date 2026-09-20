@@ -254,6 +254,7 @@ fn migrate_config(app: &AppHandle, mut config: AppConfig) -> AppConfig {
             name: "默认分组".to_string(),
             projects: std::mem::take(&mut config.projects),
             is_default: true,
+            collapsed: false,
             created_at: now,
         };
         config.groups.push(group);

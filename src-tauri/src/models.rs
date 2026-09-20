@@ -51,6 +51,9 @@ pub struct ProjectGroup {
     /// 是否为默认分组（默认分组不允许删除，但内部项目可删除）
     #[serde(default)]
     pub is_default: bool,
+    /// 侧栏中该分组是否折叠（纯展示状态，由前端读写）
+    #[serde(default)]
+    pub collapsed: bool,
     #[serde(default)]
     pub created_at: String,
 }
