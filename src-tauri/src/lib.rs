@@ -2,12 +2,20 @@ mod models;
 mod config;
 mod commands;
 mod packer;
+pub mod apps;
+mod platform;
+mod process;
+mod winps;
+pub mod vpn;
 
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager, Runtime, WindowEvent,
+    AppHandle, Emitter, Manager, Runtime, WindowEvent,
 };
+
+/// 托盘菜单里点击 VPN 相关项时推给前端的事件名
+pub const EVENT_VPN_TRAY: &str = "vpn-tray";
 
 // 把主窗口重新显示出来（从托盘左键、托盘菜单、Dock 图标进入）
 fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
@@ -89,16 +97,85 @@ pub fn run() {
             commands::open_in_idea,
             commands::open_in_trae,
             commands::open_in_terminal,
+            commands::get_platform_info,
+            commands::list_app_locations,
+            commands::set_app_path,
+            commands::clear_app_path,
+            commands::import_app,
+            commands::remove_managed_app,
+            commands::refresh_app_search,
+            commands::open_with_app_id,
+            vpn::commands::vpn_detect_connectors,
+            vpn::commands::vpn_connector_version,
+            vpn::commands::vpn_import_openconnect,
+            vpn::commands::vpn_remove_managed_openconnect,
+            vpn::commands::vpn_managed_openconnect_path,
+            vpn::commands::vpn_install_guide,
+            vpn::commands::vpn_encrypt_password,
+            vpn::commands::vpn_validate_cidr,
+            vpn::commands::vpn_check_rule_overlaps,
+            vpn::commands::vpn_elevation_info,
+            vpn::commands::vpn_setup_elevation,
+            vpn::commands::vpn_remove_elevation,
+            vpn::commands::vpn_connect,
+            vpn::commands::vpn_disconnect,
+            vpn::commands::vpn_get_snapshot,
+            vpn::commands::vpn_read_logs,
+            vpn::commands::vpn_clear_logs,
+            vpn::commands::vpn_read_learn_report,
+            vpn::commands::vpn_clear_learn_report,
+            vpn::commands::vpn_open_session_dir,
+            vpn::commands::vpn_session_dir_info,
         ])
         .setup(|app| {
             // macOS 顶部菜单栏汉化
             setup_app_menu(app.handle())?;
 
+            // VPN 运行期状态：会话目录必须主进程和提权 worker 都能读写。
+            //
+            // 这里不能自己拼 app_data_dir 了事 —— 那个目录在受控文件夹访问、
+            // 企业策略或受限令牌下会拒绝写入，而 app_data_dir() 本身不会报错，
+            // 于是失败会一路推迟到用户点「连接」时才以「拒绝访问」爆出来。
+            // 统一走 session_dir()，它带真实写入探测和逐级回退。
+            let session = match vpn::commands::session_dir(app.handle()) {
+                Ok(dir) => vpn::session::VpnSession::new(dir),
+                Err(err) => {
+                    // 连临时目录都写不了：不阻断启动，但把原因打出来，
+                    // 免得后面只看到一句没有上下文的「拒绝访问」
+                    eprintln!("VPN 会话目录不可用: {}", err);
+                    vpn::session::VpnSession::new(std::env::temp_dir().join("demo-tools-vpn"))
+                }
+            };
+            if let Err(err) = session.ensure() {
+                eprintln!("VPN 会话目录初始化失败: {}", err);
+            }
+            app.manage(vpn::commands::VpnState::new(session));
+
+            // 轮询会话目录里的状态文件，把 VPN 状态与日志推给前端
+            vpn::commands::start_status_poller(app.handle().clone());
+
             // 托盘：关掉窗口后应用仍在后台运行，从托盘菜单重新打开或退出
             let show = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
+            let vpn_connect =
+                MenuItem::with_id(app, "vpn-connect", "连接 VPN", true, None::<&str>)?;
+            let vpn_disconnect =
+                MenuItem::with_id(app, "vpn-disconnect", "断开 VPN", true, None::<&str>)?;
+            let vpn_mode =
+                MenuItem::with_id(app, "vpn-mode", "切换分流模式", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
             let separator = PredefinedMenuItem::separator(app)?;
-            let menu = Menu::with_items(app, &[&show, &separator, &quit])?;
+            let menu = Menu::with_items(
+                app,
+                &[
+                    &show,
+                    &separator,
+                    &vpn_connect,
+                    &vpn_disconnect,
+                    &vpn_mode,
+                    &separator,
+                    &quit,
+                ],
+            )?;
 
             let mut tray = TrayIconBuilder::with_id("main")
                 .tooltip("demo-tools")
@@ -107,7 +184,16 @@ pub fn run() {
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => show_main_window(app),
-                    "quit" => app.exit(0),
+                    // VPN 的配置与规则都在前端，托盘只负责把动作转发过去
+                    "vpn-connect" | "vpn-disconnect" | "vpn-mode" => {
+                        show_main_window(app);
+                        let _ = app.emit(EVENT_VPN_TRAY, event.id.as_ref().to_string());
+                    }
+                    "quit" => {
+                        // 退出前先请求 worker 收尾，避免留下无人回收的路由
+                        vpn::commands::shutdown(app);
+                        app.exit(0);
+                    }
                     _ => {}
                 })
                 .on_tray_icon_event(|tray, event| {

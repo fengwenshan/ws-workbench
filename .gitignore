@@ -29,6 +29,14 @@ release/
 .pnpm-store/
 pnpm-workspace.yaml
 
+# 应用本地运行时配置（cwd/.config 是 config.rs 的候选路径之一）
+# 里面存着真实 VPN 账号与 profile，等同于机器专属状态，切勿提交
+src-tauri/.config/
+
+# 内置 openconnect 的本地留档压缩包：解出来的内容已经在 openconnect/ 目录里，
+# 留着只会被打进安装包，白白撑大体积
+src-tauri/resources/apps/*.zip
+
 # 编辑器与系统
 .DS_Store
 .idea/

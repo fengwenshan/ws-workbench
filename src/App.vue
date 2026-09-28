@@ -2,14 +2,21 @@
 import { ref, computed, onMounted, onUnmounted } from "vue";
 import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getVersion } from "@tauri-apps/api/app";
 import { useConfig } from "@/composables/useConfig";
 import { usePack } from "@/composables/usePack";
 import { useUpdater } from "@/composables/useUpdater";
+import { useVpn } from "@/composables/useVpn";
+import { useApps } from "@/composables/useApps";
+import { initPlatform, platform } from "@/platform";
+import { MODE_LABELS, type VpnMode } from "@/types/vpn";
 import ProjectList from "@/components/ProjectList.vue";
 import ProjectConfig from "@/components/ProjectConfig.vue";
 import PackProgress from "@/components/PackProgress.vue";
 import LogPanel from "@/components/LogPanel.vue";
+import VpnPanel from "@/components/vpn/VpnPanel.vue";
+import SettingsPanel from "@/components/settings/SettingsPanel.vue";
 
 const {
   config,
@@ -44,6 +51,50 @@ const {
   dismissCurrent,
 } = useUpdater();
 
+// VPN 与项目打包共用同一份 config.json，这里复用 useConfig 的 saveConfig 落盘
+const vpn = useVpn(config, saveConfig);
+
+// 外部应用定位（设置页用），与项目打包、VPN 共用同一套查找结果
+const apps = useApps();
+
+// 一级导航：项目打包 / VPN / 设置
+const activeTab = ref<"projects" | "vpn" | "settings">("projects");
+
+// 平台判定统一走 platform 模块，不再靠 navigator.userAgent 猜
+const isMac = computed(() => platform.is_macos);
+
+// 托盘菜单只负责转发动作，具体行为在这里决定
+let trayUnlisten: UnlistenFn | null = null;
+onMounted(async () => {
+  trayUnlisten = await listen<string>("vpn-tray", async (event) => {
+    activeTab.value = "vpn";
+    switch (event.payload) {
+      case "vpn-connect":
+        await vpn.toggleConnection();
+        break;
+      case "vpn-disconnect":
+        await vpn.disconnect();
+        break;
+      case "vpn-mode": {
+        const profile = vpn.selectedProfile;
+        if (!profile) {
+          vpn.pushLog("warn", "还没有选中 VPN 配置");
+          break;
+        }
+        const next: VpnMode =
+          profile.mode === "customer_first" ? "company_first" : "customer_first";
+        await vpn.setMode(next);
+        vpn.pushLog("info", `分流模式已切换为「${MODE_LABELS[next]}」，断开重连后生效`);
+        break;
+      }
+    }
+  });
+});
+onUnmounted(() => {
+  trayUnlisten?.();
+  trayUnlisten = null;
+});
+
 // 每天 10:00 / 15:00 自动校验更新
 onMounted(startDailyCheck);
 onUnmounted(stopDailyCheck);
@@ -56,10 +107,9 @@ onMounted(async () => {
   } catch (err: any) {
     addLog("warn", `读取版本号失败: ${err}`);
   }
+  // 用后端的编译期平台信息覆盖 userAgent 兜底值
+  await initPlatform();
 });
-
-// macOS 用 Overlay 标题栏：顶部留出 28px 空白给红黄绿按钮，并作为窗口拖动区
-const isMac = navigator.userAgent.includes("Macintosh");
 
 const updateBusy = computed(
   () =>
@@ -328,8 +378,47 @@ async function openOutputDir() {
 <template>
   <div class="app-layout" :class="{ 'mac-overlay-titlebar': isMac }">
     <!-- macOS Overlay 标题栏：顶部这条空白区可拖动窗口，红黄绿按钮浮在它上面 -->
-    <div v-if="isMac" class="titlebar-drag" data-tauri-drag-region></div>
+    <div v-if="isMac" class="titlebar-drag" data-tauri-region data-tauri-drag-region></div>
 
+    <!-- 顶部一级导航 -->
+    <header class="app-header">
+      <nav class="tabs">
+        <button
+          class="tab"
+          :class="{ 'tab-active': activeTab === 'projects' }"
+          @click="activeTab = 'projects'"
+        >
+          项目打包
+        </button>
+        <button
+          class="tab"
+          :class="{ 'tab-active': activeTab === 'vpn' }"
+          @click="activeTab = 'vpn'"
+        >
+          VPN
+          <span v-if="vpn.isConnected" class="tab-badge tab-badge-ok">已连接</span>
+          <span v-else-if="vpn.phaseBusy" class="tab-badge tab-badge-busy">连接中</span>
+        </button>
+        <button
+          class="tab"
+          :class="{ 'tab-active': activeTab === 'settings' }"
+          @click="activeTab = 'settings'"
+        >
+          设置
+          <span v-if="apps.missing.length > 0" class="tab-badge tab-badge-warn">
+            {{ apps.missing.length }} 项未找到
+          </span>
+        </button>
+      </nav>
+      <div class="header-right">
+        <span v-if="vpn.isConnected" class="header-chip">
+          {{ vpn.status.profile_name || "VPN" }} · {{ MODE_LABELS[vpn.status.mode] }}
+        </span>
+      </div>
+    </header>
+
+    <!-- 项目打包页 -->
+    <div v-show="activeTab === 'projects'" class="tab-body tab-body-row">
     <!-- 左侧：项目分组列表 -->
     <aside class="sidebar">
       <ProjectList
@@ -533,14 +622,110 @@ async function openOutputDir() {
         <LogPanel :logs="logs" @clear="clearLogs" />
       </div>
     </main>
+    </div>
+
+    <!-- VPN 页：用 v-show 而不是 v-if，保证切页时连接状态与日志流不中断 -->
+    <div v-show="activeTab === 'vpn'" class="tab-body">
+      <VpnPanel :vpn="vpn" :active="activeTab === 'vpn'" />
+    </div>
+
+    <!-- 设置页 -->
+    <div v-show="activeTab === 'settings'" class="tab-body">
+      <SettingsPanel :apps="apps" />
+    </div>
   </div>
 </template>
 
 <style scoped>
 .app-layout {
   display: flex;
+  flex-direction: column;
   height: 100vh;
 }
+
+/* 顶部一级导航 */
+.app-header {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 0 16px;
+  height: 44px;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-primary);
+}
+.tabs {
+  display: flex;
+  gap: 4px;
+}
+.tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: none;
+  background: transparent;
+  padding: 6px 14px;
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.tab:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.tab-active {
+  background: var(--bg-active);
+  color: var(--text-active);
+  font-weight: 500;
+}
+.tab-badge {
+  font-size: 11px;
+  border-radius: 9px;
+  padding: 1px 7px;
+}
+.tab-badge-ok {
+  color: var(--success);
+  background: rgba(16, 185, 129, 0.12);
+}
+.tab-badge-busy {
+  color: var(--warning);
+  background: rgba(245, 158, 11, 0.12);
+}
+.tab-badge-warn {
+  color: var(--text-secondary);
+  background: var(--bg-tag);
+}
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.header-chip {
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: var(--bg-tag);
+  border-radius: 10px;
+  padding: 2px 10px;
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 页签内容区 */
+.tab-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.tab-body-row {
+  flex-direction: row;
+}
+
 .sidebar {
   width: 240px;
   border-right: 1px solid var(--border-color);
@@ -551,14 +736,14 @@ async function openOutputDir() {
 }
 .main-content {
   flex: 1;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
 }
-/* macOS Overlay 标题栏：左右两栏内容下移 28px，顶部露出可拖拽的空白条 */
-.mac-overlay-titlebar .sidebar,
-.mac-overlay-titlebar .main-content {
-  padding-top: 28px;
+/* macOS Overlay 标题栏：整个导航下移 28px，顶部露出可拖拽的空白条给红黄绿按钮 */
+.mac-overlay-titlebar .app-header {
+  margin-top: 28px;
 }
 /* 顶部拖拽区（透明，仅占 28px，不遮挡下方内容） */
 .titlebar-drag {

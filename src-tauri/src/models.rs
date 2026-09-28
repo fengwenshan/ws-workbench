@@ -65,6 +65,25 @@ pub struct AppConfig {
     pub default_exclude: Vec<String>,
     #[serde(default)]
     pub default_exclude_version: u32,
+    /// VPN 配置列表
+    #[serde(default)]
+    pub vpn_profiles: Vec<crate::vpn::models::VpnProfile>,
+    /// VPN 规则集列表
+    #[serde(default)]
+    pub vpn_rule_sets: Vec<crate::vpn::models::VpnRuleSet>,
+    /// 上次选中的 VPN 配置
+    #[serde(default)]
+    pub vpn_active_profile_id: String,
+    /// 用户在设置页手动指定的应用可执行文件路径（Windows 专有设置）
+    #[serde(default)]
+    pub app_paths: Vec<crate::apps::models::AppPathOverride>,
+    /// 注册免 UAC 计划任务时用的会话目录。
+    ///
+    /// 计划的 `/TR` 把会话目录路径写死了，会话目录一旦回退（用户目录被
+    /// 受控文件夹访问/企业策略挡住），旧任务就作废了。这里记一份，
+    /// 连接时和当前目录比一下即可，不必每次都去查任务定义。
+    #[serde(default)]
+    pub vpn_worker_session_dir: String,
 }
 
 impl Default for AppConfig {
@@ -74,6 +93,11 @@ impl Default for AppConfig {
             projects: vec![],
             default_exclude: default_exclude_rules(),
             default_exclude_version: DEFAULT_EXCLUDE_VERSION,
+            vpn_profiles: vec![],
+            vpn_rule_sets: vec![],
+            vpn_active_profile_id: String::new(),
+            app_paths: vec![],
+            vpn_worker_session_dir: String::new(),
         }
     }
 }

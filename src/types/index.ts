@@ -1,3 +1,5 @@
+import type { VpnProfile, VpnRuleSet } from './vpn'
+
 export interface ProjectConfig {
   id: string
   name: string
@@ -22,6 +24,12 @@ export interface AppConfig {
   projects: ProjectConfig[]
   default_exclude: string[]
   default_exclude_version?: number
+  /** VPN 配置列表 */
+  vpn_profiles: VpnProfile[]
+  /** VPN 规则集列表 */
+  vpn_rule_sets: VpnRuleSet[]
+  /** 上次选中的 VPN 配置 */
+  vpn_active_profile_id: string
 }
 
 export interface PackResult {
@@ -75,3 +83,5 @@ export interface VcsInfo {
   /** 远程仓库地址，未检测到为空字符串 */
   url: string
 }
+
+export * from './vpn'

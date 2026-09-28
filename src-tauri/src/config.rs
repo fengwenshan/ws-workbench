@@ -281,10 +281,9 @@ mod tests {
 
     fn old_config(rules: &[&str], version: u32) -> AppConfig {
         AppConfig {
-            groups: vec![],
-            projects: vec![],
             default_exclude: rules.iter().map(|s| s.to_string()).collect(),
             default_exclude_version: version,
+            ..Default::default()
         }
     }
 

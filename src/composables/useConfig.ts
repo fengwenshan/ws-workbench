@@ -3,14 +3,28 @@ import { invoke } from '@tauri-apps/api/core'
 import type { AppConfig, ProjectConfig, ProjectGroup } from '@/types'
 
 export function useConfig() {
-  const config = ref<AppConfig>({ groups: [], projects: [], default_exclude: [] })
+  const config = ref<AppConfig>({
+    groups: [],
+    projects: [],
+    default_exclude: [],
+    vpn_profiles: [],
+    vpn_rule_sets: [],
+    vpn_active_profile_id: '',
+  })
   const selectedProjectId = ref<string | null>(null)
   const loading = ref(false)
 
   async function loadConfig() {
     loading.value = true
     try {
-      config.value = await invoke<AppConfig>('get_config')
+      const loaded = await invoke<AppConfig>('get_config')
+      // 老版本配置里没有 VPN 字段，这里补齐，避免模板里访问 undefined
+      config.value = {
+        ...loaded,
+        vpn_profiles: loaded.vpn_profiles ?? [],
+        vpn_rule_sets: loaded.vpn_rule_sets ?? [],
+        vpn_active_profile_id: loaded.vpn_active_profile_id ?? '',
+      }
       // 自动选中第一个项目
       if (!selectedProjectId.value) {
         const first = config.value.groups
