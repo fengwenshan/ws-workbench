@@ -1,4 +1,4 @@
-# demo-tools
+# ws-tools
 
 基于 Tauri 2 的桌面工具，把日常交付里的三件事收在一个窗口：项目打包、VPN 连接与分流、运行环境自检。界面是一级三标签 —— 项目打包 / VPN / 设置；关闭窗口不退出应用，常驻系统托盘。
 
@@ -63,7 +63,7 @@ node_modules  node_modules/**   *.zip
 
 提权方式按平台区分：
 
-- Windows：`schtasks /Create /RL HIGHEST /F` 注册计划任务 `DemoToolsVpnWorker`，之后免 UAC；注册失败时回退到 `Start-Process -Verb RunAs`，弹一次系统授权框
+- Windows：`schtasks /Create /RL HIGHEST /F` 注册计划任务 `WsToolsVpnWorker`，之后免 UAC；注册失败时回退到 `Start-Process -Verb RunAs`，弹一次系统授权框
 - macOS：`osascript ... with administrator privileges`
 
 两个进程之间没有管道可用（提权进程拿不到父进程的句柄），IPC 全部靠会话目录里的文件。
@@ -72,7 +72,7 @@ node_modules  node_modules/**   *.zip
 
 下发路由不解析 `netsh` / `route print` 的文本输出，本地化后那套输出会解析失败。Windows 侧用 JScript（cscript）执行脚本配合 PowerShell 的 `Get-NetRoute` / `Get-NetIPAddress` / `Get-NetAdapter` 拿 JSON；macOS 侧用 `route` / `ifconfig` / `netstat`。
 
-生成的 vpnc-script 必须是纯 ASCII：Windows 那份由 cscript 按 ANSI 代码页解码，混入非 ASCII 字节会直接编译失败。脚本里用 `corp-TOOLS` 作为标记行，清理时据此定位自己写入的条目。
+生成的 vpnc-script 必须是纯 ASCII：Windows 那份由 cscript 按 ANSI 代码页解码，混入非 ASCII 字节会直接编译失败。脚本里用 `WS-TOOLS` 作为标记行，清理时据此定位自己写入的条目。
 
 Windows 上的虚拟网卡由 Wintun 驱动提供（`src-tauri/resources/apps/openconnect/wintun.dll`），macOS 用系统自带的 utun。
 
@@ -92,7 +92,7 @@ Windows 上的虚拟网卡由 Wintun 驱动提供（`src-tauri/resources/apps/op
 密码不在命令行里传（进程列表可见），走 stdin 交给 openconnect 的 `--passwd-on-stdin`。落盘前加密：
 
 - Windows：DPAPI，密文形如 `dpapi:<hex>`，解密时带 `CRYPTPROTECT_UI_FORBIDDEN`
-- macOS：钥匙串，密文形如 `keychain:<key>`，服务名 `demo-tools-vpn-<key>`
+- macOS：钥匙串，密文形如 `keychain:<key>`，服务名 `ws-tools-vpn-<key>`
 
 ### 设置
 
@@ -112,7 +112,7 @@ macOS 的应用菜单做了汉化，点 Dock 图标会把窗口重新显示出�
 | --- | --- |
 | 桌面框架 | Tauri 2（`tauri` 开启 `tray-icon`） |
 | 前端 | Vue 3.5 + TypeScript 5.6 + Vite 6 |
-| 后端 | Rust edition 2021，库名 `demo_tools_lib` |
+| 后端 | Rust edition 2021，库名 `ws_tools_lib` |
 | 插件 | dialog、shell、store、updater、process |
 | 关键 crate | `ignore`、`walkdir`、`zip`、`chrono`、`uuid`、`tempfile`、`serde` |
 
@@ -143,7 +143,7 @@ Vite 固定在 8790 端口并开启 `strictPort`，端口被占用会直接失�
 powershell -ExecutionPolicy Bypass -File scripts\dev-restart.ps1
 ```
 
-脚本按仓库路径匹配进程命令行，只结束本仓库的 `demo-tools`、vite、tauri 进程，不误伤其他项目；检测到 `openconnect` 仍在运行会直接退出，避免留下无人回收的路由。
+脚本按仓库路径匹配进程命令行，只结束本仓库的 `ws-tools`、vite、tauri 进程，不误伤其他项目；检测到 `openconnect` 仍在运行会直接退出，避免留下无人回收的路由。
 
 脚本不经过 pnpm，因为本机 PATH 里的 pnpm 来自 TRAE 自带的 corepack 0.32.0，它给 pnpm 12 生成的 shim 指向 `bin/pnpm.cjs`，而 pnpm 12 只提供 `bin/pnpm.mjs`，调用必然 `MODULE_NOT_FOUND`。脚本改为直接调用 `node_modules\.bin\tauri.cmd`，并用 `-c` 把 `beforeDevCommand` 覆盖成 `npm run dev`。另装一份能跑通的 pnpm 12.5.1 也不合适：它会把 `packageManagerDependencies` 和 `@pnpm/exe.*` 写进 `pnpm-lock.yaml`，CI 用的 pnpm 10 读不懂这个格式。
 
@@ -164,7 +164,7 @@ node scripts/release.mjs --target x86_64-pc-windows-msvc   # 交叉编译 Window
 
 | 变量 | 用途 |
 | --- | --- |
-| `TAURI_SIGNING_PRIVATE_KEY` | 更新签名私钥内容，不设时回退读 `~/.tauri/demo-tools.key` |
+| `TAURI_SIGNING_PRIVATE_KEY` | 更新签名私钥内容，不设时回退读 `~/.tauri/ws-tools.key` |
 | `GITEE_TOKEN` | Gitee 私人令牌（权限含 projects），创建发行版与上传附件必需 |
 | `GITHUB_TOKEN` | 把安装包镜像到 GitHub 发行版，不设则跳过镜像 |
 | `TAURI_BUNDLES=app` | 只打 app、跳过 Tauri 的 dmg 打包脚本，受限环境配 `--dmg` 使用 |
@@ -183,27 +183,27 @@ node scripts/release.mjs --target x86_64-pc-windows-msvc   # 交叉编译 Window
 
 ## 自动更新
 
-更新端点为 `https://gitee.com/feng_wenshan/demo-tools/raw/main/updates/latest.json`，用 minisign 公钥（指纹 `9CB4E4B1ECEF3353`）校验签名。之所以只走 Gitee：GitHub 的 `raw.githubusercontent.com` 在目标网络下被拦，把地址换过去已装客户端会取不到更新。
+更新端点为 `https://gitee.com/feng_wenshan/ws-tools/raw/main/updates/latest.json`，用 minisign 公钥（指纹 `9CB4E4B1ECEF3353`）校验签名。之所以只走 Gitee：GitHub 的 `raw.githubusercontent.com` 在目标网络下被拦，把地址换过去已装客户端会取不到更新。
 
 `updates/latest.json` 的结构：
 
 ```json
 {
   "version": "1.0.14",
-  "notes": "demo-tools v1.0.14",
+  "notes": "ws-tools v1.0.14",
   "pub_date": "2026-09-17T15:38:15Z",
   "platforms": {
-    "windows-x86_64": { "signature": "...", "url": "https://gitee.com/.../demo-tools-setup.exe" },
-    "darwin-aarch64": { "signature": "...", "url": "https://gitee.com/.../demo-tools.app.tar.gz" }
+    "windows-x86_64": { "signature": "...", "url": "https://gitee.com/.../ws-tools-setup.exe" },
+    "darwin-aarch64": { "signature": "...", "url": "https://gitee.com/.../ws-tools.app.tar.gz" }
   }
 }
 ```
 
-客户端每天 10:00 与 15:00 各校验一次；用户选择忽略的版本记在 localStorage 的 `demo-tools:dismissed-update-version` 下，不再重复提示。
+客户端每天 10:00 与 15:00 各校验一次；用户选择忽略的版本记在 localStorage 的 `ws-tools:dismissed-update-version` 下，不再重复提示。
 
 ## 配置与数据
 
-配置走 `tauri-plugin-store`，文件 `config.json`，键名 `app_config`。Store 不可用时按以下顺序找可写目录，逐个做真实写入探测：`app_data_dir` → `app_config_dir` → `~/.demo-tools` → `$HOME/.demo-tools` → `$TMPDIR/demo-tools` → `/tmp/demo-tools` → `cwd/.config`；全部失败则退回进程内存，此时重启会丢数据。
+配置走 `tauri-plugin-store`，文件 `config.json`，键名 `app_config`。Store 不可用时按以下顺序找可写目录，逐个做真实写入探测：`app_data_dir` → `app_config_dir` → `~/.ws-tools` → `$HOME/.ws-tools` → `$TMPDIR/ws-tools` → `/tmp/ws-tools` → `cwd/.config`；全部失败则退回进程内存，此时重启会丢数据。
 
 加载时的迁移：旧版顶层 `projects` 字段收进「默认分组」；默认排除规则补齐到最新版本。
 

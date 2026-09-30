@@ -8,7 +8,7 @@
 //! 所以一切状态通过会话目录里的文件回传。
 
 use std::io::{BufRead, BufReader, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
@@ -47,6 +47,14 @@ struct Worker {
     status: VpnStatus,
     snapshot: NetworkSnapshot,
     applied: Vec<AppliedRouteRecord>,
+    /// 「以公司网络为主」时默认路由已被脚本交给隧道，断开时必须交还
+    default_route_taken: bool,
+    /// 脚本是否已把 VPN DNS 写到本机（macOS 走 scutil/networksetup），断开时同样要还原
+    dns_applied: bool,
+    /// 脚本下发 DNS 时用的物理网络服务名，断开的兜底还原要用
+    dns_service: String,
+    /// 连接时解析出的 VPN 服务器 IP，用来清理脚本残留的防环主机路由
+    vpn_server_ips: Vec<String>,
     /// 最近几行输出，失败时作为诊断信息
     tail: Vec<String>,
     /// script.log 已经读过的行数（脚本的 stdout 接不到管道，只能靠这个文件回传）
@@ -83,6 +91,10 @@ impl Worker {
             status,
             snapshot: NetworkSnapshot::default(),
             applied: Vec::new(),
+            default_route_taken: false,
+            dns_applied: false,
+            dns_service: String::new(),
+            vpn_server_ips: Vec::new(),
             tail: Vec::new(),
             script_log_lines: 0,
             learn_report,
@@ -141,6 +153,12 @@ impl Worker {
                         .collect();
                 }
                 "done" => {}
+                // 脚本接管/交还默认路由的回报；断开时据此决定要不要还原
+                "default_route" => self.default_route_taken = value == "vpn",
+                // 脚本把 VPN DNS 下发到本机了；断开时据此还原 DNS（脚本 disconnect 分支
+                // 在 SIGKILL 下不会执行，只能靠这里兜底）
+                "dns_applied" => self.dns_applied = true,
+                "dns_service" => self.dns_service = value,
                 _ => {}
             }
         }
@@ -342,7 +360,8 @@ impl Worker {
                 }
             }
             VpnMode::CompanyFirst => {
-                // 默认路由已经由脚本交给 VPN，这里只需要把客户侧网段抢回本地
+                // 默认路由已经由脚本交给隧道（company_first 会接管 default），
+                // 这里只需要把客户侧网段抢回本地
                 let target = self.local_target();
                 let mut list = self.request.exclude_rules.clone();
                 for subnet in self.snapshot.local_subnets.clone() {
@@ -416,7 +435,7 @@ impl Worker {
 
     /// 隧道本身和本程序发起的连接都不是分流目标，采样时直接排除
     fn self_process_names() -> Vec<String> {
-        ["openconnect.exe", "openconnect", "demo-tools.exe", "demo-tools"]
+        ["openconnect.exe", "openconnect", "ws-tools.exe", "ws-tools"]
             .iter()
             .map(|name| name.to_string())
             .collect()
@@ -514,7 +533,7 @@ impl Worker {
         }
     }
 
-    /// 回收本程序添加的路由
+    /// 回收本程序添加的路由，并把默认路由交还给连接前的物理网关
     fn cleanup_routes(&mut self) {
         let records: Vec<AppliedRouteRecord> = self.applied.drain(..).collect();
         for record in records {
@@ -525,6 +544,34 @@ impl Worker {
             if let Err(e) = result {
                 self.log(&format!("[清理] {} 回收失败: {}", record.cidr, e));
             }
+        }
+        // 停止隧道走的是 SIGKILL，脚本的 disconnect 分支不会执行，
+        // 默认路由只能在这里交还，否则断开后整机失去默认路由
+        if self.default_route_taken {
+            self.default_route_taken = false;
+            let gateway = self.snapshot.default_gateway.clone();
+            match route::restore_default_route(&gateway) {
+                Ok(()) => self.log("[清理] 默认路由已交还给物理网关"),
+                Err(e) => self.log(&format!("[清理] 默认路由还原失败: {}", e)),
+            }
+        }
+        // 脚本给 VPN 服务器加的防环主机路由不在这份记录里，SIGKILL 停止时脚本的
+        // disconnect 分支不会执行，它会一直残留并可能让下次连接选源失败，这里一并清掉。
+        for ip in std::mem::take(&mut self.vpn_server_ips) {
+            if let Err(e) = route::delete_host_route(&ip) {
+                self.log(&format!("[清理] 服务器主机路由 {} 回收失败: {}", ip, e));
+            }
+        }
+        // DNS 同理：脚本的 disconnect 分支在 SIGKILL 下不会执行，
+        // 这里必须兜底还原，否则断开后 /etc/resolv.conf 还指着内网 DNS，
+        // 上不了网也解析不出公网域名。默认路由已交还，正好能问到物理网络服务名。
+        if self.dns_applied {
+            self.dns_applied = false;
+            let dir = self.session.dir.clone();
+            let service = self.dns_service.clone();
+            let tun = self.status.tun_dev.clone();
+            script::restore_vpn_dns(&dir, &service, &tun);
+            self.log("[清理] VPN DNS 已还原");
         }
         self.status.routes.clear();
     }
@@ -556,7 +603,17 @@ impl Worker {
             if route::interface_is_vpn(&info) {
                 continue;
             }
-            if info.index != snapshot.default_if_index && snapshot.default_if_index != 0 {
+            // Windows 拿得到接口索引，直接比索引即可；macOS 的索引恒为 0，
+            // 只能退化成比接口名——否则 lo0 的 127.0.0.0/8 也会被当成
+            // 「本地直连网段」写进直连例外，路由守护就会一直去动回环路由。
+            let on_default_interface = if snapshot.default_if_index != 0 {
+                info.index == snapshot.default_if_index
+            } else if !snapshot.default_if_alias.is_empty() {
+                info.alias == snapshot.default_if_alias
+            } else {
+                true
+            };
+            if !on_default_interface {
                 continue;
             }
             if let Some(subnet) = route::subnet_of(&info.ip, info.prefix_len) {
@@ -574,16 +631,42 @@ impl Worker {
 
     // ======================= openconnect 主通道 =======================
 
+    /// 清掉上一轮会话可能残留的「VPN 服务器防环主机路由」。
+    ///
+    /// 脚本会给服务器本身加一条主机路由避免环路，而 worker 停隧道走的是 SIGKILL，
+    /// 脚本的 disconnect 分支不会执行，这条路由就会残留。残留路由绑定的源地址在
+    /// 物理网卡地址变化后会失效，内核发起连接时选不到本地地址，直接以
+    /// `Can't assign requested address` 失败——连最初的 TCP 握手都做不了。
+    /// 所以必须在拉起 openconnect *之前* 先按解析出的服务器 IP 自愈一次。
+    fn clear_stale_server_routes(&mut self) {
+        let ips = resolve_server_ips(&self.request.server);
+        self.vpn_server_ips = ips.clone();
+        if ips.is_empty() {
+            self.log("[清理] 未能解析 VPN 服务器地址，跳过旧主机路由清理");
+            return;
+        }
+        for ip in &ips {
+            match route::delete_host_route(ip) {
+                Ok(()) => {}
+                Err(e) => self.log(&format!("[清理] 旧服务器主机路由 {} 清理失败: {}", ip, e)),
+            }
+        }
+        self.log(&format!(
+            "[清理] 已刷新 VPN 服务器主机路由 {}，避免残留路由导致选源失败",
+            ips.join(", ")
+        ));
+    }
+
     fn connect_openconnect(&mut self) -> Result<(Child, Vec<String>), String> {
+        self.clear_stale_server_routes();
         let (file_name, content) = script::generate(&script::ScriptContext {
             session_dir: &self.session.dir,
             mode: self.request.mode,
             use_vpn_dns: self.request.use_vpn_dns,
             original_gateway: &self.snapshot.default_gateway,
         });
-        let script_path = self.session.script_dir().join(file_name);
-        std::fs::write(&script_path, content)
-            .map_err(|e| format!("写入路由脚本失败 {}: {}", script_path.display(), e))?;
+        let script_path = script_path_for_openconnect(&self.session.script_dir(), file_name)?;
+        write_script_file(&script_path, &content)?;
         self.log(&format!("[脚本] 已生成 {}", script_path.display()));
 
         let mut request = self.request.clone();
@@ -632,12 +715,22 @@ impl Worker {
                 if let Some(raw) = self.script_failure() {
                     let _ = child.kill();
                     let _ = child.wait();
+                    // 各平台的脚本引擎完全不同：Windows 走 cscript/JScript，类 Unix 走
+                    // /bin/sh。排障提示必须跟着平台走，否则 macOS 上看到「Windows
+                    // Script Host」只会把人带偏。Windows 文案保持原样不动。
+                    #[cfg(target_os = "windows")]
+                    let hint = "常见原因是 Windows Script Host（cscript）被杀软拦截或系统策略禁用，\
+                                可先确认 `cscript //?` 能正常运行；";
+                    #[cfg(not(target_os = "windows"))]
+                    let hint = "常见原因是脚本路径被 openconnect 交给 /bin/sh 时按空格拆了词\
+                                （`--script` 的值在它眼里是一条 shell 命令行），本程序已把脚本\
+                                改放到不含空格的目录来规避；若仍失败，再排查脚本可执行位或 \
+                                /bin/sh 是否被安全策略拦截；";
                     let reason = format!(
                         "路由脚本执行失败，隧道无法完成配置。openconnect 的原话：{}\n\
-                         常见原因是 Windows Script Host（cscript）被杀软拦截或系统策略禁用，\
-                         可先确认 `cscript //?` 能正常运行；脚本本身由本程序生成，\
+                         {}脚本本身由本程序生成，\
                          如需排查请把会话目录里的 worker.log 与 script.log 一并提供。",
-                        raw
+                        raw, hint
                     );
                     return self.fail(&reason);
                 }
@@ -853,9 +946,114 @@ pub fn run(session_dir: &Path) -> i32 {
     code
 }
 
+/// 把 `host:port` 形式的服务器地址解析成 IPv4 列表。
+///
+/// 只做 IPv4：脚本加的防环主机路由、以及 `route -host` 的清理都只认 IPv4 地址；
+/// 解析不出来（DNS 不通、地址非法）就返回空列表，让调用方跳过清理而不是报错。
+fn resolve_server_ips(server: &str) -> Vec<String> {
+    let host = match server.rsplit_once(':') {
+        Some((host, port)) if port.chars().all(|c| c.is_ascii_digit()) => host,
+        _ => server,
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    if host.is_empty() {
+        return Vec::new();
+    }
+
+    use std::net::{IpAddr, ToSocketAddrs};
+    let mut out: Vec<String> = Vec::new();
+    if let Ok(addrs) = (host, 0u16).to_socket_addrs() {
+        for addr in addrs {
+            if let IpAddr::V4(v4) = addr.ip() {
+                let text = v4.to_string();
+                if !out.contains(&text) {
+                    out.push(text);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// 给 openconnect 用的脚本路径：路径里含空格时改放到不含空格的目录。
+///
+/// openconnect 执行 `--script` 的方式是「把整条值当成一条 shell 命令行交给 /bin/sh」
+/// （`openconnect --help` 原文即 "Shell command line for using a vpnc-compatible
+/// config script"），因此路径里只要有一个空格就会被 /bin/sh 拆成两个词，现场表现：
+///
+/// ```text
+/// /bin/sh: /Users/xxx/Library/Application: is a directory
+/// Script '…/vpnc-script.sh' returned error 126
+/// ```
+///
+/// macOS 的会话目录恰好落在 `~/Library/Application Support/…`（必含空格），所以路径
+/// 含空格时把脚本改放到不含空格的临时目录。只搬「脚本文件本身」：脚本写日志用的是
+/// 带引号的 `"$SESSION_DIR/script.log"`，会话目录里的 script.log 位置不变。
+///
+/// Windows 的 openconnect 用 cscript 跑 .js，参数走的是另一条路，保持原样不动。
+fn script_path_for_openconnect(
+    session_script_dir: &Path,
+    file_name: &str,
+) -> Result<PathBuf, String> {
+    #[cfg(not(target_os = "windows"))]
+    {
+        if session_script_dir.to_string_lossy().contains(' ') {
+            let dir = std::env::temp_dir()
+                .join(crate::vpn::APP_DIR_NAME)
+                .join(crate::vpn::session::SCRIPT_DIR);
+            std::fs::create_dir_all(&dir)
+                .map_err(|e| format!("创建脚本目录失败 {}: {}", dir.display(), e))?;
+            return Ok(dir.join(file_name));
+        }
+    }
+    Ok(session_script_dir.join(file_name))
+}
+
+/// 写出 openconnect 的路由脚本，并确保它有可执行位。
+///
+/// openconnect 把 `--script` 的值当成一条 shell 命令行交给 `/bin/sh` 执行，脚本最终是被
+/// `/bin/sh` 按路径 exec 的：少了可执行位就会得到 `Permission denied` 与
+/// `returned error 126`。这与「路径含空格被 /bin/sh 拆词」是两类不同成因的 126，
+/// 后者在 `script_path_for_openconnect` 里规避。Windows 下由 cscript 解释执行，
+/// 不存在这个位，保持原样。
+fn write_script_file(path: &Path, content: &str) -> Result<(), String> {
+    std::fs::write(path, content)
+        .map_err(|e| format!("写入路由脚本失败 {}: {}", path.display(), e))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perm = std::fs::metadata(path)
+            .map_err(|e| format!("读取路由脚本权限失败 {}: {}", path.display(), e))?
+            .permissions();
+        perm.set_mode(0o755);
+        std::fs::set_permissions(path, perm)
+            .map_err(|e| format!("设置路由脚本可执行位失败 {}: {}", path.display(), e))?;
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn generated_script_gets_executable_bit() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("ws-worker-script-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("vpnc-script.sh");
+        write_script_file(&path, "#!/bin/sh\necho hi\n").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_ne!(
+            mode & 0o111,
+            0,
+            "路由脚本必须带可执行位，否则 openconnect 会报 error 126: {:o}",
+            mode
+        );
+    }
 
     #[test]
     fn next_hop_uses_first_usable_address() {
@@ -886,7 +1084,7 @@ mod tests {
 
     #[test]
     fn tail_summary_picks_error_lines() {
-        let session = VpnSession::new(std::env::temp_dir().join("corp-worker-test"));
+        let session = VpnSession::new(std::env::temp_dir().join("ws-worker-test"));
         let request = VpnRequest {
             profile_id: "p".into(),
             profile_name: "n".into(),
@@ -914,7 +1112,7 @@ mod tests {
 
     #[test]
     fn tunnel_ready_requires_ip_and_interface() {
-        let session = VpnSession::new(std::env::temp_dir().join("corp-worker-test2"));
+        let session = VpnSession::new(std::env::temp_dir().join("ws-worker-test2"));
         let request = VpnRequest {
             profile_id: "p".into(),
             profile_name: "n".into(),
@@ -944,7 +1142,7 @@ mod tests {
 
     #[test]
     fn tun_setup_failure_gets_actionable_hint() {
-        let session = VpnSession::new(std::env::temp_dir().join("corp-worker-test3"));
+        let session = VpnSession::new(std::env::temp_dir().join("ws-worker-test3"));
         let request = VpnRequest {
             profile_id: "p".into(),
             profile_name: "n".into(),
@@ -983,5 +1181,37 @@ mod tests {
         );
         let hint = worker.tun_setup_hint().expect("权限不足也该给出提示");
         assert!(hint.contains("管理员"), "实际: {}", hint);
+    }
+
+    #[test]
+    #[cfg(not(target_os = "windows"))]
+    fn script_path_moves_out_of_spaced_dir() {
+        // 复刻现场：会话目录落在 ~/Library/Application Support/…，必含空格。
+        // openconnect 把 --script 交给 /bin/sh，空格会被拆成两个词：
+        //   /bin/sh: /Users/xxx/Library/Application: is a directory
+        //   Script '…/vpnc-script.sh' returned error 126
+        let spaced = PathBuf::from("/Users/someone/Library/Application Support/com.ws.tools/vpn/script");
+        let path = script_path_for_openconnect(&spaced, "vpnc-script.sh").unwrap();
+        assert!(
+            !path.to_string_lossy().contains(' '),
+            "含空格的脚本路径必须被搬走，实际: {}",
+            path.display()
+        );
+        assert_eq!(
+            path.file_name().unwrap().to_string_lossy(),
+            "vpnc-script.sh",
+            "文件名要保持不变"
+        );
+    }
+
+    #[test]
+    fn script_path_keeps_unspaced_dir() {
+        let dir = PathBuf::from("/tmp/ws-no-space/script");
+        let path = script_path_for_openconnect(&dir, "vpnc-script.sh").unwrap();
+        assert_eq!(
+            path,
+            dir.join("vpnc-script.sh"),
+            "不含空格的路径原样返回，不做无谓搬迁"
+        );
     }
 }

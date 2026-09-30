@@ -309,7 +309,7 @@ mod tests {
 
     fn temp_session(name: &str) -> VpnSession {
         let dir = std::env::temp_dir().join(format!(
-            "corp-vpn-test-{}-{}",
+            "ws-vpn-test-{}-{}",
             name,
             std::process::id()
         ));
@@ -336,7 +336,7 @@ mod tests {
             learn: false,
             extra_args: vec![],
             script_path: r"C:\session\script\vpnc-script-win.js".into(),
-            hook_exe: r"C:\app\demo-tools.exe".into(),
+            hook_exe: r"C:\app\ws-tools.exe".into(),
             created_at: "2026-01-01T00:00:00Z".into(),
         }
     }

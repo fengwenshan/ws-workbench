@@ -1,4 +1,4 @@
-﻿# 重启开发环境：结束旧的 demo-tools / vite / tauri dev 进程，再重新拉起一份。
+﻿# 重启开发环境：结束旧的 ws-tools / vite / tauri dev 进程，再重新拉起一份。
 #
 # 用法：
 #   powershell -ExecutionPolicy Bypass -File scripts\dev-restart.ps1
@@ -32,7 +32,7 @@ if (-not (Test-Path $tauri)) {
 
 # tauri.conf.json 里 beforeDevCommand 是 `pnpm dev`，本机 pnpm 不可用，覆盖成 npm。
 # 不能用 Set-Content -Encoding UTF8：PS 5.1 会写入 BOM，tauri 的 JSON 解析器不接受开头的 BOM。
-$override = Join-Path $env:TEMP 'demo-tools-dev-override.json'
+$override = Join-Path $env:TEMP 'ws-tools-dev-override.json'
 [System.IO.File]::WriteAllText($override, '{"build":{"beforeDevCommand":"npm run dev"}}')
 
 # ---------- 2. 前置检查 ----------
@@ -45,7 +45,7 @@ if (Get-Process openconnect -ErrorAction SilentlyContinue) {
 $escapedRoot = [regex]::Escape($root)
 $stale = New-Object System.Collections.Generic.List[int]
 
-Get-Process demo-tools -ErrorAction SilentlyContinue | ForEach-Object { $stale.Add($_.Id) }
+Get-Process ws-tools -ErrorAction SilentlyContinue | ForEach-Object { $stale.Add($_.Id) }
 
 Get-CimInstance Win32_Process -Filter "Name = 'node.exe' OR Name = 'cargo.exe'" -ErrorAction SilentlyContinue |
     Where-Object { $_.CommandLine -and $_.CommandLine -match $escapedRoot -and $_.CommandLine -match 'vite|tauri' } |

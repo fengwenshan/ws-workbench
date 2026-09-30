@@ -14,18 +14,26 @@ const emit = defineEmits<{
   remove: []
 }>()
 
-const passwordInput = ref('')
+const passwordInput = ref(props.profile.password)
 const showPassword = ref(false)
 const showAdvanced = ref(false)
 const passwordSaved = ref(false)
 
-// 切换配置时清空密码输入框与提示
+// 切换配置时把该配置已保存的密码回填到输入框（默认遮蔽显示）
 watch(
   () => props.profile.id,
   () => {
-    passwordInput.value = ''
+    passwordInput.value = props.profile.password
     passwordSaved.value = false
     showPassword.value = false
+  },
+)
+
+// 与已保存密码保持同步（保存成功、外部刷新后都回到真实值）
+watch(
+  () => props.profile.password,
+  (value) => {
+    passwordInput.value = value
   },
 )
 
@@ -35,7 +43,6 @@ function savePassword() {
   const plain = passwordInput.value
   if (!plain) return
   emit('save-password', plain)
-  passwordInput.value = ''
   passwordSaved.value = true
   setTimeout(() => (passwordSaved.value = false), 2500)
 }
@@ -98,7 +105,7 @@ const PROTOCOLS = ['anyconnect', 'nc', 'gp', 'pulse', 'f5', 'fortinet', 'array']
             class="form-input"
             :type="showPassword ? 'text' : 'password'"
             v-model="passwordInput"
-            :placeholder="hasPassword ? '留空表示不修改' : '填写后点右侧保存'"
+            placeholder="填写后点右侧保存"
             spellcheck="false"
             @keydown.enter="savePassword"
           />
@@ -125,7 +132,7 @@ const PROTOCOLS = ['anyconnect', 'nc', 'gp', 'pulse', 'f5', 'fortinet', 'array']
           :key="mode"
           class="mode-card"
           :class="{ 'mode-card-active': profile.mode === mode }"
-          @click="emit('update', { mode })"
+          @click="emit('update', mode === 'company_first' ? { mode, use_vpn_dns: true } : { mode })"
         >
           <strong>{{ MODE_LABELS[mode] }}</strong>
           <span>{{ MODE_DESCRIPTIONS[mode] }}</span>
@@ -158,12 +165,17 @@ const PROTOCOLS = ['anyconnect', 'nc', 'gp', 'pulse', 'f5', 'fortinet', 'array']
       <label class="check-row">
         <input
           type="checkbox"
-          :checked="profile.use_vpn_dns"
+          :checked="profile.mode === 'company_first' || profile.use_vpn_dns"
+          :disabled="profile.mode === 'company_first'"
           @change="emit('update', { use_vpn_dns: ($event.target as HTMLInputElement).checked })"
         />
         <span>
           使用服务端下发的 DNS
-          <em>
+          <em v-if="profile.mode === 'company_first'">
+            「以公司网络为主」模式下默认路由已交给隧道，解析必须走公司 DNS，
+            公司内网域名才解析得出来，所以这里固定开启。
+          </em>
+          <em v-else>
             开启后所有域名解析都优先走公司 DNS（本程序会把 VPN 网卡的跃点数降低）；
             关闭则保持客户环境 DNS 不变，公司内网域名可能解析不了。
           </em>

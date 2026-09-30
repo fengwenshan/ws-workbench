@@ -974,7 +974,7 @@ mod tests {
         write_file(src.path(), "中文目录/中文文件.js", "var a=1;");
 
         let out_parent = tempfile::tempdir().unwrap();
-        let output_dir = out_parent.path().join("corp-dist");
+        let output_dir = out_parent.path().join("ws-dist");
         let project = make_project(src.path(), &output_dir);
 
         let result = pack_to_zip_inner(None, &project, &[]).unwrap();
@@ -986,7 +986,7 @@ mod tests {
         // 名字仍是 UTF-8 字节
         let name_len = read_u16(&bytes, 26);
         let name = std::str::from_utf8(&bytes[30..30 + name_len]).unwrap();
-        assert_eq!(name, "corp-dist/中文目录/中文文件.js");
+        assert_eq!(name, "ws-dist/中文目录/中文文件.js");
 
         // 本地文件头与中央目录都要置 UTF-8 标志位
         assert_ne!(

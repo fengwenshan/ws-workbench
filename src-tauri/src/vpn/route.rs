@@ -1,4 +1,4 @@
-﻿//! 路由表操作
+//! 路由表操作
 //!
 //! 设计要点：
 //! - Windows 侧一律通过 PowerShell 获取 **JSON** 结果。中文系统下 `route print` 和
@@ -10,6 +10,15 @@
 //! - macOS 没有「接口索引」概念，用接口名（utunN / en0），所以统一抽象成 `RouteTarget`。
 
 use serde::Deserialize;
+
+/// macOS 上 `route` 命令在 `/sbin/route`，**不在** `/usr/sbin/route`。
+///
+/// 现场教训：路径写成 `/usr/sbin/route` 时进程根本起不来（ENOENT），
+/// 会同时表现成两条互相掩盖的症状——
+/// 1. 读不到默认路由，快照里出现「未找到可用的物理默认路由」；
+/// 2. 下发分流路由时报 `route -n add ... 失败: 启动失败: No such file or directory`。
+#[cfg(target_os = "macos")]
+const MACOS_ROUTE_BIN: &str = "/sbin/route";
 
 // ============================== 数据结构 ==============================
 //
@@ -314,7 +323,7 @@ pub fn list_default_routes() -> Result<Vec<DefaultRoute>, String> {
         use std::time::Duration;
 
         let (text, ok) = run_with_timeout(
-            Path::new("/usr/sbin/route"),
+            Path::new(MACOS_ROUTE_BIN),
             &["-n", "get", "default"],
             Duration::from_secs(10),
         );
@@ -494,6 +503,65 @@ pub fn delete_route(cidr: &str, target: &RouteTarget) -> Result<(), String> {
     }
 }
 
+/// 删除一条主机路由（/32）。
+///
+/// 专门用来清理脚本给 VPN 服务器加的防环主机路由：worker 停隧道走的是 SIGKILL，
+/// 脚本的 disconnect 分支不会执行，这条主机路由会一直残留。残留路由绑定的源地址
+/// 在物理网卡地址变化后可能失效，内核发起连接时选不到本地地址，就会直接以
+/// `Can't assign requested address` 失败——连最初的 TCP 握手都做不了。
+pub fn delete_host_route(ip: &str) -> Result<(), String> {
+    if parse_ipv4(ip).is_none() {
+        return Ok(());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let args = vec![
+            "-n".to_string(),
+            "delete".to_string(),
+            "-host".to_string(),
+            ip.to_string(),
+        ];
+        run_route_macos(&args, &["not in table", "No such process", "no such process"])
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(())
+    }
+}
+
+/// 把默认路由交还给连接前的物理网关。
+///
+/// 「以公司网络为主」模式下脚本会把 `default` 抢给隧道，而 worker 停止隧道走的是
+/// SIGKILL —— openconnect 根本没机会执行脚本的 disconnect 分支，所以必须由 worker
+/// 自己交还。不交还的话断开后整机没有任何默认路由，本地网络和公网会一起断掉。
+pub fn restore_default_route(original_gateway: &str) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        // 隧道网卡消失时系统会带走挂在它上面的默认路由，这里删一次只是兜底，
+        // 删不到就当没这回事，别让「删」的失败挡住后面的「加」。
+        let delete_args = vec!["-n".to_string(), "delete".to_string(), "default".to_string()];
+        let _ = run_route_macos(
+            &delete_args,
+            &["not in table", "No such process", "no such process"],
+        );
+        if original_gateway.is_empty() {
+            return Ok(());
+        }
+        let add_args = vec![
+            "-n".to_string(),
+            "add".to_string(),
+            "default".to_string(),
+            original_gateway.to_string(),
+        ];
+        run_route_macos(&add_args, &["File exists"])
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = original_gateway;
+        Ok(())
+    }
+}
+
 /// `ensure_route` 的结果：区分「新建」与「只是调了跃点数」，
 /// 断开时前者要删掉，后者只需把跃点数还原，避免误删系统自动生成的直连路由。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -606,16 +674,66 @@ pub fn route_exists(cidr: &str, target: &RouteTarget) -> Result<bool, String> {
             &["-rn", "-f", "inet"],
             Duration::from_secs(15),
         );
-        let (network, _) = parse_cidr(&cidr)?;
-        // netstat 里 10.0.0.0/8 可能显示成 10 或 10.0.0.0，用网络地址前缀做宽松匹配
-        let dotted = format_ipv4(network);
-        Ok(text.contains(&dotted))
+        let (network, prefix) = parse_cidr(&cidr)?;
+        // 必须逐行取「目标」列再解析，不能拿整段文本做子串匹配：
+        // 字符串比对在 netstat 的缩写形式下永远不成立（见 parse_netstat_destination）。
+        Ok(text.lines().any(|line| {
+            let token = match line.split_whitespace().next() {
+                Some(token) => token,
+                None => return false,
+            };
+            if token == "default" {
+                return false;
+            }
+            matches!(parse_netstat_destination(token), Some(parsed) if parsed == (network, prefix))
+        }))
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         let _ = (cidr, target);
         Ok(true)
     }
+}
+
+/// 解析 `netstat -rn -f inet` 的目标列，返回 (网络地址, 前缀长度)。
+///
+/// macOS 的 netstat 会省略尾部为 0 的八位组，并且只在「非 8/16/24 边界」时才
+/// 追加 `/前缀`，现场实测：
+/// - `192.168.1.0/24` → `192.168.1`
+/// - `127.0.0.0/8`    → `127`
+/// - `169.254.0.0/16` → `169.254`
+/// - `224.0.0.0/4`    → `224.0.0/4`
+/// - `192.168.1.1/32` → `192.168.1.1/32`
+///
+/// 直接拿 `192.168.1.0` 去 `contains` 会一条也匹配不上，路由守护因此每 15 秒
+/// 重下一次路由（日志刷屏 + `File exists`）。这里按缩写规则反推回网络地址。
+#[cfg(target_os = "macos")]
+fn parse_netstat_destination(token: &str) -> Option<(u32, u8)> {
+    let (addr_text, prefix) = match token.split_once('/') {
+        Some((addr, prefix)) => (addr, prefix.trim().parse::<u8>().ok()?),
+        None => {
+            let prefix = match token.split('.').count() {
+                1 => 8,
+                2 => 16,
+                3 => 24,
+                4 => 32,
+                _ => return None,
+            };
+            (token, prefix)
+        }
+    };
+    if prefix > 32 {
+        return None;
+    }
+    let mut octets: Vec<&str> = addr_text.split('.').collect();
+    if octets.len() > 4 {
+        return None;
+    }
+    while octets.len() < 4 {
+        octets.push("0");
+    }
+    let ip = parse_ipv4(&octets.join("."))?;
+    Some((ip & prefix_to_mask(prefix), prefix))
 }
 
 #[cfg(target_os = "macos")]
@@ -626,7 +744,7 @@ fn run_route_macos(args: &[String], tolerated: &[&str]) -> Result<(), String> {
 
     let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     let (text, ok) = run_with_timeout(
-        Path::new("/usr/sbin/route"),
+        Path::new(MACOS_ROUTE_BIN),
         &refs,
         Duration::from_secs(15),
     );
@@ -933,5 +1051,88 @@ mod tests {
         let target = RouteTarget::new(0, "", "0.0.0.0");
         let result = route_exists("127.0.0.0/8", &target);
         assert!(result.is_ok(), "route_exists 不该报错: {:?}", result.err());
+    }
+
+    // macOS 的 netstat 会把 192.168.1.0/24 印成 `192.168.1`、127.0.0.0/8 印成 `127`。
+    // 解析必须按缩写规则还原成网络地址，否则路由守护永远判「路由不存在」而反复重下发。
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn parses_abbreviated_netstat_destinations() {
+        assert_eq!(parse_netstat_destination("127"), Some((0x7f00_0000, 8)));
+        assert_eq!(parse_netstat_destination("192.168.1"), Some((0xc0a8_0100, 24)));
+        assert_eq!(parse_netstat_destination("169.254"), Some((0xa9fe_0000, 16)));
+        assert_eq!(parse_netstat_destination("224.0.0/4"), Some((0xe000_0000, 4)));
+        assert_eq!(parse_netstat_destination("198.51.100/22"), Some((0xc633_6400, 22)));
+        assert_eq!(
+            parse_netstat_destination("192.168.1.1/32"),
+            Some((0xc0a8_0101, 32))
+        );
+        // 表头等非地址目标必须被丢掉
+        assert_eq!(parse_netstat_destination("default"), None);
+        assert_eq!(parse_netstat_destination("Routing"), None);
+        assert_eq!(parse_netstat_destination("Internet:"), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn route_exists_finds_a_route_that_is_really_there() {
+        use crate::process::run_with_timeout;
+        use std::path::Path;
+        use std::time::Duration;
+
+        // 真机集成：本机 netstat 里到底有哪些网段不由测试说了算，所以先读一遍真实路由表，
+        // 挑一条能解析出来的网段，再交给 route_exists 走完整链路（起 netstat -> 解析缩写
+        // -> 比对）确认它认得出来。
+        //
+        // 之前写死 127.0.0.0/8 是错的：本机 netstat 只有 `127.0.0.1` 这条 /32 主机路由，
+        // 并没有 `127`（127.0.0.0/8）网段路由，断言「一定存在」会在真机上误报。
+        let (text, _) = run_with_timeout(
+            Path::new("/usr/sbin/netstat"),
+            &["-rn", "-f", "inet"],
+            Duration::from_secs(15),
+        );
+        let sample = text
+            .lines()
+            .filter_map(|line| line.split_whitespace().next())
+            .filter(|token| *token != "default")
+            .filter_map(parse_netstat_destination)
+            .find(|(_, prefix)| *prefix != 32)
+            .expect("本机 netstat 至少应有一条可解析的网段路由");
+        let (network, prefix) = sample;
+        let cidr = format!("{}/{}", format_ipv4(network), prefix);
+        let target = RouteTarget::new(0, "", "0.0.0.0");
+        assert_eq!(
+            route_exists(&cidr, &target),
+            Ok(true),
+            "从本机路由表里挑出来的 {} 必须能被 route_exists 认出来",
+            cidr
+        );
+    }
+
+    // ===== 真机集成测试（macOS）=====
+    //
+    // 现场教训：`route` 的绝对路径写成 `/usr/sbin/route`（macOS 上该文件并不存在）
+    // 时进程直接起不来（ENOENT），默认路由被读成空，分流路由也全部下发失败，
+    // 但两条症状都不会提示「路径写错了」——只有真实跑一次才能暴露。
+    // 这里在真机上验证：路径确实存在，且能读出一条带接口名的物理默认路由。
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_route_binary_path_exists_and_query_works() {
+        assert!(
+            std::path::Path::new(MACOS_ROUTE_BIN).exists(),
+            "macOS 的 route 命令路径必须是真实存在的文件: {}",
+            MACOS_ROUTE_BIN
+        );
+        let routes = list_default_routes().expect("读取默认路由失败");
+        assert!(
+            !routes.is_empty(),
+            "读不到默认路由，分流规则就拿不到物理出口（现场表现为「未找到可用的物理默认路由」）"
+        );
+        let physical = pick_physical_default(&routes, &[]).expect("应该能挑出物理默认路由");
+        assert!(
+            !physical.alias.is_empty(),
+            "物理默认路由必须带接口名，否则 route add 的 -interface 会是空值"
+        );
     }
 }

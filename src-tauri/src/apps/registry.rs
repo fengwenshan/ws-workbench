@@ -397,7 +397,7 @@ mod tests {
     #[test]
     fn uninstall_install_location_is_searched_for_exe() {
         // 这里用一个真实存在的临时目录，验证 InstallLocation 分支能落地
-        let dir = std::env::temp_dir().join(format!("corp-apps-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("ws-apps-test-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let exe = dir.join("openconnect.exe");
         std::fs::write(&exe, b"stub").unwrap();
@@ -485,7 +485,7 @@ mod tests {
     /// 必须能从 DisplayIcon 的父目录反推出安装位置。
     #[test]
     fn finds_directory_from_display_icon_parent() {
-        let root = std::env::temp_dir().join(format!("corp-ocdir-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("ws-ocdir-{}", std::process::id()));
         let dir = root.join("openconnect-9.21");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("openconnect.exe"), b"stub").unwrap();
@@ -518,7 +518,7 @@ mod tests {
     /// DisplayIcon 父目录里如果真有命令行程序，也应该被找到
     #[test]
     fn finds_cli_beside_display_icon() {
-        let root = std::env::temp_dir().join(format!("corp-ocbeside-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("ws-ocbeside-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("openconnect-gui.exe"), b"stub").unwrap();
         std::fs::write(root.join("openconnect.exe"), b"stub").unwrap();

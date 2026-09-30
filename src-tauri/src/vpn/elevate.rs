@@ -1,4 +1,4 @@
-﻿//! 提权启动 worker
+//! 提权启动 worker
 //!
 //! Windows：注册一个 `RL HIGHEST` 的计划任务，之后每次连接只用 `schtasks /Run`
 //! 触发，**不再弹 UAC**。只有首次注册那一下需要管理员确认。
@@ -16,10 +16,15 @@ use std::path::Path;
 use crate::vpn::session::VpnSession;
 
 /// 计划任务名（Windows）
-pub const TASK_NAME: &str = "DemoToolsVpnWorker";
+pub const TASK_NAME: &str = "WsToolsVpnWorker";
 
 /// 提权辅助脚本的退出码文件
 const ELEVATE_EXIT_FILE: &str = "elevate.exit";
+
+/// macOS 提权启动的诊断文件：记录提权 shell 的启动标记与 worker 的 stdout/stderr。
+/// 提权进程拿不到父进程的管道，只能靠它把失败现场落盘。
+#[cfg(target_os = "macos")]
+const ELEVATE_OUT_FILE: &str = "elevate.out";
 
 /// 当前进程是否已经具备管理员权限
 pub fn is_elevated() -> bool {
@@ -281,7 +286,9 @@ pub fn start_worker(
     session: &VpnSession,
     recorded_task_dir: Option<&str>,
 ) -> Result<String, String> {
-    session.clear_stop();
+    // 停止标记的生命周期只由 prepare()（新会话）与 stop_worker()（请求停止）掌控。
+    // 这里再清一次会在「断开还没收尾就重连」时抹掉刚写下的停止请求，
+    // 导致旧 worker 一直不被回收。
     session.ensure()?;
 
     #[cfg(target_os = "windows")]
@@ -314,10 +321,21 @@ pub fn start_worker(
     }
     #[cfg(target_os = "macos")]
     {
+        let out_path = session.dir.join(ELEVATE_OUT_FILE);
+        // 起始标记 + worker 的 stdout/stderr 都追加到同一个文件，方便区分
+        // 「提权 shell 没跑起来」和「shell 跑了但 worker 立刻失败」。
+        //
+        // 刻意不用 nohup：`do shell script` 下没有控制终端，nohup 会因
+        // TIOCNOTTY 失败而报 "can't detach from console: Inappropriate ioctl
+        // for device" 后直接退出，worker 根本没机会启动。
+        // 改用子 shell 后台化 `( ... & )`：子 shell 立刻退出，worker 被 launchd
+        // 收养，三个标准流全部重定向（不依赖终端）即可长期存活。
         let command = format!(
-            "nohup {} --vpn-worker {} > /dev/null 2>&1 &",
-            shell_quote(&exe.to_string_lossy()),
-            shell_quote(&session.dir.to_string_lossy())
+            "echo \"[elevate] uid=$(id -u) at $(date +%H:%M:%S)\" >> {out}; \
+             ( {exe} --vpn-worker {dir} >> {out} 2>&1 < /dev/null & )",
+            out = shell_quote(&out_path.to_string_lossy()),
+            exe = shell_quote(&exe.to_string_lossy()),
+            dir = shell_quote(&session.dir.to_string_lossy()),
         );
         let script = format!(
             "do shell script \"{}\" with administrator privileges",
@@ -328,11 +346,27 @@ pub fn start_worker(
             &["-e", &script],
             std::time::Duration::from_secs(120),
         );
-        if ok {
-            Ok("系统授权".to_string())
-        } else {
-            Err(format!("提权启动失败: {}", text.trim()))
+        if !ok {
+            return Err(format!("提权启动失败: {}", text.trim()));
         }
+
+        // 命令末尾的 `&` 让 root shell 立刻退出 0，所以 osascript 的退出码
+        // 永远为真，不能拿来判定 worker 是否真的起来了。
+        // 改为主动等待 worker 写下首行日志（会话目录已被 prepare 清空过）。
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if session.log_path().exists() {
+                return Ok("系统授权".to_string());
+            }
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        Err(format!(
+            "提权授权已通过，但 worker 未启动，诊断信息见 {}",
+            out_path.display()
+        ))
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
@@ -358,17 +392,17 @@ mod tests {
     #[test]
     fn task_name_is_stable() {
         // 任务名会写进系统计划任务列表，改动需要同步清理旧任务
-        assert_eq!(TASK_NAME, "DemoToolsVpnWorker");
+        assert_eq!(TASK_NAME, "WsToolsVpnWorker");
     }
 
     #[test]
     fn task_create_command_escapes_embedded_quotes() {
         let command = task_create_command(
-            Path::new(r"C:\Program Files\demo-tools\demo-tools.exe"),
-            Path::new(r"C:\Users\demo\AppData\Roaming\com.corp.tools\vpn"),
+            Path::new(r"C:\Program Files\ws-tools\ws-tools.exe"),
+            Path::new(r"C:\Users\demo\AppData\Roaming\com.ws.tools\vpn"),
         );
         // /TR 的值必须用 \" 包住带空格的路径，schtasks 才认得
-        assert!(command.contains(r#"/TR "\"C:\Program Files\demo-tools\demo-tools.exe\" --vpn-worker \"C:\Users\demo\AppData\Roaming\com.corp.tools\vpn\"""#));
+        assert!(command.contains(r#"/TR "\"C:\Program Files\ws-tools\ws-tools.exe\" --vpn-worker \"C:\Users\demo\AppData\Roaming\com.ws.tools\vpn\"""#));
         // 免 UAC 的关键参数
         assert!(command.contains("/RL HIGHEST"));
         assert!(command.contains("/F"));
@@ -377,8 +411,8 @@ mod tests {
     #[test]
     fn worker_launch_command_detaches_from_batch() {
         let command = worker_launch_command(
-            Path::new(r"C:\app\demo-tools.exe"),
-            Path::new(r"C:\Users\demo\AppData\Roaming\com.corp.tools\vpn"),
+            Path::new(r"C:\app\ws-tools.exe"),
+            Path::new(r"C:\Users\demo\AppData\Roaming\com.ws.tools\vpn"),
         );
         // 必须以 start 开头：否则批处理会一直等 worker 退出（整整一个会话）
         assert!(command.starts_with(r#"start "" "#));
@@ -388,22 +422,22 @@ mod tests {
     #[test]
     fn task_definition_matches_only_the_baked_in_directory() {
         // 模拟 schtasks /Query /XML 的真实输出：路径原样出现，引号被转成 &quot;
-        let definition = r#"<Command>"C:\app\demo-tools.exe" --vpn-worker "C:\Users\demo\AppData\Roaming\com.corp.tools\vpn"</Command>"#;
+        let definition = r#"<Command>"C:\app\ws-tools.exe" --vpn-worker "C:\Users\demo\AppData\Roaming\com.ws.tools\vpn"</Command>"#;
 
         // 路径一致 → 可以复用免 UAC 任务
         assert!(definition_mentions_dir(
             definition,
-            Path::new(r"C:\Users\demo\AppData\Roaming\com.corp.tools\vpn")
+            Path::new(r"C:\Users\demo\AppData\Roaming\com.ws.tools\vpn")
         ));
 
         // 会话目录回退到别的盘/别的根 → 必须重新注册，不能复用旧任务
         assert!(!definition_mentions_dir(
             definition,
-            Path::new(r"C:\Users\demo\AppData\Local\com.corp.tools\vpn")
+            Path::new(r"C:\Users\demo\AppData\Local\com.ws.tools\vpn")
         ));
         assert!(!definition_mentions_dir(
             definition,
-            Path::new(r"C:\Users\demo\AppData\Local\Temp\com.corp.tools\vpn")
+            Path::new(r"C:\Users\demo\AppData\Local\Temp\com.ws.tools\vpn")
         ));
     }
 
@@ -420,33 +454,33 @@ mod tests {
     fn recorded_directory_is_compared_case_insensitively() {
         // Windows 上盘符和大小写都不敏感，用户手改过配置也要能对上
         assert!(paths_equal(
-            r"c:\users\demo\appdata\roaming\com.corp.tools\vpn",
-            Path::new(r"C:\Users\demo\AppData\Roaming\com.corp.tools\vpn")
+            r"c:\users\demo\appdata\roaming\com.ws.tools\vpn",
+            Path::new(r"C:\Users\demo\AppData\Roaming\com.ws.tools\vpn")
         ));
         // 尾部斜杠、正反斜杠混用也应视为同一目录
         assert!(paths_equal(
-            "C:/Users/demo/AppData/Roaming/com.corp.tools/vpn/",
-            Path::new(r"C:\Users\demo\AppData\Roaming\com.corp.tools\vpn")
+            "C:/Users/demo/AppData/Roaming/com.ws.tools/vpn/",
+            Path::new(r"C:\Users\demo\AppData\Roaming\com.ws.tools\vpn")
         ));
         // 空记录不能当成匹配，否则会误判成「任务可用」而不去重注册
         assert!(!paths_equal(
             "",
-            Path::new(r"C:\Users\demo\AppData\Roaming\com.corp.tools\vpn")
+            Path::new(r"C:\Users\demo\AppData\Roaming\com.ws.tools\vpn")
         ));
     }
 
     #[test]
     fn recorded_directory_wins_without_querying_schtasks() {
-        let current = Path::new(r"C:\Users\demo\AppData\Local\com.corp.tools\vpn");
+        let current = Path::new(r"C:\Users\demo\AppData\Local\com.ws.tools\vpn");
         // 记录一致 → 复用（此分支不会去读任务定义）
         assert!(worker_task_matches(
             current,
-            Some(r"C:\Users\demo\AppData\Local\com.corp.tools\vpn")
+            Some(r"C:\Users\demo\AppData\Local\com.ws.tools\vpn")
         ));
         // 记录指向旧目录 → 必须重新注册，不能复用旧任务
         assert!(!worker_task_matches(
             current,
-            Some(r"C:\Users\demo\AppData\Roaming\com.corp.tools\vpn")
+            Some(r"C:\Users\demo\AppData\Roaming\com.ws.tools\vpn")
         ));
     }
 

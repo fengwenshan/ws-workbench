@@ -7,7 +7,7 @@
 //! 密文统一以十六进制字符串保存，避免额外引入 base64 依赖。
 
 /// 十六进制编码
-fn to_hex(bytes: &[u8]) -> String {
+pub(crate) fn to_hex(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
     for b in bytes {
         out.push_str(&format!("{:02x}", b));
@@ -16,7 +16,7 @@ fn to_hex(bytes: &[u8]) -> String {
 }
 
 /// 十六进制解码
-fn from_hex(text: &str) -> Result<Vec<u8>, String> {
+pub(crate) fn from_hex(text: &str) -> Result<Vec<u8>, String> {
     let trimmed = text.trim();
     if trimmed.len() % 2 != 0 {
         return Err("密文长度不合法".to_string());
@@ -83,7 +83,7 @@ fn platform_unprotect(stored: &str) -> Result<String, String> {
 fn platform_forget(_stored: &str) {}
 
 #[cfg(target_os = "windows")]
-mod dpapi {
+pub(crate) mod dpapi {
     use std::ffi::c_void;
     use std::ptr;
 
@@ -193,7 +193,7 @@ mod dpapi {
 // ============================== macOS / 钥匙串 ==============================
 
 #[cfg(target_os = "macos")]
-const KEYCHAIN_SERVICE: &str = "demo-tools-vpn";
+const KEYCHAIN_SERVICE: &str = "ws-tools-vpn";
 
 #[cfg(target_os = "macos")]
 fn keychain_service(key: &str) -> String {
@@ -208,7 +208,7 @@ fn platform_protect(key: &str, plain: &str) -> Result<String, String> {
             "add-generic-password",
             "-U",
             "-a",
-            "demo-tools",
+            "ws-tools",
             "-s",
             &service,
             "-w",
@@ -235,7 +235,7 @@ fn platform_unprotect(stored: &str) -> Result<String, String> {
         .args([
             "find-generic-password",
             "-a",
-            "demo-tools",
+            "ws-tools",
             "-s",
             &service,
             "-w",
@@ -256,7 +256,7 @@ fn platform_forget(stored: &str) {
             .args([
                 "delete-generic-password",
                 "-a",
-                "demo-tools",
+                "ws-tools",
                 "-s",
                 &service,
             ])

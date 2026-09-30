@@ -20,73 +20,195 @@ fn set_memory_cache(config: &AppConfig) {
     *cache = Some(config.clone());
 }
 
-/// 使用 Store 插件加载配置
-fn load_from_store(app: &AppHandle) -> Option<AppConfig> {
-    let store = app.store("config.json").ok()?;
-    let value = store.get(STORE_KEY)?;
-    serde_json::from_value::<AppConfig>(value).ok()
+/// 使用 Store 插件加载配置。
+///
+/// - `Ok(Some((配置, 是否为历史明文)))`：读取成功
+/// - `Ok(None)`：Store 中没有配置
+/// - `Err`：Store 中存在数据但无法解密/解析，调用方绝不能覆盖回写
+fn load_from_store(app: &AppHandle) -> Result<Option<(AppConfig, bool)>, String> {
+    let store = match app.store("config.json") {
+        Ok(store) => store,
+        Err(_) => return Ok(None),
+    };
+    let value = match store.get(STORE_KEY) {
+        Some(value) => value,
+        None => return Ok(None),
+    };
+    match value {
+        serde_json::Value::String(s) => {
+            if crate::crypto::is_encrypted(&s) {
+                let json = crate::crypto::decrypt_str(app, &s)?;
+                let config = serde_json::from_str::<AppConfig>(&json)
+                    .map_err(|e| format!("解析配置失败: {}", e))?;
+                Ok(Some((config, false)))
+            } else {
+                let config = serde_json::from_str::<AppConfig>(&s)
+                    .map_err(|e| format!("解析配置失败: {}", e))?;
+                Ok(Some((config, true)))
+            }
+        }
+        other => {
+            let config = serde_json::from_value::<AppConfig>(other)
+                .map_err(|e| format!("解析配置失败: {}", e))?;
+            Ok(Some((config, true)))
+        }
+    }
 }
 
-/// 使用 Store 插件保存配置
+/// 使用 Store 插件保存配置（以 SM4 密文信封写入）
 fn save_to_store(app: &AppHandle, config: &AppConfig) -> Result<(), String> {
     let store = app.store("config.json")
         .map_err(|e| format!("创建 store 失败: {}", e))?;
-    let value = serde_json::to_value(config)
+    let json = serde_json::to_string(config)
         .map_err(|e| format!("序列化失败: {}", e))?;
-    store.set(STORE_KEY, value);
+    let envelope = crate::crypto::encrypt_str(app, &json)?;
+    store.set(STORE_KEY, serde_json::Value::String(envelope));
     store.save()
         .map_err(|e| format!("保存 store 失败: {}", e))?;
     Ok(())
 }
 
-/// 从文件系统加载配置（兜底）
-fn load_from_file(app: &AppHandle) -> Option<AppConfig> {
+/// 从文件系统加载配置（兜底）。
+///
+/// - `Ok(Some((配置, 是否为历史明文)))`：读取成功
+/// - `Ok(None)`：所有候选目录都没有可读配置
+/// - `Err`：存在密文但无法解密，调用方绝不能覆盖回写
+fn load_from_file(app: &AppHandle) -> Result<Option<(AppConfig, bool)>, String> {
     use std::fs;
 
-    // 按优先级尝试多个路径
-    let candidates = get_file_candidates(app);
+    let mut saw_unreadable = false;
+    // 按优先级尝试多个路径（含历史遗留临时目录，仅用于迁移读取）
+    let candidates = get_read_candidates(app);
     for (_, dir) in candidates {
         let path = dir.join("config.json");
-        if path.exists() {
-            if let Ok(content) = fs::read_to_string(&path) {
-                if let Ok(config) = serde_json::from_str::<AppConfig>(&content) {
-                    return Some(config);
+        if !path.exists() {
+            continue;
+        }
+        let content = match fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(_) => {
+                // 文件存在却读不出（权限/非 UTF-8）：绝不能当作"无数据"被默认配置覆盖
+                saw_unreadable = true;
+                continue;
+            }
+        };
+        let trimmed = content.trim();
+        if crate::crypto::is_encrypted(trimmed) {
+            if let Ok(json) = crate::crypto::decrypt_str(app, trimmed) {
+                if let Ok(config) = serde_json::from_str::<AppConfig>(&json) {
+                    return Ok(Some((config, false)));
                 }
+            }
+            // 密文无法解密：记录后跳过该候选，避免被默认配置覆盖
+            saw_unreadable = true;
+            continue;
+        }
+        match serde_json::from_str::<AppConfig>(trimmed) {
+            Ok(config) => return Ok(Some((config, true))),
+            Err(_) => {
+                // 明文存在但无法解析：同样不能视为"无数据"
+                saw_unreadable = true;
+                continue;
             }
         }
     }
-    None
+    if saw_unreadable {
+        return Err("配置文件存在但无法读取或解密".to_string());
+    }
+    Ok(None)
 }
 
-/// 获取文件系统候选目录
-fn get_file_candidates(app: &AppHandle) -> Vec<(String, std::path::PathBuf)> {
+/// 追加候选目录（去重）
+fn push_candidate(
+    candidates: &mut Vec<(String, std::path::PathBuf)>,
+    name: &str,
+    path: std::path::PathBuf,
+) {
+    if !candidates.iter().any(|(_, p)| p == &path) {
+        candidates.push((name.to_string(), path));
+    }
+}
+
+/// 读取候选目录：在持久化目录基础上，额外包含历史遗留的临时目录，
+/// 用于把"曾经误落在临时目录里的数据"一次性迁移出来；
+/// 临时目录只参与读取，绝不作为写入目标。
+fn get_read_candidates(app: &AppHandle) -> Vec<(String, std::path::PathBuf)> {
+    use std::env;
+    use std::path::PathBuf;
+
+    let mut candidates = get_write_candidates(app);
+    if let Ok(temp) = env::var("TMPDIR") {
+        push_candidate(
+            &mut candidates,
+            "TMPDIR/ws-tools(legacy)",
+            PathBuf::from(temp).join("ws-tools"),
+        );
+    }
+    push_candidate(
+        &mut candidates,
+        "/tmp/ws-tools(legacy)",
+        PathBuf::from("/tmp/ws-tools"),
+    );
+    candidates
+}
+
+/// 追加项目内兜底候选（`<crate>/.config`、`<cwd>/.config`）。
+///
+/// 仅用于开发场景：`tauri dev` 时应用可能运行在受限沙箱里，写不了用户数据目录，
+/// 而项目目录通常是允许写入的。`src-tauri/.config/` 已在 .gitignore 中忽略，
+/// 不会污染版本库；发布版用户数据目录可写，永远不会走到这里。
+fn push_project_candidates(candidates: &mut Vec<(String, std::path::PathBuf)>) {
+    use std::env;
+
+    fn is_rust_crate(dir: &std::path::Path) -> bool {
+        dir.join("Cargo.toml").is_file()
+    }
+
+    let mut roots: Vec<(String, std::path::PathBuf)> = Vec::new();
+    if let Ok(exe) = env::current_exe() {
+        for anc in exe.ancestors().skip(1).take(8) {
+            if is_rust_crate(anc) {
+                roots.push(("crate/.config".to_string(), anc.join(".config")));
+                break;
+            }
+        }
+    }
+    if let Ok(cwd) = env::current_dir() {
+        roots.push(("cwd/.config".to_string(), cwd.join(".config")));
+    }
+    for (name, path) in roots {
+        push_candidate(candidates, &name, path);
+    }
+}
+
+/// 写入候选目录：优先可持久化的用户位置（应用数据/配置目录、用户主目录），
+/// 最后才退到项目内目录（开发专用）。
+///
+/// 这里刻意不含 TMPDIR / tmp：临时目录重启即失，一旦静默落盘，
+/// 用户就会看到"每次重启数据都没了"。
+fn get_write_candidates(app: &AppHandle) -> Vec<(String, std::path::PathBuf)> {
     use std::env;
     use std::path::PathBuf;
 
     let mut candidates: Vec<(String, PathBuf)> = Vec::new();
 
     if let Ok(dir) = app.path().app_data_dir() {
-        candidates.push(("app_data_dir".to_string(), dir));
+        push_candidate(&mut candidates, "app_data_dir", dir);
     }
     if let Ok(dir) = app.path().app_config_dir() {
-        candidates.push(("app_config_dir".to_string(), dir));
+        push_candidate(&mut candidates, "app_config_dir", dir);
     }
     if let Ok(home) = app.path().home_dir() {
-        candidates.push(("home/.demo-tools".to_string(), home.join(".demo-tools")));
+        push_candidate(&mut candidates, "home/.ws-tools", home.join(".ws-tools"));
     }
     if let Ok(home) = env::var("HOME") {
-        let path = PathBuf::from(home).join(".demo-tools");
-        if !candidates.iter().any(|(_, p)| p == &path) {
-            candidates.push(("env_HOME/.demo-tools".to_string(), path));
-        }
+        push_candidate(
+            &mut candidates,
+            "env_HOME/.ws-tools",
+            PathBuf::from(home).join(".ws-tools"),
+        );
     }
-    if let Ok(temp) = env::var("TMPDIR") {
-        candidates.push(("TMPDIR/demo-tools".to_string(), PathBuf::from(temp).join("demo-tools")));
-    }
-    candidates.push(("/tmp/demo-tools".to_string(), PathBuf::from("/tmp/demo-tools")));
-    if let Ok(cwd) = env::current_dir() {
-        candidates.push(("cwd/.config".to_string(), cwd.join(".config")));
-    }
+    push_project_candidates(&mut candidates);
 
     candidates
 }
@@ -107,7 +229,7 @@ fn test_writable(dir: &std::path::PathBuf) -> bool {
 fn find_writable_file_path(app: &AppHandle) -> Option<std::path::PathBuf> {
     use std::fs;
 
-    for (_, dir) in get_file_candidates(app) {
+    for (_, dir) in get_write_candidates(app) {
         if !dir.exists() {
             if fs::create_dir_all(&dir).is_err() {
                 continue;
@@ -120,7 +242,7 @@ fn find_writable_file_path(app: &AppHandle) -> Option<std::path::PathBuf> {
     None
 }
 
-/// 保存到文件系统（兜底）
+/// 保存到文件系统（兜底，以 SM4 密文信封写入）
 fn save_to_file(app: &AppHandle, config: &AppConfig) -> Result<(), String> {
     use std::fs;
 
@@ -129,8 +251,9 @@ fn save_to_file(app: &AppHandle, config: &AppConfig) -> Result<(), String> {
 
     let json = serde_json::to_string_pretty(config)
         .map_err(|e| format!("序列化失败: {}", e))?;
+    let envelope = crate::crypto::encrypt_str(app, &json)?;
 
-    fs::write(&path, json)
+    fs::write(&path, envelope)
         .map_err(|e| format!("写入文件失败: {} (路径: {})", e, path.display()))?;
 
     Ok(())
@@ -139,16 +262,34 @@ fn save_to_file(app: &AppHandle, config: &AppConfig) -> Result<(), String> {
 /// 加载配置
 pub fn load_config(app: &AppHandle) -> AppConfig {
     // 1. 优先从 Store 插件加载
-    if let Some(config) = load_from_store(app) {
-        return migrate_config(app, config);
+    match load_from_store(app) {
+        Ok(Some((config, was_plaintext))) => {
+            let migrated = migrate_config(app, config);
+            // 历史明文首读即回写密文，完成升级
+            if was_plaintext {
+                let _ = save_config(app, &migrated);
+            }
+            return migrated;
+        }
+        // Store 中有数据但无法读取：绝不覆盖，退回内存/默认值
+        Err(_) => return load_config_readonly(),
+        Ok(None) => {}
     }
 
     // 2. 从文件系统加载（可能是旧数据迁移）
-    if let Some(config) = load_from_file(app) {
-        let migrated = migrate_config(app, config);
-        // 尝试迁移到 Store
-        let _ = save_to_store(app, &migrated);
-        return migrated;
+    match load_from_file(app) {
+        Ok(Some((config, _was_plaintext))) => {
+            let migrated = migrate_config(app, config);
+            // 迁移到 Store（密文）；Store 不可用时才退回文件，
+            // 避免二者写同一个 config.json 却用不同格式互相覆盖
+            if save_to_store(app, &migrated).is_err() {
+                let _ = save_to_file(app, &migrated);
+            }
+            return migrated;
+        }
+        // 文件中有密文但无法解密：绝不覆盖，退回内存/默认值
+        Err(_) => return load_config_readonly(),
+        Ok(None) => {}
     }
 
     // 3. 从内存缓存加载
@@ -163,6 +304,17 @@ pub fn load_config(app: &AppHandle) -> AppConfig {
     let config = AppConfig::default();
     let _ = save_config(app, &config);
     config
+}
+
+/// 存在既有配置但无法读取（如钥匙串暂时不可用）时的兜底：
+/// 只用内存缓存或默认值，绝不回写，避免覆盖既有数据
+fn load_config_readonly() -> AppConfig {
+    let mut cache = get_memory_cache();
+    if !cache.groups.is_empty() || !cache.projects.is_empty() || !cache.default_exclude.is_empty() {
+        mark_default_group(&mut cache);
+        return cache;
+    }
+    AppConfig::default()
 }
 
 /// 保存配置
@@ -192,9 +344,13 @@ pub fn save_config(app: &AppHandle, config: &AppConfig) -> Result<(), String> {
 }
 
 /// 获取配置文件路径（用于调试显示）
+///
+/// 这是一个只读探测：绝不能借"查看路径"之名写入任何配置。
+/// 历史实现会 `save_to_store(default)` 做可写性探测，导致每次启动
+/// 都把用户的真实配置覆盖成默认值（表现为"每次重启数据都没了"）。
 pub fn get_config_path(app: &AppHandle) -> Result<String, String> {
-    // 先看 Store 能否工作
-    if save_to_store(app, &AppConfig::default()).is_ok() {
+    // 先看 Store 目标目录能否工作（只做 .write_test 探测，不写配置）
+    if store_dir_writable(app) {
         return Ok("Store 插件 (config.json)".to_string());
     }
 
@@ -205,6 +361,22 @@ pub fn get_config_path(app: &AppHandle) -> Result<String, String> {
 
     // 都不行，返回内存模式
     Err("当前为内存模式（重启后数据丢失）".to_string())
+}
+
+/// 探测 Store 插件目标目录（app_data_dir）是否可写。
+/// 只写 `.write_test` 探针，绝不触碰 config.json。
+fn store_dir_writable(app: &AppHandle) -> bool {
+    use std::fs;
+
+    match app.path().app_data_dir() {
+        Ok(dir) => {
+            if !dir.exists() && fs::create_dir_all(&dir).is_err() {
+                return false;
+            }
+            test_writable(&dir)
+        }
+        Err(_) => false,
+    }
 }
 
 /// 标记默认分组（兼容历史数据：旧数据没有 is_default 字段）
@@ -241,6 +413,41 @@ fn migrate_default_exclude(config: &mut AppConfig) -> bool {
     true
 }
 
+/// 迁移历史字段级加密的 VPN 密码：
+/// 旧版 password 为 `keychain:` / `dpapi:` 密文且 password_encrypted=true，
+/// 解出明文后清掉标记；解密失败则保留原值并记录日志。
+/// 返回是否发生了变更。
+fn migrate_vpn_passwords(config: &mut AppConfig) -> bool {
+    let mut changed = false;
+    for profile in config.vpn_profiles.iter_mut() {
+        if !profile.password_encrypted {
+            continue;
+        }
+        let looks_legacy = profile.password.starts_with("keychain:")
+            || profile.password.starts_with("dpapi:");
+        if !looks_legacy {
+            // 已是明文（或空），只需清掉标记
+            profile.password_encrypted = false;
+            changed = true;
+            continue;
+        }
+        match crate::vpn::credential::unprotect(&profile.password) {
+            Ok(plain) => {
+                profile.password = plain;
+                profile.password_encrypted = false;
+                changed = true;
+            }
+            Err(err) => {
+                eprintln!(
+                    "VPN 配置「{}」的旧密码解密失败，保留原值：{}",
+                    profile.name, err
+                );
+            }
+        }
+    }
+    changed
+}
+
 /// 迁移配置（旧版 projects 字段 -> 分组结构 + 标记默认分组）
 fn migrate_config(app: &AppHandle, mut config: AppConfig) -> AppConfig {
     let mut changed = false;
@@ -266,6 +473,11 @@ fn migrate_config(app: &AppHandle, mut config: AppConfig) -> AppConfig {
 
     // 3. 补齐新增的默认排除规则
     if migrate_default_exclude(&mut config) {
+        changed = true;
+    }
+
+    // 4. 迁移历史字段级加密的 VPN 密码
+    if migrate_vpn_passwords(&mut config) {
         changed = true;
     }
 
@@ -320,5 +532,73 @@ mod tests {
         assert!(config.default_exclude.contains(&".*".to_string()));
         assert!(config.default_exclude.contains(&".*/**".to_string()));
         assert_eq!(config.default_exclude_version, DEFAULT_EXCLUDE_VERSION);
+    }
+
+    fn vpn_profile(password: &str, encrypted: bool) -> crate::vpn::models::VpnProfile {
+        crate::vpn::models::VpnProfile {
+            id: "p1".to_string(),
+            name: "测试配置".to_string(),
+            server: "vpn.example.com".to_string(),
+            username: "user".to_string(),
+            password: password.to_string(),
+            password_encrypted: encrypted,
+            protocol: "anyconnect".to_string(),
+            connector: Default::default(),
+            mode: Default::default(),
+            rule_set_id: String::new(),
+            use_vpn_dns: true,
+            learn: false,
+            extra_args: Vec::new(),
+            connector_path: String::new(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    /// 标记为已加密但实际已是明文：只清标记，值保持不变
+    #[test]
+    fn migrate_vpn_passwords_clears_flag_for_plaintext() {
+        let mut config = AppConfig {
+            vpn_profiles: vec![vpn_profile("secret", true)],
+            ..Default::default()
+        };
+        assert!(migrate_vpn_passwords(&mut config));
+        assert_eq!(config.vpn_profiles[0].password, "secret");
+        assert!(!config.vpn_profiles[0].password_encrypted);
+    }
+
+    /// 幂等：迁移过的配置再次迁移不再产生变更
+    #[test]
+    fn migrate_vpn_passwords_is_idempotent() {
+        let mut config = AppConfig {
+            vpn_profiles: vec![vpn_profile("secret", true)],
+            ..Default::default()
+        };
+        assert!(migrate_vpn_passwords(&mut config));
+        assert!(!migrate_vpn_passwords(&mut config));
+    }
+
+    /// 空密码同样只清标记
+    #[test]
+    fn migrate_vpn_passwords_clears_flag_for_empty() {
+        let mut config = AppConfig {
+            vpn_profiles: vec![vpn_profile("", true)],
+            ..Default::default()
+        };
+        assert!(migrate_vpn_passwords(&mut config));
+        assert_eq!(config.vpn_profiles[0].password, "");
+        assert!(!config.vpn_profiles[0].password_encrypted);
+    }
+
+    /// 旧密文解不开时：保留原值与标记，且不视为变更（绝不覆盖既有数据）
+    #[test]
+    fn migrate_vpn_passwords_keeps_unreadable_legacy() {
+        let mut config = AppConfig {
+            vpn_profiles: vec![vpn_profile("keychain:__missing__", true)],
+            ..Default::default()
+        };
+        assert!(!migrate_vpn_passwords(&mut config));
+        assert_eq!(config.vpn_profiles[0].password, "keychain:__missing__");
+        assert!(config.vpn_profiles[0].password_encrypted);
     }
 }

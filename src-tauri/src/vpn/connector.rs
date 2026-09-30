@@ -96,7 +96,7 @@ mod tests {
             learn: false,
             extra_args: vec![],
             script_path: r"C:\session\script\vpnc-script-win.js".into(),
-            hook_exe: r"C:\app\demo-tools.exe".into(),
+            hook_exe: r"C:\app\ws-tools.exe".into(),
             created_at: String::new(),
         }
     }

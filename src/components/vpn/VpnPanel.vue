@@ -77,7 +77,8 @@ watch(
 // ============================ 交互 ============================
 
 async function handleConnect() {
-  await vpn.connect()
+  // 已连接或正在收尾时，同一个按钮要执行断开，否则会出现「点断开反而重连」
+  await vpn.toggleConnection()
   await refreshOverlaps()
 }
 

@@ -380,8 +380,9 @@ async function openOutputDir() {
     <!-- macOS Overlay 标题栏：顶部这条空白区可拖动窗口，红黄绿按钮浮在它上面 -->
     <div v-if="isMac" class="titlebar-drag" data-tauri-region data-tauri-drag-region></div>
 
-    <!-- 顶部一级导航 -->
-    <header class="app-header">
+    <!-- 顶部一级导航：macOS 下整条头部也要能拖动窗口。用 deep 让空白子元素
+         一起生效，而按钮等可点击元素会被 Tauri 自动排除，切页不受影响 -->
+    <header class="app-header" :data-tauri-drag-region="isMac ? 'deep' : undefined">
       <nav class="tabs">
         <button
           class="tab"

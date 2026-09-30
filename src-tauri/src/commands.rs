@@ -1,4 +1,4 @@
-﻿use std::path::{Path, PathBuf};
+use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager};
 use crate::apps::{self, AppContext, AppId, AppLocation, AppPathOverride};
 use crate::config;
@@ -19,6 +19,18 @@ pub fn save_config(app: AppHandle, config: AppConfig) -> Result<(), String> {
 #[tauri::command]
 pub fn get_config_path(app: AppHandle) -> Result<String, String> {
     config::get_config_path(&app)
+}
+
+/// 加密任意字符串（供前端加密本地键值使用，复用后端主密钥）
+#[tauri::command]
+pub fn vault_encrypt(app: AppHandle, plain: String) -> Result<String, String> {
+    crate::crypto::encrypt_str(&app, &plain)
+}
+
+/// 解密由 `vault_encrypt` 产生的密文
+#[tauri::command]
+pub fn vault_decrypt(app: AppHandle, cipher: String) -> Result<String, String> {
+    crate::crypto::decrypt_str(&app, &cipher)
 }
 
 #[tauri::command]
@@ -164,6 +176,7 @@ fn macos_app_names(id: AppId) -> Vec<&'static str> {
             "IntelliJ IDEA CE",
         ],
         AppId::Trae => vec!["Trae CN", "TRAE SOLO CN", "Trae"],
+        AppId::Openconnect => vec![],
     }
 }
 

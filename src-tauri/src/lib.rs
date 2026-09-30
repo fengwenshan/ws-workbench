@@ -1,5 +1,6 @@
 mod models;
 mod config;
+mod crypto;
 mod commands;
 mod packer;
 pub mod apps;
@@ -50,6 +51,23 @@ fn setup_app_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         ],
     )?;
 
+    // 编辑菜单：macOS 的 ⌘X/⌘C/⌘V/⌘A 依赖这些标准菜单项派发到第一响应者，
+    // 自定义菜单时必须补回，否则输入框里无法剪切/复制/粘贴/全选。
+    let edit_menu = Submenu::with_items(
+        app,
+        "编辑",
+        true,
+        &[
+            &PredefinedMenuItem::undo(app, Some("撤销"))?,
+            &PredefinedMenuItem::redo(app, Some("重做"))?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::cut(app, Some("剪切"))?,
+            &PredefinedMenuItem::copy(app, Some("拷贝"))?,
+            &PredefinedMenuItem::paste(app, Some("粘贴"))?,
+            &PredefinedMenuItem::select_all(app, Some("全选"))?,
+        ],
+    )?;
+
     let window_menu = Submenu::with_items(
         app,
         "窗口",
@@ -64,7 +82,7 @@ fn setup_app_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     // 让系统把「窗口」当成标准窗口菜单（由系统补上窗口列表与平铺项）
     window_menu.set_as_windows_menu_for_nsapp()?;
 
-    app.set_menu(Menu::with_items(app, &[&app_menu, &window_menu])?)?;
+    app.set_menu(Menu::with_items(app, &[&app_menu, &edit_menu, &window_menu])?)?;
     Ok(())
 }
 
@@ -85,6 +103,8 @@ pub fn run() {
             commands::get_config,
             commands::save_config,
             commands::get_config_path,
+            commands::vault_encrypt,
+            commands::vault_decrypt,
             commands::get_default_exclude_rules,
             commands::pack_project,
             commands::pack_to_zip,
@@ -111,7 +131,6 @@ pub fn run() {
             vpn::commands::vpn_remove_managed_openconnect,
             vpn::commands::vpn_managed_openconnect_path,
             vpn::commands::vpn_install_guide,
-            vpn::commands::vpn_encrypt_password,
             vpn::commands::vpn_validate_cidr,
             vpn::commands::vpn_check_rule_overlaps,
             vpn::commands::vpn_elevation_info,
@@ -143,7 +162,7 @@ pub fn run() {
                     // 连临时目录都写不了：不阻断启动，但把原因打出来，
                     // 免得后面只看到一句没有上下文的「拒绝访问」
                     eprintln!("VPN 会话目录不可用: {}", err);
-                    vpn::session::VpnSession::new(std::env::temp_dir().join("demo-tools-vpn"))
+                    vpn::session::VpnSession::new(std::env::temp_dir().join("ws-tools-vpn"))
                 }
             };
             if let Err(err) = session.ensure() {
@@ -178,7 +197,7 @@ pub fn run() {
             )?;
 
             let mut tray = TrayIconBuilder::with_id("main")
-                .tooltip("demo-tools")
+                .tooltip("ws-tools")
                 .menu(&menu)
                 // 左键单击直接打开客户端，不弹菜单；菜单只在右键时出现
                 .show_menu_on_left_click(false)

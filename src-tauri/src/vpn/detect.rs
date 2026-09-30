@@ -323,8 +323,8 @@ mod tests {
 
     #[test]
     fn import_rejects_directory_without_binary() {
-        let source = std::env::temp_dir().join(format!("corp-oc-empty-{}", std::process::id()));
-        let data = std::env::temp_dir().join(format!("corp-oc-data-{}", std::process::id()));
+        let source = std::env::temp_dir().join(format!("ws-oc-empty-{}", std::process::id()));
+        let data = std::env::temp_dir().join(format!("ws-oc-data-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&source);
         let _ = std::fs::create_dir_all(&data);
 

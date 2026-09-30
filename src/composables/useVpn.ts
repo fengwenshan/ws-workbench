@@ -300,11 +300,10 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
     await saveConfig()
   }
 
-  /** 保存密码：明文→密文由后端完成，前端不保存明文 */
+  /** 保存密码：明文直接进入配置，整块配置落盘时由后端统一加密 */
   async function savePassword(id: string, plain: string) {
     if (!plain) return
-    const cipher = await invoke<string>('vpn_encrypt_password', { key: id, plain })
-    await updateProfile(id, { password: cipher, password_encrypted: true })
+    await updateProfile(id, { password: plain, password_encrypted: false })
   }
 
   async function deleteProfile(id: string) {

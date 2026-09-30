@@ -27,7 +27,7 @@
 
 /// 应用数据目录名，与 `tauri.conf.json` 里的 identifier 保持一致。
 /// 回退到临时目录时会用它建一个同级子目录，避免把会话文件散在临时目录根下。
-pub const APP_DIR_NAME: &str = "com.corp.tools";
+pub const APP_DIR_NAME: &str = "com.ws.tools";
 
 pub mod commands;
 pub mod connector;

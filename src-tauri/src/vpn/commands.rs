@@ -1,4 +1,4 @@
-﻿//! VPN 相关的 Tauri 命令与状态轮询
+//! VPN 相关的 Tauri 命令与状态轮询
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -10,7 +10,7 @@ use crate::platform::{Os, Platform};
 use crate::vpn::guide;
 use crate::vpn::models::*;
 use crate::vpn::session::{LogCursor, VpnSession};
-use crate::vpn::{credential, detect, elevate, route};
+use crate::vpn::{detect, elevate, route};
 
 /// 状态轮询间隔：既能让界面反应够快，也不会把磁盘打满
 const POLL_INTERVAL: Duration = Duration::from_millis(600);
@@ -238,12 +238,6 @@ pub fn vpn_install_guide(candidates: Vec<ConnectorInfo>) -> InstallGuide {
 
 // ============================== 规则校验 ==============================
 
-/// 把明文密码加密后返回，前端只保存密文，界面上不再回显明文
-#[tauri::command]
-pub fn vpn_encrypt_password(key: String, plain: String) -> Result<String, String> {
-    credential::protect(&key, &plain)
-}
-
 #[tauri::command]
 pub fn vpn_validate_cidr(cidr: String) -> Result<String, String> {
     route::normalize_cidr(&cidr)
@@ -378,8 +372,10 @@ pub struct ConnectResult {
     pub elevation: String,
 }
 
+/// 必须是 async：非 async 的 Tauri 命令跑在主线程上，而下面的提权步骤要等用户
+/// 在系统授权框上点确认（最长 120s + 10s 轮询），同步执行会把整个界面卡死。
 #[tauri::command]
-pub fn vpn_connect(
+pub async fn vpn_connect(
     app: AppHandle,
     state: State<'_, VpnState>,
     profile: VpnProfile,
@@ -393,9 +389,12 @@ pub fn vpn_connect(
     })?;
     let connector = picked.clone();
 
-    // 2. 解出密码
-    let password = credential::unprotect(&profile.password)
-        .map_err(|e| format!("读取已保存的密码失败: {}", e))?;
+    // 2. 取密码（password 已是明文，落盘保护由整块配置的 SM4 信封承担）
+    // 旧字段级密文若迁移失败会保留 password_encrypted=true，此时绝不能把密文当密码发出去
+    if profile.password_encrypted {
+        return Err("该配置的旧密码尚未完成迁移，请在 VPN 配置页重新填写密码".to_string());
+    }
+    let password = profile.password.clone();
     if password.is_empty() {
         return Err("这个配置还没有保存密码，请先在配置里填写密码".to_string());
     }
@@ -406,9 +405,6 @@ pub fn vpn_connect(
         .filter(|rule| rule.enabled)
         .map(|rule| rule.cidr.clone())
         .collect();
-    if profile.mode == VpnMode::CustomerFirst && enabled.is_empty() {
-        return Err("「以客户网络为主」模式下规则表不能为空，否则不会有任何流量走 VPN".to_string());
-    }
 
     // 先落盘连接请求。持锁的部分只做文件操作，绝不跨过提权那一步。
     let session = {
@@ -419,6 +415,12 @@ pub fn vpn_connect(
         runtime.last_status = None;
         session
     };
+
+    // 「以客户网络为主」却一条规则都没有时，隧道能建起来但不会有任何流量走 VPN。
+    // 这属于用户配置问题，不该直接挡掉连接，只提示一下（与 worker 的处理保持一致）。
+    if profile.mode == VpnMode::CustomerFirst && enabled.is_empty() {
+        session.append_log("[warn] 「以客户网络为主」模式下规则表为空，不会有任何流量走 VPN");
+    }
 
     let exe = std::env::current_exe().map_err(|e| format!("取当前程序路径失败: {}", e))?;
     let request = VpnRequest {
@@ -441,7 +443,7 @@ pub fn vpn_connect(
         } else {
             Vec::new()
         },
-        use_vpn_dns: profile.use_vpn_dns,
+        use_vpn_dns: profile.use_vpn_dns || profile.mode == VpnMode::CompanyFirst,
         learn: profile.learn,
         extra_args: profile.extra_args.clone(),
         script_path: String::new(), // worker 生成脚本后回填
@@ -517,8 +519,9 @@ fn spawn_worker_directly(exe: &std::path::Path, session: &VpnSession) -> Result<
         .map_err(|e| format!("启动 worker 失败: {}", e))
 }
 
+/// 同样必须是 async：这里要等 worker 收尾（最长 20s），同步执行会卡住界面。
 #[tauri::command]
-pub fn vpn_disconnect(app: AppHandle, state: State<'_, VpnState>) -> Result<String, String> {
+pub async fn vpn_disconnect(app: AppHandle, state: State<'_, VpnState>) -> Result<String, String> {
     let runtime = state.0.lock().map_err(|_| "内部状态锁定失败".to_string())?;
     let session = runtime.session.clone();
     drop(runtime);
@@ -564,6 +567,9 @@ pub fn vpn_disconnect(app: AppHandle, state: State<'_, VpnState>) -> Result<Stri
 
 /// 进程是否还活着（用于判断 worker 是否被强杀）
 fn is_process_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
     #[cfg(target_os = "windows")]
     {
         let (text, _) = crate::process::run_with_timeout(
@@ -573,7 +579,18 @@ fn is_process_alive(pid: u32) -> bool {
         );
         text.contains(&pid.to_string())
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    {
+        // macOS 没有 /proc，必须真的去问一下进程表。
+        // `ps -p <pid> -o pid=` 命中时退出码为 0 并打印 pid，找不到时非 0 且无输出。
+        let (text, ok) = crate::process::run_with_timeout(
+            std::path::Path::new("/bin/ps"),
+            &["-p", &pid.to_string(), "-o", "pid="],
+            Duration::from_secs(5),
+        );
+        ok && text.contains(&pid.to_string())
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         std::path::Path::new(&format!("/proc/{}", pid)).exists()
     }
@@ -802,7 +819,7 @@ mod tests {
 
     #[test]
     fn probe_accepts_a_writable_directory() {
-        let root = std::env::temp_dir().join(format!("corp-probe-ok-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("ws-probe-ok-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
 
         let dir = probe_writable(&root).expect("临时目录应该可写");
@@ -816,7 +833,7 @@ mod tests {
     #[test]
     fn probe_rejects_when_directory_cannot_be_created() {
         // 父路径是个文件，create_dir_all 必然失败
-        let root = std::env::temp_dir().join(format!("corp-probe-bad-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("ws-probe-bad-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::write(&root, b"not a dir").unwrap();
 
@@ -832,7 +849,7 @@ mod tests {
     /// 问题就会推迟到用户点「连接」时才以「拒绝访问」爆出来 —— 那正是最初的现场。
     #[test]
     fn probe_rejects_directory_that_exists_but_cannot_be_written() {
-        let root = std::env::temp_dir().join(format!("corp-probe-ro-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("ws-probe-ro-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("vpn").join(".write-probe")).unwrap();
 

@@ -1,10 +1,10 @@
 [package]
-name = "demo-tools"
+name = "ws-tools"
 version = "1.0.0"
 edition = "2021"
 
 [lib]
-name = "demo_tools_lib"
+name = "ws_tools_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
@@ -25,6 +25,12 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 tempfile = "3"
 tauri-plugin-updater = "2.11.0"
 tauri-plugin-process = "2.3.1"
+base64 = "0.22"
+cbc = { version = "0.1", features = ["alloc"] }
+hmac = "0.12"
+rand = "0.8"
+sm3 = "0.4"
+sm4 = "0.5"
 
 [features]
 default = ["custom-protocol"]
