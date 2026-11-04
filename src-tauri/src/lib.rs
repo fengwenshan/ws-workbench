@@ -1,3 +1,7 @@
+// Windows 的 MSVC 链接器会输出创建 .lib/.exp 的信息，属于正常链接产物，
+// 不是代码问题；这里按 rustc 的建议把它们当作信息性输出忽略。
+#![allow(linker_messages)]
+
 mod models;
 mod config;
 mod db;

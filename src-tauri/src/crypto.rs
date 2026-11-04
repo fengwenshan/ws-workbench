@@ -268,27 +268,71 @@ fn parse_master_key_file(path: &std::path::Path) -> Result<Option<[u8; 32]>, Str
     }
 }
 
-/// Windows：主密钥经 DPAPI 保护后写入 `<app_data_dir>/.vault_key`
+/// 主密钥可能落盘的目录，和配置/数据库使用同一组候选。
+///
+/// 正常环境第一项就是 `app_data_dir`；开发沙箱、企业策略或杀毒软件把用户目录
+/// 锁死时，后面的项目 `.config` 仍然可写，配置加密不会因此整体失败。
+#[cfg(target_os = "windows")]
+fn master_key_candidates(app: &AppHandle) -> Vec<std::path::PathBuf> {
+    use tauri::Manager;
+
+    let mut dirs = Vec::new();
+    if let Ok(dir) = app.path().app_data_dir() {
+        dirs.push(dir);
+    }
+    for (_, dir) in crate::config::storage_candidates(app) {
+        if !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+    dirs
+}
+
+/// Windows：主密钥经 DPAPI 保护后写入可用的候选目录。
+///
+/// 先在所有候选里找已经存在的 `.vault_key`，避免用户目录恢复可写后又在别处
+/// 新建一把密钥、把旧配置解不开；只有全都不存在时才新建。
 #[cfg(target_os = "windows")]
 fn windows_master_key(app: &AppHandle) -> Result<[u8; 32], String> {
     use tauri::Manager;
 
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("获取应用数据目录失败: {}", e))?;
-    std::fs::create_dir_all(&dir).map_err(|e| format!("创建应用数据目录失败: {}", e))?;
-    let path = dir.join(KEY_FILE);
-
-    if let Some(master) = parse_master_key_file(&path)? {
-        return Ok(master);
+    if let Err(err) = app.path().app_data_dir() {
+        // 只影响诊断信息，后面的候选目录仍可继续使用
+        eprintln!("[vault] 获取应用数据目录失败: {}", err);
+    }
+    let dirs = master_key_candidates(app);
+    for dir in &dirs {
+        let path = dir.join(KEY_FILE);
+        match parse_master_key_file(&path) {
+            Ok(Some(master)) => return Ok(master),
+            Ok(None) => {}
+            // 已有密钥读不出来时绝不能换地方新建，否则旧数据永久解不开
+            Err(err) => return Err(format!("{}（{}）", err, path.display())),
+        }
     }
 
-    let master = random_key();
-    let cipher = crate::vpn::credential::dpapi::protect(&master)?;
-    std::fs::write(&path, format!("dpapi:{}", crate::vpn::credential::to_hex(&cipher)))
-        .map_err(|e| format!("写入主密钥失败: {}", e))?;
-    Ok(master)
+    let mut failures: Vec<String> = Vec::new();
+    for dir in &dirs {
+        if let Err(err) = std::fs::create_dir_all(dir) {
+            failures.push(format!("{}（{}）", dir.display(), err));
+            continue;
+        }
+        let path = dir.join(KEY_FILE);
+        let master = random_key();
+        let cipher = crate::vpn::credential::dpapi::protect(&master)?;
+        match std::fs::write(
+            &path,
+            format!("dpapi:{}", crate::vpn::credential::to_hex(&cipher)),
+        ) {
+            Ok(()) => return Ok(master),
+            Err(err) => failures.push(format!("{}（{}）", path.display(), err)),
+        }
+    }
+
+    Err(format!(
+        "没有可写的主密钥目录，已依次尝试：{}",
+        failures.join("、")
+    ))
 }
 
 #[cfg(test)]
