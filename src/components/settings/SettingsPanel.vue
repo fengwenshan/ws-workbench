@@ -1,16 +1,30 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
+import { open } from '@tauri-apps/plugin-dialog'
 import { platform } from '@/platform'
 import { SOURCE_LABELS, sourceTone, type AppId, type AppLocation } from '@/types/apps'
 import type { AppsApi } from '@/composables/useApps'
 
 const props = defineProps<{
   apps: AppsApi
+  defaultUploadDir: string | null
 }>()
+
+const emit = defineEmits<{
+  updateDefaultUploadDir: [dir: string | null]
+}>()
+
+interface StorageInfo {
+  db_path: string
+  settings_path: string
+  ok: boolean
+  error: string
+}
 
 const apps = props.apps
 const configPath = ref('')
+const storageInfo = ref<StorageInfo | null>(null)
 const expanded = ref<string>('')
 
 const canConfigurePaths = computed(() => platform.is_windows)
@@ -21,7 +35,24 @@ onMounted(async () => {
   } catch (err: any) {
     configPath.value = `读取失败：${err}`
   }
+  try {
+    storageInfo.value = await invoke<StorageInfo>('storage_info')
+  } catch {
+    storageInfo.value = null
+  }
 })
+
+async function changeDefaultDir() {
+  await run(async () => {
+    const selected = await open({ directory: true, multiple: false })
+    if (!selected) return
+    emit('updateDefaultUploadDir', Array.isArray(selected) ? selected[0] : selected)
+  }, '选择目录失败')
+}
+
+function resetDefaultDir() {
+  emit('updateDefaultUploadDir', null)
+}
 
 function toggleCandidates(id: string) {
   expanded.value = expanded.value === id ? '' : id
@@ -83,8 +114,39 @@ const reveal = (path: string) => run(() => apps.revealPath(path), '打开目录�
         </div>
       </div>
       <div class="info-row">
-        <span class="info-label">配置文件</span>
-        <span class="info-value mono">{{ configPath || '—' }}</span>
+        <span class="info-label">数据库</span>
+        <span class="info-value mono">{{ storageInfo?.db_path || configPath || '—' }}</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">设置文件</span>
+        <span class="info-value mono">{{ storageInfo?.settings_path || '—' }}</span>
+      </div>
+      <div v-if="storageInfo && !storageInfo.ok" class="info-row">
+        <span class="info-label">存储状态</span>
+        <span class="info-value">异常：{{ storageInfo.error }}</span>
+      </div>
+    </section>
+
+    <!-- 附件上传 -->
+    <section class="card">
+      <h4>附件上传</h4>
+      <p class="muted">
+        分组/项目未单独设置上传目录时，附件默认加密存放到这里；此处也未设置时，落到应用私有目录。
+      </p>
+      <div class="upload-dir-row">
+        <span class="upload-dir-path mono" :title="defaultUploadDir || ''">
+          {{ defaultUploadDir || '（未设置，使用应用私有目录）' }}
+        </span>
+        <div class="upload-dir-actions">
+          <button class="btn btn-secondary btn-xs" @click="changeDefaultDir">更改</button>
+          <button
+            class="btn btn-secondary btn-xs"
+            :disabled="!defaultUploadDir"
+            @click="resetDefaultDir"
+          >
+            恢复默认
+          </button>
+        </div>
       </div>
     </section>
 
@@ -442,5 +504,29 @@ const reveal = (path: string) => run(() => apps.revealPath(path), '打开目录�
 .btn-xs {
   padding: 4px 10px;
   font-size: 12px;
+}
+.muted {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-muted);
+  margin-bottom: 10px;
+}
+.upload-dir-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.upload-dir-path {
+  flex: 1;
+  min-width: 160px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  word-break: break-all;
+}
+.upload-dir-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
 }
 </style>
