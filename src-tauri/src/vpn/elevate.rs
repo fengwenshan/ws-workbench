@@ -10,6 +10,7 @@
 //! 关键约束：提权进程**无法继承父进程的标准句柄**，所以 worker 的一切结果都通过
 //! 会话目录里的文件回传（见 `session.rs`）。
 
+#[cfg(target_os = "windows")]
 use std::fs;
 use std::path::Path;
 
@@ -18,7 +19,8 @@ use crate::vpn::session::VpnSession;
 /// 计划任务名（Windows）
 pub const TASK_NAME: &str = "WsWorkbenchVpnWorker";
 
-/// 提权辅助脚本的退出码文件
+/// 提权辅助脚本的退出码文件（仅 Windows）
+#[cfg(target_os = "windows")]
 const ELEVATE_EXIT_FILE: &str = "elevate.exit";
 
 /// macOS 提权启动的诊断文件：记录提权 shell 的启动标记与 worker 的 stdout/stderr。
@@ -279,12 +281,12 @@ pub fn delete_worker_task() -> Result<(), String> {
 
 /// 启动 worker。
 ///
-/// `recorded_task_dir` 是上次注册计划任务时用的会话目录（来自 store），
+/// `_recorded_task_dir` 是上次注册计划任务时用的会话目录（来自 store），
 /// 用来判断现有任务是否还指向当前目录。为空表示没有记录，会去查任务定义。
 pub fn start_worker(
     exe: &Path,
     session: &VpnSession,
-    recorded_task_dir: Option<&str>,
+    _recorded_task_dir: Option<&str>,
 ) -> Result<String, String> {
     // 停止标记的生命周期只由 prepare()（新会话）与 stop_worker()（请求停止）掌控。
     // 这里再清一次会在「断开还没收尾就重连」时抹掉刚写下的停止请求，
@@ -295,7 +297,7 @@ pub fn start_worker(
     {
         // 除了「任务存在」，还得确认任务指向的就是当前会话目录：
         // 否则 /Run 起来的是往旧目录写的 worker，主进程等不到任何状态。
-        if worker_task_exists() && worker_task_matches(&session.dir, recorded_task_dir) {
+        if worker_task_exists() && worker_task_matches(&session.dir, _recorded_task_dir) {
             let (text, ok) = crate::process::run_with_timeout(
                 Path::new("schtasks.exe"),
                 &["/Run", "/TN", TASK_NAME],

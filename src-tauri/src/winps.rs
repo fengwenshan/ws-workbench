@@ -7,14 +7,19 @@
 //! 强制 `[Console]::OutputEncoding` 为 UTF-8，避免中文网卡名、中文路径被 OEM 代码页破坏。
 
 use serde::Deserialize;
+
+#[cfg(any(target_os = "windows", test))]
 use serde_json::Value;
 
+#[cfg(target_os = "windows")]
 use crate::process::run_with_timeout;
 
 /// PowerShell 脚本默认执行超时
+#[cfg(target_os = "windows")]
 const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(40);
 
 /// 统一包装：设置输出编码、遇到错误即停止
+#[cfg(any(target_os = "windows", test))]
 pub fn wrap(script: &str) -> String {
     format!(
         "[Console]::OutputEncoding=[Text.Encoding]::UTF8; $ErrorActionPreference='Stop'; {}",
@@ -22,6 +27,7 @@ pub fn wrap(script: &str) -> String {
     )
 }
 
+#[cfg(target_os = "windows")]
 fn powershell_path() -> String {
     std::env::var("SystemRoot")
         .map(|root| format!(r"{}\System32\WindowsPowerShell\v1.0\powershell.exe", root))
@@ -57,23 +63,14 @@ pub fn run_with_timeout_ms(script: &str, timeout: std::time::Duration) -> Result
     }
 }
 
-#[cfg(not(target_os = "windows"))]
-pub fn run(_script: &str) -> Result<String, String> {
-    Err("当前平台没有 PowerShell".to_string())
-}
-
 #[cfg(target_os = "windows")]
 pub fn run_json(script: &str) -> Result<Value, String> {
     let text = run(script)?;
     parse_json(&text)
 }
 
-#[cfg(not(target_os = "windows"))]
-pub fn run_json(_script: &str) -> Result<Value, String> {
-    Err("当前平台没有 PowerShell".to_string())
-}
-
 /// 解析 PowerShell 输出的 JSON，顺带处理 BOM 与空输出
+#[cfg(any(target_os = "windows", test))]
 pub fn parse_json(text: &str) -> Result<Value, String> {
     let cleaned = text.trim_start_matches('\u{feff}').trim();
     if cleaned.is_empty() {
@@ -89,6 +86,7 @@ pub fn parse_json(text: &str) -> Result<Value, String> {
 }
 
 /// `ConvertTo-Json` 在只有一条记录时返回对象而不是数组，这里统一成数组
+#[cfg(any(target_os = "windows", test))]
 pub fn json_array(value: Value) -> Vec<Value> {
     match value {
         Value::Array(items) => items,
@@ -114,6 +112,7 @@ where
 }
 
 /// 按 schema 把 JSON 数组解析成结构体列表，遇到坏记录直接跳过
+#[cfg(any(target_os = "windows", test))]
 pub fn parse_list<T: serde::de::DeserializeOwned>(value: Value) -> Vec<T> {
     json_array(value)
         .into_iter()
