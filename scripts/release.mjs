@@ -91,7 +91,7 @@ const TARGET = process.env.TAURI_TARGET || argValue('--target') || ''
 /** 额外生成 macOS 的 dmg 安装包（见 createDmg 的说明） */
 const WANT_DMG = process.argv.includes('--dmg')
 /**
- * 版本号覆盖：CI 自动递增版本时用，避免修改文件造成的提交回环。
+ * 版本号覆盖：CI 由 tag 触发时传入 tag 对应的版本号，避免修改文件造成的提交回环。
  * 通过 tauri build --config 注入，构建出的 app 与清单版本保持一致。
  */
 const VERSION_OVERRIDE = argValue('--version') || process.env.RELEASE_VERSION || ''

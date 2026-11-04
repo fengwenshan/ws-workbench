@@ -207,17 +207,20 @@ node scripts/release.mjs --target x86_64-pc-windows-msvc   # 交叉编译 Window
 | `GITHUB_TOKEN` | 把安装包镜像到 GitHub 发行版，不设则跳过镜像 |
 | `TAURI_BUNDLES=app` | 只打 app、跳过 Tauri 的 dmg 打包脚本，受限环境配 `--dmg` 使用 |
 
-版本的唯一来源是 `src-tauri/tauri.conf.json` 的 `version`。发布流程：构建（含更新签名）→ 上传安装包到 Gitee 发行版（tag 为 `v{version}`）→ 合并生成本平台的 `updates/latest.json` 条目并提交。安装包会同时镜像到 GitHub 发行版，但清单里的 `url` 始终指向 Gitee，因为已装客户端读的就是这个地址。发布只推提交，不打本地 git tag。
+发布版本的唯一来源是 git tag：CI 把 `vX.Y.Z` 里的 `X.Y.Z` 通过 `tauri build --config` 注入，不改源文件。发布流程：打 tag → 构建（含更新签名）→ 上传安装包到 Gitee 发行版（同名 tag）→ 合并生成本平台的 `updates/latest.json` 条目并提交回 `main`。安装包会同时镜像到 GitHub 发行版，但清单里的 `url` 始终指向 Gitee，因为已装客户端读的就是这个地址。
 
-仓库里没有版本号手工递增这一步：CI 取 `tauri.conf.json` 的 major.minor，patch 位用 GitHub 运行序号，即 `1.0.0` → `1.0.<run_number>`。
+```bash
+git tag v1.0.16
+git push origin v1.0.16   # 只有推 tag 才会触发 GitHub 构建
+```
 
 ### CI
 
-`.github/workflows/release.yml` 在推送到 `main` 或手动 `workflow_dispatch` 时触发，macOS 与 Windows 两个 job 并行，都跑在 `macos-14` 上；Windows 侧是交叉编译（`cargo-xwin` + `nsis` + `llvm`）。
+`.github/workflows/release.yml` 只在推送 `v*` tag 时触发（直接 push `main` 不会构建），macOS 与 Windows 两个 job 并行，都跑在 `macos-14` 上；Windows 侧是交叉编译（`cargo-xwin` + `nsis` + `llvm`）。版本号直接从 tag 解析，因此 tag 必须是 `vX.Y.Z` 形式，否则第一个预检步骤就会失败。
 
 跑之前必须配两个仓库密钥：`TAURI_SIGNING_PRIVATE_KEY` 和 `GITEE_TOKEN`，缺任意一个都会在预检步骤直接退出。
 
-两个 job 会同时改 `updates/latest.json`，脚本用「快进到远端最新 → 以远端为基线合并本平台条目 → 推送被拒就撤销重试」来避免互相覆盖。CI 自己推的清单提交带 `[skip ci]`，job 上还有一层守卫，不会自触发。
+两个 job 会同时改 `updates/latest.json`，脚本用「快进到远端最新 → 以远端为基线合并本平台条目 → 推送被拒就撤销重试」来避免互相覆盖。CI 自己推回 `main` 的清单提交带 `[skip ci]`，且工作流只由 tag 触发，不会自触发。
 
 ## 自动更新
 

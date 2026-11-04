@@ -1,8 +1,7 @@
 name: Release
 
-# 合并到 main 即自动发版：递增版本号 → 构建 macOS 与 Windows 安装包
-# → 上传到 Gitee 发行版 → 把更新清单提交回两个远端。
-# 也可在 Actions 页面手动触发（workflow_dispatch）。
+# 创建 tag（vX.Y.Z）才触发发版：校验 tag → 构建 macOS 与 Windows 安装包
+# → 上传到发行版 → 把更新清单提交回两个远端。直接 push main 不会触发构建。
 #
 # ─────────────────────────────────────────────────────────────
 # 一次性配置（必须做完，否则跑不起来）
@@ -19,9 +18,9 @@ name: Release
 #      git remote set-url --add --push origin git@github.com:fengwenshan/ws-workbench.git
 #
 # 3) 版本号规则
-#    取 tauri.conf.json 里的 major.minor，patch 位用 GitHub 运行序号：
-#    1.0.0 → 1.0.<run_number>。通过 tauri build --config 注入，
-#    不改动源文件，因此不会产生提交回环。
+#    tag 名就是版本号：打 v1.0.16 就发布 1.0.16，通过 tauri build --config
+#    注入，不改动源文件，因此不会产生提交回环。
+#    tag 必须是 vX.Y.Z 形式，否则预检直接失败。
 #
 # 安装包会同时上传到 Gitee 与 GitHub 两个发行版，两边都能直接下载安装。
 # 但客户端自动更新只走 Gitee（清单里的 url 指向 Gitee）——GitHub 在你们网络下不通，
@@ -30,8 +29,8 @@ name: Release
 # GitHub 侧用的是 Actions 自动注入的 GITHUB_TOKEN，不用手工加密钥，
 # 只依赖上面那句 permissions: contents: write。
 #
-# 关于提交回环：CI 提交更新清单时带上 [skip ci]，job 上另有守卫条件，
-# 所以 CI 自己推的提交不会再次触发构建。
+# 关于提交回环：CI 提交更新清单时带上 [skip ci]，且本工作流只由 tag 触发，
+# 推回 main 的提交不会再次触发构建。
 #
 # 为什么拆成两个并行 job：
 #   两边构建互不依赖，串行跑纯属白等；拆开后墙钟时间约等于较慢的那个。
@@ -43,22 +42,20 @@ name: Release
 
 on:
   push:
-    branches: [main]
-  workflow_dispatch:
+    tags:
+      - 'v*'
 
 # CI 需要把更新清单的提交推回 GitHub 与 Gitee
 permissions:
   contents: write
 
-# 同一分支排队执行，避免两次运行并发写同一个发行版
+# 同一个 tag 排队执行，避免两次运行并发写同一个发行版
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   macos:
-    # CI 自己提交清单时会带上 [skip ci]，这里再兜一层，避免自触发死循环
-    if: ${{ github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip ci]') }}
     # 公开仓库使用标准 GitHub 托管 runner 免费（官方计费文档：
     # "free for public repositories that use standard GitHub-hosted runners"）
     runs-on: macos-14
@@ -113,11 +110,15 @@ jobs:
       - name: 安装前端依赖
         run: pnpm install --frozen-lockfile
 
-      - name: 计算版本号
+      - name: 校验 tag 并计算版本号
         id: version
         run: |
-          BASE=$(node -p "require('./src-tauri/tauri.conf.json').version.split('.').slice(0,2).join('.')")
-          VERSION="${BASE}.${{ github.run_number }}"
+          REF="${GITHUB_REF_NAME}"
+          if ! printf '%s' "$REF" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::tag 必须是 vX.Y.Z 形式（例如 v1.0.16），当前: $REF"
+            exit 1
+          fi
+          VERSION="${REF#v}"
           echo "value=$VERSION" >> "$GITHUB_OUTPUT"
           echo "本次发布版本：$VERSION"
 
@@ -157,7 +158,6 @@ jobs:
           retention-days: 14
 
   windows:
-    if: ${{ github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip ci]') }}
     runs-on: macos-14
     steps:
       - name: 预检（仓库密钥是否已配置）
@@ -218,11 +218,15 @@ jobs:
       - name: 安装前端依赖
         run: pnpm install --frozen-lockfile
 
-      - name: 计算版本号
+      - name: 校验 tag 并计算版本号
         id: version
         run: |
-          BASE=$(node -p "require('./src-tauri/tauri.conf.json').version.split('.').slice(0,2).join('.')")
-          VERSION="${BASE}.${{ github.run_number }}"
+          REF="${GITHUB_REF_NAME}"
+          if ! printf '%s' "$REF" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::tag 必须是 vX.Y.Z 形式（例如 v1.0.16），当前: $REF"
+            exit 1
+          fi
+          VERSION="${REF#v}"
           echo "value=$VERSION" >> "$GITHUB_OUTPUT"
           echo "本次发布版本：$VERSION"
 
