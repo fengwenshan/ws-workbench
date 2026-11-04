@@ -1,31 +1,78 @@
 use std::sync::Mutex;
+
 use tauri::{AppHandle, Manager};
 use tauri_plugin_store::StoreExt;
-use crate::models::{AppConfig, ProjectGroup, DEFAULT_EXCLUDE_ADDITIONS, DEFAULT_EXCLUDE_VERSION};
+
+use crate::db::DbData;
+use crate::models::{AppConfig, AppSettings};
 
 const STORE_KEY: &str = "app_config";
 
-/// 内存缓存（所有存储方式都失败时的最后兜底）
-static MEMORY_CACHE: Mutex<Option<AppConfig>> = Mutex::new(None);
+/// 设置内存缓存（config.json 不可用时的兜底）
+static SETTINGS_CACHE: Mutex<Option<AppSettings>> = Mutex::new(None);
 
-/// 获取内存缓存
-fn get_memory_cache() -> AppConfig {
-    let cache = MEMORY_CACHE.lock().unwrap();
-    cache.clone().unwrap_or_default()
+/// 上次从数据库加载的业务快照，作为保存时 diff 的基线
+static DB_SNAPSHOT: Mutex<Option<DbData>> = Mutex::new(None);
+
+fn get_settings_cache() -> AppSettings {
+    SETTINGS_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .unwrap_or_default()
 }
 
-/// 设置内存缓存
-fn set_memory_cache(config: &AppConfig) {
-    let mut cache = MEMORY_CACHE.lock().unwrap();
-    *cache = Some(config.clone());
+fn set_settings_cache(settings: &AppSettings) {
+    *SETTINGS_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some(settings.clone());
 }
 
-/// 使用 Store 插件加载配置。
+fn set_db_snapshot(snapshot: Option<DbData>) {
+    *DB_SNAPSHOT.lock().unwrap_or_else(|e| e.into_inner()) = snapshot;
+}
+
+fn db_snapshot() -> Option<DbData> {
+    DB_SNAPSHOT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+impl AppSettings {
+    /// 从完整配置中抽出设置字段
+    pub fn from_config(config: &AppConfig) -> Self {
+        AppSettings {
+            default_exclude: config.default_exclude.clone(),
+            default_exclude_version: config.default_exclude_version,
+            vpn_active_profile_id: config.vpn_active_profile_id.clone(),
+            app_paths: config.app_paths.clone(),
+            vpn_worker_session_dir: config.vpn_worker_session_dir.clone(),
+            default_upload_dir: config.default_upload_dir.clone(),
+        }
+    }
+
+    /// 把设置与数据库实体合并成前端使用的完整配置
+    pub fn into_config(self, data: DbData) -> AppConfig {
+        AppConfig {
+            groups: data.groups,
+            projects: vec![],
+            default_exclude: self.default_exclude,
+            default_exclude_version: self.default_exclude_version,
+            vpn_profiles: data.vpn_profiles,
+            vpn_rule_sets: data.vpn_rule_sets,
+            vpn_active_profile_id: self.vpn_active_profile_id,
+            app_paths: self.app_paths,
+            vpn_worker_session_dir: self.vpn_worker_session_dir,
+            default_upload_dir: self.default_upload_dir,
+        }
+    }
+}
+
+/// 使用 Store 插件加载设置。
 ///
-/// - `Ok(Some((配置, 是否为历史明文)))`：读取成功
-/// - `Ok(None)`：Store 中没有配置
+/// - `Ok(Some((设置, 是否为历史明文)))`：读取成功
+/// - `Ok(None)`：Store 中没有设置
 /// - `Err`：Store 中存在数据但无法解密/解析，调用方绝不能覆盖回写
-fn load_from_store(app: &AppHandle) -> Result<Option<(AppConfig, bool)>, String> {
+fn load_settings_from_store(app: &AppHandle) -> Result<Option<(AppSettings, bool)>, String> {
     let store = match app.store("config.json") {
         Ok(store) => store,
         Err(_) => return Ok(None),
@@ -38,48 +85,45 @@ fn load_from_store(app: &AppHandle) -> Result<Option<(AppConfig, bool)>, String>
         serde_json::Value::String(s) => {
             if crate::crypto::is_encrypted(&s) {
                 let json = crate::crypto::decrypt_str(app, &s)?;
-                let config = serde_json::from_str::<AppConfig>(&json)
-                    .map_err(|e| format!("解析配置失败: {}", e))?;
-                Ok(Some((config, false)))
+                let settings = serde_json::from_str::<AppSettings>(&json)
+                    .map_err(|e| format!("解析设置失败: {}", e))?;
+                Ok(Some((settings, false)))
             } else {
-                let config = serde_json::from_str::<AppConfig>(&s)
-                    .map_err(|e| format!("解析配置失败: {}", e))?;
-                Ok(Some((config, true)))
+                let settings = serde_json::from_str::<AppSettings>(&s)
+                    .map_err(|e| format!("解析设置失败: {}", e))?;
+                Ok(Some((settings, true)))
             }
         }
         other => {
-            let config = serde_json::from_value::<AppConfig>(other)
-                .map_err(|e| format!("解析配置失败: {}", e))?;
-            Ok(Some((config, true)))
+            let settings = serde_json::from_value::<AppSettings>(other)
+                .map_err(|e| format!("解析设置失败: {}", e))?;
+            Ok(Some((settings, true)))
         }
     }
 }
 
-/// 使用 Store 插件保存配置（以 SM4 密文信封写入）
-fn save_to_store(app: &AppHandle, config: &AppConfig) -> Result<(), String> {
-    let store = app.store("config.json")
+/// 使用 Store 插件保存设置（以 SM4 密文信封写入）
+fn save_settings_to_store(app: &AppHandle, settings: &AppSettings) -> Result<(), String> {
+    let store = app
+        .store("config.json")
         .map_err(|e| format!("创建 store 失败: {}", e))?;
-    let json = serde_json::to_string(config)
-        .map_err(|e| format!("序列化失败: {}", e))?;
+    let json = serde_json::to_string(settings).map_err(|e| format!("序列化失败: {}", e))?;
     let envelope = crate::crypto::encrypt_str(app, &json)?;
     store.set(STORE_KEY, serde_json::Value::String(envelope));
-    store.save()
-        .map_err(|e| format!("保存 store 失败: {}", e))?;
+    store.save().map_err(|e| format!("保存 store 失败: {}", e))?;
     Ok(())
 }
 
-/// 从文件系统加载配置（兜底）。
+/// 从文件系统加载设置（兜底）。
 ///
-/// - `Ok(Some((配置, 是否为历史明文)))`：读取成功
-/// - `Ok(None)`：所有候选目录都没有可读配置
+/// - `Ok(Some((设置, 是否为历史明文)))`：读取成功
+/// - `Ok(None)`：所有候选目录都没有可读设置
 /// - `Err`：存在密文但无法解密，调用方绝不能覆盖回写
-fn load_from_file(app: &AppHandle) -> Result<Option<(AppConfig, bool)>, String> {
+fn load_settings_from_file(app: &AppHandle) -> Result<Option<(AppSettings, bool)>, String> {
     use std::fs;
 
     let mut saw_unreadable = false;
-    // 按优先级尝试多个路径
-    let candidates = storage_candidates(app);
-    for (_, dir) in candidates {
+    for (_, dir) in storage_candidates(app) {
         let path = dir.join("config.json");
         if !path.exists() {
             continue;
@@ -87,7 +131,6 @@ fn load_from_file(app: &AppHandle) -> Result<Option<(AppConfig, bool)>, String> 
         let content = match fs::read_to_string(&path) {
             Ok(content) => content,
             Err(_) => {
-                // 文件存在却读不出（权限/非 UTF-8）：绝不能当作"无数据"被默认配置覆盖
                 saw_unreadable = true;
                 continue;
             }
@@ -95,27 +138,93 @@ fn load_from_file(app: &AppHandle) -> Result<Option<(AppConfig, bool)>, String> 
         let trimmed = content.trim();
         if crate::crypto::is_encrypted(trimmed) {
             if let Ok(json) = crate::crypto::decrypt_str(app, trimmed) {
-                if let Ok(config) = serde_json::from_str::<AppConfig>(&json) {
-                    return Ok(Some((config, false)));
+                if let Ok(settings) = serde_json::from_str::<AppSettings>(&json) {
+                    return Ok(Some((settings, false)));
                 }
             }
-            // 密文无法解密：记录后跳过该候选，避免被默认配置覆盖
             saw_unreadable = true;
             continue;
         }
-        match serde_json::from_str::<AppConfig>(trimmed) {
-            Ok(config) => return Ok(Some((config, true))),
+        match serde_json::from_str::<AppSettings>(trimmed) {
+            Ok(settings) => return Ok(Some((settings, true))),
             Err(_) => {
-                // 明文存在但无法解析：同样不能视为"无数据"
                 saw_unreadable = true;
                 continue;
             }
         }
     }
     if saw_unreadable {
-        return Err("配置文件存在但无法读取或解密".to_string());
+        return Err("设置文件存在但无法读取或解密".to_string());
     }
     Ok(None)
+}
+
+/// 把设置写到文件系统（兜底，以 SM4 密文信封写入）
+fn save_settings_to_file(app: &AppHandle, settings: &AppSettings) -> Result<(), String> {
+    use std::fs;
+
+    let path = find_writable_file_path(app).ok_or_else(|| "没有可写的设置目录".to_string())?;
+    let json = serde_json::to_string(settings).map_err(|e| format!("序列化失败: {}", e))?;
+    let envelope = crate::crypto::encrypt_str(app, &json)?;
+    fs::write(&path, envelope)
+        .map_err(|e| format!("写入设置文件失败: {} (路径: {})", e, path.display()))
+}
+
+/// 加载设置：Store → 文件 → 默认值
+pub fn load_settings(app: &AppHandle) -> AppSettings {
+    match load_settings_from_store(app) {
+        Ok(Some((settings, was_plaintext))) => {
+            if was_plaintext {
+                let _ = save_settings_to_store(app, &settings);
+            }
+            set_settings_cache(&settings);
+            return settings;
+        }
+        Err(err) => {
+            eprintln!("[settings] 读取失败，使用内存/默认设置: {}", err);
+            return get_settings_cache();
+        }
+        Ok(None) => {}
+    }
+
+    match load_settings_from_file(app) {
+        Ok(Some((settings, _was_plaintext))) => {
+            if save_settings_to_store(app, &settings).is_err() {
+                let _ = save_settings_to_file(app, &settings);
+            }
+            set_settings_cache(&settings);
+            return settings;
+        }
+        Err(err) => {
+            eprintln!("[settings] 读取失败，使用内存/默认设置: {}", err);
+            return get_settings_cache();
+        }
+        Ok(None) => {}
+    }
+
+    let settings = AppSettings::default();
+    if save_settings(app, &settings).is_err() {
+        eprintln!("[settings] 首次写入默认设置失败，仅保存在内存中");
+    }
+    settings
+}
+
+/// 保存设置：Store → 文件
+pub fn save_settings(app: &AppHandle, settings: &AppSettings) -> Result<(), String> {
+    set_settings_cache(settings);
+    let mut errors: Vec<String> = Vec::new();
+    match save_settings_to_store(app, settings) {
+        Ok(()) => return Ok(()),
+        Err(e) => errors.push(format!("store: {}", e)),
+    }
+    match save_settings_to_file(app, settings) {
+        Ok(()) => return Ok(()),
+        Err(e) => errors.push(format!("file: {}", e)),
+    }
+    Err(format!(
+        "设置保存失败（已保存在内存中，重启后会丢失）：{}",
+        errors.join("; ")
+    ))
 }
 
 /// 追加候选目录（去重）
@@ -219,147 +328,66 @@ fn find_writable_file_path(app: &AppHandle) -> Option<std::path::PathBuf> {
     None
 }
 
-/// 保存到文件系统（兜底，以 SM4 密文信封写入）
-fn save_to_file(app: &AppHandle, config: &AppConfig) -> Result<(), String> {
-    use std::fs;
-
-    let path = find_writable_file_path(app)
-        .ok_or_else(|| "没有可写的文件目录".to_string())?;
-
-    let json = serde_json::to_string_pretty(config)
-        .map_err(|e| format!("序列化失败: {}", e))?;
-    let envelope = crate::crypto::encrypt_str(app, &json)?;
-
-    fs::write(&path, envelope)
-        .map_err(|e| format!("写入文件失败: {} (路径: {})", e, path.display()))?;
-
-    Ok(())
-}
-
-/// 加载配置
+/// 加载完整配置：设置 + 数据库业务实体
 pub fn load_config(app: &AppHandle) -> AppConfig {
-    // 1. 优先从 Store 插件加载
-    match load_from_store(app) {
-        Ok(Some((config, was_plaintext))) => {
-            let migrated = migrate_config(app, config);
-            // 历史明文首读即回写密文，完成升级
-            if was_plaintext {
-                let _ = save_config(app, &migrated);
-            }
-            return migrated;
+    let settings = load_settings(app);
+    let data = match crate::db::load_for_app(app) {
+        Ok(data) => {
+            set_db_snapshot(Some(data.clone()));
+            data
         }
-        // Store 中有数据但无法读取：绝不覆盖，退回内存/默认值
-        Err(_) => return load_config_readonly(),
-        Ok(None) => {}
-    }
-
-    // 2. 从文件系统加载（可能是旧数据迁移）
-    match load_from_file(app) {
-        Ok(Some((config, _was_plaintext))) => {
-            let migrated = migrate_config(app, config);
-            // 迁移到 Store（密文）；Store 不可用时才退回文件，
-            // 避免二者写同一个 config.json 却用不同格式互相覆盖
-            if save_to_store(app, &migrated).is_err() {
-                let _ = save_to_file(app, &migrated);
-            }
-            return migrated;
+        Err(err) => {
+            eprintln!("[db] 读取失败，本次不写回数据库: {}", err);
+            set_db_snapshot(None);
+            DbData::default()
         }
-        // 文件中有密文但无法解密：绝不覆盖，退回内存/默认值
-        Err(_) => return load_config_readonly(),
-        Ok(None) => {}
-    }
-
-    // 3. 从内存缓存加载
-    let mut cache = get_memory_cache();
-    if !cache.groups.is_empty() || !cache.projects.is_empty() || !cache.default_exclude.is_empty() {
-        // 同样兼容历史数据，标记默认分组
-        mark_default_group(&mut cache);
-        return cache;
-    }
-
-    // 4. 首次启动，空配置
-    let config = AppConfig::default();
-    let _ = save_config(app, &config);
+    };
+    let mut config = settings.into_config(data);
+    mark_default_group(&mut config);
     config
 }
 
-/// 存在既有配置但无法读取（如钥匙串暂时不可用）时的兜底：
-/// 只用内存缓存或默认值，绝不回写，避免覆盖既有数据
-fn load_config_readonly() -> AppConfig {
-    let mut cache = get_memory_cache();
-    if !cache.groups.is_empty() || !cache.projects.is_empty() || !cache.default_exclude.is_empty() {
-        mark_default_group(&mut cache);
-        return cache;
-    }
-    AppConfig::default()
-}
-
-/// 保存配置
+/// 保存完整配置：设置写 config.json，业务实体按快照 diff 写数据库
 pub fn save_config(app: &AppHandle, config: &AppConfig) -> Result<(), String> {
-    // 始终更新内存缓存
-    set_memory_cache(config);
-
     let mut errors: Vec<String> = Vec::new();
 
-    // 1. 优先用 Store 插件保存
-    match save_to_store(app, config) {
-        Ok(_) => return Ok(()),
-        Err(e) => errors.push(format!("store: {}", e)),
+    let settings = AppSettings::from_config(config);
+    if let Err(err) = save_settings(app, &settings) {
+        errors.push(format!("settings: {}", err));
     }
 
-    // 2. 降级到文件系统
-    match save_to_file(app, config) {
-        Ok(_) => return Ok(()),
-        Err(e) => errors.push(format!("file: {}", e)),
-    }
-
-    // 3. 都失败了，返回详细错误（但内存中已经保存了，运行时不影响）
-    Err(format!(
-        "所有存储方式均失败（数据已保存在内存中，重启后会丢失）：{}",
-        errors.join("; ")
-    ))
-}
-
-/// 获取配置文件路径（用于调试显示）
-///
-/// 这是一个只读探测：绝不能借"查看路径"之名写入任何配置。
-/// 历史实现会 `save_to_store(default)` 做可写性探测，导致每次启动
-/// 都把用户的真实配置覆盖成默认值（表现为"每次重启数据都没了"）。
-pub fn get_config_path(app: &AppHandle) -> Result<String, String> {
-    // 先看 Store 目标目录能否工作（只做 .write_test 探测，不写配置）
-    if store_dir_writable(app) {
-        return Ok("Store 插件 (config.json)".to_string());
-    }
-
-    // 再看文件系统
-    if let Some(path) = find_writable_file_path(app) {
-        return Ok(path.to_string_lossy().to_string());
-    }
-
-    // 都不行，返回内存模式
-    Err("当前为内存模式（重启后数据丢失）".to_string())
-}
-
-/// 探测 Store 插件目标目录（app_data_dir）是否可写。
-/// 只写 `.write_test` 探针，绝不触碰 config.json。
-fn store_dir_writable(app: &AppHandle) -> bool {
-    use std::fs;
-
-    match app.path().app_data_dir() {
-        Ok(dir) => {
-            if !dir.exists() && fs::create_dir_all(&dir).is_err() {
-                return false;
+    match db_snapshot() {
+        None => errors.push("本地数据库不可用，业务数据未写入".to_string()),
+        Some(prev) => {
+            let next = DbData::from_config(config);
+            match crate::db::save_for_app(app, &prev, &next) {
+                Ok(()) => set_db_snapshot(Some(next)),
+                Err(err) => errors.push(format!("db: {}", err)),
             }
-            test_writable(&dir)
         }
-        Err(_) => false,
     }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
+/// 获取数据库文件路径（用于设置页展示）
+pub fn get_config_path(app: &AppHandle) -> Result<String, String> {
+    crate::db::db_path(app).map(|path| path.to_string_lossy().to_string())
+}
+
+/// 获取设置文件路径（用于设置页展示）
+pub fn settings_path(app: &AppHandle) -> Result<String, String> {
+    find_writable_file_path(app)
+        .map(|path| path.to_string_lossy().to_string())
+        .ok_or_else(|| "设置文件当前不可写（内存模式）".to_string())
 }
 
 /// 标记默认分组（兼容历史数据：旧数据没有 is_default 字段）
-/// 返回是否发生了变更
 fn mark_default_group(config: &mut AppConfig) -> bool {
-    // 已有标记则不处理
     if config.groups.iter().any(|g| g.is_default) {
         return false;
     }
@@ -370,216 +398,65 @@ fn mark_default_group(config: &mut AppConfig) -> bool {
     false
 }
 
-/// 为旧配置补齐新增的默认排除规则
-/// 返回是否发生了变更
-fn migrate_default_exclude(config: &mut AppConfig) -> bool {
-    if config.default_exclude_version >= DEFAULT_EXCLUDE_VERSION {
-        return false;
-    }
-    for (version, additions) in DEFAULT_EXCLUDE_ADDITIONS {
-        if *version <= config.default_exclude_version {
-            continue;
-        }
-        for rule in additions.iter() {
-            if !config.default_exclude.iter().any(|r| r == rule) {
-                config.default_exclude.push(rule.to_string());
-            }
-        }
-    }
-    config.default_exclude_version = DEFAULT_EXCLUDE_VERSION;
-    true
-}
-
-/// 迁移历史字段级加密的 VPN 密码：
-/// 旧版 password 为 `keychain:` / `dpapi:` 密文且 password_encrypted=true，
-/// 解出明文后清掉标记；解密失败则保留原值并记录日志。
-/// 返回是否发生了变更。
-fn migrate_vpn_passwords(config: &mut AppConfig) -> bool {
-    let mut changed = false;
-    for profile in config.vpn_profiles.iter_mut() {
-        if !profile.password_encrypted {
-            continue;
-        }
-        let looks_legacy = profile.password.starts_with("keychain:")
-            || profile.password.starts_with("dpapi:");
-        if !looks_legacy {
-            // 已是明文（或空），只需清掉标记
-            profile.password_encrypted = false;
-            changed = true;
-            continue;
-        }
-        match crate::vpn::credential::unprotect(&profile.password) {
-            Ok(plain) => {
-                profile.password = plain;
-                profile.password_encrypted = false;
-                changed = true;
-            }
-            Err(err) => {
-                eprintln!(
-                    "VPN 配置「{}」的旧密码解密失败，保留原值：{}",
-                    profile.name, err
-                );
-            }
-        }
-    }
-    changed
-}
-
-/// 迁移配置（旧版 projects 字段 -> 分组结构 + 标记默认分组）
-fn migrate_config(app: &AppHandle, mut config: AppConfig) -> AppConfig {
-    let mut changed = false;
-
-    // 1. 旧版 projects 字段 -> 默认分组
-    if config.groups.is_empty() && !config.projects.is_empty() {
-        let now = chrono::Utc::now().to_rfc3339();
-        let group = ProjectGroup {
-            id: uuid::Uuid::new_v4().to_string(),
-            name: "默认分组".to_string(),
-            projects: std::mem::take(&mut config.projects),
-            is_default: true,
-            created_at: now,
-            note: String::new(),
-            upload_dir: None,
-            attachments: Vec::new(),
-        };
-        config.groups.push(group);
-        changed = true;
-    }
-
-    // 2. 兼容历史数据，标记默认分组
-    if mark_default_group(&mut config) {
-        changed = true;
-    }
-
-    // 3. 补齐新增的默认排除规则
-    if migrate_default_exclude(&mut config) {
-        changed = true;
-    }
-
-    // 4. 迁移历史字段级加密的 VPN 密码
-    if migrate_vpn_passwords(&mut config) {
-        changed = true;
-    }
-
-    if changed {
-        let _ = save_config(app, &config);
-    }
-    config
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::ProjectGroup;
 
-    fn old_config(rules: &[&str], version: u32) -> AppConfig {
-        AppConfig {
-            default_exclude: rules.iter().map(|s| s.to_string()).collect(),
-            default_exclude_version: version,
-            ..Default::default()
-        }
+    fn group_from_json(json: &str) -> ProjectGroup {
+        serde_json::from_str(json).unwrap()
     }
 
-    /// 老配置（无版本号，视为 0）会被补齐新增的默认排除规则
     #[test]
-    fn migrate_default_exclude_fills_new_rules() {
-        let mut config = old_config(&[".DS_Store", "*.md"], 0);
-        assert!(migrate_default_exclude(&mut config));
-        assert!(config.default_exclude.contains(&".*".to_string()));
-        assert!(config.default_exclude.contains(&".*/**".to_string()));
-        assert_eq!(config.default_exclude_version, DEFAULT_EXCLUDE_VERSION);
+    fn app_settings_default_uses_latest_exclude_rules() {
+        let settings = AppSettings::default();
+        assert_eq!(
+            settings.default_exclude_version,
+            crate::models::DEFAULT_EXCLUDE_VERSION
+        );
+        assert!(settings.default_exclude.iter().any(|r| r == ".*"));
     }
 
-    /// 已是最新版本时不重复补齐
     #[test]
-    fn migrate_default_exclude_skips_up_to_date_config() {
-        let mut config = old_config(&["*.md"], DEFAULT_EXCLUDE_VERSION);
-        assert!(!migrate_default_exclude(&mut config));
-        assert_eq!(config.default_exclude, vec!["*.md".to_string()]);
-    }
-
-    /// 已存在的规则不会被重复添加
-    #[test]
-    fn migrate_default_exclude_does_not_duplicate() {
-        let mut config = old_config(&[".*"], 0);
-        migrate_default_exclude(&mut config);
-        assert_eq!(config.default_exclude.iter().filter(|r| *r == ".*").count(), 1);
-    }
-
-    /// 新配置（首次启动）直接带上新增规则
-    #[test]
-    fn default_config_contains_new_rules() {
-        let config = AppConfig::default();
-        assert!(config.default_exclude.contains(&".*".to_string()));
-        assert!(config.default_exclude.contains(&".*/**".to_string()));
-        assert_eq!(config.default_exclude_version, DEFAULT_EXCLUDE_VERSION);
-    }
-
-    fn vpn_profile(password: &str, encrypted: bool) -> crate::vpn::models::VpnProfile {
-        crate::vpn::models::VpnProfile {
-            id: "p1".to_string(),
-            name: "测试配置".to_string(),
-            server: "vpn.example.com".to_string(),
-            username: "user".to_string(),
-            password: password.to_string(),
-            password_encrypted: encrypted,
-            protocol: "anyconnect".to_string(),
-            connector: Default::default(),
-            rule_set_id: String::new(),
-            fake_ip_range: "198.18.0.0/16".to_string(),
-            fake_ip_filter: Vec::new(),
-            use_vpn_dns: true,
-            learn: false,
-            extra_args: Vec::new(),
-            connector_path: String::new(),
-            created_at: String::new(),
-            updated_at: String::new(),
-        }
-    }
-
-    /// 标记为已加密但实际已是明文：只清标记，值保持不变
-    #[test]
-    fn migrate_vpn_passwords_clears_flag_for_plaintext() {
-        let mut config = AppConfig {
-            vpn_profiles: vec![vpn_profile("secret", true)],
+    fn app_settings_roundtrip_from_config() {
+        let config = AppConfig {
+            default_exclude: vec!["node_modules".to_string()],
+            default_exclude_version: 7,
+            vpn_active_profile_id: "p1".to_string(),
+            vpn_worker_session_dir: "/tmp/session".to_string(),
+            default_upload_dir: Some("/tmp/upload".to_string()),
             ..Default::default()
         };
-        assert!(migrate_vpn_passwords(&mut config));
-        assert_eq!(config.vpn_profiles[0].password, "secret");
-        assert!(!config.vpn_profiles[0].password_encrypted);
+        let settings = AppSettings::from_config(&config);
+        let merged = settings.into_config(crate::db::DbData::default());
+        assert_eq!(merged.default_exclude, config.default_exclude);
+        assert_eq!(merged.default_exclude_version, 7);
+        assert_eq!(merged.vpn_active_profile_id, "p1");
+        assert_eq!(merged.vpn_worker_session_dir, "/tmp/session");
+        assert_eq!(merged.default_upload_dir, config.default_upload_dir);
+        assert!(merged.groups.is_empty());
     }
 
-    /// 幂等：迁移过的配置再次迁移不再产生变更
     #[test]
-    fn migrate_vpn_passwords_is_idempotent() {
-        let mut config = AppConfig {
-            vpn_profiles: vec![vpn_profile("secret", true)],
-            ..Default::default()
-        };
-        assert!(migrate_vpn_passwords(&mut config));
-        assert!(!migrate_vpn_passwords(&mut config));
+    fn mark_default_group_marks_named_group() {
+        let mut config = AppConfig::default();
+        assert!(!mark_default_group(&mut config));
+
+        config
+            .groups
+            .push(group_from_json(r#"{"id":"g1","name":"默认分组"}"#));
+        assert!(mark_default_group(&mut config));
+        assert!(config.groups[0].is_default);
+        assert!(!mark_default_group(&mut config));
     }
 
-    /// 空密码同样只清标记
     #[test]
-    fn migrate_vpn_passwords_clears_flag_for_empty() {
-        let mut config = AppConfig {
-            vpn_profiles: vec![vpn_profile("", true)],
-            ..Default::default()
-        };
-        assert!(migrate_vpn_passwords(&mut config));
-        assert_eq!(config.vpn_profiles[0].password, "");
-        assert!(!config.vpn_profiles[0].password_encrypted);
-    }
-
-    /// 旧密文解不开时：保留原值与标记，且不视为变更（绝不覆盖既有数据）
-    #[test]
-    fn migrate_vpn_passwords_keeps_unreadable_legacy() {
-        let mut config = AppConfig {
-            vpn_profiles: vec![vpn_profile("keychain:__missing__", true)],
-            ..Default::default()
-        };
-        assert!(!migrate_vpn_passwords(&mut config));
-        assert_eq!(config.vpn_profiles[0].password, "keychain:__missing__");
-        assert!(config.vpn_profiles[0].password_encrypted);
+    fn mark_default_group_leaves_other_groups_alone() {
+        let mut config = AppConfig::default();
+        config
+            .groups
+            .push(group_from_json(r#"{"id":"g1","name":"工作"}"#));
+        assert!(!mark_default_group(&mut config));
+        assert!(!config.groups[0].is_default);
     }
 }
