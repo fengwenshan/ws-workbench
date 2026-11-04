@@ -1,5 +1,6 @@
 import { ref, onMounted } from 'vue'
-import { invoke } from '@tauri-apps/api/core'
+import { loadAppConfig, saveAppConfig } from '@/api/config'
+import { nowIso } from '@/utils/time'
 import type { AppConfig, AttachmentMeta, EntityKind, ProjectConfig, ProjectGroup } from '@/types'
 
 export function useConfig() {
@@ -25,7 +26,7 @@ export function useConfig() {
   async function loadConfig() {
     loading.value = true
     try {
-      const loaded = await invoke<AppConfig>('get_config')
+      const loaded = await loadAppConfig()
       // 老版本配置里没有 VPN 字段，这里补齐，避免模板里访问 undefined
       config.value = {
         ...loaded,
@@ -50,7 +51,7 @@ export function useConfig() {
   }
 
   async function saveConfig() {
-    await invoke('save_config', { config: config.value })
+    await saveAppConfig(config.value)
   }
 
   // 查找分组
@@ -84,7 +85,7 @@ export function useConfig() {
       name,
       projects: [],
       is_default: false,
-      created_at: new Date().toISOString(),
+      created_at: nowIso(),
       note: '',
       upload_dir: uploadDir,
       attachments: [],
@@ -158,7 +159,7 @@ export function useConfig() {
   ): Promise<ProjectConfig | undefined> {
     const group = config.value.groups.find(g => g.id === groupId)
     if (!group) return
-    const now = new Date().toISOString()
+    const now = nowIso()
     const project: ProjectConfig = {
       note: '',
       upload_dir: null,
@@ -178,7 +179,7 @@ export function useConfig() {
   async function updateProject(id: string, data: Partial<ProjectConfig>) {
     const project = findProject(id)
     if (project) {
-      Object.assign(project, data, { updated_at: new Date().toISOString() })
+      Object.assign(project, data, { updated_at: nowIso() })
       await saveConfig()
     }
   }
@@ -202,7 +203,7 @@ export function useConfig() {
     const entity = resolveEntity(kind, id)
     if (!entity) return
     entity.note = note
-    if (kind === 'project') (entity as ProjectConfig).updated_at = new Date().toISOString()
+    if (kind === 'project') (entity as ProjectConfig).updated_at = nowIso()
     await saveConfig()
   }
 
@@ -211,7 +212,7 @@ export function useConfig() {
     const entity = resolveEntity(kind, id)
     if (!entity) return
     entity.upload_dir = dir
-    if (kind === 'project') (entity as ProjectConfig).updated_at = new Date().toISOString()
+    if (kind === 'project') (entity as ProjectConfig).updated_at = nowIso()
     await saveConfig()
   }
 
@@ -226,7 +227,7 @@ export function useConfig() {
     const entity = resolveEntity(kind, id)
     if (!entity) return
     entity.attachments.push(meta)
-    if (kind === 'project') (entity as ProjectConfig).updated_at = new Date().toISOString()
+    if (kind === 'project') (entity as ProjectConfig).updated_at = nowIso()
     await saveConfig()
   }
 
@@ -235,7 +236,7 @@ export function useConfig() {
     const entity = resolveEntity(kind, id)
     if (!entity) return
     entity.attachments = entity.attachments.filter(a => a.id !== attachmentId)
-    if (kind === 'project') (entity as ProjectConfig).updated_at = new Date().toISOString()
+    if (kind === 'project') (entity as ProjectConfig).updated_at = nowIso()
     await saveConfig()
   }
 
@@ -246,7 +247,7 @@ export function useConfig() {
     const meta = entity.attachments.find(a => a.id === attachmentId)
     if (!meta) return
     meta.name = name
-    if (kind === 'project') (entity as ProjectConfig).updated_at = new Date().toISOString()
+    if (kind === 'project') (entity as ProjectConfig).updated_at = nowIso()
     await saveConfig()
   }
 

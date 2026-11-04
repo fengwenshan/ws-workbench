@@ -1,8 +1,20 @@
 <script setup lang="ts">
 import { ref, reactive, watch, computed, nextTick } from 'vue'
-import { invoke } from '@tauri-apps/api/core'
-import { open } from '@tauri-apps/plugin-dialog'
 import type { LogLevel, ProjectConfig, ProjectType, VcsInfo } from '@/types'
+import {
+  detectProjectType as detectProjectTypeCommand,
+  detectVcs as detectVcsCommand,
+} from '@/api/project'
+import { getDefaultExcludeRules } from '@/api/config'
+import {
+  openDir,
+  openInIdea,
+  openInTerminal,
+  openInTrae,
+  openInVscode,
+} from '@/api/system'
+import { pickDirectory } from '@/utils/dialog'
+import { basename, joinPath } from '@/utils/path'
 import ExcludeRules from './ExcludeRules.vue'
 
 const sourceTextarea = ref<HTMLTextAreaElement | null>(null)
@@ -90,7 +102,7 @@ async function detectProjectType(dir: string) {
   pendingDetect++
   detecting.value = true
   try {
-    const type = await invoke<ProjectType>('detect_project_type', { sourceDir: dir })
+    const type = await detectProjectTypeCommand(dir)
     // 防止异步返回时目录已变化
     if (localProject.value?.source_dir === dir) {
       projectType.value = type
@@ -115,7 +127,7 @@ async function detectVcs(dir: string) {
     return
   }
   try {
-    const info = await invoke<VcsInfo>('detect_vcs', { sourceDir: dir })
+    const info = await detectVcsCommand(dir)
     // 防止异步返回时目录已变化
     if (localProject.value?.source_dir === dir) {
       vcsInfo.value = info && info.vcs_type !== 'none' ? info : null
@@ -202,32 +214,14 @@ function onOutputChange(e: Event) {
 }
 function onExcludeChange() { debouncedSave() }
 
-// 从路径中提取最后一层目录名（兼容 Windows 反斜杠与 POSIX 斜杠）
-function getLastDirName(path: string): string {
-  const trimmed = path.replace(/[\\/]+$/, '')
-  const idx = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'))
-  return idx >= 0 ? trimmed.slice(idx + 1) : trimmed
-}
-
-// 拼接子路径：沿用源目录的分隔符风格，避免 Windows 下出现 D:\a\b/dist
-function joinPath(dir: string, name: string): string {
-  const trimmed = dir.replace(/[\\/]+$/, '')
-  const sep = trimmed.includes('\\') ? '\\' : '/'
-  return `${trimmed}${sep}${name}`
-}
-
 async function selectSourceDir() {
   const current = localProject.value?.source_dir || ''
-  const selected = await open({
-    directory: true,
-    multiple: false,
-    defaultPath: current || undefined,
-  })
+  const selected = await pickDirectory({ defaultPath: current || undefined })
   if (selected && localProject.value) {
-    const sourceDir = selected as string
+    const sourceDir = selected
     localProject.value.source_dir = sourceDir
     // 源目录改变时，强制更新项目名称和输出目录
-    localProject.value.name = getLastDirName(sourceDir)
+    localProject.value.name = basename(sourceDir)
     localProject.value.output_dir = joinPath(sourceDir, 'dist')
     debouncedSave()
   }
@@ -235,13 +229,9 @@ async function selectSourceDir() {
 
 async function selectOutputDir() {
   const current = localProject.value?.output_dir || ''
-  const selected = await open({
-    directory: true,
-    multiple: false,
-    defaultPath: current || undefined,
-  })
+  const selected = await pickDirectory({ defaultPath: current || undefined })
   if (selected && localProject.value) {
-    localProject.value.output_dir = selected as string
+    localProject.value.output_dir = selected
     debouncedSave()
   }
 }
@@ -258,7 +248,26 @@ function packZip() {
 async function runOpenCmd(cmd: string, path: string) {
   try {
     // open_dir 会返回实际打开的路径（目录不存在时已降级为上级目录）
-    const actual = await invoke<string | null>(cmd, { path })
+    let actual: string | null = null
+    switch (cmd) {
+      case 'open_dir':
+        actual = await openDir(path)
+        break
+      case 'open_in_terminal':
+        await openInTerminal(path)
+        break
+      case 'open_in_vscode':
+        await openInVscode(path)
+        break
+      case 'open_in_idea':
+        await openInIdea(path)
+        break
+      case 'open_in_trae':
+        await openInTrae(path)
+        break
+      default:
+        throw new Error(`未知的打开方式: ${cmd}`)
+    }
     if (actual && actual !== path) {
       emit('log', 'warn', `目录不存在，已打开上级目录: ${actual}`)
     } else {
@@ -314,7 +323,7 @@ function clearDefaultRules() {
 
 // 恢复默认排除规则（以后端默认规则为准）
 async function resetDefaultRules() {
-  const defaults = await invoke<string[]>('get_default_exclude_rules')
+  const defaults = await getDefaultExcludeRules()
   localDefaultExclude.value = [...defaults]
   emit('updateDefaultExclude', [...defaults])
 }

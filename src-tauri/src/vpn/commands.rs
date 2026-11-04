@@ -508,7 +508,7 @@ pub async fn vpn_connect(
         extra_args: profile.extra_args.clone(),
         script_path: String::new(), // worker 生成脚本后回填
         hook_exe: exe.to_string_lossy().to_string(),
-        created_at: chrono::Local::now().to_rfc3339(),
+        created_at: crate::util::time::now_local_rfc3339(),
     };
     session.write_request(&request)?;
 

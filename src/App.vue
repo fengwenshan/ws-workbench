@@ -1,19 +1,23 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onUnmounted } from "vue";
-import { open } from "@tauri-apps/plugin-dialog";
-import { invoke } from "@tauri-apps/api/core";
+import { ref, computed, onMounted, onUnmounted } from "vue";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getVersion } from "@tauri-apps/api/app";
-import { Modal, Checkbox, ConfigProvider, message } from "ant-design-vue";
+import { Modal, Checkbox, ConfigProvider } from "ant-design-vue";
 import zhCN from "ant-design-vue/es/locale/zh_CN";
 import { useConfig } from "@/composables/useConfig";
 import { usePack } from "@/composables/usePack";
 import { useUpdater } from "@/composables/useUpdater";
 import { useVpn } from "@/composables/useVpn";
 import { useApps } from "@/composables/useApps";
-import { initPlatform, platform } from "@/platform";
-import { safeGet, safeSet } from "@/composables/safeStorage";
-import type { AttachmentMeta, EntityKind, Selection } from "@/types";
+import {
+  useWorkbenchLayout,
+  type AppView,
+} from "@/composables/useWorkbenchLayout";
+import { useEntitySelection } from "@/composables/useEntitySelection";
+import { useProjectForm } from "@/composables/useProjectForm";
+import { useDeleteConfirm } from "@/composables/useDeleteConfirm";
+import { initPlatform } from "@/platform";
+import type { AttachmentMeta } from "@/types";
 import ProjectList from "@/components/ProjectList.vue";
 import GroupDetail from "@/components/GroupDetail.vue";
 import ProjectDetail from "@/components/ProjectDetail.vue";
@@ -47,7 +51,7 @@ const {
   collectAttachments,
 } = useConfig();
 
-const { packing, progress, result, logs, addLog, clearLogs, pack } = usePack();
+const { packing, progress, logs, addLog, clearLogs, pack } = usePack();
 
 const {
   status: updateStatus,
@@ -69,73 +73,7 @@ const vpn = useVpn(config, saveConfig);
 // 外部应用定位（设置页用），与项目打包、VPN 共用同一套查找结果
 const apps = useApps();
 
-// 视图：三个工具共享同一个工作台，日志改为工作区底部面板
-type AppView = "home" | "proxy" | "settings";
-const view = ref<AppView>("home");
-
-const VIEW_TITLES: Record<AppView, string> = {
-  home: "项目",
-  proxy: "代理",
-  settings: "设置",
-};
-const toolTitle = computed(() => VIEW_TITLES[view.value]);
-
-// 布局：项目树宽度/折叠、日志面板高度/开合，均持久化到本地
-const TREE_WIDTH_KEY = "ws-workbench:layout:tree-width";
-const TREE_COLLAPSED_KEY = "ws-workbench:layout:tree-collapsed";
-const LOG_HEIGHT_KEY = "ws-workbench:layout:log-height";
-const LOG_OPEN_KEY = "ws-workbench:layout:log-open";
-const TREE_WIDTH_DEFAULT = 260;
-const TREE_WIDTH_MIN = 200;
-const TREE_WIDTH_MAX = 420;
-const LOG_HEIGHT_DEFAULT = 220;
-const LOG_HEIGHT_MIN = 120;
-
-const treeWidth = ref(TREE_WIDTH_DEFAULT);
-const treeCollapsed = ref(false);
-const logHeight = ref(LOG_HEIGHT_DEFAULT);
-const logOpen = ref(false);
-
-function clamp(value: number, min: number, max: number) {
-  return Math.min(Math.max(value, min), max);
-}
-
-function setTreeCollapsed(collapsed: boolean) {
-  treeCollapsed.value = collapsed;
-  void safeSet(TREE_COLLAPSED_KEY, String(collapsed));
-}
-
-function toggleTree() {
-  if (view.value !== "home") {
-    view.value = "home";
-    setTreeCollapsed(false);
-    return;
-  }
-  setTreeCollapsed(!treeCollapsed.value);
-}
-
-function setLogOpen(open: boolean) {
-  logOpen.value = open;
-  void safeSet(LOG_OPEN_KEY, String(open));
-}
-
-function toggleLogs() {
-  setLogOpen(!logOpen.value);
-}
-
-function selectTool(tool: AppView) {
-  if (tool === "home" && view.value === "home") {
-    setTreeCollapsed(!treeCollapsed.value);
-    return;
-  }
-  view.value = tool;
-  if (tool === "home" && treeCollapsed.value) setTreeCollapsed(false);
-}
-
-function shortcutTitle(label: string, key: string) {
-  return `${label} (${isMac.value ? "⌘" : "Ctrl+"}${key})`;
-}
-
+// VPN 状态点：图标栏底部的连接指示
 const vpnDotClass = computed(() => {
   if (vpn.isConnected) return "connected";
   if (vpn.phaseBusy) return "busy";
@@ -147,156 +85,82 @@ const vpnTitle = computed(() => {
   return "VPN 未连接，点击进入代理";
 });
 
-// 拖拽调整面板尺寸：只改视觉尺寸，松手后一次性持久化
-type DragState =
-  | { kind: "tree"; startX: number; startWidth: number }
-  | { kind: "log"; startY: number; startHeight: number };
-let drag: DragState | null = null;
+// 工作台布局：工具切换、项目树 / 日志面板尺寸与持久化
+const {
+  view,
+  toolTitle,
+  isMac,
+  shortcutTitle,
+  selectTool,
+  treeWidth,
+  treeCollapsed,
+  setTreeCollapsed,
+  logHeight,
+  logOpen,
+  setLogOpen,
+  toggleLogs,
+  startTreeResize,
+  startLogResize,
+  resetTreeWidth,
+  resetLogHeight,
+  onTreeResizerKeydown,
+  onLogResizerKeydown,
+} = useWorkbenchLayout();
 
-function startTreeResize(event: PointerEvent) {
-  event.preventDefault();
-  drag = { kind: "tree", startX: event.clientX, startWidth: treeWidth.value };
-  (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
-}
+// 分组 / 项目选中状态
+const {
+  selection,
+  selectedId,
+  selectedGroup,
+  selectedProject,
+  ensureSelection,
+  handleSelect,
+} = useEntitySelection(config, loading);
 
-function startLogResize(event: PointerEvent) {
-  event.preventDefault();
-  drag = { kind: "log", startY: event.clientY, startHeight: logHeight.value };
-  (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
-}
-
-// 分隔条也支持键盘微调，避免只能拖鼠标
-function onTreeResizerKeydown(event: KeyboardEvent) {
-  if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
-  event.preventDefault();
-  const delta = event.key === "ArrowRight" ? 16 : -16;
-  treeWidth.value = clamp(treeWidth.value + delta, TREE_WIDTH_MIN, TREE_WIDTH_MAX);
-  void safeSet(TREE_WIDTH_KEY, String(treeWidth.value));
-}
-
-function onLogResizerKeydown(event: KeyboardEvent) {
-  if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
-  event.preventDefault();
-  const delta = event.key === "ArrowUp" ? 16 : -16;
-  logHeight.value = clamp(
-    logHeight.value + delta,
-    LOG_HEIGHT_MIN,
-    Math.round(window.innerHeight * 0.5),
-  );
-  void safeSet(LOG_HEIGHT_KEY, String(logHeight.value));
-}
-
-function onResizeMove(event: PointerEvent) {
-  if (!drag) return;
-  if (drag.kind === "tree") {
-    treeWidth.value = clamp(
-      drag.startWidth + event.clientX - drag.startX,
-      TREE_WIDTH_MIN,
-      TREE_WIDTH_MAX,
-    );
-  } else {
-    const maxHeight = Math.round(window.innerHeight * 0.5);
-    logHeight.value = clamp(
-      drag.startHeight + drag.startY - event.clientY,
-      LOG_HEIGHT_MIN,
-      maxHeight,
-    );
-  }
-}
-
-function onResizeEnd() {
-  if (!drag) return;
-  if (drag.kind === "tree") void safeSet(TREE_WIDTH_KEY, String(treeWidth.value));
-  else void safeSet(LOG_HEIGHT_KEY, String(logHeight.value));
-  drag = null;
-}
-
-function resetTreeWidth() {
-  setTreeCollapsed(false);
-  treeWidth.value = TREE_WIDTH_DEFAULT;
-  void safeSet(TREE_WIDTH_KEY, String(TREE_WIDTH_DEFAULT));
-}
-
-function resetLogHeight() {
-  logHeight.value = LOG_HEIGHT_DEFAULT;
-  void safeSet(LOG_HEIGHT_KEY, String(LOG_HEIGHT_DEFAULT));
-}
-
-function isEditableTarget(target: EventTarget | null) {
-  const element = target as HTMLElement | null;
-  if (!element) return false;
-  const tag = element.tagName.toLowerCase();
-  return (
-    tag === "input" ||
-    tag === "textarea" ||
-    tag === "select" ||
-    element.isContentEditable
-  );
-}
-
-function handleShortcut(event: KeyboardEvent) {
-  if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
-  if (isEditableTarget(event.target)) return;
-  switch (event.key.toLowerCase()) {
-    case "1":
-      event.preventDefault();
-      selectTool("home");
-      break;
-    case "2":
-      event.preventDefault();
-      selectTool("proxy");
-      break;
-    case "3":
-      event.preventDefault();
-      selectTool("settings");
-      break;
-    case "b":
-      event.preventDefault();
-      toggleTree();
-      break;
-    case "j":
-      event.preventDefault();
-      toggleLogs();
-      break;
-  }
-}
-
-async function restoreLayout() {
-  const width = Number(await safeGet(TREE_WIDTH_KEY));
-  if (Number.isFinite(width) && width > 0) {
-    treeWidth.value = clamp(width, TREE_WIDTH_MIN, TREE_WIDTH_MAX);
-  }
-  const collapsed = await safeGet(TREE_COLLAPSED_KEY);
-  if (collapsed === "true" || collapsed === "false") {
-    treeCollapsed.value = collapsed === "true";
-  }
-  const height = Number(await safeGet(LOG_HEIGHT_KEY));
-  if (Number.isFinite(height) && height > 0) {
-    logHeight.value = clamp(
-      height,
-      LOG_HEIGHT_MIN,
-      Math.round(window.innerHeight * 0.5),
-    );
-  }
-  const open = await safeGet(LOG_OPEN_KEY);
-  if (open === "true" || open === "false") {
-    logOpen.value = open === "true";
-  }
-}
-
-onMounted(() => {
-  void restoreLayout();
-  window.addEventListener("keydown", handleShortcut);
-  window.addEventListener("pointermove", onResizeMove);
-  window.addEventListener("pointerup", onResizeEnd);
-});
-onUnmounted(() => {
-  window.removeEventListener("keydown", handleShortcut);
-  window.removeEventListener("pointermove", onResizeMove);
-  window.removeEventListener("pointerup", onResizeEnd);
+// 新建分组 / 添加项目表单
+const {
+  showAddGroupForm,
+  newGroupName,
+  newGroupAddress,
+  openAddGroupForm,
+  selectGroupAddress,
+  handleAddGroup,
+  showAddForm,
+  newProjectName,
+  newProjectSource,
+  newProjectOutput,
+  openAddForm,
+  selectNewSource,
+  selectNewOutput,
+  handleAdd,
+} = useProjectForm({
+  addGroup,
+  addProject,
+  addLog,
+  onProjectCreated: (project) => {
+    selection.value = { kind: "project", id: project.id };
+  },
 });
 
-// 日志页：在应用日志与 VPN 日志之间切换
+// 删除确认弹窗
+const {
+  deleteModalOpen,
+  deleteWithFiles,
+  deleteTarget,
+  requestDeleteGroup,
+  requestDeleteProject,
+  confirmDelete,
+} = useDeleteConfirm({
+  findGroup,
+  findProject,
+  deleteGroup,
+  deleteProject,
+  collectAttachments,
+  ensureSelection,
+  addLog,
+});
+
+// 日志面板：应用日志与 VPN 日志共用底部面板
 const logSource = ref<"app" | "vpn">("app");
 const activeLogs = computed(() =>
   logSource.value === "app" ? logs.value : vpn.logs,
@@ -305,9 +169,6 @@ function clearActiveLogs() {
   if (logSource.value === "app") clearLogs();
   else vpn.clearLogs();
 }
-
-// 平台判定统一走 platform 模块，不再靠 navigator.userAgent 猜
-const isMac = computed(() => platform.is_macos);
 
 // 托盘菜单只负责转发动作，具体行为在这里决定
 let trayUnlisten: UnlistenFn | null = null;
@@ -356,7 +217,7 @@ const appVersion = ref("");
 onMounted(async () => {
   try {
     appVersion.value = await getVersion();
-  } catch (err: any) {
+  } catch (err) {
     addLog("warn", `读取版本号失败: ${err}`);
   }
   // 用后端的编译期平台信息覆盖 userAgent 兜底值
@@ -423,164 +284,6 @@ function handleDismissUpdate() {
   addLog("info", `已忽略 v${version}，本次不再提示`);
 }
 
-// 选择模型：区分分组与项目，驱动右侧路由
-const selection = ref<Selection | null>(null);
-const selectedId = computed(() => selection.value?.id ?? null);
-const selectedGroup = computed(() => {
-  const sel = selection.value;
-  if (!sel || sel.kind !== "group") return null;
-  return findGroup(sel.id) || null;
-});
-const selectedProject = computed(() => {
-  const sel = selection.value;
-  if (!sel || sel.kind !== "project") return null;
-  return findProject(sel.id) || null;
-});
-
-// 选中项失效（删除/加载完成）时回落到第一个项目
-function ensureSelection() {
-  const sel = selection.value;
-  if (sel) {
-    const alive = sel.kind === "group" ? findGroup(sel.id) : findProject(sel.id);
-    if (alive) return;
-  }
-  const first = config.value.groups.flatMap((g) => g.projects).find(Boolean);
-  selection.value = first ? { kind: "project", id: first.id } : null;
-}
-
-watch(
-  loading,
-  (value) => {
-    if (!value) ensureSelection();
-  },
-  { immediate: true },
-);
-
-// 新建分组
-const showAddGroupForm = ref(false);
-const newGroupName = ref("");
-const newGroupAddress = ref("");
-
-function openAddGroupForm() {
-  newGroupName.value = "";
-  newGroupAddress.value = "";
-  showAddGroupForm.value = true;
-}
-
-async function selectGroupAddress() {
-  const selected = await open({ directory: true, multiple: false });
-  if (selected) newGroupAddress.value = selected as string;
-}
-
-// 新建分组表单的错误反馈：写入日志并弹提示，避免只记日志看不到
-function rejectGroupForm(msg: string) {
-  addLog("error", msg);
-  message.error(msg);
-}
-
-async function handleAddGroup() {
-  const name = newGroupName.value.trim();
-  if (!name) {
-    rejectGroupForm("请填写分组名称");
-    return;
-  }
-  const address = newGroupAddress.value.trim();
-  // 未填写地址时回退到系统默认上传位置
-  let uploadDir: string | null = null;
-  if (address) {
-    // 地址不合法直接拒绝；合法但不存在则由后端按需创建
-    try {
-      uploadDir = await invoke<string>("ensure_dir", { path: address });
-    } catch (err: any) {
-      rejectGroupForm(`地址不可用: ${err}`);
-      return;
-    }
-  }
-  try {
-    await addGroup(name, uploadDir);
-    addLog("success", `已创建分组: ${name}`);
-    newGroupName.value = "";
-    newGroupAddress.value = "";
-    showAddGroupForm.value = false;
-  } catch (err: any) {
-    rejectGroupForm(`创建分组失败: ${err}`);
-  }
-}
-
-// 删除确认弹窗：分组/项目共用单次确认，附默认不勾选的「同时删除附件文件」
-const deleteModalOpen = ref(false);
-const deleteWithFiles = ref(false);
-const deleteTarget = ref<{
-  kind: EntityKind;
-  id: string;
-  name: string;
-  suffix: string;
-} | null>(null);
-
-function requestDeleteGroup(id: string) {
-  const group = findGroup(id);
-  if (!group) return;
-  // 默认分组不允许删除（内部项目仍可单独删除）
-  if (group.is_default) {
-    addLog("warn", `默认分组「${group.name}」不可删除`);
-    return;
-  }
-  const projectCount = group.projects.length;
-  deleteTarget.value = {
-    kind: "group",
-    id,
-    name: group.name,
-    suffix: projectCount > 0 ? `（含 ${projectCount} 个项目）` : "",
-  };
-  deleteWithFiles.value = false;
-  deleteModalOpen.value = true;
-}
-
-function requestDeleteProject(id: string) {
-  const project = findProject(id);
-  if (!project) return;
-  deleteTarget.value = {
-    kind: "project",
-    id,
-    name: project.name,
-    suffix: "",
-  };
-  deleteWithFiles.value = false;
-  deleteModalOpen.value = true;
-}
-
-async function confirmDelete() {
-  const target = deleteTarget.value;
-  if (!target) return;
-  try {
-    if (deleteWithFiles.value) {
-      // 勾选时逐个删除该实体（分组含其名下项目）的附件密文
-      const metas = collectAttachments(target.kind, target.id);
-      for (const meta of metas) {
-        try {
-          await invoke("remove_attachment_file", {
-            blobDir: meta.dir,
-            id: meta.id,
-          });
-        } catch (err: any) {
-          addLog("warn", `删除附件文件失败（${meta.name}）: ${err}`);
-        }
-      }
-    }
-    if (target.kind === "group") {
-      await deleteGroup(target.id);
-      addLog("info", `已删除分组: ${target.name}`);
-    } else {
-      await deleteProject(target.id);
-      addLog("info", `已删除项目: ${target.name}`);
-    }
-    ensureSelection();
-  } finally {
-    deleteModalOpen.value = false;
-    deleteTarget.value = null;
-  }
-}
-
 // 重命名分组（默认分组不允许重命名）
 async function handleRenameGroup(id: string, name: string) {
   const group = config.value.groups.find((g) => g.id === id);
@@ -593,91 +296,9 @@ async function handleRenameGroup(id: string, name: string) {
   try {
     await renameGroup(id, name);
     addLog("info", `分组已重命名: ${oldName} → ${name}`);
-  } catch (err: any) {
+  } catch (err) {
     addLog("error", `重命名分组失败: ${err}`);
   }
-}
-
-// 添加项目（在指定分组中）
-const showAddForm = ref(false);
-const targetGroupId = ref<string | null>(null);
-const newProjectName = ref("");
-const newProjectSource = ref("");
-const newProjectOutput = ref("");
-
-// 从路径中提取最后一层目录名（兼容 Windows 反斜杠与 POSIX 斜杠）
-function getLastDirName(path: string): string {
-  const trimmed = path.replace(/[\\/]+$/, "");
-  const idx = Math.max(trimmed.lastIndexOf("/"), trimmed.lastIndexOf("\\"));
-  return idx >= 0 ? trimmed.slice(idx + 1) : trimmed;
-}
-
-// 拼接子路径：沿用源目录的分隔符风格，避免 Windows 下出现 D:\a\b/dist
-function joinPath(dir: string, name: string): string {
-  const trimmed = dir.replace(/[\\/]+$/, "");
-  const sep = trimmed.includes("\\") ? "\\" : "/";
-  return `${trimmed}${sep}${name}`;
-}
-
-async function selectNewSource() {
-  const selected = await open({ directory: true, multiple: false });
-  if (selected) {
-    const sourceDir = selected as string;
-    newProjectSource.value = sourceDir;
-    // 源目录改变时，强制更新项目名称和输出目录
-    newProjectName.value = getLastDirName(sourceDir);
-    newProjectOutput.value = joinPath(sourceDir, "dist");
-  }
-}
-
-async function selectNewOutput() {
-  const selected = await open({ directory: true, multiple: false });
-  if (selected) newProjectOutput.value = selected as string;
-}
-
-function openAddForm(groupId: string) {
-  targetGroupId.value = groupId;
-  newProjectName.value = "";
-  newProjectSource.value = "";
-  newProjectOutput.value = "";
-  showAddForm.value = true;
-}
-
-async function handleAdd() {
-  if (!targetGroupId.value) {
-    addLog("warn", "未选择分组");
-    return;
-  }
-  if (!newProjectSource.value.trim()) {
-    addLog("warn", "请选择源目录");
-    return;
-  }
-
-  const sourceDir = newProjectSource.value.trim();
-  // 项目名称为空时，自动用源目录最后一层名字
-  const projectName = newProjectName.value.trim() || getLastDirName(sourceDir);
-  // 输出目录为空时，自动追加 /dist
-  const outputDir =
-    newProjectOutput.value.trim() || joinPath(sourceDir, "dist");
-
-  if (!projectName) {
-    addLog("warn", "请填写项目名称");
-    return;
-  }
-
-  const created = await addProject(targetGroupId.value, {
-    name: projectName,
-    source_dir: sourceDir,
-    output_dir: outputDir,
-    exclude: [],
-  });
-  if (created) selection.value = { kind: "project", id: created.id };
-  addLog("success", `已添加项目: ${projectName}`);
-  showAddForm.value = false;
-}
-
-function handleSelect(id: string, kind: EntityKind) {
-  selection.value = { kind, id };
 }
 
 // 笔记 / 上传位置 / 附件（分组与项目共用，按当前选中实体落盘）
@@ -727,7 +348,7 @@ async function handleSetDefaultUploadDir(dir: string | null) {
       "info",
       dir ? `全局默认上传目录已设为: ${dir}` : "已清除全局默认上传目录",
     );
-  } catch (err: any) {
+  } catch (err) {
     addLog("error", `设置全局默认上传目录失败: ${err}`);
   }
 }

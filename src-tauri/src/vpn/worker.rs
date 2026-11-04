@@ -1052,7 +1052,7 @@ pub fn tunnel_next_hop(vpn_ip: &str, netmask: &str) -> String {
 }
 
 fn now() -> String {
-    chrono::Local::now().to_rfc3339()
+    crate::util::time::now_local_rfc3339()
 }
 
 /// 从 RFC3339 时间戳算到现在过了多久

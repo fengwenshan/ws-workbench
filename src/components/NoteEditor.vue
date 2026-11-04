@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { ref, watch, onBeforeUnmount } from 'vue'
-import { invoke } from '@tauri-apps/api/core'
 import { MdEditor } from 'md-editor-v3'
 import type { ToolbarNames } from 'md-editor-v3'
 import 'md-editor-v3/lib/style.css'
 import { isWindows } from '@/platform'
 import type { AttachmentMeta, LogLevel } from '@/types'
+import { encryptUploadBytes, resolveUploadDir } from '@/api/attachments'
+import { errorText } from '@/utils/error'
 
 const props = defineProps<{
   note: string
@@ -109,12 +110,9 @@ function extOf(file: File): string {
 async function onUploadImg(files: File[], callback: (urls: string[]) => void) {
   let uploadDir: string
   try {
-    uploadDir = await invoke<string>('resolve_upload_dir', {
-      entityDir: props.uploadDir,
-      defaultDir: props.defaultUploadDir,
-    })
+    uploadDir = await resolveUploadDir(props.uploadDir, props.defaultUploadDir)
   } catch (e) {
-    emit('log', 'error', `解析上传目录失败: ${e instanceof Error ? e.message : String(e)}`)
+    emit('log', 'error', `解析上传目录失败: ${errorText(e)}`)
     callback([])
     return
   }
@@ -124,17 +122,17 @@ async function onUploadImg(files: File[], callback: (urls: string[]) => void) {
     try {
       const dataB64 = await readFileAsBase64(file)
       if (!dataB64) throw new Error('文件内容为空')
-      const meta = await invoke<AttachmentMeta>('encrypt_upload_bytes', {
+      const meta = await encryptUploadBytes(
         uploadDir,
-        name: file.name || 'image',
-        ext: extOf(file),
+        file.name || 'image',
+        extOf(file),
         dataB64,
-      })
+      )
       emit('addAttachment', meta)
       emit('log', 'success', `图片已加密上传: ${meta.name}`)
       urls.push(imageUrl(meta.id, meta.ext, meta.dir))
     } catch (e) {
-      emit('log', 'error', `图片上传失败: ${file.name} - ${e instanceof Error ? e.message : String(e)}`)
+      emit('log', 'error', `图片上传失败: ${file.name} - ${errorText(e)}`)
     }
   }
   callback(urls)

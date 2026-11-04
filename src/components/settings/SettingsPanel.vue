@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { invoke } from '@tauri-apps/api/core'
-import { open } from '@tauri-apps/plugin-dialog'
+import { getConfigPath, getStorageInfo, type StorageInfo } from '@/api/config'
 import { platform } from '@/platform'
+import { pickDirectory } from '@/utils/dialog'
 import { SOURCE_LABELS, sourceTone, type AppId, type AppLocation } from '@/types/apps'
 import type { AppsApi } from '@/composables/useApps'
 
@@ -15,13 +15,6 @@ const emit = defineEmits<{
   updateDefaultUploadDir: [dir: string | null]
 }>()
 
-interface StorageInfo {
-  db_path: string
-  settings_path: string
-  ok: boolean
-  error: string
-}
-
 const apps = props.apps
 const configPath = ref('')
 const storageInfo = ref<StorageInfo | null>(null)
@@ -31,12 +24,12 @@ const canConfigurePaths = computed(() => platform.is_windows)
 
 onMounted(async () => {
   try {
-    configPath.value = await invoke<string>('get_config_path')
+    configPath.value = await getConfigPath()
   } catch (err: any) {
     configPath.value = `读取失败：${err}`
   }
   try {
-    storageInfo.value = await invoke<StorageInfo>('storage_info')
+    storageInfo.value = await getStorageInfo()
   } catch {
     storageInfo.value = null
   }
@@ -44,9 +37,9 @@ onMounted(async () => {
 
 async function changeDefaultDir() {
   await run(async () => {
-    const selected = await open({ directory: true, multiple: false })
+    const selected = await pickDirectory()
     if (!selected) return
-    emit('updateDefaultUploadDir', Array.isArray(selected) ? selected[0] : selected)
+    emit('updateDefaultUploadDir', selected)
   }, '选择目录失败')
 }
 

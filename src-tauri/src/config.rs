@@ -301,23 +301,14 @@ pub(crate) fn storage_candidates(app: &AppHandle) -> Vec<(String, std::path::Pat
 
 /// 测试目录是否可写
 fn test_writable(dir: &std::path::PathBuf) -> bool {
-    use std::fs;
-    let test_file = dir.join(".write_test");
-    if fs::write(&test_file, b"test").is_ok() {
-        let _ = fs::remove_file(&test_file);
-        true
-    } else {
-        false
-    }
+    crate::util::fs::is_writable_dir(dir)
 }
 
 /// 找到第一个可写的文件路径
 fn find_writable_file_path(app: &AppHandle) -> Option<std::path::PathBuf> {
-    use std::fs;
-
     for (_, dir) in storage_candidates(app) {
         if !dir.exists() {
-            if fs::create_dir_all(&dir).is_err() {
+            if crate::util::fs::create_dir_all(&dir).is_err() {
                 continue;
             }
         }
