@@ -293,7 +293,9 @@ fn bundled_candidates(id: AppId, ctx: &AppContext, names: &[&str]) -> Vec<(PathB
     {
         bases.push(base.join(APPS_DIR).join(id.as_str()));
     }
-    // 开发模式下资源还没被拷进 target 目录，指回源码树
+    // 开发模式下资源还没被拷进 target 目录，指回源码树；release 不能带这条，
+    // 否则安装版可能优先拿构建机上的绝对路径，反而掩盖安装包漏资源的问题。
+    #[cfg(debug_assertions)]
     bases.push(
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("resources")
