@@ -11,5 +11,5 @@ pub mod finder;
 pub mod models;
 pub mod registry;
 
-pub use finder::{locate, locate_all, managed_dir};
-pub use models::{AppCandidate, AppContext, AppId, AppLocation, AppPathOverride};
+pub use finder::{locate, managed_dir};
+pub use models::{AppCandidate, AppContext, AppId, AppLocation};

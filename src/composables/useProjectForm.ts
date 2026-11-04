@@ -1,7 +1,6 @@
 import { ref } from 'vue'
 import { message } from 'ant-design-vue'
 import type { LogLevel, ProjectConfig, ProjectGroup } from '@/types'
-import { ensureDir } from '@/api/system'
 import { pickDirectory } from '@/utils/dialog'
 import { basename, joinPath } from '@/utils/path'
 
@@ -13,7 +12,7 @@ interface NewProjectData {
 }
 
 interface Options {
-  addGroup: (name: string, uploadDir: string | null) => Promise<ProjectGroup>
+  addGroup: (name: string) => Promise<ProjectGroup>
   addProject: (
     groupId: string,
     data: NewProjectData,
@@ -30,23 +29,17 @@ export function useProjectForm(options: Options) {
   const { addGroup, addProject, addLog, onProjectCreated } = options
 
   // ---- 新建分组 ----
+  // 附件上传统一走「设置 → 附件上传」里的地址，分组只需要一个名称
   const showAddGroupForm = ref(false)
   const newGroupName = ref('')
-  const newGroupAddress = ref('')
 
   function openAddGroupForm() {
     newGroupName.value = ''
-    newGroupAddress.value = ''
     showAddGroupForm.value = true
   }
 
-  async function selectGroupAddress() {
-    const selected = await pickDirectory()
-    if (selected) newGroupAddress.value = selected
-  }
-
-  // 新建分组表单的错误反馈：写入日志并弹提示，避免只记日志看不到
-  function rejectGroupForm(text: string) {
+  // 表单错误反馈：写入日志并弹提示，避免只记日志看不到
+  function rejectForm(text: string) {
     addLog('error', text)
     message.error(text)
   }
@@ -54,28 +47,16 @@ export function useProjectForm(options: Options) {
   async function handleAddGroup() {
     const name = newGroupName.value.trim()
     if (!name) {
-      rejectGroupForm('请填写分组名称')
+      rejectForm('请填写分组名称')
       return
     }
-    const address = newGroupAddress.value.trim()
-    // 未填写地址时回退到系统默认上传位置；填写时先校验并由后端按需创建
-    let uploadDir: string | null = null
-    if (address) {
-      try {
-        uploadDir = await ensureDir(address)
-      } catch (err) {
-        rejectGroupForm(`地址不可用: ${err}`)
-        return
-      }
-    }
     try {
-      await addGroup(name, uploadDir)
+      await addGroup(name)
       addLog('success', `已创建分组: ${name}`)
       newGroupName.value = ''
-      newGroupAddress.value = ''
       showAddGroupForm.value = false
     } catch (err) {
-      rejectGroupForm(`创建分组失败: ${err}`)
+      rejectForm(`创建分组失败: ${err}`)
     }
   }
 
@@ -85,27 +66,62 @@ export function useProjectForm(options: Options) {
   const newProjectName = ref('')
   const newProjectSource = ref('')
   const newProjectOutput = ref('')
+  // 原生选目录对话框是模态的，期间再点「添加项目」会叠出第二个框
+  const pickingProjectPath = ref(false)
 
+  // 源目录变了就同步带出项目名称与输出目录（两者之后都能改）
+  function applyProjectSource(dir: string) {
+    newProjectSource.value = dir
+    newProjectName.value = basename(dir)
+    newProjectOutput.value = joinPath(dir, 'dist')
+  }
+
+  // 点「添加项目」先选项目目录，选好才弹窗补信息；取消则不弹窗
+  async function openAddForm(groupId: string) {
+    if (pickingProjectPath.value) return
+    pickingProjectPath.value = true
+    try {
+      const selected = await pickDirectory({ title: '选择项目目录' })
+      if (!selected) return
+      targetGroupId.value = groupId
+      applyProjectSource(selected)
+      showAddForm.value = true
+    } catch (err) {
+      rejectForm(`打开目录选择失败: ${err}`)
+    } finally {
+      pickingProjectPath.value = false
+    }
+  }
+
+  // 弹窗里重新选项目目录：项目名称与输出目录跟着重算
   async function selectNewSource() {
-    const selected = await pickDirectory()
-    if (!selected) return
-    newProjectSource.value = selected
-    // 源目录改变时，强制更新项目名称和输出目录
-    newProjectName.value = basename(selected)
-    newProjectOutput.value = joinPath(selected, 'dist')
+    if (pickingProjectPath.value) return
+    pickingProjectPath.value = true
+    try {
+      const selected = await pickDirectory({
+        defaultPath: newProjectSource.value || undefined,
+        title: '选择项目目录',
+      })
+      if (!selected) return
+      applyProjectSource(selected)
+    } catch (err) {
+      rejectForm(`打开目录选择失败: ${err}`)
+    } finally {
+      pickingProjectPath.value = false
+    }
   }
 
   async function selectNewOutput() {
-    const selected = await pickDirectory()
-    if (selected) newProjectOutput.value = selected
-  }
-
-  function openAddForm(groupId: string) {
-    targetGroupId.value = groupId
-    newProjectName.value = ''
-    newProjectSource.value = ''
-    newProjectOutput.value = ''
-    showAddForm.value = true
+    if (pickingProjectPath.value) return
+    pickingProjectPath.value = true
+    try {
+      const selected = await pickDirectory({ title: '选择输出目录' })
+      if (selected) newProjectOutput.value = selected
+    } catch (err) {
+      rejectForm(`打开目录选择失败: ${err}`)
+    } finally {
+      pickingProjectPath.value = false
+    }
   }
 
   async function handleAdd() {
@@ -114,7 +130,7 @@ export function useProjectForm(options: Options) {
       return
     }
     if (!newProjectSource.value.trim()) {
-      addLog('warn', '请选择源目录')
+      addLog('warn', '请选择项目目录')
       return
     }
 
@@ -137,7 +153,7 @@ export function useProjectForm(options: Options) {
       exclude: [],
     })
     if (created) onProjectCreated?.(created)
-    addLog('success', `已添加项目: ${projectName}`)
+    addLog('success', `已添加项目: ${projectName}（${sourceDir}）`)
     showAddForm.value = false
   }
 
@@ -145,9 +161,7 @@ export function useProjectForm(options: Options) {
     // 分组表单
     showAddGroupForm,
     newGroupName,
-    newGroupAddress,
     openAddGroupForm,
-    selectGroupAddress,
     handleAddGroup,
     // 项目表单
     showAddForm,

@@ -41,11 +41,6 @@ impl Platform {
         matches!(Self::CURRENT, Os::Linux)
     }
 
-    /// Windows 专有的查找逻辑（注册表、App Paths、PATHEXT 等）只在 Windows 生效
-    pub const fn has_windows_app_search(&self) -> bool {
-        Self::is_windows(&Self)
-    }
-
     /// 可执行文件后缀
     pub const fn exe_suffix(&self) -> &'static str {
         match Self::CURRENT {
@@ -115,8 +110,6 @@ pub struct PlatformInfo {
     pub exe_suffix: String,
     /// VPN 是否必须提权
     pub vpn_needs_admin: bool,
-    /// 是否支持「手动指定应用路径」这类 Windows 专有设置
-    pub supports_app_path_settings: bool,
 }
 
 impl PlatformInfo {
@@ -133,7 +126,6 @@ impl PlatformInfo {
             is_linux: Platform::is_linux(&Platform),
             exe_suffix: Platform::exe_suffix(&Platform).to_string(),
             vpn_needs_admin: Platform::vpn_needs_admin(&Platform),
-            supports_app_path_settings: Platform::has_windows_app_search(&Platform),
         }
     }
 }
@@ -173,14 +165,6 @@ mod tests {
         } else {
             assert_eq!(suffix, "");
         }
-    }
-
-    #[test]
-    fn app_path_settings_are_windows_only() {
-        assert_eq!(
-            Platform::has_windows_app_search(&Platform),
-            cfg!(target_os = "windows")
-        );
     }
 
     #[test]

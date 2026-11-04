@@ -21,7 +21,8 @@
         "minWidth": 900,
         "minHeight": 600,
         "resizable": true,
-        "dragDropEnabled": false
+        "dragDropEnabled": false,
+        "create": false
       }
     ],
     "security": {

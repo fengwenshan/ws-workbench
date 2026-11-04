@@ -7,8 +7,8 @@
 ### 工作区
 
 - 两级结构：分组 → 项目。默认分组不可删除，但组内项目可删；分组与项目都支持拖拽排序，项目可以在分组之间拖动
-- 分组和项目各自带一份 Markdown 笔记、一组加密附件、可选的上传目录
-- 项目配置：源目录、输出目录、项目级排除规则。目录类操作都提供快捷入口：在文件管理器打开，或在终端 / VS Code / IDEA / Trae 中打开（目录不存在时自动退到上级目录）
+- 分组和项目各自带一份 Markdown 笔记、一组加密附件（上传目录统一在「设置 → 附件上传」里配）
+- 项目配置：源目录、输出目录。目录旁边是「打开方式」分体按钮：左半边用当前选中的应用打开（默认访达 / 资源管理器），右半边展开本机真正装了的编辑器与终端（VS Code、Trae、Cursor、Xcode、IntelliJ IDEA、PyCharm、WebStorm、GoLand、iTerm、终端），图标从各应用的 `.icns` 里取，菜单里标「（默认）」；选择记在 localStorage，下次沿用。目录不存在时自动退到最近存在的上级目录
 - 新建项目时识别类型（Layui / Vue2 / Vue3 / React / SpringBoot / Spring / Struts2 / Java）和版本控制远端（Git / SVN），并做源目录校验
 
 ### 笔记与附件
@@ -17,13 +17,13 @@
 
 附件从上传开始就是密文：
 
-- 选文件或直接把文件拖进窗口；上传时流式加密成 `<upload_dir>/<uuid>.wst`，先写 `.tmp` 再原子改名，磁盘上不会出现明文副本
+- 选文件，或把文件拖到「上传」页任意位置（整个内容区都是投放区）；上传时加密成 `<upload_dir>/<uuid>.wst`，先写 `.tmp` 再原子改名，磁盘上不会出现明文副本
 - 容器格式 `WST1`：明文头（magic / 版本 / 原始大小）+ 若干 `SM4-CBC(PKCS7)` 帧 + HMAC-SM3 尾。分帧读写，内存占用近似常数，大文件不会整份读进内存
-- 上传目录三级回退：分组/项目自定义目录 → 设置页全局默认目录 → App 私有 `<app_data_dir>/attachments`
+- 上传目录：设置页全局默认目录 → App 私有 `<app_data_dir>/attachments`（未设置时按需创建）
 - 打开 = 解密到临时文件后交给系统默认程序；导出 = 解密到指定路径；重命名只改元信息；删除会连同密文 blob 一起删
 - 上传与解密进度通过 `attachment-progress` 事件推给界面
 
-笔记里插入的图片同样走加密上传，正文只保存 `wst-img://`（macOS/Linux）或 `http://wst-img.localhost`（Windows）地址，编辑器渲染时由自定义协议按需解密返回，不落明文图片文件。
+笔记里插入的图片（工具栏选图或直接粘贴剪贴板图片）同样走加密上传，正文只保存 `wst-img://`（macOS/Linux）或 `http://wst-img.localhost`（Windows）地址，编辑器渲染时由自定义协议按需解密返回，不落明文图片文件；这些图片不登记为附件，不会占用「上传」页的附件列表。
 
 ### 项目打包
 
@@ -43,18 +43,29 @@ const canPack = computed(() => projectType.value === 'layui')
 - **开始打包**：逐个复制到输出目录，复制前会清空输出目录
 - **打包 ZIP**：流式 Deflate 直接写 zip，不落中间产物；zip 内会多包一层输出目录名，条目名按 UTF-8 写入并置位 bit 11
 
-排除规则走 gitignore 语法，默认规则集如下，用户可在「默认排除规则」里追加、清空或一键恢复：
+打包用**白名单（layui 项目打包规则）**：只有命中规则的文件才进包，规则统一放在**设置页 →「layui 项目打包规则」**，项目级不再单独配置。
 
 ```
-.DS_Store   *.md        .git      .git/**     .svn      .svn/**
-.idea       .idea/**    .vscode   .vscode/**  .claude   .claude/**
-.trae       .trae/**    *.scss    *.less      .gitignore
-node_modules  node_modules/**   *.zip
+*.html *.htm *.css *.js *.mjs *.json
+*.png *.jpg *.jpeg *.gif *.svg *.webp *.avif *.ico *.bmp
+*.woff *.woff2 *.ttf *.eot *.otf
+*.mp4 *.webm *.mp3 *.wav *.ogg
+*.txt *.xml
+*.thm *.tjs *.dotm     # layui 模板 / 模板脚本 / WPS 控件模板
+*.docx                 # WebOffice 新建正文的空白模板
 ```
 
-规则集带版本号（当前 `DEFAULT_EXCLUDE_VERSION = 2`），老配置在加载时自动补齐 v2 新增的 `.*` 与 `.*/**`，不会重复添加已有规则。
+- 只列运行时真的会被请求的类型；`scss`/`ts`/`vue`/`map`/`md`、构建配置（`package.json`、`vite.config.*`）、设计源文件、压缩包这些开发期产物都不在里面
+- layui 特有：`.thm`（表单/列表模板，`rsViewRender.js` 按 `APP_ROOT + '/xmodules/.../**.thm'` 拉取）、`.tjs`（模板脚本）、`.dotm`（WPS 控件的 `Normal.dotm`）都是运行时资源，默认收
+- `.docx` 只收运行时真会 GET 的那类模板（`rsWebOffice.js` 用 `$.ajax` 拉 `weboffice/newDocument.docx` 当新建正文模板）；上传控件 accept 里出现的 `.doc`/`.pdf`/`.wps` 等字符串不算引用，工程里没有对应资源的仍不收
+- **`.` 或 `_` 开头的路径段一律跳过**（任意层级，文件或目录都算）：`.svn`/`.git`/`.idea`/`.vscode`、`.DS_Store`、`_draft.html`、`partials/_header.html` 都由这一条硬规则兜住，不占规则名额
+- 匹配语义：不带 `/` 的规则按**文件名**匹配、任意层级都算（`*.png`）；带 `/` 的按**相对源目录的路径**匹配（`assets/**`、`js/app.js`）
+- 规则清空 = 视为未配置：除 `.`/`_` 开头的条目外全部打包（避免误删规则后打出空包）
+- 路径里含空格的文件始终跳过
 
-遍历由 `ignore::WalkBuilder` 完成，标准过滤全部关闭、不跟随符号链接；项目自定义规则以 `!pattern` 形式叠加。相对路径中任一段含空格的文件会被跳过，这类文件不会出现在产物里。输出目录与 zip 自身通过 `extra_excludes` 排除，避免上一次的产物被再打一遍。
+默认规则定义在 `src-tauri/src/models.rs` 的 `DEFAULT_INCLUDE`，带版本号（当前 `DEFAULT_INCLUDE_VERSION = 3`）：老配置（没有 include 字段）加载时自动补上默认集，之后用户自己删掉的规则不会被重新塞回去。「恢复默认」按钮调用 `get_default_include_rules` 取同一份清单。
+
+遍历由 `ignore::WalkBuilder` 完成，标准过滤全部关闭、不跟随符号链接；`.`/`_` 开头的条目在 `filter_entry` 里直接剪掉，包含规则用 `globset` 在遍历结果上过滤（文件名匹配 + 路径匹配两个集合）。相对路径中任一段含空格的文件会被跳过。输出目录与 zip 自身通过 `extra_excludes` 整棵子树剪掉，避免上一次的产物被再打一遍。
 
 打包过程中通过 `pack-progress` 事件推送进度，阶段依次为 `scanning` → `cleaning` → `copying` / `zipping` → `done`。
 
@@ -128,9 +139,9 @@ openconnect 探测失败时，代理页给出按平台区分的安装引导：�
 
 ### 设置
 
-显示运行环境（操作系统、架构、可执行文件后缀、是否需要提权、配置文件位置）、全局默认附件上传目录，以及外部应用的定位结果：VS Code、IDEA、Trae、openconnect。
+显示运行环境（操作系统、架构、可执行文件后缀、是否需要提权、配置文件位置、各网卡的 MAC 与全部 IP —— 多 IP 逐条列出），以及附件实际落盘位置（可直接打开目录）。
 
-查找优先级为手动指定 > 已导入副本 > 内置资源 > 注册表 > PATH。手动指定路径仅 Windows 提供；导入副本只对 openconnect 开放。macOS 与 Linux 下分别检查 `/Applications`、Homebrew 前缀以及 PATH 里的 `/usr/bin`、`/usr/local/bin`。
+「用编辑器打开项目」与 VPN 连接器探测共用同一套应用查找逻辑，优先级为专用路径 > 已导入副本 > 内置资源 > 注册表 > PATH；导入副本只对 openconnect 开放。macOS 与 Linux 下分别检查 `/Applications`、Homebrew 前缀以及 PATH 里的 `/usr/bin`、`/usr/local/bin`。
 
 ### 日志
 
@@ -248,7 +259,7 @@ git push origin v1.0.16   # 只有推 tag 才会触发 GitHub 构建
 
 业务数据（分组、项目、笔记、附件元信息、VPN 配置、规则集）存在应用私有目录的 `ws-workbench.db`（SQLite）中：表里只留 `id`、`group_id`、`sort_order` 等少量明文列，每行内容序列化成 JSON 后用 SM4 信封加密，存进 `payload` 列。`AppConfig` 与前端命令保持不变，加载时从多表组装，保存时与内存快照做 diff、事务内只写变化的行。
 
-应用设置（默认排除规则、上次选中的 VPN 配置、外部应用路径、默认上传目录、worker 会话目录）仍存在 `config.json`（`tauri-plugin-store`，键名 `app_config`），**整份加密**：SM4-CBC + 随机 IV + HMAC-SM3，信封形如 `v1.<b64(iv)>.<b64(ct)>.<b64(mac)>`。主密钥（32 字节）首次启动时随机生成，macOS 存系统钥匙串（`ws-workbench-vault` / `ws-workbench`），Windows 用 DPAPI 加密后写进 `<app_data_dir>/.vault_key`。
+应用设置（layui 项目打包规则、上次选中的 VPN 配置、默认上传目录、worker 会话目录）仍存在 `config.json`（`tauri-plugin-store`，键名 `app_config`），**整份加密**：SM4-CBC + 随机 IV + HMAC-SM3，信封形如 `v1.<b64(iv)>.<b64(ct)>.<b64(mac)>`。主密钥（32 字节）首次启动时随机生成，macOS 存系统钥匙串（`ws-workbench-vault` / `ws-workbench`），Windows 用 DPAPI 加密后写进 `<app_data_dir>/.vault_key`。
 
 前端写 localStorage 也一律走 `safeStorage`：值经 `vault_encrypt` 变成密文再落盘。
 
@@ -278,7 +289,6 @@ VPN 会话目录同时被主进程和提权 worker 使用，因此不做路径�
 | 虚拟网卡 | Wintun 驱动 | 系统 utun |
 | 分流实现 | 仅 `IP-CIDR → VPN` 规则落静态路由 | TUN 透明接管，六类规则全部生效 + fake-ip DNS |
 | 学习模式 | 支持 | 不支持 |
-| 应用路径手动指定 | 支持 | 不支持 |
 | 路由查询 | cscript + PowerShell JSON | `route` / `ifconfig` / `netstat` |
 
 其余已知限制：
@@ -296,7 +306,7 @@ src-tauri/src/
   commands/        前端命令入口按业务域拆分
     config.rs      配置读写、存储信息、本地键值加密
     project.rs     打包、校验、项目类型与 VCS 识别
-    system.rs      打开目录/终端/编辑器、平台信息、外部应用定位
+    system.rs      打开目录/终端/编辑器、平台与网络信息
     attachments.rs 附件加解密、上传目录解析、笔记内联图片
   util/            通用能力层
     fs.rs          目录创建、文本读写、可写性探测
@@ -304,9 +314,10 @@ src-tauri/src/
   config.rs        配置读写：整份加密、写入目录多级回退、历史字段迁移
   crypto.rs        字符串密文信封（SM4-CBC + HMAC-SM3）与主密钥托管
   filecrypto.rs    附件流式加密容器 WST1
-  packer.rs        打包：遍历、排除、复制、流式 ZIP
-  models.rs        AppConfig / 分组 / 项目 / 附件元信息 / 默认排除规则
+  packer.rs        打包：遍历、包含规则过滤、复制、流式 ZIP
+  models.rs        AppConfig / 分组 / 项目 / 附件元信息 / 默认包含规则
   platform.rs      操作系统判定
+  netinfo.rs       本机网卡 MAC / IP（Windows 走 PowerShell，macOS/Linux 走 getifaddrs）
   process.rs/winps.rs  进程管理与 PowerShell 调用
   apps/            外部应用定位（finder / registry）
   vpn/

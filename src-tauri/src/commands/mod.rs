@@ -5,10 +5,12 @@
 
 mod attachments;
 mod config;
+mod openwith;
 mod project;
 mod system;
 
 pub use attachments::*;
 pub use config::*;
+pub use openwith::*;
 pub use project::*;
 pub use system::*;

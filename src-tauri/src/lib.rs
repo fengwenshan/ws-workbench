@@ -8,6 +8,7 @@ mod commands;
 mod packer;
 pub mod apps;
 mod platform;
+mod netinfo;
 mod process;
 mod winps;
 pub mod vpn;
@@ -30,6 +31,40 @@ fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
         let _ = window.unminimize();
         let _ = window.set_focus();
     }
+}
+
+// 托盘图标：macOS 用模板图（黑 + 透明），系统会按菜单栏明暗自动反色；
+// Windows / Linux 用白色位图，深色任务栏上更清楚。
+fn tray_icon_image() -> Option<tauri::image::Image<'static>> {
+    let bytes: &'static [u8] = if cfg!(target_os = "macos") {
+        include_bytes!("../icons/tray/tray-template-36.png")
+    } else if cfg!(target_os = "windows") {
+        include_bytes!("../icons/tray/tray-white-32.png")
+    } else {
+        include_bytes!("../icons/tray/tray-white-48.png")
+    };
+    tauri::image::Image::from_bytes(bytes).ok()
+}
+
+// macOS 的 Dock 图标来自 .app 包里的 icns；`tauri dev` 跑的是裸二进制，
+// 没有 bundle，Dock 会退回系统那个黑底「exec」占位图标。
+// 启动时显式设一次 applicationIconImage，dev 和安装包的观感就一致了。
+#[cfg(target_os = "macos")]
+fn set_dock_icon() {
+    use objc2::{AllocAnyThread, MainThreadMarker};
+    use objc2_app_kit::{NSApplication, NSImage};
+    use objc2_foundation::NSData;
+
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let data = NSData::with_bytes(include_bytes!("../icons/icon-source.png"));
+    let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) else {
+        return;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    // SAFETY: setup 在主线程执行；NSApplication 只允许主线程访问
+    unsafe { app.setApplicationIconImage(Some(&image)) };
 }
 
 // macOS 顶部菜单栏汉化（Tauri 默认菜单是英文的）
@@ -96,6 +131,30 @@ fn setup_app_menu<R: Runtime>(_app: &AppHandle<R>) -> tauri::Result<()> {
     Ok(())
 }
 
+/// 创建主窗口。
+///
+/// 不用 Tauri 的自动创建（tauri.conf.json 里 `create: false`），是为了能在原生层
+/// 挂 `on_navigation`：把文件从 Finder 拖进窗口时，WebView 默认会直接导航到
+/// file:// 去显示那个文件，整个应用界面被顶替（现场坏掉就是这么来的）。
+/// 这里直接拒绝 file:// 导航，页面永远不会被拖进来的文件换掉。
+fn create_main_window(app: &mut tauri::App) -> tauri::Result<()> {
+    let config = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|window| window.label == "main")
+        .cloned()
+        .expect("tauri.conf.json 里缺少 main 窗口配置");
+    tauri::WebviewWindowBuilder::from_config(app.handle(), &config)?
+        .on_navigation(|url| {
+            // 只拦本地文件导航；dev 的 http://localhost 和打包后的 tauri:// 都放行
+            url.scheme() != "file"
+        })
+        .build()?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
@@ -119,26 +178,20 @@ pub fn run() {
             commands::storage_info,
             commands::vault_encrypt,
             commands::vault_decrypt,
-            commands::get_default_exclude_rules,
+            commands::get_default_include_rules,
             commands::pack_project,
             commands::pack_to_zip,
             commands::validate_project,
             commands::detect_project_type,
             commands::detect_vcs,
             commands::open_dir,
-            commands::open_parent_dir,
-            commands::open_in_vscode,
-            commands::open_in_idea,
-            commands::open_in_trae,
-            commands::open_in_terminal,
+            commands::open_file,
+            commands::list_open_with_apps,
+            commands::refresh_open_with_apps,
+            commands::open_with,
+            commands::check_dir,
             commands::get_platform_info,
-            commands::list_app_locations,
-            commands::set_app_path,
-            commands::clear_app_path,
-            commands::import_app,
-            commands::remove_managed_app,
-            commands::refresh_app_search,
-            commands::open_with_app_id,
+            commands::get_network_info,
             commands::resolve_upload_dir,
             commands::ensure_dir,
             commands::encrypt_upload_file,
@@ -170,6 +223,13 @@ pub fn run() {
             vpn::commands::vpn_session_dir_info,
         ])
         .setup(|app| {
+            // 先建主窗口：窗口配置在 tauri.conf.json 里，但 create: false 交给这里
+            create_main_window(app)?;
+
+            // dev 模式（裸二进制）Dock 会显示系统占位图标，这里补上真实图标
+            #[cfg(target_os = "macos")]
+            set_dock_icon();
+
             // macOS 顶部菜单栏汉化
             setup_app_menu(app.handle())?;
 
@@ -227,7 +287,7 @@ pub fn run() {
             )?;
 
             let mut tray = TrayIconBuilder::with_id("main")
-                .tooltip("ws-workbench")
+                // 不设 tooltip：菜单栏图标悬浮时不要弹出应用名
                 .menu(&menu)
                 // 左键单击直接打开客户端，不弹菜单；菜单只在右键时出现
                 .show_menu_on_left_click(false)
@@ -260,8 +320,9 @@ pub fn run() {
                         show_main_window(tray.app_handle());
                     }
                 });
-            if let Some(icon) = app.default_window_icon().cloned() {
-                tray = tray.icon(icon);
+            if let Some(icon) = tray_icon_image() {
+                // macOS 菜单栏深浅色由系统决定，模板图交给系统着色
+                tray = tray.icon(icon).icon_as_template(cfg!(target_os = "macos"));
             }
             tray.build(app)?;
             Ok(())
@@ -281,6 +342,10 @@ pub fn run() {
         // 注意：RunEvent::Reopen 只存在于 macOS，其他平台编译时需要整段排除
         #[cfg(target_os = "macos")]
         {
+            // 启动完成后再设一次 Dock 图标：磁贴是应用启动后才画出来的
+            if let tauri::RunEvent::Ready = event {
+                set_dock_icon();
+            }
             if let tauri::RunEvent::Reopen {
                 has_visible_windows,
                 ..

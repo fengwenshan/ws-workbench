@@ -17,20 +17,12 @@ fn emit_attachment_progress(app: &AppHandle, id: &str, done: u64, total: u64) {
     );
 }
 
-/// 解析附件的实际上传目录：实体自定义 > 全局默认 > App 私有 `attachments` 目录
+/// 解析附件的统一上传目录：全局默认 > App 私有 `attachments` 目录
 ///
-/// 由前端在展示「上传位置」行时调用，保证路径来源与落盘位置一致。
+/// 分组/项目不再单独配置上传目录，由前端在展示「上传位置」行时调用，
+/// 保证展示路径与实际落盘位置一致。
 #[tauri::command]
-pub fn resolve_upload_dir(
-    app: AppHandle,
-    entity_dir: Option<String>,
-    default_dir: Option<String>,
-) -> Result<String, String> {
-    if let Some(dir) = entity_dir.as_deref() {
-        if !dir.trim().is_empty() {
-            return Ok(dir.to_string());
-        }
-    }
+pub fn resolve_upload_dir(app: AppHandle, default_dir: Option<String>) -> Result<String, String> {
     if let Some(dir) = default_dir.as_deref() {
         if !dir.trim().is_empty() {
             return Ok(dir.to_string());
@@ -172,9 +164,9 @@ pub fn encrypt_upload_bytes(
 ) -> Result<AttachmentMeta, String> {
     let data = B64
         .decode(data_b64.as_bytes())
-        .map_err(|e| format!("图片数据解码失败: {}", e))?;
+        .map_err(|e| format!("附件数据解码失败: {}", e))?;
     if data.is_empty() {
-        return Err("图片内容为空".to_string());
+        return Err("附件内容为空".to_string());
     }
     let size = data.len() as u64;
 

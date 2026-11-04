@@ -1,14 +1,13 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from "vue";
+import { ref, computed, nextTick, onMounted, onUnmounted, watch } from "vue";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getVersion } from "@tauri-apps/api/app";
-import { Modal, Checkbox, ConfigProvider } from "ant-design-vue";
+import { Modal, Checkbox, ConfigProvider, message } from "ant-design-vue";
 import zhCN from "ant-design-vue/es/locale/zh_CN";
 import { useConfig } from "@/composables/useConfig";
 import { usePack } from "@/composables/usePack";
 import { useUpdater } from "@/composables/useUpdater";
 import { useVpn } from "@/composables/useVpn";
-import { useApps } from "@/composables/useApps";
 import {
   useWorkbenchLayout,
   type AppView,
@@ -17,7 +16,9 @@ import { useEntitySelection } from "@/composables/useEntitySelection";
 import { useProjectForm } from "@/composables/useProjectForm";
 import { useDeleteConfirm } from "@/composables/useDeleteConfirm";
 import { initPlatform } from "@/platform";
-import type { AttachmentMeta } from "@/types";
+import { decryptToTemp } from "@/api/attachments";
+import { openFile } from "@/api/system";
+import type { AttachmentMeta, QuickAttachmentItem } from "@/types";
 import ProjectList from "@/components/ProjectList.vue";
 import GroupDetail from "@/components/GroupDetail.vue";
 import ProjectDetail from "@/components/ProjectDetail.vue";
@@ -25,6 +26,7 @@ import PackProgress from "@/components/PackProgress.vue";
 import LogPanel from "@/components/LogPanel.vue";
 import VpnPanel from "@/components/vpn/VpnPanel.vue";
 import SettingsPanel from "@/components/settings/SettingsPanel.vue";
+import QuickOpenPalette from "@/components/QuickOpenPalette.vue";
 
 const {
   config,
@@ -34,6 +36,7 @@ const {
   addGroup,
   deleteGroup,
   renameGroup,
+  updateGroup,
   reorderGroups,
   reorderProjects,
   moveProject,
@@ -43,7 +46,6 @@ const {
   findGroup,
   findProject,
   updateNote,
-  updateUploadDir,
   setDefaultUploadDir,
   addAttachment,
   removeAttachment,
@@ -69,9 +71,6 @@ const {
 
 // VPN 与项目打包共用同一份 config.json，这里复用 useConfig 的 saveConfig 落盘
 const vpn = useVpn(config, saveConfig);
-
-// 外部应用定位（设置页用），与项目打包、VPN 共用同一套查找结果
-const apps = useApps();
 
 // VPN 状态点：图标栏底部的连接指示
 const vpnDotClass = computed(() => {
@@ -120,9 +119,7 @@ const {
 const {
   showAddGroupForm,
   newGroupName,
-  newGroupAddress,
   openAddGroupForm,
-  selectGroupAddress,
   handleAddGroup,
   showAddForm,
   newProjectName,
@@ -139,6 +136,98 @@ const {
   onProjectCreated: (project) => {
     selection.value = { kind: "project", id: project.id };
   },
+});
+
+// 附件面板提示上传目录不可用时，跳到设置页去改
+function handleOpenSettings() {
+  selectTool("settings");
+}
+
+// ========== 快速搜索（⌘/Ctrl+P）：VS Code 式居中浮层 ==========
+const quickOpenVisible = ref(false);
+
+/** 把所有分组/项目的附件拍平，带上所属位置，供快速搜索展示与跳转 */
+const quickItems = computed<QuickAttachmentItem[]>(() => {
+  const out: QuickAttachmentItem[] = [];
+  for (const group of config.value.groups) {
+    for (const attachment of group.attachments ?? []) {
+      out.push({
+        ...attachment,
+        entityKind: "group",
+        entityId: group.id,
+        entityPath: group.name,
+      });
+    }
+    for (const project of group.projects ?? []) {
+      for (const attachment of project.attachments ?? []) {
+        out.push({
+          ...attachment,
+          entityKind: "project",
+          entityId: project.id,
+          entityPath: `${group.name} / ${project.name}`,
+        });
+      }
+    }
+  }
+  return out;
+});
+
+function openQuickSearch() {
+  quickOpenVisible.value = true;
+}
+
+function handleQuickKeydown(event: KeyboardEvent) {
+  if (!(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey) return;
+  if (event.key.toLowerCase() !== "p") return;
+  // 和 VS Code 一样：无论焦点在哪个输入框，⌘P 都拉起快速搜索
+  event.preventDefault();
+  openQuickSearch();
+}
+
+async function handleQuickChoose(item: QuickAttachmentItem) {
+  quickOpenVisible.value = false;
+  // 附件属于别的分组/项目时先切过去，结果才能对上下面的页面
+  if (
+    selection.value?.kind !== item.entityKind ||
+    selection.value?.id !== item.entityId
+  ) {
+    selection.value = { kind: item.entityKind, id: item.entityId };
+    selectTool("home");
+  }
+  let tempPath: string;
+  try {
+    tempPath = await decryptToTemp(item.dir, item.id, item.name);
+  } catch (err: any) {
+    addLog("error", `解密失败（${item.name}）: ${err}`);
+    message.error(`解密失败: ${err}`);
+    return;
+  }
+  try {
+    await openFile(tempPath);
+    addLog("info", `已解密预览: ${item.name}`);
+  } catch (err: any) {
+    addLog("error", `打开失败（${item.name}）: ${err}`);
+    message.error(`打开失败: ${err}`);
+  }
+}
+
+onMounted(() => window.addEventListener("keydown", handleQuickKeydown));
+onUnmounted(() => window.removeEventListener("keydown", handleQuickKeydown));
+
+// 新建分组 / 添加项目弹窗都是「先选目录、后弹窗」，打开后把焦点落到名称输入框（已带出目录名，全选便于直接改写）
+const groupNameInputEl = ref<HTMLInputElement | null>(null);
+const projectNameInputEl = ref<HTMLInputElement | null>(null);
+watch(showAddGroupForm, async (open) => {
+  if (!open) return;
+  await nextTick();
+  groupNameInputEl.value?.focus();
+  groupNameInputEl.value?.select();
+});
+watch(showAddForm, async (open) => {
+  if (!open) return;
+  await nextTick();
+  projectNameInputEl.value?.focus();
+  projectNameInputEl.value?.select();
 });
 
 // 删除确认弹窗
@@ -300,17 +389,11 @@ async function handleRenameGroup(id: string, name: string) {
   }
 }
 
-// 笔记 / 上传位置 / 附件（分组与项目共用，按当前选中实体落盘）
+// 笔记 / 附件（分组与项目共用，按当前选中实体落盘）
 async function handleEntityNote(note: string) {
   const sel = selection.value;
   if (!sel) return;
   await updateNote(sel.kind, sel.id, note);
-}
-
-async function handleEntityUploadDir(dir: string | null) {
-  const sel = selection.value;
-  if (!sel) return;
-  await updateUploadDir(sel.kind, sel.id, dir);
 }
 
 async function handleEntityAddAttachment(meta: AttachmentMeta) {
@@ -335,8 +418,8 @@ async function handleUpdate(id: string, data: any) {
   await updateProject(id, data);
 }
 
-async function handleUpdateDefaultExclude(rules: string[]) {
-  config.value.default_exclude = rules;
+async function handleUpdateDefaultInclude(rules: string[]) {
+  config.value.default_include = rules;
   await saveConfig();
 }
 
@@ -353,7 +436,7 @@ async function handleSetDefaultUploadDir(dir: string | null) {
 }
 
 async function handlePack(project: any, asZip: boolean = false) {
-  await pack(project, config.value.default_exclude, asZip);
+  await pack(project, config.value.default_include, asZip);
 }
 </script>
 
@@ -369,6 +452,20 @@ async function handlePack(project: any, asZip: boolean = false) {
       <div class="titlebar-brand">
         <span class="app-name">ws-workbench</span>
       </div>
+      <!-- 居中搜索：仿 VS Code 命令中心，点击或 ⌘/Ctrl+P 呼出快速搜索 -->
+      <button
+        class="titlebar-search"
+        :title="shortcutTitle('搜索附件', 'P')"
+        aria-label="搜索附件"
+        @click="openQuickSearch"
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+          <circle cx="11" cy="11" r="6" />
+          <path d="M15.5 15.5L20 20" />
+        </svg>
+        <span class="titlebar-search-label">搜索附件</span>
+        <span class="titlebar-search-hint">{{ isMac ? '⌘P' : 'Ctrl+P' }}</span>
+      </button>
       <div class="titlebar-actions">
         <span v-if="appVersion" class="version-text">v{{ appVersion }}</span>
         <button
@@ -526,7 +623,7 @@ async function handlePack(project: any, asZip: boolean = false) {
               :group="selectedGroup"
               :default-upload-dir="config.default_upload_dir"
               @update-note="handleEntityNote"
-              @update-upload-dir="handleEntityUploadDir"
+              @open-settings="handleOpenSettings"
               @add-attachment="handleEntityAddAttachment"
               @remove-attachment="handleEntityRemoveAttachment"
               @rename-attachment="handleEntityRenameAttachment"
@@ -536,13 +633,11 @@ async function handlePack(project: any, asZip: boolean = false) {
               v-else-if="selection && selection.kind === 'project' && selectedProject"
               :key="'project-' + selection.id"
               :project="selectedProject"
-              :default-exclude="config.default_exclude"
               :default-upload-dir="config.default_upload_dir"
               @update="handleUpdate"
               @pack="handlePack"
-              @update-default-exclude="handleUpdateDefaultExclude"
               @update-note="handleEntityNote"
-              @update-upload-dir="handleEntityUploadDir"
+              @open-settings="handleOpenSettings"
               @add-attachment="handleEntityAddAttachment"
               @remove-attachment="handleEntityRemoveAttachment"
               @rename-attachment="handleEntityRenameAttachment"
@@ -564,9 +659,10 @@ async function handlePack(project: any, asZip: boolean = false) {
         <!-- 设置工具 -->
         <div v-show="view === 'settings'" class="workspace-body">
           <SettingsPanel
-            :apps="apps"
             :default-upload-dir="config.default_upload_dir"
+            :default-include="config.default_include"
             @update-default-upload-dir="handleSetDefaultUploadDir"
+            @update-default-include="handleUpdateDefaultInclude"
           />
         </div>
 
@@ -626,33 +722,23 @@ async function handlePack(project: any, asZip: boolean = false) {
       </main>
     </div>
 
-      <!-- 新建分组弹窗 -->
+      <!-- 新建分组弹窗：附件上传统一走设置里的地址，分组只需要名称 -->
       <div v-if="showAddGroupForm" class="add-form-overlay">
         <div class="add-form add-form-sm">
           <h3>新建分组</h3>
           <div class="form-row">
             <label>分组名称</label>
             <input
+              ref="groupNameInputEl"
               v-model="newGroupName"
               class="form-input"
               placeholder="请输入分组名称"
               @keydown.enter="handleAddGroup"
               autofocus
             />
-          </div>
-          <div class="form-row">
-            <label>地址（可选）</label>
-            <div class="dir-row">
-              <input
-                v-model="newGroupAddress"
-                class="form-input"
-                placeholder="留空则使用系统默认上传位置"
-                @keydown.enter="handleAddGroup"
-              />
-              <button class="btn btn-pick" @click="selectGroupAddress">
-                选择
-              </button>
-            </div>
+            <p class="form-hint">
+              附件统一存放到「设置 → 附件上传」里的地址。
+            </p>
           </div>
           <div class="form-actions">
             <button class="btn btn-secondary" @click="showAddGroupForm = false">
@@ -665,42 +751,45 @@ async function handlePack(project: any, asZip: boolean = false) {
         </div>
       </div>
 
-      <!-- 添加项目表单 -->
+      <!-- 添加项目弹窗：目录已在点击「添加项目」时选好，这里补名称与输出目录 -->
       <div v-if="showAddForm" class="add-form-overlay">
         <div class="add-form">
           <h3>添加项目</h3>
-          <div v-if="newProjectSource" class="form-row">
-            <label>项目名称</label>
-            <input
-              v-model="newProjectName"
-              class="form-input"
-              placeholder="项目名称"
-            />
-          </div>
           <div class="form-row">
-            <label>源目录</label>
+            <label>项目目录</label>
             <div class="dir-row">
               <input
                 v-model="newProjectSource"
-                class="form-input"
-                placeholder="选择源目录"
+                class="form-input form-input-readonly"
+                :title="newProjectSource"
                 readonly
               />
               <button class="btn btn-pick" @click="selectNewSource">
-                选择
+                重新选择
               </button>
             </div>
-            <p v-if="!newProjectSource" class="form-hint">
-              选完源目录会自动带出项目名称与输出目录，两者之后都能改
+            <p class="form-hint">
+              用于识别项目类型与打包；换目录会重算项目名称和输出目录。
             </p>
           </div>
-          <div v-if="newProjectSource" class="form-row">
-            <label>输出目录 (可选，默认为源目录-dist)</label>
+          <div class="form-row">
+            <label>项目名称</label>
+            <input
+              ref="projectNameInputEl"
+              v-model="newProjectName"
+              class="form-input"
+              placeholder="项目名称"
+              @keydown.enter="handleAdd"
+            />
+          </div>
+          <div class="form-row">
+            <label>输出目录 (可选，默认为项目目录-dist)</label>
             <div class="dir-row">
               <input
                 v-model="newProjectOutput"
                 class="form-input"
                 placeholder="选择输出目录"
+                @keydown.enter="handleAdd"
               />
               <button class="btn btn-pick" @click="selectNewOutput">
                 选择
@@ -733,6 +822,14 @@ async function handlePack(project: any, asZip: boolean = false) {
         </p>
         <Checkbox v-model:checked="deleteWithFiles">同时删除附件文件</Checkbox>
       </Modal>
+
+      <!-- VS Code 式快速搜索：⌘/Ctrl+P 或标题栏搜索按钮呼出 -->
+      <QuickOpenPalette
+        v-if="quickOpenVisible"
+        :items="quickItems"
+        @close="quickOpenVisible = false"
+        @choose="handleQuickChoose"
+      />
   </div>
   </ConfigProvider>
 </template>
@@ -747,6 +844,7 @@ async function handlePack(project: any, asZip: boolean = false) {
 
 /* 标题栏：承载窗口拖动、当前工具、版本与更新按钮 */
 .titlebar {
+  position: relative;
   flex-shrink: 0;
   height: 38px;
   display: flex;
@@ -776,6 +874,40 @@ async function handlePack(project: any, asZip: boolean = false) {
   align-items: center;
   gap: 10px;
   flex-shrink: 0;
+}
+.titlebar-search {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: min(440px, 38vw);
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-secondary);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.titlebar-search:hover {
+  border-color: var(--primary);
+  color: var(--text-secondary);
+}
+.titlebar-search svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+.titlebar-search-label {
+  font-size: 12px;
+}
+.titlebar-search-hint {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-muted);
 }
 .version-text {
   font-size: 12px;
@@ -1161,6 +1293,10 @@ async function handlePack(project: any, asZip: boolean = false) {
   line-height: 1.5;
   color: var(--text-muted);
 }
+.form-input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
 .add-form h3 {
   margin-bottom: 20px;
   font-size: 18px;
@@ -1187,6 +1323,11 @@ async function handlePack(project: any, asZip: boolean = false) {
 }
 .form-input:focus {
   border-color: var(--primary);
+}
+/* 新建分组里由目录选择带出的只读路径 */
+.form-input-readonly {
+  color: var(--text-secondary);
+  cursor: default;
 }
 .dir-row {
   display: flex;

@@ -50,3 +50,6 @@ src-tauri/resources/apps/*.zip
 # unplugin 自动生成的类型声明
 src/auto-imports.d.ts
 src/components.d.ts
+
+# Swift 编译缓存（design/icons/tools 本地生成，体积很大）
+**/.modulecache/

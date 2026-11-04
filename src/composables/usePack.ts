@@ -11,7 +11,7 @@ export function usePack() {
   const { logs, addLog, clearLogs } = useLog()
   let unlisten: UnlistenFn | null = null
 
-  async function pack(project: ProjectConfig, defaultExclude: string[], asZip: boolean = false) {
+  async function pack(project: ProjectConfig, defaultInclude: string[], asZip: boolean = false) {
     if (packing.value) return
     packing.value = true
     progress.value = null
@@ -36,7 +36,7 @@ export function usePack() {
       const command = asZip ? 'pack_to_zip' : 'pack_project'
       const res = await invoke<PackResult>(command, {
         project,
-        defaultExclude,
+        defaultInclude,
       })
       result.value = res
       if (res.success) {

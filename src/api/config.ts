@@ -26,8 +26,8 @@ export function getStorageInfo(): Promise<StorageInfo> {
   return invoke<StorageInfo>('storage_info')
 }
 
-export function getDefaultExcludeRules(): Promise<string[]> {
-  return invoke<string[]>('get_default_exclude_rules')
+export function getDefaultIncludeRules(): Promise<string[]> {
+  return invoke<string[]>('get_default_include_rules')
 }
 
 /** 供 localStorage 加密层使用：整段文本加密/解密 */

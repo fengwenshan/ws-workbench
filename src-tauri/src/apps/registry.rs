@@ -70,13 +70,6 @@ pub struct RegistryIndex {
 
 static CACHE: Mutex<Option<RegistryIndex>> = Mutex::new(None);
 
-/// 清空缓存，下次查询时重新扫
-pub fn clear_cache() {
-    if let Ok(mut cache) = CACHE.lock() {
-        *cache = None;
-    }
-}
-
 /// 扫描注册表（带缓存）
 pub fn index() -> RegistryIndex {
     if let Ok(cache) = CACHE.lock() {
@@ -195,14 +188,15 @@ fn matches_keyword(text: &str, keywords: &[&str]) -> bool {
 /// 必须过滤：同一个软件家族里往往有好几个可执行文件，
 /// 指向别的那个（比如图形界面主程序）拿过来会直接弹出一个窗口。
 fn display_icon_matches(names: &[&str], path: &Path) -> bool {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .map(|name| {
-            names
-                .iter()
-                .any(|candidate| candidate.eq_ignore_ascii_case(name))
-        })
-        .unwrap_or(false)
+    // 注册表给的是 Windows 路径（反斜杠）。本函数只做「文件名是否在目标列表里」，
+    // 与宿主机无关：按两种分隔符取最后一段，macOS 上跑单测也能覆盖这段逻辑。
+    let text = path.to_string_lossy();
+    let Some(name) = text.rsplit(['\\', '/']).find(|part| !part.is_empty()) else {
+        return false;
+    };
+    names
+        .iter()
+        .any(|candidate| candidate.eq_ignore_ascii_case(name))
 }
 
 /// 在目录里按给定的可执行文件名找一层（含 bin 子目录）

@@ -462,11 +462,9 @@ mod tests {
             name: format!("项目-{}", id),
             source_dir: format!("/tmp/{}", id),
             output_dir: format!("/tmp/{}-dist", id),
-            exclude: vec![".git".to_string()],
             created_at: "2026-11-04T00:00:00Z".to_string(),
             updated_at: "2026-11-04T00:00:00Z".to_string(),
             note: note.to_string(),
-            upload_dir: None,
             attachments: vec![AttachmentMeta {
                 id: format!("{}-att", id),
                 name: "a.txt".to_string(),
@@ -486,7 +484,6 @@ mod tests {
             is_default: false,
             created_at: "2026-11-04T00:00:00Z".to_string(),
             note: "分组的加密笔记".to_string(),
-            upload_dir: None,
             attachments: vec![],
         }
     }

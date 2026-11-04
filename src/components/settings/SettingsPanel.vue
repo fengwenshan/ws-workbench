@@ -1,28 +1,62 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
-import { getConfigPath, getStorageInfo, type StorageInfo } from '@/api/config'
+import { computed, onMounted, ref, watch } from 'vue'
+import { getConfigPath, getDefaultIncludeRules, getStorageInfo, type StorageInfo } from '@/api/config'
+import { resolveUploadDir } from '@/api/attachments'
+import { ensureDir, getNetworkInfo, openDir, type NetworkInfo } from '@/api/system'
 import { platform } from '@/platform'
 import { pickDirectory } from '@/utils/dialog'
-import { SOURCE_LABELS, sourceTone, type AppId, type AppLocation } from '@/types/apps'
-import type { AppsApi } from '@/composables/useApps'
+import RulesEditor from '@/components/RulesEditor.vue'
 
 const props = defineProps<{
-  apps: AppsApi
   defaultUploadDir: string | null
+  defaultInclude: string[]
 }>()
 
 const emit = defineEmits<{
   updateDefaultUploadDir: [dir: string | null]
+  updateDefaultInclude: [rules: string[]]
 }>()
 
-const apps = props.apps
 const configPath = ref('')
 const storageInfo = ref<StorageInfo | null>(null)
-const expanded = ref<string>('')
+const networkInfo = ref<NetworkInfo | null>(null)
+const networkError = ref('')
+const networkLoading = ref(false)
+/** 操作失败时的提示（贴在设置页顶部） */
+const message = ref('')
+/** 附件实际落盘目录：设置里的地址，未设置时解析成 App 私有 attachments 目录 */
+const resolvedUploadDir = ref('')
 
-const canConfigurePaths = computed(() => platform.is_windows)
+/** 打包包含规则：跟设置一起保存，改动立即回写配置 */
+const localIncludeRules = ref<string[]>([])
 
-onMounted(async () => {
+watch(
+  () => props.defaultInclude,
+  (rules) => {
+    localIncludeRules.value = [...(rules ?? [])]
+  },
+  { immediate: true },
+)
+
+function onIncludeRulesChange(rules: string[]) {
+  localIncludeRules.value = rules
+  emit('updateDefaultInclude', rules)
+}
+
+async function resetIncludeRules() {
+  try {
+    const defaults = await getDefaultIncludeRules()
+    onIncludeRulesChange([...defaults])
+  } catch (err: any) {
+    message.value = `恢复默认包含规则失败：${err}`
+  }
+}
+
+const uploadDirSource = computed(() =>
+  props.defaultUploadDir ? '设置里指定的地址' : 'App 私有目录（未指定时的默认位置）',
+)
+
+async function loadStorageInfo() {
   try {
     configPath.value = await getConfigPath()
   } catch (err: any) {
@@ -33,7 +67,53 @@ onMounted(async () => {
   } catch {
     storageInfo.value = null
   }
+}
+
+/** MAC / IP 会随插拔网线、连 VPN 变化，所以跟着右上角的「重新检测」一起刷新 */
+async function loadNetworkInfo() {
+  networkLoading.value = true
+  try {
+    networkInfo.value = await getNetworkInfo()
+    networkError.value = ''
+  } catch (err: any) {
+    networkInfo.value = null
+    networkError.value = String(err)
+  } finally {
+    networkLoading.value = false
+  }
+}
+
+/** 始终展示真实路径，而不是「未设置」——用户要知道附件到底存在哪 */
+async function loadUploadDir() {
+  try {
+    resolvedUploadDir.value = await resolveUploadDir(props.defaultUploadDir)
+  } catch {
+    resolvedUploadDir.value = ''
+  }
+}
+
+onMounted(() => {
+  loadStorageInfo()
+  loadNetworkInfo()
+  loadUploadDir()
 })
+
+// 父组件改完默认目录后立刻重算，避免继续显示旧路径
+watch(() => props.defaultUploadDir, loadUploadDir)
+
+async function refreshAll() {
+  await Promise.all([loadNetworkInfo(), loadStorageInfo(), loadUploadDir()])
+}
+
+async function openUploadDir() {
+  const path = resolvedUploadDir.value
+  if (!path) return
+  await run(async () => {
+    // 首次上传前目录还不存在，先建出来再打开
+    const dir = await ensureDir(path)
+    await openDir(dir)
+  }, '打开上传目录失败')
+}
 
 async function changeDefaultDir() {
   await run(async () => {
@@ -47,28 +127,14 @@ function resetDefaultDir() {
   emit('updateDefaultUploadDir', null)
 }
 
-function toggleCandidates(id: string) {
-  expanded.value = expanded.value === id ? '' : id
-}
-
-function otherCandidates(item: AppLocation) {
-  return item.candidates.filter((candidate) => candidate.path !== item.path)
-}
-
 /** 统一把操作失败的原因提示到顶部，避免每个按钮各写一套 */
 async function run(action: () => Promise<unknown>, failureLabel: string) {
   try {
     await action()
   } catch (err: any) {
-    apps.lastMessage = `${failureLabel}：${err}`
+    message.value = `${failureLabel}：${err}`
   }
 }
-
-const pick = (id: AppId) => run(() => apps.pickExecutable(id), '设置失败')
-const clear = (id: AppId) => run(() => apps.clearPath(id), '清除失败')
-const importDir = (id: AppId) => run(() => apps.importDirectory(id), '导入失败')
-const removeManaged = (id: AppId) => run(() => apps.removeManaged(id), '移除失败')
-const reveal = (path: string) => run(() => apps.revealPath(path), '打开目录失败')
 </script>
 
 <template>
@@ -76,14 +142,14 @@ const reveal = (path: string) => run(() => apps.revealPath(path), '打开目录�
     <div class="settings-head">
       <div>
         <h3>设置</h3>
-        <p>运行环境与应用启动文件的位置。</p>
+        <p>本机运行环境、网络与附件位置。</p>
       </div>
-      <button class="btn btn-secondary" :disabled="apps.loading" @click="apps.refresh()">
-        {{ apps.loading ? '检测中…' : '重新检测' }}
+      <button class="btn btn-secondary" :disabled="networkLoading" @click="refreshAll">
+        {{ networkLoading ? '检测中…' : '重新检测' }}
       </button>
     </div>
 
-    <p v-if="apps.lastMessage" class="toast">{{ apps.lastMessage }}</p>
+    <p v-if="message" class="toast">{{ message }}</p>
 
     <!-- 运行环境 -->
     <section class="card">
@@ -118,19 +184,58 @@ const reveal = (path: string) => run(() => apps.revealPath(path), '打开目录�
         <span class="info-label">存储状态</span>
         <span class="info-value">异常：{{ storageInfo.error }}</span>
       </div>
+
+      <!-- 网络：按网卡列出 MAC 和该网卡的全部 IP，多 IP 逐条显示 -->
+      <div class="net-block">
+        <div class="net-head">
+          <span class="net-title">网络</span>
+          <span class="net-sub">网卡的 MAC 与全部 IP</span>
+        </div>
+        <p v-if="networkLoading && !networkInfo" class="net-empty">正在读取网络信息…</p>
+        <p v-else-if="networkError" class="net-empty">读取失败：{{ networkError }}</p>
+        <p v-else-if="!networkInfo || networkInfo.interfaces.length === 0" class="net-empty">
+          未检测到可用的网络接口
+        </p>
+        <div v-else class="net-list">
+          <div v-for="iface in networkInfo.interfaces" :key="iface.name" class="net-item">
+            <span class="net-name mono">{{ iface.name }}</span>
+            <span class="net-mac mono">{{ iface.mac ? `MAC ${iface.mac}` : '无 MAC' }}</span>
+            <span v-for="address in iface.addresses" :key="address.ip" class="net-address">
+              <span class="mono">
+                {{ address.ip }}<template v-if="address.prefix !== null">/{{ address.prefix }}</template>
+              </span>
+              <span class="tag" :class="address.family === 'IPv4' ? 'tag-ok' : 'tag-muted'">
+                {{ address.family }}
+              </span>
+            </span>
+            <span v-if="iface.addresses.length === 0" class="net-empty">暂无 IP</span>
+          </div>
+        </div>
+      </div>
     </section>
 
     <!-- 附件上传 -->
     <section class="card">
       <h4>附件上传</h4>
       <p class="muted">
-        分组/项目未单独设置上传目录时，附件默认加密存放到这里；此处也未设置时，落到应用私有目录。
+        所有分组/项目的附件都加密存放到这里（磁盘文件名是附件 id，原始文件名存在数据库里）；下方显示的是实际落盘位置，未单独设置时是应用私有目录。
       </p>
       <div class="upload-dir-row">
-        <span class="upload-dir-path mono" :title="defaultUploadDir || ''">
-          {{ defaultUploadDir || '（未设置，使用应用私有目录）' }}
-        </span>
+        <div class="upload-dir-main">
+          <span class="upload-dir-path mono" :title="resolvedUploadDir">
+            {{ resolvedUploadDir || '正在解析上传目录…' }}
+          </span>
+          <span class="upload-dir-source">来源：{{ uploadDirSource }}</span>
+        </div>
         <div class="upload-dir-actions">
+          <button
+            class="btn btn-secondary btn-xs"
+            :disabled="!resolvedUploadDir"
+            title="在文件管理器中打开该目录"
+            @click="openUploadDir"
+          >
+            打开
+          </button>
           <button class="btn btn-secondary btn-xs" @click="changeDefaultDir">更改</button>
           <button
             class="btn btn-secondary btn-xs"
@@ -143,109 +248,28 @@ const reveal = (path: string) => run(() => apps.revealPath(path), '打开目录�
       </div>
     </section>
 
-    <!-- 应用路径 -->
+    <!-- 打包包含规则：白名单，只有命中的文件才进包 -->
     <section class="card">
       <div class="card-head">
-        <h4>应用启动文件</h4>
-        <span v-if="canConfigurePaths" class="card-sub">
-          共 {{ apps.locations.length }} 项，{{ apps.missing.length }} 项未找到
-        </span>
+        <h4>layui 项目打包规则</h4>
+        <button class="btn btn-secondary btn-xs" @click="resetIncludeRules">恢复默认</button>
       </div>
-
-      <div v-if="!canConfigurePaths" class="platform-note">
-        <strong>该设置仅在 Windows 提供</strong>
-        <p>
-          Windows 上的应用未必装在默认目录、也未必进 PATH，所以需要在这里手动指定。
-          {{ platform.label }} 下本程序会直接按系统约定查找：macOS 看
-          <code>/Applications</code> 与 Homebrew 前缀，Linux 看 PATH 与
-          <code>/usr/bin</code>、<code>/usr/local/bin</code>。
-          下面仍然列出各项的定位结果，出问题时方便排查。
-        </p>
-      </div>
-
-      <div class="app-list">
-        <div v-for="item in apps.locations" :key="item.id" class="app-item">
-          <div class="app-row">
-            <span class="dot" :class="item.available ? 'dot-ok' : 'dot-idle'"></span>
-            <div class="app-main">
-              <div class="app-title">
-                <strong>{{ item.name }}</strong>
-                <span class="tag" :class="'tag-' + sourceTone(item.source)">
-                  {{ SOURCE_LABELS[item.source] ?? item.source }}
-                </span>
-                <span v-if="item.override_path && item.source !== 'custom'" class="tag tag-warn">
-                  指定路径未生效
-                </span>
-              </div>
-              <p class="app-desc">{{ item.description }}</p>
-
-              <p class="app-path mono">{{ item.path || '未找到可执行文件' }}</p>
-              <p v-if="item.expected_names.length > 0" class="app-expected">
-                该选的文件：<span class="mono">{{ item.expected_names.join(' / ') }}</span>
-              </p>
-              <p v-if="item.note" class="app-note">{{ item.note }}</p>
-
-              <!-- 内置副本：位置编译期就定了，不需要找 -->
-              <div v-if="item.builtin_path" class="extra-row">
-                <span class="tag tag-ok">已内置</span>
-                <span class="mono extra-path">{{ item.builtin_path }}</span>
-              </div>
-              <p v-if="item.builtin_path" class="app-expected">
-                随程序一起分发，不用配置也没有可找的余地；连接时默认用它。
-              </p>
-            </div>
-
-            <div class="app-actions">
-              <button
-                v-if="item.available"
-                class="btn btn-secondary btn-xs"
-                @click="reveal(item.path)"
-              >
-                打开所在目录
-              </button>
-              <template v-if="canConfigurePaths">
-                <button class="btn btn-secondary btn-xs" @click="pick(item.id as AppId)">
-                  {{ item.override_path ? '重新指定' : '手动指定' }}
-                </button>
-                <button
-                  v-if="item.override_path"
-                  class="btn btn-secondary btn-xs"
-                  @click="clear(item.id as AppId)"
-                >
-                  清除指定
-                </button>
-                <button
-                  v-if="item.supports_import"
-                  class="btn btn-secondary btn-xs"
-                  @click="importDir(item.id as AppId)"
-                >
-                  导入目录
-                </button>
-                <button
-                  v-if="item.source === 'managed'"
-                  class="btn btn-danger btn-xs"
-                  @click="removeManaged(item.id as AppId)"
-                >
-                  移除托管
-                </button>
-              </template>
-            </div>
-          </div>
-
-          <div v-if="otherCandidates(item).length > 0" class="candidates">
-            <button class="candidates-toggle" @click="toggleCandidates(item.id)">
-              {{ expanded === item.id ? '收起' : `其他候选（${otherCandidates(item).length}）` }}
-            </button>
-            <div v-if="expanded === item.id" class="candidate-list">
-              <div v-for="candidate in otherCandidates(item)" :key="candidate.path" class="candidate-row">
-                <span class="tag tag-muted">{{ SOURCE_LABELS[candidate.source] ?? candidate.source }}</span>
-                <span class="mono candidate-path">{{ candidate.path }}</span>
-                <span v-if="!candidate.exists" class="candidate-missing">不存在</span>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
+      <p class="rule-tip">
+        只有命中下面规则的文件才会进包，没命中的一律不打包；以 <code>.</code> 或 <code>_</code>
+        开头的文件/目录始终跳过，路径里含空格的也跳过。默认已包含 layui 工程运行时用到的
+        <code>.thm</code> 模板、<code>.tjs</code> 模板脚本、WPS 控件的 <code>.dotm</code>，
+        以及 WebOffice 新建正文用的 <code>.docx</code> 空白模板。
+      </p>
+      <RulesEditor
+        v-model="localIncludeRules"
+        placeholder="输入规则后回车添加，如 *.html、js/**"
+        @update:modelValue="onIncludeRulesChange"
+      />
+      <p class="rule-tip rule-tip-dim">
+        不带 <code>/</code> 的规则按文件名匹配（任意层级都算，如 <code>*.png</code>）；带
+        <code>/</code> 的按相对源目录的路径匹配（如 <code>assets/**</code>、<code>js/app.js</code>）。
+        规则为空时视为未配置：除 <code>.</code>/<code>_</code> 开头的条目外全部打包。
+      </p>
     </section>
   </div>
 </template>
@@ -282,6 +306,31 @@ const reveal = (path: string) => run(() => apps.revealPath(path), '打开目录�
   border-radius: 6px;
   padding: 8px 12px;
 }
+.card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.rule-tip {
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+.rule-tip-dim {
+  margin-top: 8px;
+  margin-bottom: 0;
+}
+.rule-tip code {
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: var(--bg-tag);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: var(--text-tag);
+}
 .card {
   border: 1px solid var(--border-color);
   border-radius: 8px;
@@ -292,19 +341,6 @@ const reveal = (path: string) => run(() => apps.revealPath(path), '打开目录�
   font-size: 14px;
   color: var(--text-primary);
   margin-bottom: 10px;
-}
-.card-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 10px;
-}
-.card-head h4 {
-  margin-bottom: 0;
-}
-.card-sub {
-  font-size: 12px;
-  color: var(--text-muted);
 }
 .info-grid {
   display: grid;
@@ -326,115 +362,6 @@ const reveal = (path: string) => run(() => apps.revealPath(path), '打开目录�
   color: var(--text-secondary);
   word-break: break-all;
 }
-.platform-note {
-  border: 1px solid rgba(59, 130, 246, 0.3);
-  background: rgba(59, 130, 246, 0.06);
-  border-radius: 6px;
-  padding: 10px 12px;
-  margin-bottom: 12px;
-}
-.platform-note strong {
-  font-size: 13px;
-  color: var(--text-primary);
-}
-.platform-note p {
-  margin-top: 4px;
-  font-size: 12px;
-  line-height: 1.65;
-  color: var(--text-secondary);
-}
-.platform-note code {
-  background: var(--bg-tag);
-  border-radius: 3px;
-  padding: 0 4px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-}
-.app-list {
-  display: flex;
-  flex-direction: column;
-}
-.app-item {
-  border-top: 1px solid var(--border-color);
-  padding: 10px 0;
-}
-.app-item:first-child {
-  border-top: none;
-}
-.app-row {
-  display: flex;
-  gap: 10px;
-  align-items: flex-start;
-}
-.dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  margin-top: 6px;
-  flex-shrink: 0;
-}
-.dot-ok {
-  background: var(--success);
-}
-.dot-idle {
-  background: var(--text-muted);
-}
-.app-main {
-  flex: 1;
-  min-width: 0;
-}
-.app-title {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-.app-title strong {
-  font-size: 13px;
-  color: var(--text-primary);
-}
-.app-desc {
-  font-size: 12px;
-  color: var(--text-muted);
-  margin-top: 2px;
-}
-.app-path {
-  font-size: 12px;
-  color: var(--text-secondary);
-  margin-top: 3px;
-  word-break: break-all;
-}
-.app-note {
-  font-size: 12px;
-  color: var(--warning);
-  margin-top: 3px;
-  line-height: 1.55;
-}
-.app-expected {
-  font-size: 12px;
-  color: var(--text-muted);
-  margin-top: 3px;
-}
-.extra-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 6px;
-}
-.extra-path {
-  flex: 1;
-  min-width: 0;
-  font-size: 12px;
-  color: var(--text-secondary);
-  word-break: break-all;
-}
-.app-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  justify-content: flex-end;
-  max-width: 280px;
-  flex-shrink: 0;
-}
 .tag {
   font-size: 11px;
   border-radius: 9px;
@@ -449,48 +376,6 @@ const reveal = (path: string) => run(() => apps.revealPath(path), '打开目录�
   color: var(--text-secondary);
   background: var(--bg-tag);
 }
-.tag-warn {
-  color: var(--warning);
-  background: rgba(245, 158, 11, 0.12);
-}
-.candidates {
-  margin-left: 18px;
-  margin-top: 6px;
-}
-.candidates-toggle {
-  border: none;
-  background: transparent;
-  color: var(--primary);
-  font-size: 12px;
-  cursor: pointer;
-  padding: 0;
-}
-.candidate-list {
-  margin-top: 6px;
-  border: 1px solid var(--border-color);
-  border-radius: 6px;
-  overflow: hidden;
-}
-.candidate-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 5px 8px;
-  font-size: 12px;
-  border-top: 1px solid var(--border-color);
-}
-.candidate-row:first-child {
-  border-top: none;
-}
-.candidate-path {
-  flex: 1;
-  color: var(--text-secondary);
-  word-break: break-all;
-}
-.candidate-missing {
-  color: var(--text-muted);
-  flex-shrink: 0;
-}
 .mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
@@ -504,18 +389,82 @@ const reveal = (path: string) => run(() => apps.revealPath(path), '打开目录�
   color: var(--text-muted);
   margin-bottom: 10px;
 }
+/* 网络：MAC / 全部 IP */
+.net-block {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border-color);
+}
+.net-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.net-title {
+  font-size: 12px;
+  color: var(--text-muted);
+  width: 104px;
+  flex-shrink: 0;
+}
+.net-sub {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.net-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.net-item {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  background: var(--bg-secondary);
+  font-size: 12px;
+}
+.net-name {
+  min-width: 48px;
+  color: var(--text-primary);
+  font-weight: 600;
+}
+.net-mac {
+  color: var(--text-secondary);
+}
+.net-address {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-secondary);
+}
+.net-empty {
+  font-size: 12px;
+  color: var(--text-muted);
+}
 .upload-dir-row {
   display: flex;
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
 }
-.upload-dir-path {
+.upload-dir-main {
   flex: 1;
-  min-width: 160px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.upload-dir-path {
   font-size: 12px;
   color: var(--text-secondary);
   word-break: break-all;
+}
+.upload-dir-source {
+  font-size: 11px;
+  color: var(--text-muted);
 }
 .upload-dir-actions {
   display: flex;

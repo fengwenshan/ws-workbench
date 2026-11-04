@@ -29,8 +29,6 @@ export interface PlatformInfo {
   exe_suffix: string
   /** VPN 是否必须提权 */
   vpn_needs_admin: boolean
-  /** 是否支持「手动指定应用路径」这类 Windows 专有设置 */
-  supports_app_path_settings: boolean
 }
 
 /** userAgent 兜底，仅在拿到后端结果之前生效 */
@@ -51,7 +49,6 @@ function fromUserAgent(): PlatformInfo {
     is_linux: os === 'linux',
     exe_suffix: os === 'windows' ? '.exe' : '',
     vpn_needs_admin: true,
-    supports_app_path_settings: os === 'windows',
   }
 }
 
@@ -80,6 +77,3 @@ export async function initPlatform(): Promise<PlatformInfo> {
 export const isWindows = () => state.is_windows
 export const isMacos = () => state.is_macos
 export const isLinux = () => state.is_linux
-
-/** Windows 专有设置（应用路径手动指定）是否可用 */
-export const supportsAppPathSettings = () => state.supports_app_path_settings

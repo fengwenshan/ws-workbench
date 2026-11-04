@@ -24,19 +24,6 @@ export async function pickDirectory(
   return picked
 }
 
-/** 选择单个文件；用户取消返回 null */
-export async function pickFile(
-  options: PickFilesOptions = {},
-): Promise<string | null> {
-  const picked = await open({
-    directory: false,
-    multiple: false,
-    defaultPath: options.defaultPath,
-    title: options.title,
-  })
-  return typeof picked === 'string' ? picked : null
-}
-
 /** 选择一个或多个文件；用户取消返回空数组 */
 export async function pickFiles(
   options: PickFilesOptions = {},

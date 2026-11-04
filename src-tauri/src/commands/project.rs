@@ -9,18 +9,18 @@ use crate::packer;
 pub async fn pack_project(
     app: AppHandle,
     project: ProjectConfig,
-    default_exclude: Vec<String>,
+    default_include: Vec<String>,
 ) -> Result<PackResult, String> {
-    packer::pack_project(&app, &project, &default_exclude)
+    packer::pack_project(&app, &project, &default_include)
 }
 
 #[tauri::command]
 pub async fn pack_to_zip(
     app: AppHandle,
     project: ProjectConfig,
-    default_exclude: Vec<String>,
+    default_include: Vec<String>,
 ) -> Result<PackResult, String> {
-    packer::pack_to_zip(&app, &project, &default_exclude)
+    packer::pack_to_zip(&app, &project, &default_include)
 }
 
 #[tauri::command]
