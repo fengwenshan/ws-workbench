@@ -15,9 +15,9 @@ const PREFIX: &str = "v1.";
 
 /// macOS 钥匙串服务名 / 账号
 #[cfg(target_os = "macos")]
-const VAULT_SERVICE: &str = "ws-tools-vault";
+const VAULT_SERVICE: &str = "ws-workbench-vault";
 #[cfg(target_os = "macos")]
-const VAULT_ACCOUNT: &str = "ws-tools";
+const VAULT_ACCOUNT: &str = "ws-workbench";
 
 /// Windows 主密钥落盘文件名（内容为 `dpapi:<hex>`）
 #[cfg(target_os = "windows")]
@@ -32,9 +32,9 @@ type HmacSm3 = Hmac<Sm3>;
 /// SM4 只接受 16 字节密钥，故加密时取 `enc_key` 的前 16 字节
 /// （SM3 摘要左截断），认证仍使用完整的 32 字节 `mac_key`。
 #[derive(Clone, Copy)]
-struct VaultKeys {
-    enc_key: [u8; 32],
-    mac_key: [u8; 32],
+pub(crate) struct VaultKeys {
+    pub(crate) enc_key: [u8; 32],
+    pub(crate) mac_key: [u8; 32],
 }
 
 /// 进程内缓存，避免每次读写都去访问钥匙串 / DPAPI
@@ -84,7 +84,7 @@ fn decode_master_hex(hex: &str) -> Result<[u8; 32], String> {
 }
 
 /// 加密封装（给定子密钥，纯函数，便于单测）
-fn encrypt_with_keys(keys: &VaultKeys, plain: &str) -> Result<String, String> {
+pub(crate) fn encrypt_with_keys(keys: &VaultKeys, plain: &str) -> Result<String, String> {
     use rand::RngCore;
 
     let mut iv = [0u8; 16];
@@ -110,7 +110,7 @@ fn encrypt_with_keys(keys: &VaultKeys, plain: &str) -> Result<String, String> {
 }
 
 /// 解密封装（给定子密钥，纯函数，便于单测）
-fn decrypt_with_keys(keys: &VaultKeys, envelope: &str) -> Result<String, String> {
+pub(crate) fn decrypt_with_keys(keys: &VaultKeys, envelope: &str) -> Result<String, String> {
     let body = envelope
         .trim()
         .strip_prefix(PREFIX)
@@ -149,7 +149,7 @@ fn decrypt_with_keys(keys: &VaultKeys, envelope: &str) -> Result<String, String>
 ///
 /// 整个「检查-创建-写入缓存」过程持有同一把锁，避免并发首启时
 /// 生成两把不同的主密钥导致数据不可解。
-fn vault_keys(app: &AppHandle) -> Result<VaultKeys, String> {
+pub(crate) fn vault_keys(app: &AppHandle) -> Result<VaultKeys, String> {
     let mut guard = VAULT_KEYS.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(keys) = guard.as_ref() {
         return Ok(*keys);
@@ -193,38 +193,32 @@ fn load_or_create_master_key(app: &AppHandle) -> Result<[u8; 32], String> {
     }
 }
 
-/// macOS：主密钥存系统钥匙串（明文为十六进制）
+/// 读取指定服务名 / 账号下的钥匙串条目；不存在时返回 None
 #[cfg(target_os = "macos")]
-fn macos_master_key() -> Result<[u8; 32], String> {
-    let existing = std::process::Command::new("security")
-        .args([
-            "find-generic-password",
-            "-a",
-            VAULT_ACCOUNT,
-            "-s",
-            VAULT_SERVICE,
-            "-w",
-        ])
+fn keychain_read(service: &str, account: &str) -> Option<String> {
+    let output = std::process::Command::new("security")
+        .args(["find-generic-password", "-a", account, "-s", service, "-w"])
         .output()
-        .map_err(|e| format!("调用 security 失败: {}", e))?;
-
-    if existing.status.success() {
-        let hex = String::from_utf8_lossy(&existing.stdout).trim().to_string();
-        return decode_master_hex(&hex);
+        .ok()?;
+    if !output.status.success() {
+        return None;
     }
+    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
 
-    let master = random_key();
-    let hex = crate::vpn::credential::to_hex(&master);
+/// 写入（覆盖）钥匙串条目
+#[cfg(target_os = "macos")]
+fn keychain_write(service: &str, account: &str, value: &str) -> Result<(), String> {
     let output = std::process::Command::new("security")
         .args([
             "add-generic-password",
             "-U",
             "-a",
-            VAULT_ACCOUNT,
+            account,
             "-s",
-            VAULT_SERVICE,
+            service,
             "-w",
-            &hex,
+            value,
         ])
         .output()
         .map_err(|e| format!("调用 security 失败: {}", e))?;
@@ -234,7 +228,44 @@ fn macos_master_key() -> Result<[u8; 32], String> {
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
+    Ok(())
+}
+
+/// macOS：主密钥存系统钥匙串（明文为十六进制）
+#[cfg(target_os = "macos")]
+fn macos_master_key() -> Result<[u8; 32], String> {
+    if let Some(hex) = keychain_read(VAULT_SERVICE, VAULT_ACCOUNT) {
+        return decode_master_hex(&hex);
+    }
+
+    let master = random_key();
+    let hex = crate::vpn::credential::to_hex(&master);
+    keychain_write(VAULT_SERVICE, VAULT_ACCOUNT, &hex)?;
     Ok(master)
+}
+
+/// 解析主密钥文件；文件不存在时返回 None（由调用方决定是否新建）
+#[cfg(target_os = "windows")]
+fn parse_master_key_file(path: &std::path::Path) -> Result<Option<[u8; 32]>, String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => {
+            let text = text.trim();
+            if let Some(hex) = text.strip_prefix("dpapi:") {
+                let cipher = crate::vpn::credential::from_hex(hex)?;
+                let plain = crate::vpn::credential::dpapi::unprotect(&cipher)?;
+                return Ok(Some(to_master(&plain)?));
+            }
+            if let Ok(master) = decode_master_hex(text) {
+                return Ok(Some(master));
+            }
+            // 文件存在但内容无法解析：绝不能覆盖既有密钥
+            Err("主密钥文件内容无法解析".to_string())
+        }
+        // 文件不存在时才允许新建
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        // 其它 IO 错误（权限/占用等）绝不能覆盖既有密钥，直接报错
+        Err(e) => Err(format!("读取主密钥文件失败: {}", e)),
+    }
 }
 
 /// Windows：主密钥经 DPAPI 保护后写入 `<app_data_dir>/.vault_key`
@@ -249,24 +280,8 @@ fn windows_master_key(app: &AppHandle) -> Result<[u8; 32], String> {
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建应用数据目录失败: {}", e))?;
     let path = dir.join(KEY_FILE);
 
-    match std::fs::read_to_string(&path) {
-        Ok(text) => {
-            let text = text.trim();
-            if let Some(hex) = text.strip_prefix("dpapi:") {
-                let cipher = crate::vpn::credential::from_hex(hex)?;
-                let plain = crate::vpn::credential::dpapi::unprotect(&cipher)?;
-                return to_master(&plain);
-            }
-            if let Ok(master) = decode_master_hex(text) {
-                return Ok(master);
-            }
-            // 文件存在但内容无法解析：绝不能覆盖既有密钥
-            return Err("主密钥文件内容无法解析".to_string());
-        }
-        // 文件不存在时才创建新密钥
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        // 其它 IO 错误（权限/占用等）绝不能覆盖既有密钥，直接报错
-        Err(e) => return Err(format!("读取主密钥文件失败: {}", e)),
+    if let Some(master) = parse_master_key_file(&path)? {
+        return Ok(master);
     }
 
     let master = random_key();
