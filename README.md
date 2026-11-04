@@ -73,7 +73,12 @@ const canPack = computed(() => projectType.value === 'layui')
 
 底层只调 openconnect，不依赖 Cisco AnyConnect 客户端或 OpenConnect GUI。
 
-连接器按优先级查找：手动指定 > 已导入副本 > 内置资源 > 注册表（仅 Windows）> 常见安装目录 > PATH。判定可用性的方式是真正执行一次 `openconnect --version` 并解析版本号，而不是看文件存在与否 —— Wintun 版解压后缺依赖 DLL 是很常见的情况，光看路径会把跑不起来的二进制当成可用。
+连接器来源按平台区分：
+
+- **Windows 只认安装包内置的 openconnect**（`src-tauri/resources/apps/openconnect/openconnect.exe` + 同目录 `wintun.dll`）。不扫描注册表、常见安装目录或 PATH，也不提供「导入外部 openconnect」入口，避免把来源不明的二进制拉进提权进程。内置副本缺失时直接报错并提示重装。
+- **macOS** 按「手动指定 > 已导入副本 > 内置资源 > Homebrew / 常见目录 > PATH」查找。
+
+判定可用性的方式是真正执行一次 `openconnect --version` 并解析版本号，而不是看文件存在与否 —— 解压后缺依赖 DLL 是很常见的情况，光看路径会把跑不起来的二进制当成可用。
 
 支持的协议：`anyconnect`、`nc`、`gp`、`pulse`、`f5`、`fortinet`、`array`。
 
@@ -89,7 +94,7 @@ const canPack = computed(() => projectType.value === 'layui')
 两个平台实现方式不同：
 
 - **macOS：TUN 透明接管。** worker 另建一个捕获 utun，把 `0.0.0.0/1` 与 `128.0.0.0/1` 两条半默认路由指向它。抓到的 TCP/UDP 包交给 smoltcp 用户态协议栈完成握手与收发，连接被终结后再按规则选出口：`DIRECT` 用 `IP_BOUND_IF` 把出站 socket 钉在物理网卡，`VPN` 钉在隧道网卡并补一条 `/32` 流路由，随后双向搬运字节。DNS 由本地 fake-ip 服务应答：A 记录分配池内假 IP、AAAA 返回空答；连接到达后用假 IP 反查域名参与规则匹配，命中 `fake_ip_filter` 的域名不伪造、走真实解析。
-- **Windows：过渡期按路由分流。** 只把规则表里 `IP-CIDR → VPN` 的条目下发成静态路由，并每 15 秒守护一次补回被系统或 VPN 客户端改掉的路由。域名、进程、端口规则和 fake-ip 要等 Windows 侧的 TUN 接管落地（平台抽象已经抽好，实现留到下一竖切）。
+- **Windows：TUN 透明接管。** 用 Wintun 另建捕获网卡，同样把 `0.0.0.0/1` 与 `128.0.0.0/1` 两条半默认路由指向它，后续 TCP/UDP/DNS 处理与 macOS 共用同一套 smoltcp 引擎。出口用 `IP_UNICAST_IF` 在 socket 上钉物理网卡或隧道网卡；VPN 流另外补一条 `/32` 路由指向隧道（同一真实 IP 的多条流用引用计数共用，最后一条关闭时才删除），避免隧道网卡没有目标网段路由时连接失败。服务器的 `/32` 防环路由通过 `route.exe` 走物理网关，且必须先于两条半默认路由安装。DNS 同样是本地 fake-ip 应答，连接到达后反查域名再走规则。
 
 规则改动不会热生效，需要断开重连。
 
@@ -135,13 +140,13 @@ Windows 上的虚拟网卡由 Wintun 驱动提供（`src-tauri/resources/apps/op
 
 #### 安装引导
 
-openconnect 探测失败时，代理页给出按平台区分的安装引导：可复制的安装命令加官方下载地址，不写臆测步骤。
+openconnect 探测失败时，代理页给出按平台区分的安装引导：macOS/Linux 给可复制的安装命令加官方下载地址；Windows 只说明内置副本缺失并提示覆盖安装，不引导下载外部二进制。
 
 ### 设置
 
 显示运行环境（操作系统、架构、可执行文件后缀、是否需要提权、配置文件位置、各网卡的 MAC 与全部 IP —— 多 IP 逐条列出），以及附件实际落盘位置（可直接打开目录）。
 
-「用编辑器打开项目」与 VPN 连接器探测共用同一套应用查找逻辑，优先级为专用路径 > 已导入副本 > 内置资源 > 注册表 > PATH；导入副本只对 openconnect 开放。macOS 与 Linux 下分别检查 `/Applications`、Homebrew 前缀以及 PATH 里的 `/usr/bin`、`/usr/local/bin`。
+「用编辑器打开项目」与非 Windows 的 VPN 连接器探测共用同一套应用查找逻辑，优先级为专用路径 > 已导入副本 > 内置资源 > 注册表 > PATH；导入副本只对 openconnect 开放。Windows 的 VPN 探测是例外：只认安装包内置副本，不查注册表、安装目录或 PATH。macOS 与 Linux 下分别检查 `/Applications`、Homebrew 前缀以及 PATH 里的 `/usr/bin`、`/usr/local/bin`。
 
 ### 日志
 
@@ -169,8 +174,8 @@ macOS 的应用菜单做了汉化，点 Dock 图标会把窗口重新显示出�
 
 - Node 22 与 pnpm（CI 固定 pnpm 10；`pnpm-lock.yaml` 为 9.0 格式）
 - Rust stable 工具链
-- 仅在需要 VPN 时：可用的 openconnect。Windows 直接用 `src-tauri/resources/apps/openconnect/` 里的内置副本，macOS 建议 `brew install openconnect`
-- VPN 连接需要管理员授权，见「权限与进程拆分」；macOS 的透明接管依赖系统自带的 utun，Windows 当前只支持按 `IP-CIDR` 规则下发路由
+- 仅在需要 VPN 时：可用的 openconnect。Windows 必须使用 `src-tauri/resources/apps/openconnect/` 里的内置副本（安装包会一起打进去），macOS 建议 `brew install openconnect`
+- VPN 连接需要管理员授权，见「权限与进程拆分」；两个平台都通过 TUN 透明接管做规则分流，macOS 用系统 utun，Windows 用内置 `wintun.dll`
 
 ## 开发
 
@@ -287,7 +292,7 @@ VPN 会话目录同时被主进程和提权 worker 使用，因此不做路径�
 | --- | --- | --- |
 | VPN 提权 | 计划任务免 UAC，失败回退 UAC 弹窗 | 系统授权框 |
 | 虚拟网卡 | Wintun 驱动 | 系统 utun |
-| 分流实现 | 仅 `IP-CIDR → VPN` 规则落静态路由 | TUN 透明接管，六类规则全部生效 + fake-ip DNS |
+| 分流实现 | TUN 透明接管；域名 / 网段 / 端口规则 + fake-ip DNS 生效 | TUN 透明接管；六类规则 + fake-ip DNS 生效 |
 | 学习模式 | 支持 | 不支持 |
 | 路由查询 | cscript + PowerShell JSON | `route` / `ifconfig` / `netstat` |
 
@@ -295,7 +300,9 @@ VPN 会话目录同时被主进程和提权 worker 使用，因此不做路径�
 
 - 打包只支持 Layui 项目
 - 相对路径含空格的文件会被跳过
-- Windows 上的域名、进程、端口规则与 fake-ip 暂不生效，等 TUN 接管落地
+- Windows 的进程反查暂未接入 IP Helper，`PROCESS-NAME` 规则在 Windows 上不会命中；域名 / 网段 / 端口规则不受影响
+- fake-ip 只在应用重新发起 DNS 查询时生效：连接前已缓存的真实 IP（系统 DNS 缓存、浏览器缓存、DoH）不会命中域名规则，连上后请刷新 DNS 或重启对应应用
+- 捕获与分流只处理 IPv4 TCP/UDP；ICMP 和 IPv6 仍走系统默认路由，不参与域名规则
 - 规则改动需要断开重连才生效
 - 学习模式只给建议，采纳候选网段需要手动点击
 
@@ -325,10 +332,11 @@ src-tauri/src/
     rule_engine.rs Clash 式有序列规则引擎（纯逻辑，可离线单测）
     fakedns.rs     fake-ip 地址池：分配 / 反查 / 过滤 / 回收（纯逻辑）
     dns_srv.rs     fake-ip DNS 应答（A 分配假地址、AAAA 空答）
+    dns_client.rs  最小 DNS 客户端：连接阶段把假地址解析成真实 IPv4
     netstack.rs    smoltcp 用户态协议栈，终结 TUN 上抓到的连接
-    router.rs      出口选择与双向字节搬运（macOS）
-    platform.rs    TUN / 路由 / 网卡绑定的平台抽象（macOS）
-    tun_device.rs  捕获 utun 的创建与读写（macOS）
+    router.rs      出口选择、fake-ip 真实解析与双向字节搬运（双平台）
+    platform.rs    TUN / 路由 / 网卡绑定的平台抽象（macOS IP_BOUND_IF / Windows IP_UNICAST_IF）
+    tun_device.rs  捕获网卡创建与读写（macOS utun / Windows Wintun）
     proc_lookup.rs 五元组反查进程名（macOS）
     worker.rs      提权进程，连接生命周期主体
     commands.rs    主进程侧命令与状态轮询
@@ -339,7 +347,7 @@ src-tauri/src/
     credential.rs  密码加密存储
     detect.rs      连接器可用性探测
     elevate.rs     提权启动
-    guide.rs       openconnect 安装引导
+    guide.rs       openconnect 安装引导（Windows 只提示重装内置副本）
     session.rs     会话目录 IPC
 src/
   components/      ProjectList / GroupDetail / ProjectDetail / ProjectConfig /

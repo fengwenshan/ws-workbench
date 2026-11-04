@@ -62,17 +62,11 @@ struct Worker {
     learn_report: LearnReport,
     /// 采样连续失败次数，超过阈值自动停用学习模式
     learn_failures: u32,
-    /// 规则分流引擎；仅在 macOS 装配成功后存在（Task 9）
-    #[cfg(target_os = "macos")]
+    /// 规则分流引擎；Windows 与 macOS 都用它接管流量
     engine: Option<crate::vpn::router::Engine>,
-    /// 捕获 TUN 设备；设备本体已交给引擎持有（TunPhy），这里仅留句柄位
-    #[cfg(target_os = "macos")]
-    capture_dev: Option<crate::vpn::tun_device::Utun>,
     /// 捕获 TUN 的接口索引，断开时按它回收半默认路由
-    #[cfg(target_os = "macos")]
     capture_index: u32,
-    /// fake-ip 假地址池（Task 11 起由引擎消费）
-    #[cfg(target_os = "macos")]
+    /// fake-ip 假地址池（由引擎消费）
     fake_pool: Option<crate::vpn::fakedns::FakeIpPool>,
 }
 
@@ -109,13 +103,8 @@ impl Worker {
             script_log_lines: 0,
             learn_report,
             learn_failures: 0,
-            #[cfg(target_os = "macos")]
             engine: None,
-            #[cfg(target_os = "macos")]
-            capture_dev: None,
-            #[cfg(target_os = "macos")]
             capture_index: 0,
-            #[cfg(target_os = "macos")]
             fake_pool: None,
         }
     }
@@ -324,53 +313,6 @@ impl Worker {
         }
     }
 
-    #[cfg(not(target_os = "macos"))]
-    fn record_applied(&mut self, cidr: &str, target: &RouteTarget, via: &str, outcome: RouteOutcome) {
-        self.status.routes.push(crate::vpn::models::AppliedRoute {
-            cidr: cidr.to_string(),
-            via: via.to_string(),
-            next_hop: target.next_hop.clone(),
-            iface: target.display(),
-            owned: outcome == RouteOutcome::Created,
-        });
-        self.applied.push(AppliedRouteRecord {
-            cidr: cidr.to_string(),
-            target: target.clone(),
-            outcome,
-        });
-    }
-
-    /// 按规则表下发路由（过渡期：只处理 IP-CIDR -> VPN 的规则）
-    #[cfg(not(target_os = "macos"))]
-    fn apply_routes(&mut self) {
-        self.status.routes.clear();
-        let rules = match self.compiled_rules() {
-            Ok(r) => r,
-            Err(e) => {
-                self.log(&format!("[规则] {}", e));
-                return;
-            }
-        };
-        let target = self.vpn_target();
-        for rule in rules.rules() {
-            if rule.kind != crate::vpn::rule_engine::RuleKind::IpCidr {
-                continue;
-            }
-            if rule.policy != crate::vpn::rule_engine::Policy::Vpn {
-                continue;
-            }
-            let cidr = rule.value.clone();
-            match route::add_route(&cidr, &target, 1) {
-                Ok(()) => {
-                    self.log(&format!("[路由] {} -> VPN ({})", cidr, target.display()));
-                    self.record_applied(&cidr, &target, "vpn", RouteOutcome::Created);
-                }
-                Err(e) => self.log(&format!("[路由] {} 下发失败: {}", cidr, e)),
-            }
-        }
-        let _ = self.session.write_status(&self.status);
-    }
-
     fn compiled_rules(&mut self) -> Result<crate::vpn::rule_engine::CompiledRuleSet, String> {
         use crate::vpn::rule_engine::{compile, Policy, Rule, RuleKind};
         let enabled: Vec<(String, String, String, bool)> = self
@@ -427,11 +369,10 @@ impl Worker {
     ///
     /// 装配成功后过渡期的按 CIDR 下发路由全部作废（清空 `applied`），
     /// 改由引擎在每条流建立时按规则注入。
-    #[cfg(target_os = "macos")]
     fn start_engine(&mut self) -> Result<(), String> {
-        // TunDevice 提供 Utun 的 name()/index()，RouteTable 提供捕获路由的增删
-        use crate::vpn::platform::{RouteTable, TunDevice};
-        use crate::vpn::{netstack, platform, proc_lookup, router, tun_device};
+        // TunDevice 提供捕获网卡的 name()/index()，RouteTable 提供捕获路由的增删
+        use crate::vpn::platform::{ProcLookup, RouteTable, TunDevice};
+        use crate::vpn::{netstack, platform, router, tun_device};
 
         let (vpn_dev, vpn_index) = match (self.status.tun_dev.as_str(), self.status.tun_index) {
             ("", 0) => return Err("隧道接口信息缺失，无法装配引擎".to_string()),
@@ -439,8 +380,9 @@ impl Worker {
             (dev, idx) => (dev.to_string(), idx),
         };
 
-        let capture = tun_device::Utun::create().map_err(|e| format!("创建捕获 TUN 失败: {}", e))?;
-        // 捕获 TUN 用 10.9.0.0/30，取首个可用地址 10.9.0.1 作为本地点对点地址
+        let capture = tun_device::create_capture(&self.request.connector_path)
+            .map_err(|e| format!("创建捕获网卡失败: {}", e))?;
+        // 捕获网卡用 10.9.0.0/30，取首个可用地址 10.9.0.1 作为本地点对点地址
         let capture_ip = crate::vpn::route::first_usable_in_subnet("10.9.0.0", "30")
             .unwrap_or_else(|| "10.9.0.1".to_string());
         let mtu = if self.status.mtu == 0 { 1500 } else { self.status.mtu };
@@ -450,15 +392,32 @@ impl Worker {
         let capture_index = capture.index();
         self.capture_index = capture_index;
 
-        let route_table = platform::MacRouteTable::new();
-        route_table.add_capture_routes(capture_index)?;
+        let route_table = platform::SystemRouteTable::new();
 
+        // 防环主机路由必须在捕获路由之前生效：否则发往 VPN 服务器本身的
+        // 流量会被捕获网卡再抓回来，形成回环。
         let gw = self.snapshot.default_gateway.clone();
-        for ip in filter_server_ips(&resolve_server_ips(&self.request.server), &capture_ip) {
-            if let Ok(v4) = ip.parse() {
-                let _ = route_table.add_server_host_route(v4, &gw);
+        let server_ips = filter_server_ips(&resolve_server_ips(&self.request.server), &capture_ip);
+        let mut v4_tried = 0usize;
+        let mut v4_added = 0usize;
+        for ip in &server_ips {
+            if let Ok(v4) = ip.parse::<std::net::Ipv4Addr>() {
+                v4_tried += 1;
+                match route_table.add_server_host_route(v4, &gw) {
+                    Ok(()) => v4_added += 1,
+                    Err(e) => self.log(&format!("[路由] 服务器防环路由 {} 添加失败: {}", ip, e)),
+                }
             }
         }
+        if v4_tried > 0 && v4_added == 0 {
+            return Err(format!(
+                "无法为 VPN 服务器添加防环路由（网关 {:?}），已中止以免流量回环",
+                gw
+            ));
+        }
+
+        // 最后才抢半默认路由：此时服务器流量已经钉在物理网关上。
+        route_table.add_capture_routes(capture_index)?;
 
         let pool = crate::vpn::fakedns::FakeIpPool::new(
             &self.request.fake_ip_range,
@@ -468,7 +427,24 @@ impl Worker {
         self.fake_pool = Some(pool.clone());
 
         let rules = self.compiled_rules()?;
-        let proc = proc_lookup::SysctlProcLookup::new();
+        #[cfg(target_os = "macos")]
+        let proc: Box<dyn ProcLookup> =
+            Box::new(crate::vpn::proc_lookup::SysctlProcLookup::new());
+        #[cfg(windows)]
+        let proc: Box<dyn ProcLookup> = Box::new(platform::WindowsProcLookup::new());
+
+        // DIRECT 出口要钉物理网卡；快照拿不到索引时退回捕获索引（macOS 的
+        // `unix_list_interfaces` 索引恒为 0，保持旧行为）。
+        #[cfg(windows)]
+        if self.snapshot.default_if_index == 0 {
+            return Err("找不到物理默认网卡，无法确定直连出口（已中止以免回环）".to_string());
+        }
+        let physical_if = if self.snapshot.default_if_index != 0 {
+            self.snapshot.default_if_index
+        } else {
+            capture_index
+        };
+
         let mut engine = router::Engine::assemble(
             capture,
             netstack::NetstackConfig {
@@ -477,15 +453,26 @@ impl Worker {
                 fake_domains: std::collections::HashMap::new(),
             },
             rules,
-            Box::new(platform::MacRouteTable::new()),
-            Box::new(platform::MacIfBinder::new()),
-            capture_index,
+            Box::new(platform::SystemRouteTable::new()),
+            Box::new(platform::SystemIfBinder::new()),
+            physical_if,
             vpn_index,
-            Box::new(proc),
+            proc,
             &self.request.default_policy,
         )?;
         // 把假地址池交给引擎：DNS 本地应答与假 IP 反查域名都靠它
         engine.set_fake_pool(pool);
+        // 服务端下发的 DNS 作为内网域名的兜底解析器（用户关掉该选项就不注入）
+        if self.request.use_vpn_dns {
+            let vpn_dns: Vec<std::net::Ipv4Addr> = self
+                .status
+                .dns
+                .iter()
+                .flat_map(|s| s.split_whitespace())
+                .filter_map(|s| s.parse().ok())
+                .collect();
+            engine.set_vpn_dns(vpn_dns);
+        }
         self.engine = Some(engine);
         self.log(&format!(
             "[引擎] 已接管：捕获 {} ({}) -> 隧道 {}",
@@ -520,6 +507,16 @@ impl Worker {
         Ok(index)
     }
 
+    /// Windows：隧道接口索引直接由脚本回报；缺失时按名字回查。
+    #[cfg(windows)]
+    fn tunnel_if_index(&self, dev: &str) -> Result<u32, String> {
+        crate::vpn::route::list_interfaces()?
+            .into_iter()
+            .find(|info| info.alias == dev && info.index != 0)
+            .map(|info| info.index)
+            .ok_or_else(|| format!("找不到隧道接口 {} 的索引", dev))
+    }
+
     /// 给捕获 TUN 配地址与 MTU（openconnect 不会碰这张自建网卡）。
     #[cfg(target_os = "macos")]
     fn configure_interface(&self, dev: &str, ip: &str, mtu: u32) -> Result<(), String> {
@@ -543,8 +540,60 @@ impl Worker {
         Ok(())
     }
 
+    /// Windows：Wintun 网卡刚建出来时网络栈可能还没就绪，netsh 失败要短暂重试。
+    #[cfg(windows)]
+    fn configure_interface(&self, dev: &str, ip: &str, mtu: u32) -> Result<(), String> {
+        use std::os::windows::process::CommandExt;
+        use std::process::Command;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+        let netsh = crate::vpn::platform::system32_tool("netsh.exe");
+        let mut last = String::new();
+        for _ in 0..25 {
+            let output = Command::new(&netsh)
+                .args([
+                    "interface",
+                    "ipv4",
+                    "set",
+                    "address",
+                    &format!("name={}", dev),
+                    "static",
+                    ip,
+                    "255.255.255.252",
+                ])
+                .creation_flags(CREATE_NO_WINDOW)
+                .output();
+            match output {
+                Ok(out) if out.status.success() => {
+                    let _ = Command::new(&netsh)
+                        .args([
+                            "interface",
+                            "ipv4",
+                            "set",
+                            "subinterface",
+                            dev,
+                            &format!("mtu={}", mtu),
+                            "store=active",
+                        ])
+                        .creation_flags(CREATE_NO_WINDOW)
+                        .status();
+                    return Ok(());
+                }
+                Ok(out) => {
+                    last = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                }
+                Err(e) => last = e.to_string(),
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        Err(format!(
+            "给捕获网卡 {} 配地址失败：{}",
+            dev,
+            if last.is_empty() { "netsh 未返回错误信息".to_string() } else { last }
+        ))
+    }
+
     /// 把引擎的连接数写进状态，界面据此显示活动连接。
-    #[cfg(target_os = "macos")]
     fn publish_engine_status(&mut self) {
         let count = self.engine.as_ref().map(|e| e.flow_count()).unwrap_or(0);
         self.status.message = format!("已连接，活动连接 {}", count);
@@ -650,14 +699,14 @@ impl Worker {
     /// 回收本程序添加的路由，并把默认路由交还给连接前的物理网关
     fn cleanup_routes(&mut self) {
         // 引擎接管后：关闭所有流并回收流路由，再拆掉捕获 TUN 抢的那两条半默认路由
-        // 与给服务器加的防环主机路由。TUN 设备本体随 Engine 一起 drop（Utun::Drop 关 fd）。
-        #[cfg(target_os = "macos")]
+        // 与给服务器加的防环主机路由。TUN 设备本体随 Engine 一起 drop。
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
             use crate::vpn::platform::RouteTable;
             if let Some(mut engine) = self.engine.take() {
                 engine.shutdown();
             }
-            let route_table = crate::vpn::platform::MacRouteTable::new();
+            let route_table = crate::vpn::platform::SystemRouteTable::new();
             let capture_index = self.capture_index;
             if capture_index != 0 {
                 let _ = route_table.del_capture_routes(capture_index);
@@ -667,7 +716,6 @@ impl Worker {
                     let _ = route_table.del_server_host_route(v4);
                 }
             }
-            self.capture_dev = None;
             self.capture_index = 0;
             self.fake_pool = None;
         }
@@ -840,12 +888,9 @@ impl Worker {
 
             // 引擎的收发循环必须每轮推进：塞进 15s 巡检那一跳会把吞吐卡死。
             // 引擎尚未装配（隧道未就绪）时是 None，这一跳自然空转。
-            #[cfg(target_os = "macos")]
-            {
-                if let Some(engine) = self.engine.as_mut() {
-                    if let Err(e) = engine.poll() {
-                        self.log(&format!("[引擎] 轮询出错: {}", e));
-                    }
+            if let Some(engine) = self.engine.as_mut() {
+                if let Err(e) = engine.poll() {
+                    self.log(&format!("[引擎] 轮询出错: {}", e));
                 }
             }
 
@@ -882,19 +927,14 @@ impl Worker {
             }
 
             if !routes_applied && self.tunnel_ready() {
-                #[cfg(target_os = "macos")]
-                {
-                    if let Err(e) = self.start_engine() {
-                        self.fail(&e);
-                        return EXIT_FAILED;
-                    }
-                    self.set_phase(VpnPhase::Connected, "隧道已建立，引擎已接管");
+                if let Err(e) = self.start_engine() {
+                    // 引擎装配失败必须把隧道一起收掉，否则留下一个没人管辖的
+                    // openconnect 进程和一张半配置的网卡，网络会处于黑洞状态。
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return self.fail(&e);
                 }
-                #[cfg(not(target_os = "macos"))]
-                {
-                    self.apply_routes();
-                    self.set_phase(VpnPhase::Connected, "隧道已建立");
-                }
+                self.set_phase(VpnPhase::Connected, "隧道已建立，引擎已接管");
                 routes_applied = true;
                 // 隧道刚起来就先采一轮，别让用户干等 15 秒
                 if self.request.learn {
@@ -949,23 +989,18 @@ impl Worker {
             if routes_applied && Instant::now() >= guard_at {
                 // 引擎的收发循环已提到每轮执行，这里只做节流的状态发布；
                 // 引擎缺席（装配失败）的窗口仍走 guard_routes 兜底。
-                #[cfg(target_os = "macos")]
-                {
-                    if self.engine.is_some() {
-                        self.publish_engine_status();
-                    } else {
-                        self.guard_routes();
-                    }
-                }
-                #[cfg(not(target_os = "macos"))]
-                {
+                if self.engine.is_some() {
+                    self.publish_engine_status();
+                } else {
                     self.guard_routes();
                 }
                 self.learn_tick();
                 guard_at = Instant::now() + GUARD_INTERVAL;
             }
 
-            thread::sleep(Duration::from_millis(200));
+            // 引擎接管后要更勤地推进协议栈：200ms 一轮会把交互式请求拖到
+            // 几秒才完成。未接管时仍按 200ms 节流，避免空转。
+            thread::sleep(Duration::from_millis(if self.engine.is_some() { 10 } else { 200 }));
         }
 
         // 正常停止流程

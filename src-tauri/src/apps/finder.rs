@@ -310,6 +310,17 @@ fn bundled_candidates(id: AppId, ctx: &AppContext, names: &[&str]) -> Vec<(PathB
     out
 }
 
+/// 只取构建期内置的副本，不触发注册表 / PATH / 安装目录扫描。
+///
+/// Windows 的 VPN 连接器现在固定用安装包自带的那份，不再去找用户机器上装的
+/// openconnect；这个函数就是那条「只看内置」的入口。
+pub fn bundled_binary(id: AppId, ctx: &AppContext) -> Option<PathBuf> {
+    bundled_candidates(id, ctx, id.executable_names())
+        .into_iter()
+        .map(|(path, _)| path)
+        .find(|path| path.is_file())
+}
+
 /// 去重（Windows 路径不区分大小写），保持顺序
 fn dedup(items: Vec<(PathBuf, String)>) -> Vec<(PathBuf, String)> {
     let mut seen: HashSet<String> = HashSet::new();

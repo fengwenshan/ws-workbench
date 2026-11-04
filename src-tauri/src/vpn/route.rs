@@ -5,8 +5,8 @@
 //!   `netsh` 的输出是本地化的，直接解析文本会在不同机器上失效；CIM 对象的属性名不变。
 //! - 所有临时路由都显式写入 `ActiveStore`，绝不落进持久化路由表。
 //!   （`New-NetRoute` 默认同时写 Active + Persistent，会污染注册表）
-//! - 分流依赖 Windows 的「最长前缀优先」规则：/24 永远胜过 VPN 下发的 /0，
-//!   因此直连例外只需添加更具体的路由。
+//! - 捕获路由用两条 /1 抢占默认路由；分流由引擎按流决定出口，Windows 侧再为
+//!   VPN 流补 /32 主机路由，不依赖 VPN 服务端是否下发 /0。
 //! - macOS 没有「接口索引」概念，用接口名（utunN / en0），所以统一抽象成 `RouteTarget`。
 
 use serde::Deserialize;
@@ -461,6 +461,21 @@ pub fn add_route(cidr: &str, target: &RouteTarget, metric: u32) -> Result<(), St
     }
 }
 
+/// Windows：按目的前缀删除路由，不限定接口。
+///
+/// 清理捕获网卡的半默认路由时，接口可能已经被移除（或索引变了），
+/// 按接口删会漏掉旧条目，这里直接按前缀清。
+#[cfg(target_os = "windows")]
+pub fn remove_route_prefix(cidr: &str) -> Result<(), String> {
+    let cidr = normalize_cidr(cidr)?;
+    let script = format!(
+        "Remove-NetRoute -DestinationPrefix '{}' -Confirm:$false \
+         -PolicyStore ActiveStore -ErrorAction SilentlyContinue | Out-Null",
+        cidr
+    );
+    powershell(&script).map(|_| ())
+}
+
 /// 删除一条临时路由；路由不存在时不报错
 pub fn delete_route(cidr: &str, target: &RouteTarget) -> Result<(), String> {
     let cidr = normalize_cidr(cidr)?;
@@ -523,8 +538,18 @@ pub fn delete_host_route(ip: &str) -> Result<(), String> {
         ];
         run_route_macos(&args, &["not in table", "No such process", "no such process"])
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     {
+        let script = format!(
+            "Remove-NetRoute -DestinationPrefix '{}/32' -Confirm:$false \
+             -PolicyStore ActiveStore -ErrorAction SilentlyContinue | Out-Null",
+            ip
+        );
+        powershell(&script).map(|_| ())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = ip;
         Ok(())
     }
 }
