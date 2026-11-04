@@ -443,9 +443,6 @@ impl<D: TunDevice> Netstack<D> {
     }
 
     /// 在应用侧 socket 与出站流之间双向搬运 TCP 字节。
-    ///
-    /// 出口 `Router` 只在 macOS 竖切实现，故整个方法随之门控。
-    #[cfg(target_os = "macos")]
     pub fn pump_tcp(&mut self, router: &mut super::router::Router) {
         let handles: Vec<SocketHandle> = self.tcp_active.keys().copied().collect();
         for h in handles {

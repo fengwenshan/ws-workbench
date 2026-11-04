@@ -266,12 +266,15 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
     value = '',
     policy: VpnPolicy = 'DIRECT',
   ): VpnRule {
-    return { id: crypto.randomUUID(), kind, value, policy, no_resolve: true, remark: '', enabled: true }
+    return { id: crypto.randomUUID(), kind, value, policy, no_resolve: false, remark: '', enabled: true }
   }
 
   async function addProfile(name = '新建 VPN 配置', server = '') {
-    // 顺手建一个空的规则集，省得用户还要再点一次
-    const ruleSet = newRuleSet(`${name} 的公司网段`)
+    // 新配置默认带一条 corp 规则：域名里含 corp 的请求走 VPN，其余直连。
+    // 用户仍可在规则表里改顺序、加网段或删掉这条。
+    const corp = newRule('DOMAIN-KEYWORD', 'corp', 'VPN')
+    corp.remark = 'corp 相关域名走 VPN'
+    const ruleSet = newRuleSet(`${name} 的分流规则`, [corp])
     config.value.vpn_rule_sets.push(ruleSet)
 
     const now = nowIso()

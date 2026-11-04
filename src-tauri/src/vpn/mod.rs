@@ -37,6 +37,7 @@ pub mod commands;
 pub mod connector;
 pub mod credential;
 pub mod detect;
+pub mod dns_client;
 pub mod dns_srv;
 pub mod elevate;
 pub mod fakedns;

@@ -87,6 +87,19 @@ async function submit() {
   addError.value = ''
 }
 
+/** 一键补上「域名含 corp 走 VPN」的默认规则，已有同义规则时不重复添加。 */
+function presetCorp() {
+  const exists = props.ruleSet.rules.some(
+    (rule) =>
+      rule.kind === 'DOMAIN-KEYWORD' &&
+      rule.value.trim().toLowerCase() === 'corp' &&
+      rule.policy === 'VPN',
+  )
+  if (!exists) {
+    emit('add', 'DOMAIN-KEYWORD', 'corp', 'VPN', 'corp 相关域名走 VPN')
+  }
+}
+
 const enabledCount = computed(
   () => props.ruleSet.rules.filter((rule) => rule.enabled).length,
 )
@@ -238,6 +251,7 @@ const totalCount = computed(() => props.ruleSet.rules.length)
         @keydown.enter="submit"
       />
       <Button type="primary" size="small" @click="submit">新增规则</Button>
+      <Button size="small" @click="presetCorp">corp → VPN</Button>
     </div>
     <p v-if="addError" class="rule-error">{{ addError }}</p>
   </div>
@@ -371,6 +385,7 @@ const totalCount = computed(() => props.ruleSet.rules.length)
 }
 .rule-add {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   margin-top: 10px;
 }

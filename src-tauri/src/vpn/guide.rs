@@ -35,42 +35,33 @@ fn windows_guide(openconnect_available: bool) -> InstallGuide {
     if !openconnect_available {
         return InstallGuide {
             platform: "windows".to_string(),
-            title: "内置的 openconnect 没能启动，需要补一份可用的副本".to_string(),
-            description: "本程序自带一份 openconnect（带 Wintun 驱动的 Windows 版），正常情况下你不需要装任何东西。\
-                走到这里说明那份副本缺失或跑不起来 —— 最常见的原因是解压不完整、\
-                缺少配套 DLL，或者被安全软件拦截。请从下方的官方来源取一份带 openconnect.exe 的\
-                完整发行包，然后按下面两步交给本程序。"
+            title: "安装包内置的 openconnect 缺失或无法启动".to_string(),
+            description: "Windows 版固定使用安装包自带的 openconnect，不再读取注册表、\
+                常见安装目录或 PATH，也不会导入外部的 openconnect。走到这里说明\
+                resources/apps/openconnect 里的副本不完整 —— 最常见的是解压不完整、\
+                缺少同目录 DLL，或被安全软件拦截。"
                 .to_string(),
             steps: vec![
                 step(
-                    "准备一份完整的 openconnect 发行包",
-                    "需要的是压缩包里含 openconnect.exe 与同目录 DLL 的那一类（Windows 版通常\
-                     由 MinGW64 构建）。只下载单个 exe 是不行的，缺 DLL 会直接启动失败。",
+                    "确认安装目录完整",
+                    "检查安装目录下的 resources\\apps\\openconnect 是否同时存在\
+                     openconnect.exe 与 libopenconnect-5.dll、wintun.dll 等配套 DLL。",
                     "",
                 ),
                 step(
-                    "交给本程序托管",
-                    "到「设置」页找到 OpenConnect 这一项：「导入目录」会把 openconnect.exe 和\
-                     同目录的 DLL 一起复制到程序自己的数据目录，之后连接就用这份，\
-                     不需要管理员权限、也不污染你的安装目录；\
-                     也可以直接「手动指定」选中 openconnect.exe 使用。",
+                    "重新安装本程序",
+                    "用官方安装包覆盖安装一次；如果杀毒软件报过拦截，先把安装目录加入白名单。",
                     "",
                 ),
             ],
-            links: vec![
-                link("openconnect 官方文档", "https://www.infradead.org/openconnect/"),
-                link(
-                    "Windows 安装包说明",
-                    "https://www.infradead.org/openconnect/packages.html",
-                ),
-            ],
+            links: vec![],
         };
     }
 
     InstallGuide {
         platform: "windows".to_string(),
-        title: "连接器正常".to_string(),
-        description: "openconnect 已可用，可以开始配置 VPN 了。".to_string(),
+        title: "连接器正常（安装包内置）".to_string(),
+        description: "openconnect 来自安装包内置副本，可以开始配置 VPN 了。".to_string(),
         steps: vec![],
         links: vec![],
     }
@@ -148,7 +139,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn windows_without_openconnect_explains_builtin_and_points_to_settings() {
+    fn windows_without_openconnect_explains_builtin_and_reinstall() {
         let guide = build(Os::Windows, false);
         assert!(guide.title.contains("内置"), "实际: {}", guide.title);
         let mut text = format!("{}\n{}", guide.title, guide.description);
@@ -158,8 +149,8 @@ mod tests {
         // 用户得知道「内置那份为什么不好使」，才知道要找什么
         assert!(text.contains("DLL"), "缺少 DLL 的说明: {}", text);
         assert!(
-            text.contains("设置") && text.contains("导入目录"),
-            "应该把用户引导到设置页的导入入口: {}",
+            text.contains(r"resources\apps\openconnect") && text.contains("重新安装"),
+            "应该把用户引导到安装目录并建议覆盖安装: {}",
             text
         );
         assert!(!guide.links.iter().any(|item| item.url.contains("openconnect-vpn.net")));

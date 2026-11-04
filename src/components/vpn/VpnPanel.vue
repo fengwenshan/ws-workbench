@@ -3,6 +3,7 @@ import { computed, ref, watch } from 'vue'
 import type { VpnApi } from '@/composables/useVpn'
 import type { VpnPolicy, VpnProfile, VpnRuleKind } from '@/types/vpn'
 import { PHASE_LABELS } from '@/types/vpn'
+import { platform } from '@/platform'
 import VpnInstallGuide from './VpnInstallGuide.vue'
 import VpnLearnCard from './VpnLearnCard.vue'
 import VpnProfileForm from './VpnProfileForm.vue'
@@ -202,7 +203,7 @@ watch(
         <VpnInstallGuide
           v-if="vpn.noConnector"
           :guide="vpn.guide"
-          :can-import="true"
+          :can-import="!platform.is_windows"
           @import="handleImport"
           @copy-command="(cmd: string) => vpn.pushLog('info', `已复制命令: ${cmd}`)"
         />
