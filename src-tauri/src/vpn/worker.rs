@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use crate::vpn::connector;
 use crate::vpn::learn;
 use crate::vpn::models::{
-    AppliedRoute, LearnReport, LearnSummary, NetworkSnapshot, VpnPhase, VpnRequest, VpnStatus,
+    LearnReport, LearnSummary, NetworkSnapshot, VpnPhase, VpnRequest, VpnStatus,
 };
 use crate::vpn::route::{self, RouteOutcome, RouteTarget};
 use crate::vpn::script;
@@ -324,8 +324,9 @@ impl Worker {
         }
     }
 
+    #[cfg(not(target_os = "macos"))]
     fn record_applied(&mut self, cidr: &str, target: &RouteTarget, via: &str, outcome: RouteOutcome) {
-        self.status.routes.push(AppliedRoute {
+        self.status.routes.push(crate::vpn::models::AppliedRoute {
             cidr: cidr.to_string(),
             via: via.to_string(),
             next_hop: target.next_hop.clone(),
@@ -340,6 +341,7 @@ impl Worker {
     }
 
     /// 按规则表下发路由（过渡期：只处理 IP-CIDR -> VPN 的规则）
+    #[cfg(not(target_os = "macos"))]
     fn apply_routes(&mut self) {
         self.status.routes.clear();
         let rules = match self.compiled_rules() {

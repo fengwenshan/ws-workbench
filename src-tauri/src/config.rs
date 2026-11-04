@@ -14,6 +14,9 @@ static SETTINGS_CACHE: Mutex<Option<AppSettings>> = Mutex::new(None);
 /// 上次从数据库加载的业务快照，作为保存时 diff 的基线
 static DB_SNAPSHOT: Mutex<Option<DbData>> = Mutex::new(None);
 
+/// 设置读取失败只提示一次：load_config 启动时会被多处调用，避免刷屏
+static SETTINGS_WARNED: std::sync::Once = std::sync::Once::new();
+
 fn get_settings_cache() -> AppSettings {
     SETTINGS_CACHE
         .lock()
@@ -120,18 +123,14 @@ fn save_settings_to_store(app: &AppHandle, settings: &AppSettings) -> Result<(),
 /// - `Ok(None)`：所有候选目录都没有可读设置
 /// - `Err`：存在密文但无法解密，调用方绝不能覆盖回写
 fn load_settings_from_file(app: &AppHandle) -> Result<Option<(AppSettings, bool)>, String> {
-    use std::fs;
-
-    let mut saw_unreadable = false;
+    let mut unreadable: Vec<String> = Vec::new();
     for (_, dir) in storage_candidates(app) {
         let path = dir.join("config.json");
-        if !path.exists() {
-            continue;
-        }
-        let content = match fs::read_to_string(&path) {
-            Ok(content) => content,
-            Err(_) => {
-                saw_unreadable = true;
+        let content = match crate::util::fs::read_text_if_exists(&path) {
+            Ok(Some(content)) => content,
+            Ok(None) => continue,
+            Err(err) => {
+                unreadable.push(format!("{}（{}）", path.display(), err));
                 continue;
             }
         };
@@ -142,32 +141,32 @@ fn load_settings_from_file(app: &AppHandle) -> Result<Option<(AppSettings, bool)
                     return Ok(Some((settings, false)));
                 }
             }
-            saw_unreadable = true;
+            unreadable.push(path.display().to_string());
             continue;
         }
         match serde_json::from_str::<AppSettings>(trimmed) {
             Ok(settings) => return Ok(Some((settings, true))),
             Err(_) => {
-                saw_unreadable = true;
+                unreadable.push(path.display().to_string());
                 continue;
             }
         }
     }
-    if saw_unreadable {
-        return Err("设置文件存在但无法读取或解密".to_string());
+    if !unreadable.is_empty() {
+        return Err(format!(
+            "设置文件存在但无法解密（可能是旧版本主密钥加密，不会覆盖原文件）：{}",
+            unreadable.join("; ")
+        ));
     }
     Ok(None)
 }
 
 /// 把设置写到文件系统（兜底，以 SM4 密文信封写入）
 fn save_settings_to_file(app: &AppHandle, settings: &AppSettings) -> Result<(), String> {
-    use std::fs;
-
     let path = find_writable_file_path(app).ok_or_else(|| "没有可写的设置目录".to_string())?;
     let json = serde_json::to_string(settings).map_err(|e| format!("序列化失败: {}", e))?;
     let envelope = crate::crypto::encrypt_str(app, &json)?;
-    fs::write(&path, envelope)
-        .map_err(|e| format!("写入设置文件失败: {} (路径: {})", e, path.display()))
+    crate::util::fs::write_text(&path, &envelope)
 }
 
 /// 加载设置：Store → 文件 → 默认值
@@ -181,7 +180,9 @@ pub fn load_settings(app: &AppHandle) -> AppSettings {
             return settings;
         }
         Err(err) => {
-            eprintln!("[settings] 读取失败，使用内存/默认设置: {}", err);
+            SETTINGS_WARNED.call_once(|| {
+                eprintln!("[settings] 读取失败，使用内存/默认设置: {}", err);
+            });
             return get_settings_cache();
         }
         Ok(None) => {}
@@ -196,7 +197,9 @@ pub fn load_settings(app: &AppHandle) -> AppSettings {
             return settings;
         }
         Err(err) => {
-            eprintln!("[settings] 读取失败，使用内存/默认设置: {}", err);
+            SETTINGS_WARNED.call_once(|| {
+                eprintln!("[settings] 读取失败，使用内存/默认设置: {}", err);
+            });
             return get_settings_cache();
         }
         Ok(None) => {}

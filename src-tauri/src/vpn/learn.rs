@@ -21,6 +21,7 @@
 
 use std::collections::BTreeMap;
 
+#[cfg(any(target_os = "windows", test))]
 use serde::Deserialize;
 
 use crate::vpn::models::{LearnedHost, LearnedSubnet, LearnReport, LearnSummary};
@@ -54,6 +55,7 @@ pub struct Observation {
 }
 
 /// `Get-NetTCPConnection` 的原始行
+#[cfg(any(target_os = "windows", test))]
 #[derive(Debug, Clone, Default, Deserialize)]
 struct RawConnection {
     #[serde(
@@ -141,6 +143,7 @@ pub fn sample(
 }
 
 /// 过滤 + 归类。抽成纯函数是为了能在任意平台上跑单测。
+#[cfg(any(target_os = "windows", test))]
 fn classify(
     raw: &[RawConnection],
     vpn_ips: &[String],
@@ -191,6 +194,7 @@ fn classify(
 }
 
 /// 本机自身、回环、链路本地、组播、广播：都不是分流目标
+#[cfg(any(target_os = "windows", test))]
 fn is_uninteresting(ip: u32) -> bool {
     ip == 0
         || ip == u32::MAX

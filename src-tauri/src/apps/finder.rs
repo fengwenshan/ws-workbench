@@ -34,6 +34,7 @@ pub fn is_script(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(target_os = "windows")]
 fn env_dir(name: &str) -> Option<PathBuf> {
     std::env::var_os(name)
         .map(PathBuf::from)
