@@ -90,7 +90,7 @@ CREATE TABLE IF NOT EXISTS vpn_rule_sets (
 
 ### 4.3 加密与密钥
 
-- `crypto.rs` 把现有私有的 `vault_keys` 函数与 `VaultKeys` 类型提升为 `pub(crate)`，供 `db.rs` 取主密钥；对外行为不变。
+- `crypto.rs` 的 `vault_keys` / `VaultKeys` 已是 `pub(crate)`，保持不变；把 `encrypt_with_keys` / `decrypt_with_keys` 提升为 `pub(crate)` 供 `db.rs` 用固定密钥做单测。
 - `db.rs` 对外提供带 `&VaultKeys` 参数的纯函数（`load_all`、`save_diff`），另提供接收 `AppHandle` 的薄封装供命令层调用；前者是可单测的边界。
 - 只加密 `payload`；`id`、`group_id`、`sort_order` 为明文。可接受的泄露面仅限记录数量与 UUID，不包含名称、笔记、密码等内容。
 
