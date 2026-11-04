@@ -81,6 +81,17 @@ fn resolve_session_dir(app: &AppHandle) -> Result<(PathBuf, String), String> {
     if let Ok(base) = app.path().app_local_data_dir() {
         candidates.push(("本地数据目录".to_string(), base));
     }
+    // dev 构建在受限环境（受控文件夹访问、沙箱）下可能连本地数据目录都建不出来。
+    // 这时退到可执行文件旁：target/debug 对开发进程一定可写，提权 worker 也用同一路径。
+    #[cfg(debug_assertions)]
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            candidates.push((
+                "开发目录（可执行文件旁）".to_string(),
+                parent.join("ws-workbench-dev"),
+            ));
+        }
+    }
     // 兜底：临时目录在当前用户 profile 下，权限最宽松
     candidates.push((
         "临时目录".to_string(),

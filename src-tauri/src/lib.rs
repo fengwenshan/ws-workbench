@@ -131,6 +131,32 @@ fn setup_app_menu<R: Runtime>(_app: &AppHandle<R>) -> tauri::Result<()> {
     Ok(())
 }
 
+/// 选一个能真正建出来的 WebView2 用户数据目录。
+///
+/// 不要用默认目录（`%LOCALAPPDATA%\EBWebView`）：其它 WebView2 应用会共用，
+/// 浏览器版本或锁不一致时创建环境会报「拒绝访问」。优先应用数据目录；在受限
+/// 环境（受控文件夹访问、企业策略、沙箱）下退到可执行文件旁，最后才是临时目录。
+fn webview_data_dir(app: &tauri::App) -> std::path::PathBuf {
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(base) = app.path().app_local_data_dir() {
+        candidates.push(base.join("webview"));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            candidates.push(parent.join("webview-data"));
+        }
+    }
+    candidates.push(std::env::temp_dir().join("ws-workbench-webview"));
+
+    for dir in &candidates {
+        if std::fs::create_dir_all(dir).is_ok() {
+            return dir.clone();
+        }
+    }
+    // 全都建不出来时仍返回首选路径，让 WebView2 自己报出更具体的错误。
+    candidates.remove(0)
+}
+
 /// 创建主窗口。
 ///
 /// 不用 Tauri 的自动创建（tauri.conf.json 里 `create: false`），是为了能在原生层
@@ -146,7 +172,9 @@ fn create_main_window(app: &mut tauri::App) -> tauri::Result<()> {
         .find(|window| window.label == "main")
         .cloned()
         .expect("tauri.conf.json 里缺少 main 窗口配置");
+
     tauri::WebviewWindowBuilder::from_config(app.handle(), &config)?
+        .data_directory(webview_data_dir(app))
         .on_navigation(|url| {
             // 只拦本地文件导航；dev 的 http://localhost 和打包后的 tauri:// 都放行
             url.scheme() != "file"
