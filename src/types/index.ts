@@ -22,16 +22,22 @@ export interface AttachmentMeta {
   dir: string
 }
 
+/** 快速搜索（⌘/Ctrl+P）的附件条目：附件本身 + 所属实体，用于展示位置并跳转 */
+export interface QuickAttachmentItem extends AttachmentMeta {
+  entityKind: EntityKind
+  entityId: string
+  /** 面包屑：分组名，或「分组 / 项目」 */
+  entityPath: string
+}
+
 export interface ProjectConfig {
   id: string
   name: string
   source_dir: string
   output_dir: string
-  exclude: string[]
   created_at: string
   updated_at: string
   note: string
-  upload_dir: string | null
   attachments: AttachmentMeta[]
 }
 
@@ -43,15 +49,14 @@ export interface ProjectGroup {
   is_default?: boolean
   created_at: string
   note: string
-  upload_dir: string | null
   attachments: AttachmentMeta[]
 }
 
 export interface AppConfig {
   groups: ProjectGroup[]
   projects: ProjectConfig[]
-  default_exclude: string[]
-  default_exclude_version?: number
+  default_include: string[]
+  default_include_version?: number
   /** VPN 配置列表 */
   vpn_profiles: VpnProfile[]
   /** VPN 规则集列表 */

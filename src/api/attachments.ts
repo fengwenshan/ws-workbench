@@ -3,14 +3,9 @@ import type { AttachmentMeta } from '@/types'
 
 /** 附件加密存储相关命令 */
 
-export function resolveUploadDir(
-  entityDir: string | null,
-  defaultDir: string | null,
-): Promise<string> {
-  return invoke<string>('resolve_upload_dir', {
-    entityDir,
-    defaultDir,
-  })
+/** 解析附件的统一上传目录：设置里的地址 > App 私有 attachments 目录 */
+export function resolveUploadDir(defaultDir: string | null): Promise<string> {
+  return invoke<string>('resolve_upload_dir', { defaultDir })
 }
 
 export function encryptUploadFile(

@@ -1,4 +1,9 @@
 <script setup lang="ts">
+/**
+ * 规则 chips 编辑器：回车 / 逗号 / 失焦都能添加，× 删除。
+ *
+ * 全局「打包包含规则」用它；不绑定具体语义，只负责一份 string[]。
+ */
 import { ref } from 'vue'
 
 const props = defineProps<{
@@ -35,7 +40,7 @@ function onKeydown(e: KeyboardEvent) {
 </script>
 
 <template>
-  <div class="exclude-rules">
+  <div class="rules-editor">
     <div class="tags">
       <span v-for="(rule, index) in modelValue" :key="index" class="tag">
         {{ rule }}
@@ -45,7 +50,7 @@ function onKeydown(e: KeyboardEvent) {
     <input
       v-model="input"
       class="rule-input"
-      :placeholder="placeholder || '输入排除规则后回车添加'"
+      :placeholder="placeholder || '输入规则后回车添加'"
       @keydown="onKeydown"
       @blur="addRule"
     />
@@ -53,7 +58,7 @@ function onKeydown(e: KeyboardEvent) {
 </template>
 
 <style scoped>
-.exclude-rules {
+.rules-editor {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;

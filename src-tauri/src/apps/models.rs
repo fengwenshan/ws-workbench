@@ -63,14 +63,6 @@ impl AppId {
         }
     }
 
-    /// 是否是把整个目录复制到程序数据目录来托管。
-    ///
-    /// 只对自包含的命令行程序有意义：openconnect 是一堆 exe + dll，
-    /// 拷过来就能跑；装了服务或写注册表的应用拷过来会坏。
-    pub const fn supports_import(&self) -> bool {
-        matches!(self, AppId::Openconnect)
-    }
-
     /// 可执行文件名，按优先级排列。
     /// Windows 上 .cmd/.bat 是命令行包装脚本，需要交给 cmd.exe 解释。
     pub const fn executable_names(&self) -> &'static [&'static str] {
@@ -170,8 +162,6 @@ pub struct AppCandidate {
     pub path: String,
     /// override / managed / bundled / registry / system / path
     pub source: String,
-    /// 是否为需要 cmd.exe 解释的 .cmd/.bat
-    pub script: bool,
     /// 该路径当前是否存在
     pub exists: bool,
 }
@@ -185,10 +175,8 @@ pub struct AppLocation {
     /// 最终选中的可执行文件路径；空表示没找到
     pub path: String,
     pub available: bool,
-    /// custom(设置页指定) / managed(托管副本) / registry / system / path / bundled / missing
+    /// custom(调用方指定) / managed(托管副本) / registry / system / path / bundled / missing
     pub source: String,
-    /// 用户在设置页里指定的路径
-    pub override_path: String,
     /// 补充说明：找不到时的排查提示，或来源说明
     pub note: String,
     /// 随程序分发的内置副本路径。
@@ -197,13 +185,7 @@ pub struct AppLocation {
     /// 没有任何可搜的余地。混在候选列表里只会让人以为还得找一遍。
     #[serde(default)]
     pub builtin_path: String,
-    /// 是否支持「导入到应用数据目录」
-    pub supports_import: bool,
-    /// 是否支持手动指定路径（目前 Windows 才有完整的设置页）
-    pub supports_override: bool,
-    /// 手动指定时该选哪个文件。把期望的文件名列出来，用户才不会挑错。
-    pub expected_names: Vec<String>,
-    /// 其它找到的候选（不含内置副本），界面可以列出来让用户切换
+    /// 其它找到的候选（不含内置副本）
     pub candidates: Vec<AppCandidate>,
 }
 
@@ -217,34 +199,9 @@ impl AppLocation {
             path: String::new(),
             available: false,
             source: "missing".to_string(),
-            override_path: String::new(),
             note,
             builtin_path: String::new(),
-            supports_import: id.supports_import(),
-            supports_override: true,
-            expected_names: id
-                .executable_names()
-                .iter()
-                .map(|name| name.to_string())
-                .collect(),
             candidates: Vec::new(),
-        }
-    }
-}
-
-/// 应用路径的用户覆盖设置
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AppPathOverride {
-    /// AppId::as_str()
-    pub id: String,
-    pub path: String,
-}
-
-impl AppPathOverride {
-    pub fn new(id: &str, path: &str) -> Self {
-        AppPathOverride {
-            id: id.to_string(),
-            path: path.to_string(),
         }
     }
 }
@@ -258,21 +215,6 @@ pub struct AppContext {
     pub resource_dir: Option<std::path::PathBuf>,
     /// 可执行文件所在目录
     pub exe_dir: Option<std::path::PathBuf>,
-    /// 设置页里手动指定的路径。
-    /// 放在上下文里而不是每次单传，是为了让所有调用方（项目打包、VPN 连接器探测、
-    /// 设置页自身）自动共享同一份设置，不会出现「设置页配了但某个页面看不到」的情况。
-    pub overrides: Vec<AppPathOverride>,
-}
-
-impl AppContext {
-    /// 取某个应用在设置页里指定的路径
-    pub fn override_for(&self, id: AppId) -> &str {
-        self.overrides
-            .iter()
-            .find(|item| item.id == id.as_str())
-            .map(|item| item.path.as_str())
-            .unwrap_or("")
-    }
 }
 
 #[cfg(test)]
@@ -317,15 +259,6 @@ mod tests {
     }
 
     #[test]
-    fn only_openconnect_supports_import() {
-        // 复制整个安装目录只对自包含的命令行程序可行
-        assert!(AppId::Openconnect.supports_import());
-        for id in [AppId::Vscode, AppId::Idea, AppId::Trae] {
-            assert!(!id.supports_import(), "{} 不应该支持导入", id.as_str());
-        }
-    }
-
-    #[test]
     fn executable_names_cover_platform_conventions() {
         // Windows 下必须列 .exe，非 Windows 下必须有一个不带后缀的名字
         assert!(AppId::Openconnect
@@ -346,11 +279,6 @@ mod tests {
         assert!(location.path.is_empty());
         // 标题必须点明这是命令行程序，免得和别的版本混在一起
         assert_eq!(location.name, "OpenConnect（命令行）");
-        // 并且要告诉用户该选哪个文件
-        assert!(location
-            .expected_names
-            .iter()
-            .any(|name| name == "openconnect.exe"));
     }
 
     /// openconnect 只认自己那个可执行文件，不会把图形界面版的认成自己。
@@ -369,18 +297,5 @@ mod tests {
         let description = AppId::Openconnect.description();
         assert!(description.contains("自动登录"), "实际: {}", description);
         assert!(description.contains("分流"), "实际: {}", description);
-    }
-
-    #[test]
-    fn every_id_has_expected_names() {
-        for id in AppId::ALL {
-            let location = AppLocation::missing(*id, String::new());
-            assert_eq!(
-                location.expected_names.len(),
-                id.executable_names().len(),
-                "{} 的期望文件名没带上",
-                id.as_str()
-            );
-        }
     }
 }

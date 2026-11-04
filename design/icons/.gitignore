@@ -1,0 +1,6 @@
+tools/rasterize
+tools/.tmp/
+tools/.modulecache/
+tools/__pycache__/
+dist/_*
+dist/preview/_sysicons/

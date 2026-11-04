@@ -11,10 +11,10 @@ defineProps<{
 
 const emit = defineEmits<{
   updateNote: [note: string]
-  updateUploadDir: [dir: string | null]
   addAttachment: [meta: AttachmentMeta]
   removeAttachment: [id: string]
   renameAttachment: [id: string, name: string]
+  openSettings: []
   log: [level: LogLevel, message: string]
 }>()
 </script>
@@ -29,10 +29,8 @@ const emit = defineEmits<{
       <TabPane key="note" tab="笔记">
         <NoteEditor
           :note="group.note"
-          :upload-dir="group.upload_dir"
           :default-upload-dir="defaultUploadDir"
           @update="(note) => emit('updateNote', note)"
-          @add-attachment="(meta) => emit('addAttachment', meta)"
           @log="(level, message) => emit('log', level, message)"
         />
       </TabPane>
@@ -41,10 +39,10 @@ const emit = defineEmits<{
           kind="group"
           :entity="group"
           :default-upload-dir="defaultUploadDir"
-          @update-upload-dir="(dir) => emit('updateUploadDir', dir)"
           @add-attachment="(meta) => emit('addAttachment', meta)"
           @remove-attachment="(id) => emit('removeAttachment', id)"
           @rename-attachment="(id, name) => emit('renameAttachment', id, name)"
+          @open-settings="emit('openSettings')"
           @log="(level, message) => emit('log', level, message)"
         />
       </TabPane>

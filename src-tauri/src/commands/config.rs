@@ -3,7 +3,7 @@
 use tauri::AppHandle;
 
 use crate::config;
-use crate::models::{default_exclude_rules, AppConfig};
+use crate::models::{default_include_rules, AppConfig};
 
 #[tauri::command]
 pub fn get_config(app: AppHandle) -> AppConfig {
@@ -67,6 +67,6 @@ pub fn vault_decrypt(app: AppHandle, cipher: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-pub fn get_default_exclude_rules() -> Vec<String> {
-    default_exclude_rules()
+pub fn get_default_include_rules() -> Vec<String> {
+    default_include_rules()
 }

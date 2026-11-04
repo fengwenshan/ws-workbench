@@ -44,10 +44,9 @@ impl AppSettings {
     /// 从完整配置中抽出设置字段
     pub fn from_config(config: &AppConfig) -> Self {
         AppSettings {
-            default_exclude: config.default_exclude.clone(),
-            default_exclude_version: config.default_exclude_version,
+            default_include: config.default_include.clone(),
+            default_include_version: config.default_include_version,
             vpn_active_profile_id: config.vpn_active_profile_id.clone(),
-            app_paths: config.app_paths.clone(),
             vpn_worker_session_dir: config.vpn_worker_session_dir.clone(),
             default_upload_dir: config.default_upload_dir.clone(),
         }
@@ -58,12 +57,11 @@ impl AppSettings {
         AppConfig {
             groups: data.groups,
             projects: vec![],
-            default_exclude: self.default_exclude,
-            default_exclude_version: self.default_exclude_version,
+            default_include: self.default_include,
+            default_include_version: self.default_include_version,
             vpn_profiles: data.vpn_profiles,
             vpn_rule_sets: data.vpn_rule_sets,
             vpn_active_profile_id: self.vpn_active_profile_id,
-            app_paths: self.app_paths,
             vpn_worker_session_dir: self.vpn_worker_session_dir,
             default_upload_dir: self.default_upload_dir,
         }
@@ -170,10 +168,28 @@ fn save_settings_to_file(app: &AppHandle, settings: &AppSettings) -> Result<(), 
 }
 
 /// 加载设置：Store → 文件 → 默认值
+/// 老版本配置补上新增的默认排除规则。
+///
+/// 包含规则是按版本维护的（见 [`crate::models::DEFAULT_INCLUDE`]）：老配置
+/// （没有 include 字段，版本 0）加载时补上默认集；用户之后自己删掉的规则
+/// 不会因为版本没变被重新塞回去。
+fn upgrade_default_include(app: &AppHandle, settings: &mut AppSettings) -> bool {
+    let mut version = settings.default_include_version;
+    let changed = crate::models::migrate_default_include(&mut settings.default_include, &mut version);
+    settings.default_include_version = version;
+    if changed {
+        if let Err(err) = save_settings(app, settings) {
+            eprintln!("[settings] 打包包含规则升级后回写失败: {}", err);
+        }
+    }
+    changed
+}
+
 pub fn load_settings(app: &AppHandle) -> AppSettings {
     match load_settings_from_store(app) {
-        Ok(Some((settings, was_plaintext))) => {
-            if was_plaintext {
+        Ok(Some((mut settings, was_plaintext))) => {
+            let upgraded = upgrade_default_include(app, &mut settings);
+            if was_plaintext && !upgraded {
                 let _ = save_settings_to_store(app, &settings);
             }
             set_settings_cache(&settings);
@@ -189,8 +205,9 @@ pub fn load_settings(app: &AppHandle) -> AppSettings {
     }
 
     match load_settings_from_file(app) {
-        Ok(Some((settings, _was_plaintext))) => {
-            if save_settings_to_store(app, &settings).is_err() {
+        Ok(Some((mut settings, _was_plaintext))) => {
+            let upgraded = upgrade_default_include(app, &mut settings);
+            if !upgraded && save_settings_to_store(app, &settings).is_err() {
                 let _ = save_settings_to_file(app, &settings);
             }
             set_settings_cache(&settings);
@@ -402,20 +419,20 @@ mod tests {
     }
 
     #[test]
-    fn app_settings_default_uses_latest_exclude_rules() {
+    fn app_settings_default_uses_latest_include_rules() {
         let settings = AppSettings::default();
         assert_eq!(
-            settings.default_exclude_version,
-            crate::models::DEFAULT_EXCLUDE_VERSION
+            settings.default_include_version,
+            crate::models::DEFAULT_INCLUDE_VERSION
         );
-        assert!(settings.default_exclude.iter().any(|r| r == ".*"));
+        assert!(settings.default_include.iter().any(|r| r == "*.js"));
     }
 
     #[test]
     fn app_settings_roundtrip_from_config() {
         let config = AppConfig {
-            default_exclude: vec!["node_modules".to_string()],
-            default_exclude_version: 7,
+            default_include: vec!["*.js".to_string()],
+            default_include_version: 7,
             vpn_active_profile_id: "p1".to_string(),
             vpn_worker_session_dir: "/tmp/session".to_string(),
             default_upload_dir: Some("/tmp/upload".to_string()),
@@ -423,8 +440,8 @@ mod tests {
         };
         let settings = AppSettings::from_config(&config);
         let merged = settings.into_config(crate::db::DbData::default());
-        assert_eq!(merged.default_exclude, config.default_exclude);
-        assert_eq!(merged.default_exclude_version, 7);
+        assert_eq!(merged.default_include, config.default_include);
+        assert_eq!(merged.default_include_version, 7);
         assert_eq!(merged.vpn_active_profile_id, "p1");
         assert_eq!(merged.vpn_worker_session_dir, "/tmp/session");
         assert_eq!(merged.default_upload_dir, config.default_upload_dir);

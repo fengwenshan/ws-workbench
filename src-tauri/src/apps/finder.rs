@@ -329,16 +329,9 @@ fn dedup(items: Vec<(PathBuf, String)>) -> Vec<(PathBuf, String)> {
 
 /// 定位一个应用。
 ///
-/// `extra_override` 是调用方自带的专用路径（例如某个 VPN 配置里单独指定的连接器），
-/// 它优先于设置页里的全局设置。
+/// `extra_override` 是调用方自带的专用路径（例如某个 VPN 配置里单独指定的连接器）。
 pub fn locate(id: AppId, ctx: &AppContext, extra_override: &str) -> AppLocation {
-    // 调用方专用路径 > 设置页全局路径
-    let extra = extra_override.trim();
-    let override_text = if extra.is_empty() {
-        ctx.override_for(id).trim().to_string()
-    } else {
-        extra.to_string()
-    };
+    let override_text = extra_override.trim().to_string();
 
     let mut collected: Vec<(PathBuf, String)> = Vec::new();
     // 用户手动指定。即使不存在也保留，好让界面明确告诉用户「你填的路径不对」
@@ -366,7 +359,6 @@ pub fn locate(id: AppId, ctx: &AppContext, extra_override: &str) -> AppLocation 
         .map(|(path, source)| AppCandidate {
             path: path.to_string_lossy().to_string(),
             source: source.clone(),
-            script: is_script(path),
             exists: path.is_file(),
         })
         .collect();
@@ -390,25 +382,16 @@ pub fn locate(id: AppId, ctx: &AppContext, extra_override: &str) -> AppLocation 
             path: path.to_string_lossy().to_string(),
             available: true,
             source: source.clone(),
-            override_path: override_text,
             note: if source == "custom" {
-                "使用设置页手动指定的路径".to_string()
+                "使用调用方指定的路径".to_string()
             } else {
                 String::new()
             },
             builtin_path: builtin_text,
-            supports_import: id.supports_import(),
-            supports_override: Platform::is_windows(&Platform),
-            expected_names: id
-                .executable_names()
-                .iter()
-                .map(|name| name.to_string())
-                .collect(),
             candidates,
         },
         None => {
             let mut missing = AppLocation::missing(id, missing_note(&override_text));
-            missing.override_path = override_text;
             missing.builtin_path = builtin_text;
             missing.candidates = candidates;
             missing
@@ -421,18 +404,10 @@ pub fn locate(id: AppId, ctx: &AppContext, extra_override: &str) -> AppLocation 
 /// 直接在 `locate` 里测会受这台机器装了哪些软件影响。
 fn missing_note(override_path: &str) -> String {
     if !override_path.is_empty() && !Path::new(override_path).is_file() {
-        format!("设置里指定的路径不存在：{}", override_path)
+        format!("指定的路径不存在：{}", override_path)
     } else {
         "已查找：手动指定、程序托管目录、内置资源、注册表、常见安装目录、PATH".to_string()
     }
-}
-
-/// 一次性定位所有应用（只按设置页里的全局配置，不带调用方专用路径）
-pub fn locate_all(ctx: &AppContext) -> Vec<AppLocation> {
-    AppId::ALL
-        .iter()
-        .map(|id| locate(*id, ctx, ""))
-        .collect()
 }
 
 /// 把一个已有的应用目录复制到程序托管目录。
@@ -562,8 +537,6 @@ mod tests {
     fn missing_override_is_reported_not_swallowed() {
         let ctx = AppContext::default();
         let location = locate(AppId::Openconnect, &ctx, r"Z:\nope\openconnect.exe");
-        // 手动指定的路径必须原样保留在结果里，界面才能显示「当前填的是这个」
-        assert_eq!(location.override_path, r"Z:\nope\openconnect.exe");
         let custom = location
             .candidates
             .iter()
@@ -695,81 +668,6 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&data);
         let _ = std::fs::remove_dir_all(&custom);
-    }
-
-    #[test]
-    fn locate_all_returns_every_app() {
-        let ctx = AppContext::default();
-        let all = locate_all(&ctx);
-        assert_eq!(all.len(), AppId::ALL.len());
-        for location in &all {
-            assert!(!location.name.is_empty());
-        }
-    }
-
-    #[test]
-    fn locate_all_applies_settings_overrides() {
-        let custom = temp_dir("all-override");
-        let exe = custom.join(if cfg!(target_os = "windows") {
-            "openconnect.exe"
-        } else {
-            "openconnect"
-        });
-        std::fs::write(&exe, b"stub").unwrap();
-
-        let ctx = AppContext {
-            overrides: vec![crate::apps::models::AppPathOverride::new(
-                "openconnect",
-                &exe.to_string_lossy(),
-            )],
-            ..Default::default()
-        };
-        let all = locate_all(&ctx);
-        let openconnect = all
-            .iter()
-            .find(|item| item.id == "openconnect")
-            .expect("应该有 openconnect");
-        assert_eq!(openconnect.source, "custom");
-        assert_eq!(openconnect.path, exe.to_string_lossy());
-
-        let _ = std::fs::remove_dir_all(&custom);
-    }
-
-    #[test]
-    fn per_call_override_beats_settings_override() {
-        let settings = temp_dir("settings-override");
-        let settings_exe = settings.join(if cfg!(target_os = "windows") {
-            "openconnect.exe"
-        } else {
-            "openconnect"
-        });
-        std::fs::write(&settings_exe, b"stub").unwrap();
-
-        let per_call = temp_dir("percall-override");
-        let per_call_exe = per_call.join(if cfg!(target_os = "windows") {
-            "openconnect.exe"
-        } else {
-            "openconnect"
-        });
-        std::fs::write(&per_call_exe, b"stub").unwrap();
-
-        let ctx = AppContext {
-            overrides: vec![crate::apps::models::AppPathOverride::new(
-                "openconnect",
-                &settings_exe.to_string_lossy(),
-            )],
-            ..Default::default()
-        };
-        // VPN 配置里自带的路径应该压过设置页里的
-        let location = locate(AppId::Openconnect, &ctx, &per_call_exe.to_string_lossy());
-        assert_eq!(location.path, per_call_exe.to_string_lossy());
-
-        // 不带专用路径时用设置页的
-        let fallback = locate(AppId::Openconnect, &ctx, "");
-        assert_eq!(fallback.path, settings_exe.to_string_lossy());
-
-        let _ = std::fs::remove_dir_all(&settings);
-        let _ = std::fs::remove_dir_all(&per_call);
     }
 
     #[test]

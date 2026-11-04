@@ -277,31 +277,30 @@ mod tests {
         // `apps::locate` 会把内置副本从 candidates 里摘出去、单独放进 builtin_path，
         // 所以 probe_app 必须补探一次。漏了的话内置 openconnect 永远判成 missing，
         // 「自动」模式会直接报「没有可用连接器」—— 用户现场就是这么发生的。
-        let bundled = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("resources")
-            .join("apps")
-            .join("openconnect")
-            .join("openconnect.exe");
-        if !bundled.is_file() {
+        let ctx = AppContext::default();
+        let location = apps::locate(AppId::Openconnect, &ctx, "");
+        if location.builtin_path.is_empty() {
             // 内置二进制体积大，不进版本库；本地没放就跳过，别把测试搞成环境依赖
             return;
         }
 
-        let found = detect_all(&AppContext::default(), "");
+        let probed = probe_app(AppId::Openconnect, &ctx, "");
+        // 本机已经装了可用的 openconnect（brew 等）时，内置副本按优先级只作兜底，
+        // 「补探内置副本」这条分支本来就不该走到，别把测试搞成环境依赖。
+        if probed.iter().any(|item| item.available && item.source != "bundled") {
+            return;
+        }
         assert!(
-            found
-                .iter()
-                .any(|item| item.kind == "openconnect" && item.source == "bundled"),
+            probed.iter().any(|item| item.source == "bundled"),
             "内置 openconnect 没有被探测，实际结果: {:?}",
-            found
+            probed
                 .iter()
                 .map(|item| format!("{}:{}", item.kind, item.source))
                 .collect::<Vec<_>>()
         );
 
         // 真正的行为断言：内置副本装好了，「自动」就该选它
-        let picked = pick_connector(&found, ConnectorKind::Auto)
-            .expect("至少要能选出一个连接器");
+        let picked = pick_connector(&probed, ConnectorKind::Auto).expect("至少要能选出一个连接器");
         assert_eq!(
             picked.kind, "openconnect",
             "自动模式没选内置 openconnect，而是选了 {}（{}）",

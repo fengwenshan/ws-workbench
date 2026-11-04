@@ -7,7 +7,7 @@ export function useConfig() {
   const config = ref<AppConfig>({
     groups: [],
     projects: [],
-    default_exclude: [],
+    default_include: [],
     vpn_profiles: [],
     vpn_rule_sets: [],
     vpn_active_profile_id: '',
@@ -19,8 +19,9 @@ export function useConfig() {
   // 老版本配置缺字段时补齐，避免模板访问 undefined
   function normalizeEntity(entity: ProjectConfig | ProjectGroup) {
     if (typeof entity.note !== 'string') entity.note = ''
-    if (entity.upload_dir === undefined) entity.upload_dir = null
     if (!Array.isArray(entity.attachments)) entity.attachments = []
+    // 旧版本给分组/项目单独存过上传目录，现在统一用设置里的地址，读到就丢弃
+    delete (entity as ProjectConfig & { upload_dir?: string | null }).upload_dir
   }
 
   async function loadConfig() {
@@ -35,7 +36,7 @@ export function useConfig() {
         vpn_active_profile_id: loaded.vpn_active_profile_id ?? '',
         default_upload_dir: loaded.default_upload_dir ?? null,
       }
-      // 补齐 note / upload_dir / attachments
+      // 补齐 note / attachments，并清掉旧版本单独存的上传目录
       config.value.groups.forEach(normalizeEntity)
       config.value.groups.forEach(g => g.projects.forEach(normalizeEntity))
       // 自动选中第一个项目
@@ -78,8 +79,8 @@ export function useConfig() {
     return kind === 'group' ? findGroup(id) : findProject(id)
   }
 
-  // 新建分组
-  async function addGroup(name: string, uploadDir: string | null = null): Promise<ProjectGroup> {
+  // 新建分组（附件上传统一走设置里的地址，分组不再有自己的目录）
+  async function addGroup(name: string): Promise<ProjectGroup> {
     const group: ProjectGroup = {
       id: crypto.randomUUID(),
       name,
@@ -87,7 +88,6 @@ export function useConfig() {
       is_default: false,
       created_at: nowIso(),
       note: '',
-      upload_dir: uploadDir,
       attachments: [],
     }
     config.value.groups.push(group)
@@ -123,6 +123,18 @@ export function useConfig() {
     await saveConfig()
   }
 
+  // 按 id 更新分组名称，笔记、附件与组内项目原样保留
+  async function updateGroup(groupId: string, data: { name?: string }) {
+    const group = config.value.groups.find(g => g.id === groupId)
+    if (!group) return
+    // 默认分组不允许重命名
+    if (typeof data.name === 'string' && !group.is_default) {
+      const trimmed = data.name.trim()
+      if (trimmed) group.name = trimmed
+    }
+    await saveConfig()
+  }
+
   // 分组重新排序
   async function reorderGroups(newGroups: ProjectGroup[]) {
     config.value.groups = newGroups
@@ -154,15 +166,14 @@ export function useConfig() {
   // 在指定分组中添加项目
   async function addProject(
     groupId: string,
-    data: Omit<ProjectConfig, 'id' | 'created_at' | 'updated_at' | 'note' | 'upload_dir' | 'attachments'> &
-      Partial<Pick<ProjectConfig, 'note' | 'upload_dir' | 'attachments'>>,
+    data: Omit<ProjectConfig, 'id' | 'created_at' | 'updated_at' | 'note' | 'attachments'> &
+      Partial<Pick<ProjectConfig, 'note' | 'attachments'>>,
   ): Promise<ProjectConfig | undefined> {
     const group = config.value.groups.find(g => g.id === groupId)
     if (!group) return
     const now = nowIso()
     const project: ProjectConfig = {
       note: '',
-      upload_dir: null,
       attachments: [],
       ...data,
       id: crypto.randomUUID(),
@@ -207,16 +218,7 @@ export function useConfig() {
     await saveConfig()
   }
 
-  // 设置分组/项目附件上传目录（null 表示恢复默认）
-  async function updateUploadDir(kind: EntityKind, id: string, dir: string | null) {
-    const entity = resolveEntity(kind, id)
-    if (!entity) return
-    entity.upload_dir = dir
-    if (kind === 'project') (entity as ProjectConfig).updated_at = nowIso()
-    await saveConfig()
-  }
-
-  // 设置全局默认附件上传目录
+  // 设置全局默认附件上传目录（分组/项目的附件统一存到这里）
   async function setDefaultUploadDir(dir: string | null) {
     config.value.default_upload_dir = dir
     await saveConfig()
@@ -273,6 +275,7 @@ export function useConfig() {
     addGroup,
     deleteGroup,
     renameGroup,
+    updateGroup,
     reorderGroups,
     reorderProjects,
     moveProject,
@@ -282,7 +285,6 @@ export function useConfig() {
     findGroup,
     findProject,
     updateNote,
-    updateUploadDir,
     setDefaultUploadDir,
     addAttachment,
     removeAttachment,

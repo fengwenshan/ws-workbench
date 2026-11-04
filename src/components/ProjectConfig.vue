@@ -5,17 +5,10 @@ import {
   detectProjectType as detectProjectTypeCommand,
   detectVcs as detectVcsCommand,
 } from '@/api/project'
-import { getDefaultExcludeRules } from '@/api/config'
-import {
-  openDir,
-  openInIdea,
-  openInTerminal,
-  openInTrae,
-  openInVscode,
-} from '@/api/system'
+import { checkDir } from '@/api/system'
 import { pickDirectory } from '@/utils/dialog'
 import { basename, joinPath } from '@/utils/path'
-import ExcludeRules from './ExcludeRules.vue'
+import OpenWithButton from './OpenWithButton.vue'
 
 const sourceTextarea = ref<HTMLTextAreaElement | null>(null)
 const outputTextarea = ref<HTMLTextAreaElement | null>(null)
@@ -29,24 +22,17 @@ function autoResize(el: HTMLTextAreaElement | null) {
 
 const props = defineProps<{
   project: ProjectConfig | null
-  defaultExclude: string[]
 }>()
 
 const emit = defineEmits<{
   update: [id: string, data: Partial<ProjectConfig>]
   pack: [project: ProjectConfig, asZip: boolean]
   log: [level: LogLevel, message: string]
-  updateDefaultExclude: [rules: string[]]
 }>()
 
 const localProject = ref<ProjectConfig | null>(null)
-const localDefaultExclude = ref<string[]>([])
 const projectType = ref<ProjectType>('unknown')
 let saveTimer: any = null
-
-watch(() => props.defaultExclude, (newVal) => {
-  localDefaultExclude.value = [...newVal]
-}, { immediate: true })
 
 watch(() => props.project, (newVal) => {
   // 切换/删除项目时，先清除待保存的计时器，避免旧数据写入
@@ -55,7 +41,7 @@ watch(() => props.project, (newVal) => {
     saveTimer = null
   }
   if (newVal) {
-    localProject.value = { ...newVal, exclude: [...newVal.exclude] }
+    localProject.value = { ...newVal }
   } else {
     // 项目被删除时，清空所有本地状态
     localProject.value = null
@@ -77,6 +63,9 @@ let detectTimer: any = null
 let pendingDetect = 0
 const detecting = ref(false)
 const vcsInfo = ref<VcsInfo | null>(null)
+// 源目录是否已不存在（只影响提示与「识别」按钮，不改任何数据）
+const sourceMissing = ref(false)
+let sourceCheckSeq = 0
 
 watch(
   () => localProject.value?.source_dir,
@@ -85,14 +74,29 @@ watch(
     // 先重置为未知，避免旧类型残留导致误操作
     projectType.value = 'unknown'
     vcsInfo.value = null
+    sourceMissing.value = false
     if (!dir) return
     detectTimer = setTimeout(() => {
       detectProjectType(dir)
       detectVcs(dir)
+      checkSourceDir(dir)
     }, 250)
   },
   { immediate: true }
 )
+
+// 目录失效时给出提示：记录还在，重新选目录即可恢复，笔记/附件/排除规则都不受影响
+async function checkSourceDir(dir: string) {
+  const seq = ++sourceCheckSeq
+  try {
+    const status = await checkDir(dir)
+    if (seq === sourceCheckSeq && localProject.value?.source_dir === dir) {
+      sourceMissing.value = !status.is_dir
+    }
+  } catch {
+    if (seq === sourceCheckSeq) sourceMissing.value = false
+  }
+}
 
 async function detectProjectType(dir: string) {
   if (!dir) {
@@ -155,13 +159,16 @@ function refreshProjectType() {
   vcsInfo.value = null
   detectProjectType(dir)
   detectVcs(dir)
+  checkSourceDir(dir)
 }
 
-// 是否可手动识别（源目录有值时可用）
-const canDetect = computed(() => !!localProject.value?.source_dir)
+// 是否可手动识别（源目录存在时可用；目录失效只影响识别，不影响记录）
+const canDetect = computed(
+  () => !!localProject.value?.source_dir && !sourceMissing.value,
+)
 
 // 是否为 Layui 项目（只有 Layui 项目支持打包）
-const canPack = computed(() => projectType.value === 'layui')
+const canPack = computed(() => projectType.value === 'layui' && !sourceMissing.value)
 
 const typeLabel = computed(() => {
   switch (projectType.value) {
@@ -197,7 +204,6 @@ function debouncedSave() {
         name: localProject.value.name,
         source_dir: localProject.value.source_dir,
         output_dir: localProject.value.output_dir,
-        exclude: localProject.value.exclude,
       })
     }
   }, 500)
@@ -212,7 +218,6 @@ function onOutputChange(e: Event) {
   autoResize(e.target as HTMLTextAreaElement)
   debouncedSave()
 }
-function onExcludeChange() { debouncedSave() }
 
 async function selectSourceDir() {
   const current = localProject.value?.source_dir || ''
@@ -244,90 +249,6 @@ function packZip() {
   if (selectedProject.value) emit('pack', selectedProject.value!, true)
 }
 
-// ===== 打开相关 =====
-async function runOpenCmd(cmd: string, path: string) {
-  try {
-    // open_dir 会返回实际打开的路径（目录不存在时已降级为上级目录）
-    let actual: string | null = null
-    switch (cmd) {
-      case 'open_dir':
-        actual = await openDir(path)
-        break
-      case 'open_in_terminal':
-        await openInTerminal(path)
-        break
-      case 'open_in_vscode':
-        await openInVscode(path)
-        break
-      case 'open_in_idea':
-        await openInIdea(path)
-        break
-      case 'open_in_trae':
-        await openInTrae(path)
-        break
-      default:
-        throw new Error(`未知的打开方式: ${cmd}`)
-    }
-    if (actual && actual !== path) {
-      emit('log', 'warn', `目录不存在，已打开上级目录: ${actual}`)
-    } else {
-      emit('log', 'info', `已打开: ${path}`)
-    }
-  } catch (err: any) {
-    emit('log', 'error', `打开失败: ${err}`)
-  }
-}
-
-function openSourceDir() {
-  if (localProject.value) runOpenCmd('open_dir', localProject.value.source_dir)
-}
-function openSourceInTerminal() {
-  if (localProject.value) runOpenCmd('open_in_terminal', localProject.value.source_dir)
-}
-function openSourceInVscode() {
-  if (localProject.value) runOpenCmd('open_in_vscode', localProject.value.source_dir)
-}
-function openSourceInIdea() {
-  if (localProject.value) runOpenCmd('open_in_idea', localProject.value.source_dir)
-}
-function openSourceInTrae() {
-  if (localProject.value) runOpenCmd('open_in_trae', localProject.value.source_dir)
-}
-function openOutputDir() {
-  if (localProject.value) runOpenCmd('open_dir', localProject.value.output_dir)
-}
-function openOutputInTerminal() {
-  if (localProject.value) runOpenCmd('open_in_terminal', localProject.value.output_dir)
-}
-function openOutputInVscode() {
-  if (localProject.value) runOpenCmd('open_in_vscode', localProject.value.output_dir)
-}
-function openOutputInIdea() {
-  if (localProject.value) runOpenCmd('open_in_idea', localProject.value.output_dir)
-}
-function openOutputInTrae() {
-  if (localProject.value) runOpenCmd('open_in_trae', localProject.value.output_dir)
-}
-
-// ===== 默认排除规则管理 =====
-function removeDefaultRule(index: number) {
-  localDefaultExclude.value.splice(index, 1)
-  emit('updateDefaultExclude', [...localDefaultExclude.value])
-}
-
-// 清空默认排除规则
-function clearDefaultRules() {
-  localDefaultExclude.value = []
-  emit('updateDefaultExclude', [])
-}
-
-// 恢复默认排除规则（以后端默认规则为准）
-async function resetDefaultRules() {
-  const defaults = await getDefaultExcludeRules()
-  localDefaultExclude.value = [...defaults]
-  emit('updateDefaultExclude', [...defaults])
-}
-
 // 暴露头部操作区所需的状态与方法，供父组件在 Tabs 右侧渲染
 const headerState = reactive({
   projectType,
@@ -335,6 +256,7 @@ const headerState = reactive({
   canDetect,
   canPack,
   typeLabel,
+  sourceMissing,
 })
 
 defineExpose({
@@ -375,14 +297,14 @@ defineExpose({
             @input="onSourceChange"
           ></textarea>
           <button class="btn btn-pick" @click="selectSourceDir">选择</button>
+          <OpenWithButton
+            :path="localProject!.source_dir"
+            @log="(level, message) => emit('log', level, message)"
+          />
         </div>
-        <div class="action-btns">
-          <button class="btn btn-action" @click="openSourceDir" title="Finder 中打开">打开</button>
-          <button class="btn btn-action" @click="openSourceInTerminal" title="在终端中打开（目录不存在时打开上级目录）">终端</button>
-          <button class="btn btn-action" @click="openSourceInVscode" title="用 VSCode 打开">VSCode</button>
-          <button class="btn btn-action" @click="openSourceInIdea" title="用 IDEA 打开">IDEA</button>
-          <button class="btn btn-action" @click="openSourceInTrae" title="用 Trae 打开">Trae</button>
-        </div>
+        <p v-if="sourceMissing" class="dir-missing-hint">
+          ⚠ 源目录已不存在，打包与类型识别暂不可用。重新选择一个目录即可恢复，项目笔记、附件和排除规则都不会丢。
+        </p>
       </div>
 
       <div class="form-row">
@@ -397,40 +319,10 @@ defineExpose({
             @input="onOutputChange"
           ></textarea>
           <button class="btn btn-pick" @click="selectOutputDir">选择</button>
-        </div>
-        <div class="action-btns">
-          <button class="btn btn-action" @click="openOutputDir" title="Finder 中打开">打开</button>
-          <button class="btn btn-action" @click="openOutputInTerminal" title="在终端中打开（目录不存在时打开上级目录）">终端</button>
-          <button class="btn btn-action" @click="openOutputInVscode" title="用 VSCode 打开">VSCode</button>
-          <button class="btn btn-action" @click="openOutputInIdea" title="用 IDEA 打开">IDEA</button>
-          <button class="btn btn-action" @click="openOutputInTrae" title="用 Trae 打开">Trae</button>
-        </div>
-      </div>
-
-      <div class="form-row">
-        <label>项目排除规则</label>
-        <ExcludeRules
-          v-model="localProject!.exclude"
-          placeholder="添加项目级排除规则（回车确认）"
-          @update:modelValue="onExcludeChange"
-        />
-      </div>
-
-      <div class="form-row">
-        <div class="exclude-header">
-          <label>默认排除规则（含空格文件名自动排除）</label>
-          <button class="btn-reset-default" @click="resetDefaultRules">恢复默认</button>
-        </div>
-        <div class="default-exclude">
-          <span
-            v-for="(rule, index) in localDefaultExclude"
-            :key="rule"
-            class="tag-deletable"
-          >
-            {{ rule }}
-            <button class="tag-remove" @click="removeDefaultRule(index)">×</button>
-          </span>
-          <span class="tag-readonly tag-special">*含空格的文件/目录</span>
+          <OpenWithButton
+            :path="localProject!.output_dir"
+            @log="(level, message) => emit('log', level, message)"
+          />
         </div>
       </div>
 
@@ -514,26 +406,12 @@ defineExpose({
 .dir-row .form-textarea:focus {
   border-color: var(--primary);
 }
-.action-btns {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 6px;
-}
-.btn-action {
-  padding: 4px 10px;
-  border: 1px solid var(--border-color);
-  border-radius: 4px;
-  background: var(--bg-input);
-  cursor: pointer;
+/* 源目录失效提示：记录还在，重新选目录即可恢复 */
+.dir-missing-hint {
+  margin: 8px 0 0;
   font-size: 12px;
-  color: var(--text-secondary);
-  transition: all 0.15s;
-}
-.btn-action:hover {
-  border-color: var(--primary);
-  color: var(--primary);
-  background: #eff6ff;
+  line-height: 1.5;
+  color: var(--danger);
 }
 .vcs-info {
   display: flex;
@@ -572,78 +450,6 @@ defineExpose({
 }
 .vcs-empty {
   color: var(--text-muted);
-}
-.exclude-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 6px;
-}
-.exclude-header label {
-  margin-bottom: 0;
-}
-.btn-reset-default {
-  padding: 4px 10px;
-  font-size: 12px;
-  border: 1px solid var(--primary);
-  border-radius: 4px;
-  background: transparent;
-  color: var(--primary);
-  cursor: pointer;
-  transition: all 0.15s;
-}
-.btn-reset-default:hover {
-  background: var(--primary);
-  color: white;
-}
-.default-exclude {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  padding: 8px;
-  border: 1px solid var(--border-color);
-  border-radius: 6px;
-  background: var(--bg-readonly);
-}
-.tag-readonly {
-  padding: 2px 6px;
-  background: var(--bg-tag);
-  border-radius: 3px;
-  font-size: 12px;
-  color: var(--text-muted);
-}
-.tag-deletable {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 2px 4px 2px 6px;
-  background: var(--bg-tag);
-  border-radius: 3px;
-  font-size: 12px;
-  color: var(--text-muted);
-}
-.tag-remove {
-  border: none;
-  background: none;
-  cursor: pointer;
-  font-size: 14px;
-  color: var(--text-muted);
-  padding: 0;
-  line-height: 1;
-  border-radius: 2px;
-  width: 16px;
-  height: 16px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-.tag-remove:hover {
-  background: var(--danger);
-  color: white;
-}
-.tag-special {
-  background: #fef3c7;
-  color: #92400e;
 }
 .no-project {
   display: flex;
