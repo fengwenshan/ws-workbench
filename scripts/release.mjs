@@ -54,7 +54,7 @@ const OUT_DIR = join(ROOT, 'release')
 /** 更新产物在仓库里的目录（会被提交，客户端通过 raw 地址读取） */
 const UPDATES_DIR = 'updates'
 
-const REPO = process.env.GITEE_REPO || 'feng_wenshan/demo-tools'
+const REPO = process.env.GITEE_REPO || 'feng_wenshan/ws-workbench'
 const BRANCH = process.env.GITEE_BRANCH || 'main'
 const SKIP_PUBLISH = process.argv.includes('--no-publish')
 
@@ -70,14 +70,14 @@ const API_BASE = 'https://gitee.com/api/v5'
  * GitHub 仓库：安装包会同步镜像一份到它的发行版，方便下载。
  * CI 里用 Actions 自动注入的 GITHUB_TOKEN；本机手动发布会跳过这一步。
  */
-const GITHUB_REPO = process.env.GITHUB_REPO || 'fengwenshan/demo-tools'
+const GITHUB_REPO = process.env.GITHUB_REPO || 'fengwenshan/ws-workbench'
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN || ''
 const GITHUB_API = 'https://api.github.com'
 /** GitHub 的资产上传走独立域名 */
 const GITHUB_UPLOAD = 'https://uploads.github.com'
 
 const KEY_PATH =
-  process.env.TAURI_SIGNING_PRIVATE_KEY_PATH || join(process.env.HOME || '', '.tauri/demo-tools.key')
+  process.env.TAURI_SIGNING_PRIVATE_KEY_PATH || join(process.env.HOME || '', '.tauri/ws-workbench.key')
 
 /** 更新清单的固定文件名 */
 const ASSET_MANIFEST = 'latest.json'
@@ -123,7 +123,7 @@ function resolvePlatform(product) {
         f.startsWith(product) && (f.endsWith('-setup.exe') || f.endsWith('.msi')),
       matchSig: (f) =>
         f.startsWith(product) && (f.endsWith('-setup.exe.sig') || f.endsWith('.msi.sig')),
-      assetFile: 'demo-tools-setup.exe',
+      assetFile: 'ws-workbench-setup.exe',
       label: 'Windows',
     }
   }
@@ -134,7 +134,7 @@ function resolvePlatform(product) {
       bundleSubdir: 'macos',
       matchBundle: (f) => f.startsWith(product) && f.endsWith('.app.tar.gz'),
       matchSig: (f) => f.startsWith(product) && f.endsWith('.app.tar.gz.sig'),
-      assetFile: 'demo-tools.app.tar.gz',
+      assetFile: 'ws-workbench.app.tar.gz',
       // macOS 额外提供 dmg 作为人工安装包（更新载荷用的是 .app.tar.gz）
       installerSubdir: 'dmg',
       matchInstaller: (f) => f.startsWith(product) && f.endsWith('.dmg'),
@@ -230,7 +230,7 @@ function build() {
     if (!existsSync(KEY_PATH)) {
       fail(
         `找不到签名私钥: ${KEY_PATH}\n` +
-          '先执行: npx tauri signer generate -w ~/.tauri/demo-tools.key'
+          '先执行: npx tauri signer generate -w ~/.tauri/ws-workbench.key'
       )
     }
     privateKey = readFileSync(KEY_PATH, 'utf8')
@@ -596,7 +596,7 @@ function stageManifest(version, platform, entry) {
   const base = readManifestAt(`origin/${BRANCH}`) || { platforms: {} }
   const manifest = {
     version,
-    notes: `demo-tools v${version}`,
+    notes: `ws-workbench v${version}`,
     pub_date: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
     platforms: { ...(base.platforms || {}), [platform.key]: entry },
   }
@@ -752,7 +752,7 @@ async function main() {
   const platforms = { ...(published?.platforms || {}), [platform.key]: entry }
   const manifest = {
     version,
-    notes: `demo-tools v${version}`,
+    notes: `ws-workbench v${version}`,
     pub_date: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
     platforms,
   }
