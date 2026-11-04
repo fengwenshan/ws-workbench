@@ -42,6 +42,21 @@ pub fn default_exclude_rules() -> Vec<String> {
     rules
 }
 
+/// 附件元信息。`id` 即磁盘上密文文件的主名（`<id>.wst`）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttachmentMeta {
+    pub id: String,
+    pub name: String,
+    pub size: u64,
+    #[serde(default)]
+    pub ext: String,
+    #[serde(default)]
+    pub created_at: i64,
+    /// 该附件实际落盘目录（快照上传时的解析结果，便于删除/导出）
+    #[serde(default)]
+    pub dir: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectGroup {
     pub id: String,
@@ -51,11 +66,51 @@ pub struct ProjectGroup {
     /// 是否为默认分组（默认分组不允许删除，但内部项目可删除）
     #[serde(default)]
     pub is_default: bool,
-    /// 侧栏中该分组是否折叠（纯展示状态，由前端读写）
-    #[serde(default)]
-    pub collapsed: bool,
     #[serde(default)]
     pub created_at: String,
+    /// 加密笔记（Markdown）
+    #[serde(default)]
+    pub note: String,
+    /// 该分组的附件上传目录（未设置则回退到全局默认）
+    #[serde(default)]
+    pub upload_dir: Option<String>,
+    /// 附件列表
+    #[serde(default)]
+    pub attachments: Vec<AttachmentMeta>,
+}
+
+/// 只随 config.json 保存的应用设置；业务数据改由 SQLite 承载
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppSettings {
+    #[serde(default)]
+    pub default_exclude: Vec<String>,
+    #[serde(default)]
+    pub default_exclude_version: u32,
+    /// 上次选中的 VPN 配置
+    #[serde(default)]
+    pub vpn_active_profile_id: String,
+    /// 用户在设置页手动指定的应用可执行文件路径（Windows 专有设置）
+    #[serde(default)]
+    pub app_paths: Vec<crate::apps::models::AppPathOverride>,
+    /// 注册免 UAC 计划任务时用的会话目录
+    #[serde(default)]
+    pub vpn_worker_session_dir: String,
+    /// 全局默认附件上传目录（分组/项目未单独设置时使用）
+    #[serde(default)]
+    pub default_upload_dir: Option<String>,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        AppSettings {
+            default_exclude: default_exclude_rules(),
+            default_exclude_version: DEFAULT_EXCLUDE_VERSION,
+            vpn_active_profile_id: String::new(),
+            app_paths: vec![],
+            vpn_worker_session_dir: String::new(),
+            default_upload_dir: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,6 +123,28 @@ pub struct AppConfig {
     pub default_exclude: Vec<String>,
     #[serde(default)]
     pub default_exclude_version: u32,
+    /// VPN 配置列表
+    #[serde(default)]
+    pub vpn_profiles: Vec<crate::vpn::models::VpnProfile>,
+    /// VPN 规则集列表
+    #[serde(default)]
+    pub vpn_rule_sets: Vec<crate::vpn::models::VpnRuleSet>,
+    /// 上次选中的 VPN 配置
+    #[serde(default)]
+    pub vpn_active_profile_id: String,
+    /// 用户在设置页手动指定的应用可执行文件路径（Windows 专有设置）
+    #[serde(default)]
+    pub app_paths: Vec<crate::apps::models::AppPathOverride>,
+    /// 注册免 UAC 计划任务时用的会话目录。
+    ///
+    /// 计划的 `/TR` 把会话目录路径写死了，会话目录一旦回退（用户目录被
+    /// 受控文件夹访问/企业策略挡住），旧任务就作废了。这里记一份，
+    /// 连接时和当前目录比一下即可，不必每次都去查任务定义。
+    #[serde(default)]
+    pub vpn_worker_session_dir: String,
+    /// 全局默认附件上传目录（分组/项目未单独设置时使用）
+    #[serde(default)]
+    pub default_upload_dir: Option<String>,
 }
 
 impl Default for AppConfig {
@@ -77,6 +154,12 @@ impl Default for AppConfig {
             projects: vec![],
             default_exclude: default_exclude_rules(),
             default_exclude_version: DEFAULT_EXCLUDE_VERSION,
+            vpn_profiles: vec![],
+            vpn_rule_sets: vec![],
+            vpn_active_profile_id: String::new(),
+            app_paths: vec![],
+            vpn_worker_session_dir: String::new(),
+            default_upload_dir: None,
         }
     }
 }
@@ -93,6 +176,15 @@ pub struct ProjectConfig {
     pub created_at: String,
     #[serde(default)]
     pub updated_at: String,
+    /// 加密笔记（Markdown）
+    #[serde(default)]
+    pub note: String,
+    /// 该项目的附件上传目录（未设置则回退到分组/全局默认）
+    #[serde(default)]
+    pub upload_dir: Option<String>,
+    /// 附件列表
+    #[serde(default)]
+    pub attachments: Vec<AttachmentMeta>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

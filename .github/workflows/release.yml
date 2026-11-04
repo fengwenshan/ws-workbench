@@ -9,14 +9,14 @@ name: Release
 #
 # 1) 仓库密钥（Settings → Secrets and variables → Actions → New repository secret）
 #      TAURI_SIGNING_PRIVATE_KEY  更新签名私钥的**内容**
-#                                 （即本机 ~/.tauri/risen-tools.key 的全文）
+#                                 （即本机 ~/.tauri/ws-workbench.key 的全文）
 #      GITEE_TOKEN                Gitee 私人令牌，权限范围需含 projects
 #    两个 job 开头的「预检」步骤都会检查这两项，缺了会直接秒退并给出明确提示。
 #
 # 2) 让代码能同时到达 GitHub（Action 的触发源）与 Gitee（发布目标）
 #    在本机执行一次，之后一条 git push 即同时推到两个仓库：
-#      git remote set-url --add --push origin git@gitee.com:feng_wenshan/risen-tools.git
-#      git remote set-url --add --push origin git@github.com:fengwenshan/risen-tools.git
+#      git remote set-url --add --push origin git@gitee.com:feng_wenshan/ws-workbench.git
+#      git remote set-url --add --push origin git@github.com:fengwenshan/ws-workbench.git
 #
 # 3) 版本号规则
 #    取 tauri.conf.json 里的 major.minor，patch 位用 GitHub 运行序号：
@@ -130,8 +130,8 @@ jobs:
         env:
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
         run: |
-          git remote set-url --add --push origin "https://github.com/fengwenshan/risen-tools.git"
-          git remote set-url --add --push origin "https://feng_wenshan:${GITEE_TOKEN}@gitee.com/feng_wenshan/risen-tools.git"
+          git remote set-url --add --push origin "https://github.com/fengwenshan/ws-workbench.git"
+          git remote set-url --add --push origin "https://feng_wenshan:${GITEE_TOKEN}@gitee.com/feng_wenshan/ws-workbench.git"
           git config user.name "冯文山"
           git config user.email "fengwenshan@example.com"
 
@@ -230,8 +230,8 @@ jobs:
         env:
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
         run: |
-          git remote set-url --add --push origin "https://github.com/fengwenshan/risen-tools.git"
-          git remote set-url --add --push origin "https://feng_wenshan:${GITEE_TOKEN}@gitee.com/feng_wenshan/risen-tools.git"
+          git remote set-url --add --push origin "https://github.com/fengwenshan/ws-workbench.git"
+          git remote set-url --add --push origin "https://feng_wenshan:${GITEE_TOKEN}@gitee.com/feng_wenshan/ws-workbench.git"
           git config user.name "冯文山"
           git config user.email "fengwenshan@example.com"
 

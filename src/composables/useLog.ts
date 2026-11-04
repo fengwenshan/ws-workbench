@@ -1,5 +1,6 @@
 import { ref } from 'vue'
 import type { LogEntry, LogLevel } from '@/types'
+import { timeLabel } from '@/utils/time'
 
 export function useLog() {
   const logs = ref<LogEntry[]>([])
@@ -8,7 +9,7 @@ export function useLog() {
   function addLog(level: LogLevel, message: string) {
     logs.value.push({
       id: logId++,
-      timestamp: new Date().toLocaleTimeString('zh-CN'),
+      timestamp: timeLabel(),
       level,
       message,
     })

@@ -1,13 +1,27 @@
 mod models;
 mod config;
+mod db;
+mod crypto;
+mod filecrypto;
+mod util;
 mod commands;
 mod packer;
+pub mod apps;
+mod platform;
+mod process;
+mod winps;
+pub mod vpn;
 
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager, Runtime, WindowEvent,
+    AppHandle, Emitter, Manager, Runtime, WindowEvent,
 };
+
+/// 托盘菜单里点击 VPN 相关项时推给前端的事件名
+pub const EVENT_VPN_TRAY: &str = "vpn-tray";
+/// 托盘菜单里点击页面入口（代理 / 设置 / 日志）时推给前端的事件名
+pub const EVENT_NAV_TRAY: &str = "nav-tray";
 
 // 把主窗口重新显示出来（从托盘左键、托盘菜单、Dock 图标进入）
 fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
@@ -42,6 +56,23 @@ fn setup_app_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         ],
     )?;
 
+    // 编辑菜单：macOS 的 ⌘X/⌘C/⌘V/⌘A 依赖这些标准菜单项派发到第一响应者，
+    // 自定义菜单时必须补回，否则输入框里无法剪切/复制/粘贴/全选。
+    let edit_menu = Submenu::with_items(
+        app,
+        "编辑",
+        true,
+        &[
+            &PredefinedMenuItem::undo(app, Some("撤销"))?,
+            &PredefinedMenuItem::redo(app, Some("重做"))?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::cut(app, Some("剪切"))?,
+            &PredefinedMenuItem::copy(app, Some("拷贝"))?,
+            &PredefinedMenuItem::paste(app, Some("粘贴"))?,
+            &PredefinedMenuItem::select_all(app, Some("全选"))?,
+        ],
+    )?;
+
     let window_menu = Submenu::with_items(
         app,
         "窗口",
@@ -56,7 +87,7 @@ fn setup_app_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     // 让系统把「窗口」当成标准窗口菜单（由系统补上窗口列表与平铺项）
     window_menu.set_as_windows_menu_for_nsapp()?;
 
-    app.set_menu(Menu::with_items(app, &[&app_menu, &window_menu])?)?;
+    app.set_menu(Menu::with_items(app, &[&app_menu, &edit_menu, &window_menu])?)?;
     Ok(())
 }
 
@@ -73,10 +104,21 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .register_asynchronous_uri_scheme_protocol("wst-img", |ctx, request, responder| {
+            let app = ctx.app_handle().clone();
+            let uri = request.uri().clone();
+            std::thread::spawn(move || {
+                let response = commands::serve_note_image(&app, &uri);
+                responder.respond(response);
+            });
+        })
         .invoke_handler(tauri::generate_handler![
             commands::get_config,
             commands::save_config,
             commands::get_config_path,
+            commands::storage_info,
+            commands::vault_encrypt,
+            commands::vault_decrypt,
             commands::get_default_exclude_rules,
             commands::pack_project,
             commands::pack_to_zip,
@@ -89,25 +131,123 @@ pub fn run() {
             commands::open_in_idea,
             commands::open_in_trae,
             commands::open_in_terminal,
+            commands::get_platform_info,
+            commands::list_app_locations,
+            commands::set_app_path,
+            commands::clear_app_path,
+            commands::import_app,
+            commands::remove_managed_app,
+            commands::refresh_app_search,
+            commands::open_with_app_id,
+            commands::resolve_upload_dir,
+            commands::ensure_dir,
+            commands::encrypt_upload_file,
+            commands::decrypt_export_file,
+            commands::decrypt_to_temp,
+            commands::remove_attachment_file,
+            commands::encrypt_upload_bytes,
+            vpn::commands::vpn_detect_connectors,
+            vpn::commands::vpn_connector_version,
+            vpn::commands::vpn_import_openconnect,
+            vpn::commands::vpn_remove_managed_openconnect,
+            vpn::commands::vpn_managed_openconnect_path,
+            vpn::commands::vpn_install_guide,
+            vpn::commands::vpn_validate_cidr,
+            vpn::commands::vpn_check_rule_overlaps,
+            vpn::commands::vpn_validate_rule,
+            vpn::commands::vpn_preview_rules,
+            vpn::commands::vpn_elevation_info,
+            vpn::commands::vpn_setup_elevation,
+            vpn::commands::vpn_remove_elevation,
+            vpn::commands::vpn_connect,
+            vpn::commands::vpn_disconnect,
+            vpn::commands::vpn_get_snapshot,
+            vpn::commands::vpn_read_logs,
+            vpn::commands::vpn_clear_logs,
+            vpn::commands::vpn_read_learn_report,
+            vpn::commands::vpn_clear_learn_report,
+            vpn::commands::vpn_open_session_dir,
+            vpn::commands::vpn_session_dir_info,
         ])
         .setup(|app| {
             // macOS 顶部菜单栏汉化
             setup_app_menu(app.handle())?;
 
+            // VPN 运行期状态：会话目录必须主进程和提权 worker 都能读写。
+            //
+            // 这里不能自己拼 app_data_dir 了事 —— 那个目录在受控文件夹访问、
+            // 企业策略或受限令牌下会拒绝写入，而 app_data_dir() 本身不会报错，
+            // 于是失败会一路推迟到用户点「连接」时才以「拒绝访问」爆出来。
+            // 统一走 session_dir()，它带真实写入探测和逐级回退。
+            let session = match vpn::commands::session_dir(app.handle()) {
+                Ok(dir) => vpn::session::VpnSession::new(dir),
+                Err(err) => {
+                    // 连临时目录都写不了：不阻断启动，但把原因打出来，
+                    // 免得后面只看到一句没有上下文的「拒绝访问」
+                    eprintln!("VPN 会话目录不可用: {}", err);
+                    vpn::session::VpnSession::new(std::env::temp_dir().join("ws-workbench-vpn"))
+                }
+            };
+            if let Err(err) = session.ensure() {
+                eprintln!("VPN 会话目录初始化失败: {}", err);
+            }
+            app.manage(vpn::commands::VpnState::new(session));
+
+            // 轮询会话目录里的状态文件，把 VPN 状态与日志推给前端
+            vpn::commands::start_status_poller(app.handle().clone());
+
             // 托盘：关掉窗口后应用仍在后台运行，从托盘菜单重新打开或退出
             let show = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
+            // 页面入口：点一下把窗口唤到前台并切到对应页面
+            let nav_proxy = MenuItem::with_id(app, "nav-proxy", "代理", true, None::<&str>)?;
+            let nav_settings =
+                MenuItem::with_id(app, "nav-settings", "设置", true, None::<&str>)?;
+            let nav_logs = MenuItem::with_id(app, "nav-logs", "日志", true, None::<&str>)?;
+            let vpn_connect =
+                MenuItem::with_id(app, "vpn-connect", "连接 VPN", true, None::<&str>)?;
+            let vpn_disconnect =
+                MenuItem::with_id(app, "vpn-disconnect", "断开 VPN", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
             let separator = PredefinedMenuItem::separator(app)?;
-            let menu = Menu::with_items(app, &[&show, &separator, &quit])?;
+            let separator2 = PredefinedMenuItem::separator(app)?;
+            let menu = Menu::with_items(
+                app,
+                &[
+                    &show,
+                    &separator,
+                    &nav_proxy,
+                    &nav_settings,
+                    &nav_logs,
+                    &separator2,
+                    &vpn_connect,
+                    &vpn_disconnect,
+                    &separator,
+                    &quit,
+                ],
+            )?;
 
             let mut tray = TrayIconBuilder::with_id("main")
-                .tooltip("risen-tools")
+                .tooltip("ws-workbench")
                 .menu(&menu)
                 // 左键单击直接打开客户端，不弹菜单；菜单只在右键时出现
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => show_main_window(app),
-                    "quit" => app.exit(0),
+                    // 页面入口：唤起窗口，让前端切到代理 / 设置 / 日志页
+                    "nav-proxy" | "nav-settings" | "nav-logs" => {
+                        show_main_window(app);
+                        let _ = app.emit(EVENT_NAV_TRAY, event.id.as_ref().to_string());
+                    }
+                    // VPN 的配置与规则都在前端，托盘只负责把动作转发过去
+                    "vpn-connect" | "vpn-disconnect" => {
+                        show_main_window(app);
+                        let _ = app.emit(EVENT_VPN_TRAY, event.id.as_ref().to_string());
+                    }
+                    "quit" => {
+                        // 退出前先请求 worker 收尾，避免留下无人回收的路由
+                        vpn::commands::shutdown(app);
+                        app.exit(0);
+                    }
                     _ => {}
                 })
                 .on_tray_icon_event(|tray, event| {

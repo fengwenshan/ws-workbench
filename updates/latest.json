@@ -1,15 +1,15 @@
 {
-  "version": "1.0.15",
-  "notes": "risen-tools v1.0.15",
-  "pub_date": "2026-09-20T13:38:51Z",
+  "version": "1.0.14",
+  "notes": "ws-tools v1.0.14",
+  "pub_date": "2026-09-17T15:38:15Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVE0rL3NzZVMwbk9EV3dFbEFqRWxhNklLclhQMnFsVHc4Y3JZS2duSkNkOFRnQndDQnQrZFA5czU1RnhmUVk3UnU1QWNKTXNmRlhQdUM5NFZidEJCd2N5ai9HcFd0bWcwPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg5OTEwNDM2CWZpbGU6cmlzZW4tdG9vbHNfMS4wLjE1X3g2NC1zZXR1cC5leGUKZmRXWjZSazk1UC9NWElzbW5CUDBlcS9zU1d1bW9zL0YzWWZ1M0hxbktSaFU0TVZ4MVN6ZkFGMUM2OUdFTjc3RWxrOEdUd0dzMzhMNm5LZDd5blJIQ3c9PQo=",
-      "url": "https://gitee.com/feng_wenshan/risen-tools/releases/download/v1.0.15/risen-tools-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVE0rL3NzZVMwblBtOUFvYm5Bd2FaSEpadDV5U213U2F0RHRITFBYUmR1U0FCamFaNXU2MEZQNHlxQmRDZHpOK2FVdnVPZFY1OEFXQlFkOHY4M1hWcDRBbTBSQkt5Q1EwPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg5NjU4ODI1CWZpbGU6cmlzZW4tdG9vbHNfMS4wLjE0X3g2NC1zZXR1cC5leGUKcXdSYVhuVGdqN3FTSDFHSm44Q0xibWRpZmpaK1RBMnI1TktuZkdQV2VGK3RzWXAweVNNOWIyeTE4OTVpMXF4cjA4SjU4eWNnSjA5S25xZ09uR2o5RGc9PQo=",
+      "url": "https://gitee.com/feng_wenshan/ws-tools/releases/download/v1.0.14/risen-tools-setup.exe"
     },
     "darwin-aarch64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVE0rL3NzZVMwbklaSlJMdjBnbHF4citzWjdmOVFPS2lxZ1F3Y2o5b0loc3FzR2N2cnBOZVQzK0tsVFNBMndLa1FKK3FsQ2NtSUVIeXlqM3BwRkYyTkgrSmdkQWMrNlFRPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg5OTEwMTY1CWZpbGU6cmlzZW4tdG9vbHMuYXBwLnRhci5negpkUFpQWGNPRkpHYkVLbXpOUmw3ZGxpSVk2em0zdlkySEx2R0FkbTBJbG1UWmFsL1BHWWFreGdFSHZGTVhnZzc1WUFEYllKY3p2UDU0QnpuRTVkMDZCdz09Cg==",
-      "url": "https://gitee.com/feng_wenshan/risen-tools/releases/download/v1.0.15/risen-tools.app.tar.gz"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVE0rL3NzZVMwbkN0QVpwOFNQV2R1THN0SUx3TUExeDEya2JTQzRzSW5GL29DRGVkWW5XK2JRcmtsWERacHJpTGI3M0w5QVk1ZHhZSkZTaU1aYURmSWgxd1paM1YrMFFZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg5NjU4NjQxCWZpbGU6cmlzZW4tdG9vbHMuYXBwLnRhci5negphc3EySGtaWVgvK2JDb3NDYTJmR3k5TFdzZFdKRklWN2JtbHc3andLTmdDQlVKQWFOK0hXN1VKU2wxdzJKeElsVnM4a2JJdFVjV25ZOFZyQ1RJeTVCUT09Cg==",
+      "url": "https://gitee.com/feng_wenshan/ws-tools/releases/download/v1.0.14/risen-tools.app.tar.gz"
     }
   }
 }

@@ -1,6 +1,7 @@
 import { ref, computed } from 'vue'
 import { check } from '@tauri-apps/plugin-updater'
 import { relaunch } from '@tauri-apps/plugin-process'
+import { safeGet, safeSet } from './safeStorage'
 
 export type UpdateStatus =
   | 'idle'
@@ -27,7 +28,7 @@ export const DAILY_CHECK_TIMES: ReadonlyArray<readonly [number, number]> = [
 ]
 
 /** 已忽略的版本，避免重启后重复打扰 */
-const DISMISS_KEY = 'risen-tools:dismissed-update-version'
+const DISMISS_KEY = 'ws-workbench:dismissed-update-version'
 
 /**
  * 距离下一个校验时间点还有多少毫秒。
@@ -56,9 +57,12 @@ export function useUpdater() {
   const downloadedBytes = ref(0)
   const totalBytes = ref(0)
   const percentage = ref(0)
-  const dismissedVersion = ref<string>(
-    typeof localStorage !== 'undefined' ? localStorage.getItem(DISMISS_KEY) || '' : ''
-  )
+  const dismissedVersion = ref<string>('')
+
+  async function loadDismissed() {
+    dismissedVersion.value = (await safeGet(DISMISS_KEY)) || ''
+  }
+  void loadDismissed()
 
   let pending: PendingUpdate | null = null
   let scheduleTimer: ReturnType<typeof setTimeout> | null = null
@@ -72,11 +76,7 @@ export function useUpdater() {
   function dismissCurrent() {
     if (!info.value) return
     dismissedVersion.value = info.value.version
-    try {
-      localStorage.setItem(DISMISS_KEY, info.value.version)
-    } catch {
-      // localStorage 不可用时忽略，仅内存生效
-    }
+    void safeSet(DISMISS_KEY, info.value.version)
   }
 
   async function checkUpdate(): Promise<UpdateInfo | null> {
