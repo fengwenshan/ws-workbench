@@ -115,6 +115,7 @@ pub fn run() {
             commands::get_config,
             commands::save_config,
             commands::get_config_path,
+            commands::storage_info,
             commands::vault_encrypt,
             commands::vault_decrypt,
             commands::get_default_exclude_rules,
