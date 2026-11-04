@@ -5,12 +5,6 @@ import { platform } from '@/platform'
 /** 工具页标识：日志已改为工作区底部面板，不属于工具页 */
 export type AppView = 'home' | 'proxy' | 'settings'
 
-const VIEW_TITLES: Record<AppView, string> = {
-  home: '项目',
-  proxy: '代理',
-  settings: '设置',
-}
-
 const TREE_WIDTH_KEY = 'ws-workbench:layout:tree-width'
 const TREE_COLLAPSED_KEY = 'ws-workbench:layout:tree-collapsed'
 const LOG_HEIGHT_KEY = 'ws-workbench:layout:log-height'
@@ -32,7 +26,6 @@ function clamp(value: number, min: number, max: number) {
  */
 export function useWorkbenchLayout() {
   const view = ref<AppView>('home')
-  const toolTitle = computed(() => VIEW_TITLES[view.value])
   const isMac = computed(() => platform.is_macos)
 
   const treeWidth = ref(TREE_WIDTH_DEFAULT)
@@ -232,7 +225,6 @@ export function useWorkbenchLayout() {
 
   return {
     view,
-    toolTitle,
     isMac,
     shortcutTitle,
     selectTool,
