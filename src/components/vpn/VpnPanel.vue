@@ -1,9 +1,8 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import type { VpnApi } from '@/composables/useVpn'
-import type { VpnProfile } from '@/types/vpn'
-import { MODE_LABELS, PHASE_LABELS } from '@/types/vpn'
-import LogPanel from '../LogPanel.vue'
+import type { VpnPolicy, VpnProfile, VpnRuleKind } from '@/types/vpn'
+import { PHASE_LABELS } from '@/types/vpn'
 import VpnInstallGuide from './VpnInstallGuide.vue'
 import VpnLearnCard from './VpnLearnCard.vue'
 import VpnProfileForm from './VpnProfileForm.vue'
@@ -20,7 +19,6 @@ const vpn = props.vpn
 
 const confirmDelete = ref<VpnProfile | null>(null)
 const importHint = ref('')
-const overlaps = ref<string[]>([])
 
 // ============================ 状态条 ============================
 
@@ -60,26 +58,11 @@ const connectorSummary = computed(() => {
   return vpn.activeConnectors.map((c: any) => `${c.name}${c.version ? ' ' + c.version : ''}`).join(' / ')
 })
 
-// ============================ 规则覆盖检查 ============================
-
-async function refreshOverlaps() {
-  const rules = vpn.selectedRuleSet?.rules ?? []
-  const enabled = rules.filter((rule: any) => rule.enabled).map((rule: any) => rule.cidr)
-  overlaps.value = enabled.length > 1 ? await vpn.checkOverlaps(enabled) : []
-}
-
-watch(
-  () => [vpn.selectedRuleSet?.id, (vpn.selectedRuleSet?.rules ?? []).map((r: any) => r.cidr + r.enabled).join(',')],
-  refreshOverlaps,
-  { immediate: true },
-)
-
 // ============================ 交互 ============================
 
 async function handleConnect() {
   // 已连接或正在收尾时，同一个按钮要执行断开，否则会出现「点断开反而重连」
   await vpn.toggleConnection()
-  await refreshOverlaps()
 }
 
 async function handleImport() {
@@ -147,7 +130,6 @@ watch(
             <span v-if="vpn.status.connector_name" class="status-chip">
               {{ vpn.status.connector_name }}
             </span>
-            <span class="status-chip status-chip-mode">{{ MODE_LABELS[vpn.status.mode] }}</span>
           </div>
           <span class="status-sub">{{ statusSubtitle || connectorSummary }}</span>
         </div>
@@ -187,7 +169,6 @@ watch(
             <span class="item-name">{{ profile.name }}</span>
             <span class="item-sub mono">{{ profile.server || '未填写服务器' }}</span>
           </div>
-          <span class="item-mode">{{ MODE_LABELS[profile.mode] }}</span>
         </div>
         <div v-if="vpn.profiles.length === 0" class="list-empty">
           还没有配置，点右上角新建一个
@@ -243,13 +224,21 @@ watch(
           </div>
 
           <VpnRuleTable
+            v-if="vpn.selectedRuleSet"
             :rule-set="vpn.selectedRuleSet"
-            :mode="vpn.selectedProfile.mode"
-            :overlaps="overlaps"
-            @add="(cidr: string, remark: string) => vpn.addRule(vpn.selectedProfile!.rule_set_id, cidr, remark)"
+            :validate-rule="vpn.validateRule"
+            @add="
+              (kind: VpnRuleKind, value: string, policy: VpnPolicy, remark: string) =>
+                vpn.addRule(vpn.selectedProfile!.rule_set_id, kind, value, policy, remark)
+            "
             @update="(ruleId: string, patch: any) => vpn.updateRule(vpn.selectedProfile!.rule_set_id, ruleId, patch)"
             @remove="(ruleId: string) => vpn.deleteRule(vpn.selectedProfile!.rule_set_id, ruleId)"
+            @update-default-policy="
+              (policy: VpnPolicy) =>
+                vpn.updateRuleSet(vpn.selectedProfile!.rule_set_id, { default_policy: policy })
+            "
           />
+          <div v-else class="rule-empty">这个配置还没有规则集</div>
 
           <VpnLearnCard :vpn="vpn" />
 
@@ -292,11 +281,6 @@ watch(
       会话目录已回退到「{{ vpn.sessionDir.origin }}」：<span class="mono">{{ vpn.sessionDir.path }}</span>。
       首选的用户数据目录不可写（受控文件夹访问或企业策略），日志与连接状态文件都写在这里。
     </p>
-
-    <!-- 日志 -->
-    <div class="log-section">
-      <LogPanel :logs="vpn.logs" @clear="vpn.clearLogs()" />
-    </div>
 
     <!-- 删除确认 -->
     <div v-if="confirmDelete" class="dialog-overlay" @click.self="confirmDelete = null">
@@ -391,10 +375,6 @@ watch(
   border-radius: 9px;
   padding: 1px 8px;
 }
-.status-chip-mode {
-  color: var(--primary);
-  background: rgba(59, 130, 246, 0.1);
-}
 .status-sub {
   font-size: 12px;
   color: var(--text-muted);
@@ -472,11 +452,6 @@ watch(
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.item-mode {
-  font-size: 11px;
-  color: var(--text-muted);
-  flex-shrink: 0;
-}
 .list-empty {
   padding: 18px 12px;
   font-size: 12px;
@@ -531,6 +506,15 @@ watch(
 .card-head h4 {
   font-size: 14px;
   color: var(--text-primary);
+}
+.rule-empty {
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 14px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-muted);
+  background: var(--bg-primary);
 }
 .card-sub {
   font-size: 12px;
@@ -610,14 +594,6 @@ watch(
 .session-dir-hint .mono {
   color: inherit;
   font-weight: 600;
-}
-
-/* 日志 */
-.log-section {
-  height: 180px;
-  border-top: 1px solid var(--border-color);
-  background: var(--bg-primary);
-  flex-shrink: 0;
 }
 
 /* 弹窗 */

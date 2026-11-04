@@ -50,7 +50,7 @@ Rust 侧多处内部读写配置（如 `commands.rs::app_context`/`set_app_path`
 ### 主密钥
 
 - 首次运行时生成 **32 字节随机主密钥**，交由系统密钥库托管：
-  - **macOS**：钥匙串，`service = ws-tools-vault`、`account = ws-tools`。复用 `credential.rs` 的 `security add-generic-password -U -a ws-tools -s <service> -w <hex>` / `find-generic-password ... -w` / `delete-generic-password` 调用方式。
+  - **macOS**：钥匙串，`service = ws-workbench-vault`、`account = ws-workbench`。复用 `credential.rs` 的 `security add-generic-password -U -a ws-workbench -s <service> -w <hex>` / `find-generic-password ... -w` / `delete-generic-password` 调用方式。
   - **Windows**：用 DPAPI（`CryptProtectData`）保护后写入 `<app_data_dir>/.vault_key`（内容形如 `dpapi:<hex>`），复用 `credential.rs` 的 DPAPI FFI。
 - 主密钥**永不**写入 `config.json`、**永不**进源码。
 - 密钥分离：`enc_key = SM3(master ‖ "enc")`，`mac_key = SM3(master ‖ "mac")`（两者均为 32 字节摘要）。SM4 只接受 128 位密钥，故加密时取 `enc_key` 前 16 字节（SM3 摘要左截断）；HMAC-SM3 使用完整 32 字节 `mac_key`。
@@ -136,7 +136,7 @@ Rust 侧多处内部读写配置（如 `commands.rs::app_context`/`set_app_path`
 - [ ] 打开 `<app_data_dir>/config.json`（及文件回退副本）为 `v1.` 信封密文，肉眼不可读。
 - [ ] 界面内所有功能（项目分组、VPN 配置与规则、应用路径）操作正常，展示为明文。
 - [ ] 老明文配置首次启动后被自动重写为密文。
-- [ ] macOS 钥匙串中存在 `ws-tools-vault` / `master` 条目；重启后仍能正确解密。
+- [ ] macOS 钥匙串中存在 `ws-workbench-vault` / `master` 条目；重启后仍能正确解密。
 - [ ] 手工篡改密文任一字节后应用不崩溃，日志报「数据已被篡改」并走兜底。
 - [ ] 更新提示关闭标记在 `localStorage` 中为密文。
 - [ ] 旧版 `keychain:`/`dpapi:` 密码的 VPN 配置升级后可正常连接，`config.json` 中不再出现这两个前缀。

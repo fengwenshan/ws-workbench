@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, nextTick } from 'vue'
-import type { ProjectGroup, ProjectConfig } from '@/types'
+import type { EntityKind, ProjectGroup, ProjectConfig } from '@/types'
 
 const props = defineProps<{
   groups: ProjectGroup[]
@@ -8,7 +8,7 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  select: [id: string]
+  select: [id: string, kind: EntityKind]
   addGroup: []
   deleteGroup: [id: string]
   renameGroup: [id: string, name: string]
@@ -350,7 +350,9 @@ function toggleCollapse(groupId: string) {
         >
           <div
             class="group-header"
+            :class="{ active: group.id === selectedId }"
             :draggable="editingGroupId !== group.id"
+            @click="emit('select', group.id, 'group')"
             @dragstart="onGroupDragStart($event, group.id)"
             @dragend="onDragEnd"
             @dragenter="acceptDrop"
@@ -420,7 +422,7 @@ function toggleCollapse(groupId: string) {
                   dragging: isDraggingProject(project.id)
                 }"
                 draggable="true"
-                @click="emit('select', project.id)"
+                @click="emit('select', project.id, 'project')"
                 @dragstart="onProjectDragStart($event, project.id, group.id)"
                 @dragenter="acceptDrop"
                 @dragover="onProjectDragOver($event, group.id, projIndex)"
@@ -505,6 +507,11 @@ function toggleCollapse(groupId: string) {
 }
 .group-header:active {
   cursor: grabbing;
+}
+.group-header.active {
+  background: var(--bg-active);
+  color: var(--text-active);
+  border-radius: 6px;
 }
 .group-drag-handle {
   font-size: 12px;

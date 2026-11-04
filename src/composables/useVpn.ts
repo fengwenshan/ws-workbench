@@ -10,9 +10,10 @@ import type {
   InstallGuide,
   LearnReport,
   SessionDirInfo,
-  VpnMode,
+  VpnPolicy,
   VpnProfile,
   VpnRule,
+  VpnRuleKind,
   VpnRuleSet,
   VpnSnapshotPayload,
   VpnStatus,
@@ -32,7 +33,6 @@ function emptyStatus(): VpnStatus {
     profile_name: '',
     connector: '',
     connector_name: '',
-    mode: 'customer_first',
     tun_dev: '',
     tun_index: 0,
     vpn_ip: '',
@@ -213,6 +213,7 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
       const result = await invoke<ConnectResult>('vpn_connect', {
         profile: target,
         rules,
+        defaultPolicy: selectedRuleSet.value?.default_policy ?? 'DIRECT',
         customOpenconnect: target.connector_path || null,
       })
       pushLog(
@@ -254,12 +255,17 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
       id: crypto.randomUUID(),
       name,
       rules,
+      default_policy: 'DIRECT',
       created_at: new Date().toISOString(),
     }
   }
 
-  function newRule(cidr: string, remark = ''): VpnRule {
-    return { id: crypto.randomUUID(), cidr, remark, enabled: true }
+  function newRule(
+    kind: VpnRuleKind = 'DOMAIN',
+    value = '',
+    policy: VpnPolicy = 'DIRECT',
+  ): VpnRule {
+    return { id: crypto.randomUUID(), kind, value, policy, no_resolve: true, remark: '', enabled: true }
   }
 
   async function addProfile(name = '新建 VPN 配置', server = '') {
@@ -277,9 +283,10 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
       password_encrypted: false,
       protocol: 'anyconnect',
       connector: 'auto',
-      mode: 'customer_first',
       rule_set_id: ruleSet.id,
-      use_vpn_dns: false,
+      fake_ip_range: '198.18.0.0/16',
+      fake_ip_filter: [],
+      use_vpn_dns: true,
       learn: false,
       extra_args: [],
       connector_path: '',
@@ -335,10 +342,18 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
     await saveConfig()
   }
 
-  async function addRule(ruleSetId: string, cidr: string, remark = '') {
+  async function addRule(
+    ruleSetId: string,
+    kind: VpnRuleKind,
+    value: string,
+    policy: VpnPolicy,
+    remark = '',
+  ) {
     const ruleSet = ruleSets.value.find((r) => r.id === ruleSetId)
     if (!ruleSet) return
-    ruleSet.rules.push(newRule(cidr, remark))
+    const rule = newRule(kind, value, policy)
+    rule.remark = remark
+    ruleSet.rules.push(rule)
     await saveConfig()
   }
 
@@ -365,27 +380,26 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
     await refreshConnectors()
   }
 
-  async function setMode(mode: VpnMode) {
-    const profile = selectedProfile.value
-    if (!profile) return
-    await updateProfile(profile.id, { mode })
+  /** 校验单条规则，返回规范化后的匹配值；失败时 reject，交由调用方展示 */
+  async function validateRule(kind: VpnRuleKind, value: string): Promise<string> {
+    return await invoke<string>('vpn_validate_rule', { kind, value })
   }
 
-  /** 校验 CIDR 并顺手给出规范化结果 */
-  async function validateCidr(cidr: string): Promise<string | null> {
-    try {
-      return await invoke<string>('vpn_validate_cidr', { cidr })
-    } catch {
-      return null
-    }
-  }
-
-  async function checkOverlaps(cidrs: string[]): Promise<string[]> {
-    try {
-      return await invoke<string[]>('vpn_check_rule_overlaps', { cidrs })
-    } catch {
-      return []
-    }
+  /** 用给定规则集与一条输入预览命中结果 */
+  async function previewRule(
+    rules: VpnRule[],
+    defaultPolicy: VpnPolicy,
+    probe: { domain?: string; ip?: string; port?: number; process?: string },
+  ): Promise<VpnPolicy> {
+    const verdict = await invoke<string>('vpn_preview_rules', {
+      rules,
+      defaultPolicy,
+      domain: probe.domain ?? null,
+      ip: probe.ip ?? null,
+      port: probe.port ?? null,
+      process: probe.process ?? null,
+    })
+    return verdict as VpnPolicy
   }
 
   // ============================ 学习模式 ============================
@@ -438,11 +452,13 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
       pushLog('warn', '这个配置还没有规则集，请先在分流规则里新建一个')
       return
     }
-    if (ruleSet.rules.some((rule) => rule.cidr === cidr)) {
+    if (ruleSet.rules.some((rule) => rule.kind === 'IP-CIDR' && rule.value === cidr)) {
       pushLog('info', `${cidr} 已经在规则表里了`)
       return
     }
-    ruleSet.rules.push(newRule(cidr, remark))
+    const rule = newRule('IP-CIDR', cidr, 'VPN')
+    rule.remark = remark
+    ruleSet.rules.push(rule)
     await saveConfig()
     pushLog('success', `已把 ${cidr} 加入规则表`)
   }
@@ -569,9 +585,8 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
     updateRule,
     deleteRule,
     selectProfile,
-    setMode,
-    validateCidr,
-    checkOverlaps,
+    validateRule,
+    previewRule,
     setLearn,
     loadLearnReport,
     clearLearnReport,

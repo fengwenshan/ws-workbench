@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import type { VpnStatus } from '@/types/vpn'
-import { MODE_LABELS } from '@/types/vpn'
 
 const props = defineProps<{
   status: VpnStatus
@@ -48,7 +47,6 @@ const hasRoutes = computed(() => props.status.routes.length > 0)
   <div class="preview">
     <div class="preview-head">
       <h4>当前生效的分流</h4>
-      <span class="mode-tag">{{ MODE_LABELS[status.mode] }}</span>
     </div>
 
     <div v-if="tunnelRows.length === 0" class="preview-empty">
@@ -105,14 +103,6 @@ const hasRoutes = computed(() => props.status.routes.length > 0)
 .preview-head h4 {
   font-size: 14px;
   color: var(--text-primary);
-}
-.mode-tag {
-  font-size: 12px;
-  color: var(--primary);
-  border: 1px solid rgba(59, 130, 246, 0.4);
-  background: rgba(59, 130, 246, 0.08);
-  border-radius: 10px;
-  padding: 1px 8px;
 }
 .preview-empty {
   font-size: 12px;

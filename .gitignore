@@ -43,3 +43,10 @@ src-tauri/resources/apps/*.zip
 .vscode/
 .trae/
 *.log
+
+# 本地 brainstorm/技能运行状态
+.superpowers/
+
+# unplugin 自动生成的类型声明
+src/auto-imports.d.ts
+src/components.d.ts

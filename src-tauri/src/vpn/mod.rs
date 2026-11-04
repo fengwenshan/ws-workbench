@@ -21,23 +21,35 @@
 //! - `connector`   真正拉起隧道（openconnect）
 //! - `session`     会话目录 IPC（提权进程拿不到父进程管道，只能靠文件）
 //! - `learn`       学习模式：采样实际连通的远端 IP，反推候选分流网段
+//! - `rule_engine` Clash 式有序列规则：解析、匹配与 RULE-SET 内存展开（纯逻辑）
+//! - `fakedns`     fake-ip 假地址池：分配 / 反查 / 过滤 / 回收（纯逻辑）
+//! - `netstack`    smoltcp 用户态栈：把 TUN 上的 IP 包适配成 smoltcp Device 并终结连接
+//! - `router`      出口选择与双向字节搬运：按规则钉网卡、建出站 TCP、回收流路由
 //! - `elevate`     提权启动（Windows 计划任务免 UAC / macOS 系统授权框）
 //! - `worker`      提权进程入口，连接生命周期主体
 //! - `guide`       openconnect 不可用时的安装引导
 
 /// 应用数据目录名，与 `tauri.conf.json` 里的 identifier 保持一致。
 /// 回退到临时目录时会用它建一个同级子目录，避免把会话文件散在临时目录根下。
-pub const APP_DIR_NAME: &str = "com.ws.tools";
+pub const APP_DIR_NAME: &str = "com.ws.workbench";
 
 pub mod commands;
 pub mod connector;
 pub mod credential;
 pub mod detect;
+pub mod dns_srv;
 pub mod elevate;
+pub mod fakedns;
 pub mod guide;
 pub mod learn;
 pub mod models;
+pub mod netstack;
+pub mod platform;
+pub mod proc_lookup;
 pub mod route;
+pub mod router;
+pub mod rule_engine;
 pub mod script;
 pub mod session;
+pub mod tun_device;
 pub mod worker;

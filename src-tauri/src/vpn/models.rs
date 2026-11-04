@@ -4,31 +4,6 @@ fn default_true() -> bool {
     true
 }
 
-/// 分流模式
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum VpnMode {
-    /// 以客户网络为主：只有命中规则集的网段走 VPN，其余（客户内网、互联网）全部走本地
-    CustomerFirst,
-    /// 以公司网络为主：全部流量走 VPN，规则集里的网段（客户网段）直连本地
-    CompanyFirst,
-}
-
-impl Default for VpnMode {
-    fn default() -> Self {
-        VpnMode::CustomerFirst
-    }
-}
-
-impl VpnMode {
-    pub fn label(&self) -> &'static str {
-        match self {
-            VpnMode::CustomerFirst => "以客户网络为主",
-            VpnMode::CompanyFirst => "以公司网络为主",
-        }
-    }
-}
-
 /// 连接器类型。现在只有 openconnect 一条通道，两个取值等价，
 /// 保留枚举是为了不改存储格式，将来扩通道时直接加取值即可。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -98,26 +73,36 @@ impl VpnPhase {
     }
 }
 
-/// 单条分流规则
+/// 单条分流规则。`kind`/`policy` 取值与 rule_engine::RuleKind/Policy 的 as_str() 一致。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VpnRule {
     pub id: String,
-    /// CIDR，例如 10.0.0.0/8
-    pub cidr: String,
+    /// Clash 规范形式：DOMAIN / DOMAIN-SUFFIX / DOMAIN-KEYWORD / PROCESS-NAME / DST-PORT / IP-CIDR / RULE-SET
+    pub kind: String,
+    pub value: String,
+    #[serde(default = "default_policy_str")]
+    pub policy: String,
+    #[serde(default = "default_true")]
+    pub no_resolve: bool,
     #[serde(default)]
     pub remark: String,
-    /// 是否启用；停用的规则不参与下发
     #[serde(default = "default_true")]
     pub enabled: bool,
 }
 
-/// 规则集：一组网段，可以绑定到不同的 VPN 配置
+fn default_policy_str() -> String {
+    "DIRECT".to_string()
+}
+
+/// 规则集：一组有序规则 + 兜底走向，可以绑定到不同的 VPN 配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VpnRuleSet {
     pub id: String,
     pub name: String,
     #[serde(default)]
     pub rules: Vec<VpnRule>,
+    #[serde(default = "default_policy_str")]
+    pub default_policy: String,
     #[serde(default)]
     pub created_at: String,
 }
@@ -142,12 +127,15 @@ pub struct VpnProfile {
     /// 指定连接器；现在只有 openconnect 一条通道，auto 与 openconnect 等价
     #[serde(default)]
     pub connector: ConnectorKind,
-    /// 分流模式
-    #[serde(default)]
-    pub mode: VpnMode,
     /// 绑定的规则集 id
     #[serde(default)]
     pub rule_set_id: String,
+    /// fake-ip 地址池，用于按域名分流时反查真实目标
+    #[serde(default = "default_fake_ip_range")]
+    pub fake_ip_range: String,
+    /// 不进入 fake-ip 池的地址段
+    #[serde(default)]
+    pub fake_ip_filter: Vec<String>,
     /// 是否把服务端下发的 DNS 写入 VPN 网卡
     #[serde(default = "default_true")]
     pub use_vpn_dns: bool,
@@ -168,6 +156,10 @@ pub struct VpnProfile {
 
 fn default_protocol() -> String {
     "anyconnect".to_string()
+}
+
+fn default_fake_ip_range() -> String {
+    "198.18.0.0/16".to_string()
 }
 
 /// 探测到的连接器
@@ -332,8 +324,6 @@ pub struct VpnStatus {
     pub connector: String,
     #[serde(default)]
     pub connector_name: String,
-    #[serde(default)]
-    pub mode: VpnMode,
     /// 隧道接口名
     #[serde(default)]
     pub tun_dev: String,
@@ -381,7 +371,6 @@ impl Default for VpnStatus {
             profile_name: String::new(),
             connector: String::new(),
             connector_name: String::new(),
-            mode: VpnMode::default(),
             tun_dev: String::new(),
             tun_index: 0,
             vpn_ip: String::new(),
@@ -412,13 +401,18 @@ pub struct VpnRequest {
     pub connector: ConnectorKind,
     /// 连接器可执行文件路径
     pub connector_path: String,
-    pub mode: VpnMode,
-    /// 本次要下发到隧道的网段（客户网络为主模式）
+    /// 本次要下发的有序规则（已过滤掉停用项）
     #[serde(default)]
-    pub include_rules: Vec<String>,
-    /// 本次要直连的网段（公司网络为主模式）
+    pub rules: Vec<VpnRule>,
+    /// 规则全不命中时的兜底走向
+    #[serde(default = "default_policy_str")]
+    pub default_policy: String,
+    /// fake-ip 地址池
+    #[serde(default = "default_fake_ip_range")]
+    pub fake_ip_range: String,
+    /// 不进入 fake-ip 池的地址段
     #[serde(default)]
-    pub exclude_rules: Vec<String>,
+    pub fake_ip_filter: Vec<String>,
     pub use_vpn_dns: bool,
     /// 连接期间是否开启学习模式：周期性采集实际连通的远端，反推候选分流网段
     #[serde(default)]
@@ -528,5 +522,29 @@ mod tests {
         let profile: VpnProfile = serde_json::from_str(raw).expect("老档案必须还能读出来");
         assert_eq!(profile.connector, ConnectorKind::Auto);
         assert_eq!(profile.server, "vpn.example.com:443");
+    }
+
+    #[test]
+    fn default_rule_is_domain_match_direct() {
+        let rule: VpnRule = serde_json::from_str(
+            r#"{"id":"r1","kind":"DOMAIN","value":"a.com","policy":"DIRECT","remark":"","enabled":true}"#,
+        ).unwrap();
+        assert_eq!(rule.kind, "DOMAIN");
+        assert_eq!(rule.policy, "DIRECT");
+        assert!(rule.no_resolve);
+    }
+
+    #[test]
+    fn old_profile_with_mode_still_loads() {
+        let raw = r#"{"id":"p1","name":"公司 VPN","server":"vpn.example.com:443","username":"alice","password":"cipher","password_encrypted":true,"protocol":"anyconnect","mode":"company_first","rule_set_id":"rs1","use_vpn_dns":false,"extra_args":[],"connector_path":"","created_at":"","updated_at":""}"#;
+        let profile: VpnProfile = serde_json::from_str(raw).expect("老档案必须还能读");
+        assert_eq!(profile.server, "vpn.example.com:443");
+        assert_eq!(profile.fake_ip_range, "198.18.0.0/16");
+    }
+
+    #[test]
+    fn rule_set_default_policy_defaults_to_direct() {
+        let set: VpnRuleSet = serde_json::from_str(r#"{"id":"rs1","name":"默认"}"#).unwrap();
+        assert_eq!(set.default_policy, "DIRECT");
     }
 }

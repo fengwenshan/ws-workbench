@@ -885,6 +885,9 @@ mod tests {
             exclude: Vec::new(),
             created_at: String::new(),
             updated_at: String::new(),
+            note: String::new(),
+            upload_dir: None,
+            attachments: Vec::new(),
         }
     }
 

@@ -1,6 +1,6 @@
 import { ref, onMounted } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
-import type { AppConfig, ProjectConfig, ProjectGroup } from '@/types'
+import type { AppConfig, AttachmentMeta, EntityKind, ProjectConfig, ProjectGroup } from '@/types'
 
 export function useConfig() {
   const config = ref<AppConfig>({
@@ -10,9 +10,17 @@ export function useConfig() {
     vpn_profiles: [],
     vpn_rule_sets: [],
     vpn_active_profile_id: '',
+    default_upload_dir: null,
   })
   const selectedProjectId = ref<string | null>(null)
   const loading = ref(false)
+
+  // 老版本配置缺字段时补齐，避免模板访问 undefined
+  function normalizeEntity(entity: ProjectConfig | ProjectGroup) {
+    if (typeof entity.note !== 'string') entity.note = ''
+    if (entity.upload_dir === undefined) entity.upload_dir = null
+    if (!Array.isArray(entity.attachments)) entity.attachments = []
+  }
 
   async function loadConfig() {
     loading.value = true
@@ -24,7 +32,11 @@ export function useConfig() {
         vpn_profiles: loaded.vpn_profiles ?? [],
         vpn_rule_sets: loaded.vpn_rule_sets ?? [],
         vpn_active_profile_id: loaded.vpn_active_profile_id ?? '',
+        default_upload_dir: loaded.default_upload_dir ?? null,
       }
+      // 补齐 note / upload_dir / attachments
+      config.value.groups.forEach(normalizeEntity)
+      config.value.groups.forEach(g => g.projects.forEach(normalizeEntity))
       // 自动选中第一个项目
       if (!selectedProjectId.value) {
         const first = config.value.groups
@@ -41,6 +53,11 @@ export function useConfig() {
     await invoke('save_config', { config: config.value })
   }
 
+  // 查找分组
+  function findGroup(groupId: string): ProjectGroup | undefined {
+    return config.value.groups.find(g => g.id === groupId)
+  }
+
   // 查找项目所在分组
   function findGroupByProject(projectId: string): ProjectGroup | undefined {
     return config.value.groups.find(g => g.projects.some(p => p.id === projectId))
@@ -55,14 +72,22 @@ export function useConfig() {
     return undefined
   }
 
+  // 按 kind 解析分组/项目实体
+  function resolveEntity(kind: EntityKind, id: string): ProjectGroup | ProjectConfig | undefined {
+    return kind === 'group' ? findGroup(id) : findProject(id)
+  }
+
   // 新建分组
-  async function addGroup(name: string): Promise<ProjectGroup> {
+  async function addGroup(name: string, uploadDir: string | null = null): Promise<ProjectGroup> {
     const group: ProjectGroup = {
       id: crypto.randomUUID(),
       name,
       projects: [],
       is_default: false,
       created_at: new Date().toISOString(),
+      note: '',
+      upload_dir: uploadDir,
+      attachments: [],
     }
     config.value.groups.push(group)
     await saveConfig()
@@ -126,11 +151,18 @@ export function useConfig() {
   }
 
   // 在指定分组中添加项目
-  async function addProject(groupId: string, data: Omit<ProjectConfig, 'id' | 'created_at' | 'updated_at'>): Promise<ProjectConfig | undefined> {
+  async function addProject(
+    groupId: string,
+    data: Omit<ProjectConfig, 'id' | 'created_at' | 'updated_at' | 'note' | 'upload_dir' | 'attachments'> &
+      Partial<Pick<ProjectConfig, 'note' | 'upload_dir' | 'attachments'>>,
+  ): Promise<ProjectConfig | undefined> {
     const group = config.value.groups.find(g => g.id === groupId)
     if (!group) return
     const now = new Date().toISOString()
     const project: ProjectConfig = {
+      note: '',
+      upload_dir: null,
+      attachments: [],
       ...data,
       id: crypto.randomUUID(),
       created_at: now,
@@ -165,6 +197,70 @@ export function useConfig() {
     await saveConfig()
   }
 
+  // 更新分组/项目笔记
+  async function updateNote(kind: EntityKind, id: string, note: string) {
+    const entity = resolveEntity(kind, id)
+    if (!entity) return
+    entity.note = note
+    if (kind === 'project') (entity as ProjectConfig).updated_at = new Date().toISOString()
+    await saveConfig()
+  }
+
+  // 设置分组/项目附件上传目录（null 表示恢复默认）
+  async function updateUploadDir(kind: EntityKind, id: string, dir: string | null) {
+    const entity = resolveEntity(kind, id)
+    if (!entity) return
+    entity.upload_dir = dir
+    if (kind === 'project') (entity as ProjectConfig).updated_at = new Date().toISOString()
+    await saveConfig()
+  }
+
+  // 设置全局默认附件上传目录
+  async function setDefaultUploadDir(dir: string | null) {
+    config.value.default_upload_dir = dir
+    await saveConfig()
+  }
+
+  // 追加附件元数据
+  async function addAttachment(kind: EntityKind, id: string, meta: AttachmentMeta) {
+    const entity = resolveEntity(kind, id)
+    if (!entity) return
+    entity.attachments.push(meta)
+    if (kind === 'project') (entity as ProjectConfig).updated_at = new Date().toISOString()
+    await saveConfig()
+  }
+
+  // 移除附件元数据
+  async function removeAttachment(kind: EntityKind, id: string, attachmentId: string) {
+    const entity = resolveEntity(kind, id)
+    if (!entity) return
+    entity.attachments = entity.attachments.filter(a => a.id !== attachmentId)
+    if (kind === 'project') (entity as ProjectConfig).updated_at = new Date().toISOString()
+    await saveConfig()
+  }
+
+  // 重命名附件（仅改元数据，blob 名保持 uuid）
+  async function renameAttachment(kind: EntityKind, id: string, attachmentId: string, name: string) {
+    const entity = resolveEntity(kind, id)
+    if (!entity) return
+    const meta = entity.attachments.find(a => a.id === attachmentId)
+    if (!meta) return
+    meta.name = name
+    if (kind === 'project') (entity as ProjectConfig).updated_at = new Date().toISOString()
+    await saveConfig()
+  }
+
+  // 收集实体名下的附件（分组含其名下所有项目），用于删除实体时联动删 blobs
+  function collectAttachments(kind: EntityKind, id: string): AttachmentMeta[] {
+    if (kind === 'project') {
+      const project = findProject(id)
+      return project ? [...project.attachments] : []
+    }
+    const group = findGroup(id)
+    if (!group) return []
+    return [...group.attachments, ...group.projects.flatMap(p => p.attachments)]
+  }
+
   onMounted(loadConfig)
 
   return {
@@ -182,6 +278,14 @@ export function useConfig() {
     addProject,
     updateProject,
     deleteProject,
+    findGroup,
     findProject,
+    updateNote,
+    updateUploadDir,
+    setDefaultUploadDir,
+    addAttachment,
+    removeAttachment,
+    renameAttachment,
+    collectAttachments,
   }
 }

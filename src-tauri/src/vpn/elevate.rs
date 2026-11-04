@@ -16,7 +16,7 @@ use std::path::Path;
 use crate::vpn::session::VpnSession;
 
 /// 计划任务名（Windows）
-pub const TASK_NAME: &str = "WsToolsVpnWorker";
+pub const TASK_NAME: &str = "WsWorkbenchVpnWorker";
 
 /// 提权辅助脚本的退出码文件
 const ELEVATE_EXIT_FILE: &str = "elevate.exit";
@@ -392,17 +392,17 @@ mod tests {
     #[test]
     fn task_name_is_stable() {
         // 任务名会写进系统计划任务列表，改动需要同步清理旧任务
-        assert_eq!(TASK_NAME, "WsToolsVpnWorker");
+        assert_eq!(TASK_NAME, "WsWorkbenchVpnWorker");
     }
 
     #[test]
     fn task_create_command_escapes_embedded_quotes() {
         let command = task_create_command(
-            Path::new(r"C:\Program Files\ws-tools\ws-tools.exe"),
-            Path::new(r"C:\Users\demo\AppData\Roaming\com.ws.tools\vpn"),
+            Path::new(r"C:\Program Files\ws-workbench\ws-workbench.exe"),
+            Path::new(r"C:\Users\demo\AppData\Roaming\com.ws.workbench\vpn"),
         );
         // /TR 的值必须用 \" 包住带空格的路径，schtasks 才认得
-        assert!(command.contains(r#"/TR "\"C:\Program Files\ws-tools\ws-tools.exe\" --vpn-worker \"C:\Users\demo\AppData\Roaming\com.ws.tools\vpn\"""#));
+        assert!(command.contains(r#"/TR "\"C:\Program Files\ws-workbench\ws-workbench.exe\" --vpn-worker \"C:\Users\demo\AppData\Roaming\com.ws.workbench\vpn\"""#));
         // 免 UAC 的关键参数
         assert!(command.contains("/RL HIGHEST"));
         assert!(command.contains("/F"));
@@ -411,8 +411,8 @@ mod tests {
     #[test]
     fn worker_launch_command_detaches_from_batch() {
         let command = worker_launch_command(
-            Path::new(r"C:\app\ws-tools.exe"),
-            Path::new(r"C:\Users\demo\AppData\Roaming\com.ws.tools\vpn"),
+            Path::new(r"C:\app\ws-workbench.exe"),
+            Path::new(r"C:\Users\demo\AppData\Roaming\com.ws.workbench\vpn"),
         );
         // 必须以 start 开头：否则批处理会一直等 worker 退出（整整一个会话）
         assert!(command.starts_with(r#"start "" "#));
@@ -422,22 +422,22 @@ mod tests {
     #[test]
     fn task_definition_matches_only_the_baked_in_directory() {
         // 模拟 schtasks /Query /XML 的真实输出：路径原样出现，引号被转成 &quot;
-        let definition = r#"<Command>"C:\app\ws-tools.exe" --vpn-worker "C:\Users\demo\AppData\Roaming\com.ws.tools\vpn"</Command>"#;
+        let definition = r#"<Command>"C:\app\ws-workbench.exe" --vpn-worker "C:\Users\demo\AppData\Roaming\com.ws.workbench\vpn"</Command>"#;
 
         // 路径一致 → 可以复用免 UAC 任务
         assert!(definition_mentions_dir(
             definition,
-            Path::new(r"C:\Users\demo\AppData\Roaming\com.ws.tools\vpn")
+            Path::new(r"C:\Users\demo\AppData\Roaming\com.ws.workbench\vpn")
         ));
 
         // 会话目录回退到别的盘/别的根 → 必须重新注册，不能复用旧任务
         assert!(!definition_mentions_dir(
             definition,
-            Path::new(r"C:\Users\demo\AppData\Local\com.ws.tools\vpn")
+            Path::new(r"C:\Users\demo\AppData\Local\com.ws.workbench\vpn")
         ));
         assert!(!definition_mentions_dir(
             definition,
-            Path::new(r"C:\Users\demo\AppData\Local\Temp\com.ws.tools\vpn")
+            Path::new(r"C:\Users\demo\AppData\Local\Temp\com.ws.workbench\vpn")
         ));
     }
 
@@ -454,33 +454,33 @@ mod tests {
     fn recorded_directory_is_compared_case_insensitively() {
         // Windows 上盘符和大小写都不敏感，用户手改过配置也要能对上
         assert!(paths_equal(
-            r"c:\users\demo\appdata\roaming\com.ws.tools\vpn",
-            Path::new(r"C:\Users\demo\AppData\Roaming\com.ws.tools\vpn")
+            r"c:\users\demo\appdata\roaming\com.ws.workbench\vpn",
+            Path::new(r"C:\Users\demo\AppData\Roaming\com.ws.workbench\vpn")
         ));
         // 尾部斜杠、正反斜杠混用也应视为同一目录
         assert!(paths_equal(
-            "C:/Users/demo/AppData/Roaming/com.ws.tools/vpn/",
-            Path::new(r"C:\Users\demo\AppData\Roaming\com.ws.tools\vpn")
+            "C:/Users/demo/AppData/Roaming/com.ws.workbench/vpn/",
+            Path::new(r"C:\Users\demo\AppData\Roaming\com.ws.workbench\vpn")
         ));
         // 空记录不能当成匹配，否则会误判成「任务可用」而不去重注册
         assert!(!paths_equal(
             "",
-            Path::new(r"C:\Users\demo\AppData\Roaming\com.ws.tools\vpn")
+            Path::new(r"C:\Users\demo\AppData\Roaming\com.ws.workbench\vpn")
         ));
     }
 
     #[test]
     fn recorded_directory_wins_without_querying_schtasks() {
-        let current = Path::new(r"C:\Users\demo\AppData\Local\com.ws.tools\vpn");
+        let current = Path::new(r"C:\Users\demo\AppData\Local\com.ws.workbench\vpn");
         // 记录一致 → 复用（此分支不会去读任务定义）
         assert!(worker_task_matches(
             current,
-            Some(r"C:\Users\demo\AppData\Local\com.ws.tools\vpn")
+            Some(r"C:\Users\demo\AppData\Local\com.ws.workbench\vpn")
         ));
         // 记录指向旧目录 → 必须重新注册，不能复用旧任务
         assert!(!worker_task_matches(
             current,
-            Some(r"C:\Users\demo\AppData\Roaming\com.ws.tools\vpn")
+            Some(r"C:\Users\demo\AppData\Roaming\com.ws.workbench\vpn")
         ));
     }
 

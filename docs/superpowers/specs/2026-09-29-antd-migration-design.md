@@ -6,7 +6,7 @@
 
 ## 1. 背景与目标
 
-`ws-tools` 是一个 Tauri 2 + Vue 3.5 + Vite 6 + TypeScript 桌面应用（macOS WebKit 运行）。
+`ws-workbench` 是一个 Tauri 2 + Vue 3.5 + Vite 6 + TypeScript 桌面应用（macOS WebKit 运行）。
 当前前端没有引入任何 UI 组件库，界面完全由原生标签（`button` / `input` / `textarea` / `select` / `div` 自绘弹窗等）加手写 CSS 构成，样式集中在 `src/assets/styles/main.css` 的一套 CSS 变量与 `.btn*` 全局类上。
 
 目标：引入 `ant-design-vue@4.x`，采用**按需导入**方式，并把现有界面的原始标签替换为 antd 组件，统一交互与视觉。

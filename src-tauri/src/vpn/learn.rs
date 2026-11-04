@@ -465,7 +465,7 @@ mod tests {
             &raw_rows,
             &["10.20.1.7".to_string()],
             &["192.168.1.0/24".to_string()],
-            &["openconnect".to_string(), "ws-tools.exe".to_string()],
+            &["openconnect".to_string(), "ws-workbench.exe".to_string()],
         );
         assert_eq!(
             got,

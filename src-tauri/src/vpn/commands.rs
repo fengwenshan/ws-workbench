@@ -287,6 +287,63 @@ pub fn vpn_check_rule_overlaps(cidrs: Vec<String>) -> Vec<String> {
     warnings
 }
 
+/// 单条规则的入参校验，供 UI 即时反馈。
+pub fn validate_rule_input(kind: &str, value: &str) -> Result<(), String> {
+    use crate::vpn::rule_engine::{parse_port_range, RuleKind};
+    let kind = RuleKind::parse(kind)?;
+    if value.trim().is_empty() {
+        return Err("匹配值不能为空".to_string());
+    }
+    match kind {
+        RuleKind::DstPort => {
+            parse_port_range(value)?;
+        }
+        RuleKind::IpCidr => {
+            crate::vpn::route::normalize_cidr(value)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// 校验单条规则并回填规范化后的匹配值（`IP-CIDR` 会规范化网络地址）。
+#[tauri::command]
+pub fn vpn_validate_rule(kind: String, value: String) -> Result<String, String> {
+    validate_rule_input(&kind, &value)?;
+    Ok(match crate::vpn::rule_engine::RuleKind::parse(&kind)? {
+        crate::vpn::rule_engine::RuleKind::IpCidr => crate::vpn::route::normalize_cidr(&value)?,
+        _ => value,
+    })
+}
+
+/// 用给定规则集与一条输入预览命中结果，供 UI 展示「这条会走哪」。
+#[tauri::command]
+pub fn vpn_preview_rules(
+    rules: Vec<VpnRule>,
+    default_policy: String,
+    domain: Option<String>,
+    ip: Option<String>,
+    port: Option<u16>,
+    process: Option<String>,
+) -> Result<String, String> {
+    use crate::vpn::rule_engine::{compile, MatchInput, Policy, Rule, RuleKind};
+    let mut compiled = Vec::new();
+    for r in rules.iter().filter(|r| r.enabled) {
+        let kind = RuleKind::parse(&r.kind)?;
+        let policy = Policy::parse(&r.policy)?;
+        compiled.push(Rule::new(kind, &r.value, policy).with_no_resolve(r.no_resolve));
+    }
+    let default = Policy::parse(&default_policy)?;
+    let set = compile(&compiled, &std::collections::HashMap::new(), default)?;
+    let verdict = set.evaluate(&MatchInput {
+        domain: domain.as_deref(),
+        ip: ip.as_deref(),
+        port,
+        process: process.as_deref(),
+    });
+    Ok(verdict.as_str().to_string())
+}
+
 // ============================== 提权 ==============================
 
 #[derive(serde::Serialize)]
@@ -380,8 +437,13 @@ pub async fn vpn_connect(
     state: State<'_, VpnState>,
     profile: VpnProfile,
     rules: Vec<VpnRule>,
+    default_policy: Option<String>,
     custom_openconnect: Option<String>,
 ) -> Result<ConnectResult, String> {
+    // 兜底策略由前端从所选规则集透传，缺省或空白时退回直连
+    let default_policy = default_policy
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "DIRECT".to_string());
     // 1. 选连接器
     let candidates = vpn_detect_connectors(app.clone(), custom_openconnect.clone());
     let picked = detect::pick_connector(&candidates, profile.connector).ok_or_else(|| {
@@ -400,11 +462,22 @@ pub async fn vpn_connect(
     }
 
     // 3. 组装连接请求
-    let enabled: Vec<String> = rules
-        .iter()
-        .filter(|rule| rule.enabled)
-        .map(|rule| rule.cidr.clone())
-        .collect();
+    let rules: Vec<VpnRule> = rules.into_iter().filter(|rule| rule.enabled).collect();
+
+    // 规则先编译一次：任何一条规则不合法都在这里拦下，避免带着坏规则去连。
+    // 这是 fail-closed —— 宁可连接失败，也不放行一份语义错误的规则集。
+    {
+        use crate::vpn::rule_engine::{compile, Policy, Rule, RuleKind};
+        let mut compiled = Vec::new();
+        for r in rules.iter().filter(|r| r.enabled) {
+            let kind = RuleKind::parse(&r.kind)?;
+            let policy = Policy::parse(&r.policy)?;
+            compiled.push(Rule::new(kind, &r.value, policy).with_no_resolve(r.no_resolve));
+        }
+        let default = Policy::parse(&default_policy)?;
+        compile(&compiled, &std::collections::HashMap::new(), default)
+            .map_err(|e| format!("规则编译失败：{}", e))?;
+    }
 
     // 先落盘连接请求。持锁的部分只做文件操作，绝不跨过提权那一步。
     let session = {
@@ -416,12 +489,6 @@ pub async fn vpn_connect(
         session
     };
 
-    // 「以客户网络为主」却一条规则都没有时，隧道能建起来但不会有任何流量走 VPN。
-    // 这属于用户配置问题，不该直接挡掉连接，只提示一下（与 worker 的处理保持一致）。
-    if profile.mode == VpnMode::CustomerFirst && enabled.is_empty() {
-        session.append_log("[warn] 「以客户网络为主」模式下规则表为空，不会有任何流量走 VPN");
-    }
-
     let exe = std::env::current_exe().map_err(|e| format!("取当前程序路径失败: {}", e))?;
     let request = VpnRequest {
         profile_id: profile.id.clone(),
@@ -432,18 +499,11 @@ pub async fn vpn_connect(
         protocol: profile.protocol.clone(),
         connector: profile.connector,
         connector_path: connector.path.clone(),
-        mode: profile.mode,
-        include_rules: if profile.mode == VpnMode::CustomerFirst {
-            enabled.clone()
-        } else {
-            Vec::new()
-        },
-        exclude_rules: if profile.mode == VpnMode::CompanyFirst {
-            enabled
-        } else {
-            Vec::new()
-        },
-        use_vpn_dns: profile.use_vpn_dns || profile.mode == VpnMode::CompanyFirst,
+        rules: rules.clone(),
+        default_policy: default_policy.clone(),
+        fake_ip_range: profile.fake_ip_range.clone(),
+        fake_ip_filter: profile.fake_ip_filter.clone(),
+        use_vpn_dns: profile.use_vpn_dns,
         learn: profile.learn,
         extra_args: profile.extra_args.clone(),
         script_path: String::new(), // worker 生成脚本后回填
@@ -815,6 +875,21 @@ mod tests {
         ]);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("不会生效"));
+    }
+
+    #[test]
+    fn validates_known_kinds() {
+        assert!(validate_rule_input("DOMAIN", "a.com").is_ok());
+        assert!(validate_rule_input("DST-PORT", "443").is_ok());
+        assert!(validate_rule_input("DST-PORT", "70000").is_err());
+        assert!(validate_rule_input("IP-CIDR", "10.0.0.0/8").is_ok());
+        assert!(validate_rule_input("IP-CIDR", "10.0.0.0/33").is_err());
+        assert!(validate_rule_input("bogus", "x").is_err());
+    }
+
+    #[test]
+    fn domain_rule_rejects_empty_value() {
+        assert!(validate_rule_input("DOMAIN", "").is_err());
     }
 
     #[test]
