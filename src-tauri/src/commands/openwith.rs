@@ -8,10 +8,15 @@
 //! data URL 交给前端，前端直接 `<img>` 显示；其它平台先不给图标，前端用
 //! 首字母兜底。
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::Path;
 use std::sync::Mutex;
 
+#[cfg(target_os = "macos")]
+use std::path::PathBuf;
+#[cfg(target_os = "macos")]
+use std::process::Command;
+
+#[cfg(target_os = "macos")]
 use base64::Engine as _;
 use serde::Serialize;
 use tauri::AppHandle;

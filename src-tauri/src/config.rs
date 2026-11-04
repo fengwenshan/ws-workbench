@@ -223,8 +223,8 @@ pub fn load_settings(app: &AppHandle) -> AppSettings {
     }
 
     let settings = AppSettings::default();
-    if save_settings(app, &settings).is_err() {
-        eprintln!("[settings] 首次写入默认设置失败，仅保存在内存中");
+    if let Err(err) = save_settings(app, &settings) {
+        eprintln!("[settings] 首次写入默认设置失败，仅保存在内存中: {}", err);
     }
     settings
 }
