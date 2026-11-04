@@ -1,6 +1,14 @@
 import { ref, computed, onMounted, reactive } from 'vue'
-import { invoke } from '@tauri-apps/api/core'
-import { open } from '@tauri-apps/plugin-dialog'
+import {
+  clearAppPath,
+  importApp,
+  listAppLocations,
+  refreshAppSearch,
+  removeManagedApp,
+  setAppPath,
+} from '@/api/apps'
+import { openParentDir } from '@/api/system'
+import { pickDirectory, pickFile } from '@/utils/dialog'
 import type { AppId, AppLocation } from '@/types/apps'
 
 /** 应用定位与路径设置的状态管理 */
@@ -23,7 +31,7 @@ export function useApps() {
     try {
       // 走 refresh 而不是 list，顺带清掉后端的注册表缓存 ——
       // 用户点了「重新检测」通常是刚装完软件
-      locations.value = await invoke<AppLocation[]>('refresh_app_search')
+      locations.value = await refreshAppSearch()
     } finally {
       loading.value = false
     }
@@ -32,7 +40,7 @@ export function useApps() {
   async function load() {
     loading.value = true
     try {
-      locations.value = await invoke<AppLocation[]>('list_app_locations')
+      locations.value = await listAppLocations()
     } finally {
       loading.value = false
     }
@@ -48,13 +56,9 @@ export function useApps() {
       ? `选择 ${location?.name ?? id} 的启动文件（${expected}）`
       : `选择 ${location?.name ?? id} 的启动文件`
 
-    const picked = await open({ multiple: false, directory: false, title })
-    if (!picked) return null
-    const path = typeof picked === 'string' ? picked : (picked as any).path
-    locations.value = await invoke<AppLocation[]>('set_app_path', {
-      appId: id,
-      path,
-    })
+    const path = await pickFile({ title })
+    if (!path) return null
+    locations.value = await setAppPath(id, path)
     lastMessage.value = `已指定 ${location?.name ?? id} 的启动文件`
     setTimeout(() => (lastMessage.value = ''), 3000)
     return path
@@ -62,23 +66,18 @@ export function useApps() {
 
   /** 清除指定路径，回到自动查找 */
   async function clearPath(id: AppId) {
-    locations.value = await invoke<AppLocation[]>('clear_app_path', { appId: id })
+    locations.value = await clearAppPath(id)
     lastMessage.value = `已清除 ${find(id)?.name ?? id} 的指定路径，回到自动查找`
     setTimeout(() => (lastMessage.value = ''), 3000)
   }
 
   /** 把一个已有的应用目录复制到程序数据目录并托管 */
   async function importDirectory(id: AppId) {
-    const picked = await open({
-      directory: true,
-      multiple: false,
+    const picked = await pickDirectory({
       title: `选择 ${find(id)?.name ?? id} 所在的目录`,
     })
     if (!picked) return
-    const message = await invoke<string>('import_app', {
-      appId: id,
-      sourceDir: picked as string,
-    })
+    const message = await importApp(id, picked)
     await load()
     lastMessage.value = message
     setTimeout(() => (lastMessage.value = ''), 4000)
@@ -86,7 +85,7 @@ export function useApps() {
 
   /** 移除程序托管的副本 */
   async function removeManaged(id: AppId) {
-    const message = await invoke<string>('remove_managed_app', { appId: id })
+    const message = await removeManagedApp(id)
     await load()
     lastMessage.value = message
     setTimeout(() => (lastMessage.value = ''), 4000)
@@ -94,7 +93,7 @@ export function useApps() {
 
   /** 在文件管理器里定位到该可执行文件 */
   async function revealPath(path: string) {
-    await invoke('open_parent_dir', { path })
+    await openParentDir(path)
   }
 
   onMounted(load)

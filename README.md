@@ -290,7 +290,14 @@ VPN 会话目录同时被主进程和提权 worker 使用，因此不做路径�
 
 ```
 src-tauri/src/
-  commands.rs      前端命令入口：配置、打包、打开、附件加解密、笔记图片
+  commands/        前端命令入口按业务域拆分
+    config.rs      配置读写、存储信息、本地键值加密
+    project.rs     打包、校验、项目类型与 VCS 识别
+    system.rs      打开目录/终端/编辑器、平台信息、外部应用定位
+    attachments.rs 附件加解密、上传目录解析、笔记内联图片
+  util/            通用能力层
+    fs.rs          目录创建、文本读写、可写性探测
+    time.rs        本地 RFC3339 / UTC 毫秒时间戳
   config.rs        配置读写：整份加密、写入目录多级回退、历史字段迁移
   crypto.rs        字符串密文信封（SM4-CBC + HMAC-SM3）与主密钥托管
   filecrypto.rs    附件流式加密容器 WST1
@@ -326,8 +333,19 @@ src/
     vpn/           VpnPanel / VpnProfileForm / VpnRuleTable / VpnRoutePreview /
                    VpnLearnCard / VpnInstallGuide
     settings/      SettingsPanel
-  composables/     useConfig / usePack / useVpn / useApps / useLog / useUpdater / safeStorage
+  composables/     useConfig / usePack / useVpn / useApps / useLog / useUpdater /
+                   useWorkbenchLayout / useEntitySelection / useProjectForm /
+                   useDeleteConfirm / safeStorage
+  api/             后端命令的类型化封装（config / project / system / attachments / apps）
+  utils/           通用小工具（time / dialog / path / error）
   types/           前后端共享的数据结构
 scripts/release.mjs  构建、上传、更新清单合并
 updates/latest.json  更新清单（由发布脚本生成并提交）
 ```
+
+分层约定：
+
+- 通用能力只放 `src/utils`、`src/api` 与 `src-tauri/src/util`，业务代码不重复实现路径、时间、对话框、命令调用。
+- 前端每个业务一个 composable 或组件（项目、VPN、设置、附件各自独立），跨业务组合只在 `App.vue` 里做。
+- Rust 命令按业务域放在 `commands/<域>.rs`，新增命令先归域再导出，避免所有入口堆在一个文件里。
+- 改某个业务时只动它自己的模块；通用层变更需同时跑 `pnpm build` 与 `cargo test --lib`。

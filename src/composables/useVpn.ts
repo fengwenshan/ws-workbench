@@ -1,8 +1,9 @@
 import { ref, computed, onMounted, onUnmounted, reactive, watch, type Ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
-import { open } from '@tauri-apps/plugin-dialog'
 import type { AppConfig, LogEntry, LogLevel } from '@/types'
+import { pickDirectory } from '@/utils/dialog'
+import { nowIso, timeLabel } from '@/utils/time'
 import type {
   ConnectorInfo,
   ConnectResult,
@@ -142,10 +143,10 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
   }
 
   async function importOpenconnect() {
-    const picked = await open({ directory: true, multiple: false })
+    const picked = await pickDirectory()
     if (!picked) return
     const message = await invoke<string>('vpn_import_openconnect', {
-      sourceDir: picked as string,
+      sourceDir: picked,
     })
     pushLog('success', message)
     await refreshConnectors()
@@ -182,7 +183,7 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
   function pushLog(level: LogLevel, message: string, withTime = true) {
     logs.value.push({
       id: logId++,
-      timestamp: withTime ? new Date().toLocaleTimeString('zh-CN') : '',
+      timestamp: withTime ? timeLabel() : '',
       level,
       message,
     })
@@ -256,7 +257,7 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
       name,
       rules,
       default_policy: 'DIRECT',
-      created_at: new Date().toISOString(),
+      created_at: nowIso(),
     }
   }
 
@@ -273,7 +274,7 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
     const ruleSet = newRuleSet(`${name} 的公司网段`)
     config.value.vpn_rule_sets.push(ruleSet)
 
-    const now = new Date().toISOString()
+    const now = nowIso()
     const profile: VpnProfile = {
       id: crypto.randomUUID(),
       name,
@@ -303,7 +304,7 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
   async function updateProfile(id: string, patch: Partial<VpnProfile>) {
     const profile = profiles.value.find((p) => p.id === id)
     if (!profile) return
-    Object.assign(profile, patch, { updated_at: new Date().toISOString() })
+    Object.assign(profile, patch, { updated_at: nowIso() })
     await saveConfig()
   }
 

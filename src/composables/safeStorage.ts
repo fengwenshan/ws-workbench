@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core'
+import { decryptText, encryptText } from '@/api/config'
 
 /** 后端密文信封前缀，与 Rust crypto.rs 的 PREFIX 保持一致 */
 const ENCRYPTED_PREFIX = 'v1.'
@@ -25,7 +25,7 @@ export async function safeGet(key: string): Promise<string | null> {
   }
 
   try {
-    return await invoke<string>('vault_decrypt', { cipher: raw })
+    return await decryptText(raw)
   } catch (err) {
     console.error(`[safeStorage] 解密 ${key} 失败`, err)
     return null
@@ -39,7 +39,7 @@ export async function safeGet(key: string): Promise<string | null> {
 export async function safeSet(key: string, value: string): Promise<void> {
   if (typeof localStorage === 'undefined') return
   try {
-    const cipher = await invoke<string>('vault_encrypt', { plain: value })
+    const cipher = await encryptText(value)
     localStorage.setItem(key, cipher)
   } catch (err) {
     console.error(`[safeStorage] 加密 ${key} 失败，降级为明文`, err)

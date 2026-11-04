@@ -1,12 +1,20 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
-import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
-import { open, save } from '@tauri-apps/plugin-dialog'
 import { open as openPath } from '@tauri-apps/plugin-shell'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
 import { Button, Input, Progress, Empty, Tag, Modal, message } from 'ant-design-vue'
 import type { AttachmentMeta, EntityKind, ProjectConfig, ProjectGroup } from '@/types'
+import {
+  decryptExportFile,
+  decryptToTemp,
+  encryptUploadFile,
+  removeAttachmentFile,
+  resolveUploadDir,
+} from '@/api/attachments'
+import { pickDirectory, pickFiles, pickSavePath } from '@/utils/dialog'
+import { basename } from '@/utils/path'
+import { formatDateTime } from '@/utils/time'
 
 const props = defineProps<{
   kind: EntityKind
@@ -51,10 +59,10 @@ const progressVisible = computed(
 
 async function resolveDir() {
   try {
-    resolvedDir.value = await invoke<string>('resolve_upload_dir', {
-      entityDir: props.entity.upload_dir,
-      defaultDir: props.defaultUploadDir,
-    })
+    resolvedDir.value = await resolveUploadDir(
+      props.entity.upload_dir,
+      props.defaultUploadDir,
+    )
   } catch (err: any) {
     resolvedDir.value = ''
     emit('log', 'error', `解析上传目录失败: ${err}`)
@@ -68,25 +76,11 @@ watch(
   },
 )
 
-function basename(path: string): string {
-  const trimmed = path.replace(/[\\/]+$/, '')
-  const idx = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'))
-  return idx >= 0 ? trimmed.slice(idx + 1) : trimmed
-}
-
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
   if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`
   return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`
-}
-
-function formatTime(ms: number): string {
-  try {
-    return new Date(ms).toLocaleString()
-  } catch {
-    return ''
-  }
 }
 
 function resetProgress() {
@@ -97,9 +91,9 @@ function resetProgress() {
 
 // ========== 上传位置 ==========
 async function changeDir() {
-  const selected = await open({ directory: true, multiple: false })
+  const selected = await pickDirectory()
   if (!selected) return
-  emit('updateUploadDir', selected as string)
+  emit('updateUploadDir', selected)
 }
 
 function restoreDefault() {
@@ -108,10 +102,9 @@ function restoreDefault() {
 
 // ========== 上传 ==========
 async function pickAndUpload() {
-  const picked = await open({ multiple: true, directory: false })
-  if (!picked) return
-  const paths = Array.isArray(picked) ? picked : [picked]
-  await uploadPaths(paths as string[])
+  const paths = await pickFiles()
+  if (!paths.length) return
+  await uploadPaths(paths)
 }
 
 async function uploadPaths(paths: string[]) {
@@ -127,11 +120,7 @@ async function uploadPaths(paths: string[]) {
     for (const path of paths) {
       const name = basename(path)
       try {
-        const meta = await invoke<AttachmentMeta>('encrypt_upload_file', {
-          srcPath: path,
-          uploadDir: dir,
-          name,
-        })
+        const meta = await encryptUploadFile(path, dir, name)
         emit('addAttachment', meta)
         emit('log', 'success', `已加密上传: ${name}`)
       } catch (err: any) {
@@ -149,11 +138,7 @@ async function uploadPaths(paths: string[]) {
 async function handleOpen(meta: AttachmentMeta) {
   busyId.value = meta.id
   try {
-    const tempPath = await invoke<string>('decrypt_to_temp', {
-      blobDir: meta.dir,
-      id: meta.id,
-      name: meta.name,
-    })
+    const tempPath = await decryptToTemp(meta.dir, meta.id, meta.name)
     await openPath(tempPath)
     emit('log', 'info', `已解密预览: ${meta.name}`)
   } catch (err: any) {
@@ -165,15 +150,11 @@ async function handleOpen(meta: AttachmentMeta) {
 }
 
 async function handleDownload(meta: AttachmentMeta) {
-  const target = await save({ defaultPath: meta.name })
+  const target = await pickSavePath(meta.name)
   if (!target) return
   busyId.value = meta.id
   try {
-    await invoke('decrypt_export_file', {
-      blobDir: meta.dir,
-      id: meta.id,
-      targetPath: target,
-    })
+    await decryptExportFile(meta.dir, meta.id, target)
     emit('log', 'success', `已导出: ${meta.name}`)
   } catch (err: any) {
     handleDecryptError(meta, err)
@@ -231,7 +212,7 @@ function confirmDelete(meta: AttachmentMeta) {
     cancelText: '取消',
     async onOk() {
       try {
-        await invoke('remove_attachment_file', { blobDir: meta.dir, id: meta.id })
+        await removeAttachmentFile(meta.dir, meta.id)
         emit('removeAttachment', meta.id)
         emit('log', 'info', `已删除附件: ${meta.name}`)
       } catch (err: any) {
@@ -364,7 +345,7 @@ onUnmounted(() => {
           />
           <span v-else class="attachment-name" :title="meta.name">{{ meta.name }}</span>
           <span class="attachment-meta">
-            {{ formatSize(meta.size) }} · {{ formatTime(meta.created_at) }}
+            {{ formatSize(meta.size) }} · {{ formatDateTime(meta.created_at) }}
           </span>
         </div>
         <div class="attachment-actions">

@@ -3,6 +3,7 @@ mod config;
 mod db;
 mod crypto;
 mod filecrypto;
+mod util;
 mod commands;
 mod packer;
 pub mod apps;

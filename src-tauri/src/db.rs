@@ -52,14 +52,11 @@ CREATE TABLE IF NOT EXISTS vpn_rule_sets (
 
 /// 解析出可写的存储目录，优先创建 app_data_dir 等候选目录
 fn resolve_storage_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    use std::fs;
     for (_, dir) in crate::config::storage_candidates(app) {
-        if !dir.exists() && fs::create_dir_all(&dir).is_err() {
+        if !dir.exists() && crate::util::fs::create_dir_all(&dir).is_err() {
             continue;
         }
-        let probe = dir.join(".db_write_test");
-        if fs::write(&probe, b"probe").is_ok() {
-            let _ = fs::remove_file(&probe);
+        if crate::util::fs::is_writable_dir(&dir) {
             return Ok(dir);
         }
     }
