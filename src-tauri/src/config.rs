@@ -77,8 +77,8 @@ fn load_from_file(app: &AppHandle) -> Result<Option<(AppConfig, bool)>, String> 
     use std::fs;
 
     let mut saw_unreadable = false;
-    // 按优先级尝试多个路径（含历史遗留临时目录，仅用于迁移读取）
-    let candidates = get_read_candidates(app);
+    // 按优先级尝试多个路径
+    let candidates = storage_candidates(app);
     for (_, dir) in candidates {
         let path = dir.join("config.json");
         if !path.exists() {
@@ -129,29 +129,6 @@ fn push_candidate(
     }
 }
 
-/// 读取候选目录：在持久化目录基础上，额外包含历史遗留的临时目录，
-/// 用于把"曾经误落在临时目录里的数据"一次性迁移出来；
-/// 临时目录只参与读取，绝不作为写入目标。
-fn get_read_candidates(app: &AppHandle) -> Vec<(String, std::path::PathBuf)> {
-    use std::env;
-    use std::path::PathBuf;
-
-    let mut candidates = get_write_candidates(app);
-    if let Ok(temp) = env::var("TMPDIR") {
-        push_candidate(
-            &mut candidates,
-            "TMPDIR/ws-tools(legacy)",
-            PathBuf::from(temp).join("ws-tools"),
-        );
-    }
-    push_candidate(
-        &mut candidates,
-        "/tmp/ws-tools(legacy)",
-        PathBuf::from("/tmp/ws-tools"),
-    );
-    candidates
-}
-
 /// 追加项目内兜底候选（`<crate>/.config`、`<cwd>/.config`）。
 ///
 /// 仅用于开发场景：`tauri dev` 时应用可能运行在受限沙箱里，写不了用户数据目录，
@@ -186,7 +163,7 @@ fn push_project_candidates(candidates: &mut Vec<(String, std::path::PathBuf)>) {
 ///
 /// 这里刻意不含 TMPDIR / tmp：临时目录重启即失，一旦静默落盘，
 /// 用户就会看到"每次重启数据都没了"。
-fn get_write_candidates(app: &AppHandle) -> Vec<(String, std::path::PathBuf)> {
+pub(crate) fn storage_candidates(app: &AppHandle) -> Vec<(String, std::path::PathBuf)> {
     use std::env;
     use std::path::PathBuf;
 
@@ -199,13 +176,13 @@ fn get_write_candidates(app: &AppHandle) -> Vec<(String, std::path::PathBuf)> {
         push_candidate(&mut candidates, "app_config_dir", dir);
     }
     if let Ok(home) = app.path().home_dir() {
-        push_candidate(&mut candidates, "home/.ws-tools", home.join(".ws-tools"));
+        push_candidate(&mut candidates, "home/.ws-workbench", home.join(".ws-workbench"));
     }
     if let Ok(home) = env::var("HOME") {
         push_candidate(
             &mut candidates,
-            "env_HOME/.ws-tools",
-            PathBuf::from(home).join(".ws-tools"),
+            "env_HOME/.ws-workbench",
+            PathBuf::from(home).join(".ws-workbench"),
         );
     }
     push_project_candidates(&mut candidates);
@@ -229,7 +206,7 @@ fn test_writable(dir: &std::path::PathBuf) -> bool {
 fn find_writable_file_path(app: &AppHandle) -> Option<std::path::PathBuf> {
     use std::fs;
 
-    for (_, dir) in get_write_candidates(app) {
+    for (_, dir) in storage_candidates(app) {
         if !dir.exists() {
             if fs::create_dir_all(&dir).is_err() {
                 continue;
@@ -461,6 +438,9 @@ fn migrate_config(app: &AppHandle, mut config: AppConfig) -> AppConfig {
             projects: std::mem::take(&mut config.projects),
             is_default: true,
             created_at: now,
+            note: String::new(),
+            upload_dir: None,
+            attachments: Vec::new(),
         };
         config.groups.push(group);
         changed = true;
@@ -544,8 +524,9 @@ mod tests {
             password_encrypted: encrypted,
             protocol: "anyconnect".to_string(),
             connector: Default::default(),
-            mode: Default::default(),
             rule_set_id: String::new(),
+            fake_ip_range: "198.18.0.0/16".to_string(),
+            fake_ip_filter: Vec::new(),
             use_vpn_dns: true,
             learn: false,
             extra_args: Vec::new(),

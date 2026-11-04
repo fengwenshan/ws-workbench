@@ -1,6 +1,8 @@
 mod models;
 mod config;
+mod db;
 mod crypto;
+mod filecrypto;
 mod commands;
 mod packer;
 pub mod apps;
@@ -17,6 +19,8 @@ use tauri::{
 
 /// 托盘菜单里点击 VPN 相关项时推给前端的事件名
 pub const EVENT_VPN_TRAY: &str = "vpn-tray";
+/// 托盘菜单里点击页面入口（代理 / 设置 / 日志）时推给前端的事件名
+pub const EVENT_NAV_TRAY: &str = "nav-tray";
 
 // 把主窗口重新显示出来（从托盘左键、托盘菜单、Dock 图标进入）
 fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
@@ -99,6 +103,14 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .register_asynchronous_uri_scheme_protocol("wst-img", |ctx, request, responder| {
+            let app = ctx.app_handle().clone();
+            let uri = request.uri().clone();
+            std::thread::spawn(move || {
+                let response = commands::serve_note_image(&app, &uri);
+                responder.respond(response);
+            });
+        })
         .invoke_handler(tauri::generate_handler![
             commands::get_config,
             commands::save_config,
@@ -125,6 +137,13 @@ pub fn run() {
             commands::remove_managed_app,
             commands::refresh_app_search,
             commands::open_with_app_id,
+            commands::resolve_upload_dir,
+            commands::ensure_dir,
+            commands::encrypt_upload_file,
+            commands::decrypt_export_file,
+            commands::decrypt_to_temp,
+            commands::remove_attachment_file,
+            commands::encrypt_upload_bytes,
             vpn::commands::vpn_detect_connectors,
             vpn::commands::vpn_connector_version,
             vpn::commands::vpn_import_openconnect,
@@ -133,6 +152,8 @@ pub fn run() {
             vpn::commands::vpn_install_guide,
             vpn::commands::vpn_validate_cidr,
             vpn::commands::vpn_check_rule_overlaps,
+            vpn::commands::vpn_validate_rule,
+            vpn::commands::vpn_preview_rules,
             vpn::commands::vpn_elevation_info,
             vpn::commands::vpn_setup_elevation,
             vpn::commands::vpn_remove_elevation,
@@ -162,7 +183,7 @@ pub fn run() {
                     // 连临时目录都写不了：不阻断启动，但把原因打出来，
                     // 免得后面只看到一句没有上下文的「拒绝访问」
                     eprintln!("VPN 会话目录不可用: {}", err);
-                    vpn::session::VpnSession::new(std::env::temp_dir().join("ws-tools-vpn"))
+                    vpn::session::VpnSession::new(std::env::temp_dir().join("ws-workbench-vpn"))
                 }
             };
             if let Err(err) = session.ensure() {
@@ -175,36 +196,48 @@ pub fn run() {
 
             // 托盘：关掉窗口后应用仍在后台运行，从托盘菜单重新打开或退出
             let show = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
+            // 页面入口：点一下把窗口唤到前台并切到对应页面
+            let nav_proxy = MenuItem::with_id(app, "nav-proxy", "代理", true, None::<&str>)?;
+            let nav_settings =
+                MenuItem::with_id(app, "nav-settings", "设置", true, None::<&str>)?;
+            let nav_logs = MenuItem::with_id(app, "nav-logs", "日志", true, None::<&str>)?;
             let vpn_connect =
                 MenuItem::with_id(app, "vpn-connect", "连接 VPN", true, None::<&str>)?;
             let vpn_disconnect =
                 MenuItem::with_id(app, "vpn-disconnect", "断开 VPN", true, None::<&str>)?;
-            let vpn_mode =
-                MenuItem::with_id(app, "vpn-mode", "切换分流模式", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
             let separator = PredefinedMenuItem::separator(app)?;
+            let separator2 = PredefinedMenuItem::separator(app)?;
             let menu = Menu::with_items(
                 app,
                 &[
                     &show,
                     &separator,
+                    &nav_proxy,
+                    &nav_settings,
+                    &nav_logs,
+                    &separator2,
                     &vpn_connect,
                     &vpn_disconnect,
-                    &vpn_mode,
                     &separator,
                     &quit,
                 ],
             )?;
 
             let mut tray = TrayIconBuilder::with_id("main")
-                .tooltip("ws-tools")
+                .tooltip("ws-workbench")
                 .menu(&menu)
                 // 左键单击直接打开客户端，不弹菜单；菜单只在右键时出现
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => show_main_window(app),
+                    // 页面入口：唤起窗口，让前端切到代理 / 设置 / 日志页
+                    "nav-proxy" | "nav-settings" | "nav-logs" => {
+                        show_main_window(app);
+                        let _ = app.emit(EVENT_NAV_TRAY, event.id.as_ref().to_string());
+                    }
                     // VPN 的配置与规则都在前端，托盘只负责把动作转发过去
-                    "vpn-connect" | "vpn-disconnect" | "vpn-mode" => {
+                    "vpn-connect" | "vpn-disconnect" => {
                         show_main_window(app);
                         let _ = app.emit(EVENT_VPN_TRAY, event.id.as_ref().to_string());
                     }
