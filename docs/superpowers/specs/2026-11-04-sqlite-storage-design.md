@@ -99,7 +99,7 @@ CREATE TABLE IF NOT EXISTS vpn_rule_sets (
 1. `SELECT id, sort_order, payload FROM groups ORDER BY sort_order`，逐行解密并反序列化为 `ProjectGroup { projects: vec![] }`。
 2. `SELECT id, group_id, sort_order, payload FROM projects ORDER BY group_id, sort_order`，解密后挂到对应分组的 `projects` 末尾；找不到所属分组视为数据不一致，整体返回 `Err`。
 3. 同样方式读取 `vpn_profiles`、`vpn_rule_sets`，按 `sort_order` 排序。
-4. 与 `config.json` 中的设置合并成 `AppConfig`，确保默认分组存在（复用 `mark_default_group`）。
+4. 与 `config.json` 中的设置合并成 `AppConfig`；沿用 `mark_default_group` 给既有「默认分组」补 `is_default` 标记（不新建分组，与现状一致）。
 5. 任一行解密或反序列化失败都整体报错，不静默丢弃、不回写。
 
 ### 4.5 保存流程（事务内 diff）
@@ -172,7 +172,7 @@ pub struct StorageInfo {
 
 ## 9. 验收标准
 
-1. 首次启动自动创建 `ws-workbench.db` 表结构与默认分组。
+1. 首次启动自动创建 `ws-workbench.db` 表结构；分组列表与现状一致为空，由用户自行新建。
 2. 增删改分组、项目、笔记、附件元信息、VPN 配置、规则集后重启，界面数据一致。
 3. 数据库文件里 `payload` 均为 `v1.` 信封密文，`strings` 搜不到笔记正文。
 4. 只修改一条笔记时，其他实体的 `payload` 字节不变。
