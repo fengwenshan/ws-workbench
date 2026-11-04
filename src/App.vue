@@ -88,7 +88,6 @@ const vpnTitle = computed(() => {
 // 工作台布局：工具切换、项目树 / 日志面板尺寸与持久化
 const {
   view,
-  toolTitle,
   isMac,
   shortcutTitle,
   selectTool,
@@ -369,7 +368,6 @@ async function handlePack(project: any, asZip: boolean = false) {
     >
       <div class="titlebar-brand">
         <span class="app-name">ws-workbench</span>
-        <span class="tool-name">{{ toolTitle }}</span>
       </div>
       <div class="titlebar-actions">
         <span v-if="appVersion" class="version-text">v{{ appVersion }}</span>
@@ -405,9 +403,9 @@ async function handlePack(project: any, asZip: boolean = false) {
           </button>
           <button
             class="rail-btn"
-            :class="{ active: view === 'proxy' }"
+            :class="{ active: view === 'proxy', 'vpn-connected': vpn.isConnected }"
             :aria-current="view === 'proxy' ? 'page' : undefined"
-            :title="shortcutTitle('代理', '2')"
+            :title="vpn.isConnected ? '代理（VPN 已连接）' : shortcutTitle('代理', '2')"
             aria-label="代理"
             @click="selectTool('proxy')"
           >
@@ -764,19 +762,13 @@ async function handlePack(project: any, asZip: boolean = false) {
 }
 .titlebar-brand {
   display: flex;
-  align-items: baseline;
-  gap: 10px;
+  align-items: center;
   min-width: 0;
 }
 .app-name {
   font-size: 13px;
   font-weight: 600;
   color: var(--text-primary);
-  white-space: nowrap;
-}
-.tool-name {
-  font-size: 12px;
-  color: var(--text-muted);
   white-space: nowrap;
 }
 .titlebar-actions {
@@ -846,6 +838,16 @@ async function handlePack(project: any, asZip: boolean = false) {
   width: 3px;
   border-radius: 0 2px 2px 0;
   background: var(--primary);
+}
+.rail-btn.vpn-connected,
+.rail-btn.vpn-connected:hover {
+  color: var(--success);
+}
+.rail-btn.vpn-connected.active {
+  background: rgba(16, 185, 129, 0.1);
+}
+.rail-btn.vpn-connected.active::before {
+  background: var(--success);
 }
 .rail-btn:focus-visible {
   outline: 2px solid var(--primary);
