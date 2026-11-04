@@ -17,8 +17,7 @@ use std::time::{Duration, Instant};
 use crate::vpn::connector;
 use crate::vpn::learn;
 use crate::vpn::models::{
-    AppliedRoute, LearnReport, LearnSummary, NetworkSnapshot, VpnMode, VpnPhase, VpnRequest,
-    VpnStatus,
+    AppliedRoute, LearnReport, LearnSummary, NetworkSnapshot, VpnPhase, VpnRequest, VpnStatus,
 };
 use crate::vpn::route::{self, RouteOutcome, RouteTarget};
 use crate::vpn::script;
@@ -63,6 +62,18 @@ struct Worker {
     learn_report: LearnReport,
     /// 采样连续失败次数，超过阈值自动停用学习模式
     learn_failures: u32,
+    /// 规则分流引擎；仅在 macOS 装配成功后存在（Task 9）
+    #[cfg(target_os = "macos")]
+    engine: Option<crate::vpn::router::Engine>,
+    /// 捕获 TUN 设备；设备本体已交给引擎持有（TunPhy），这里仅留句柄位
+    #[cfg(target_os = "macos")]
+    capture_dev: Option<crate::vpn::tun_device::Utun>,
+    /// 捕获 TUN 的接口索引，断开时按它回收半默认路由
+    #[cfg(target_os = "macos")]
+    capture_index: u32,
+    /// fake-ip 假地址池（Task 11 起由引擎消费）
+    #[cfg(target_os = "macos")]
+    fake_pool: Option<crate::vpn::fakedns::FakeIpPool>,
 }
 
 impl Worker {
@@ -70,7 +81,6 @@ impl Worker {
         let mut status = VpnStatus::default();
         status.profile_id = request.profile_id.clone();
         status.profile_name = request.profile_name.clone();
-        status.mode = request.mode;
         status.pid = std::process::id();
         status.started_at = now();
         status.updated_at = now();
@@ -99,6 +109,14 @@ impl Worker {
             script_log_lines: 0,
             learn_report,
             learn_failures: 0,
+            #[cfg(target_os = "macos")]
+            engine: None,
+            #[cfg(target_os = "macos")]
+            capture_dev: None,
+            #[cfg(target_os = "macos")]
+            capture_index: 0,
+            #[cfg(target_os = "macos")]
+            fake_pool: None,
         }
     }
 
@@ -306,21 +324,6 @@ impl Worker {
         }
     }
 
-    fn local_target(&self) -> RouteTarget {
-        #[cfg(target_os = "windows")]
-        {
-            RouteTarget::new(
-                self.snapshot.default_if_index,
-                &self.snapshot.default_if_alias,
-                &self.snapshot.default_gateway,
-            )
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            RouteTarget::new(0, &self.snapshot.default_if_alias, &self.snapshot.default_gateway)
-        }
-    }
-
     fn record_applied(&mut self, cidr: &str, target: &RouteTarget, via: &str, outcome: RouteOutcome) {
         self.status.routes.push(AppliedRoute {
             cidr: cidr.to_string(),
@@ -336,85 +339,69 @@ impl Worker {
         });
     }
 
-    /// 按分流模式下发路由
+    /// 按规则表下发路由（过渡期：只处理 IP-CIDR -> VPN 的规则）
     fn apply_routes(&mut self) {
         self.status.routes.clear();
-        let mode = self.request.mode;
-
-        match mode {
-            VpnMode::CustomerFirst => {
-                // 只有规则表里的公司网段走隧道，其余（客户内网、互联网）保持本地默认路由
-                let target = self.vpn_target();
-                let rules = self.request.include_rules.clone();
-                if rules.is_empty() {
-                    self.log("[路由] 客户网络为主模式下规则表为空，不会有任何流量走 VPN");
-                }
-                for cidr in rules {
-                    match route::add_route(&cidr, &target, 1) {
-                        Ok(()) => {
-                            self.log(&format!("[路由] {} -> VPN ({})", cidr, target.display()));
-                            self.record_applied(&cidr, &target, "vpn", RouteOutcome::Created);
-                        }
-                        Err(e) => self.log(&format!("[路由] {} 下发失败: {}", cidr, e)),
-                    }
-                }
+        let rules = match self.compiled_rules() {
+            Ok(r) => r,
+            Err(e) => {
+                self.log(&format!("[规则] {}", e));
+                return;
             }
-            VpnMode::CompanyFirst => {
-                // 默认路由已经由脚本交给隧道（company_first 会接管 default），
-                // 这里只需要把客户侧网段抢回本地
-                let target = self.local_target();
-                let mut list = self.request.exclude_rules.clone();
-                for subnet in self.snapshot.local_subnets.clone() {
-                    if !list.contains(&subnet) {
-                        list.push(subnet);
-                    }
+        };
+        let target = self.vpn_target();
+        for rule in rules.rules() {
+            if rule.kind != crate::vpn::rule_engine::RuleKind::IpCidr {
+                continue;
+            }
+            if rule.policy != crate::vpn::rule_engine::Policy::Vpn {
+                continue;
+            }
+            let cidr = rule.value.clone();
+            match route::add_route(&cidr, &target, 1) {
+                Ok(()) => {
+                    self.log(&format!("[路由] {} -> VPN ({})", cidr, target.display()));
+                    self.record_applied(&cidr, &target, "vpn", RouteOutcome::Created);
                 }
-                for cidr in list {
-                    match route::ensure_route(&cidr, &target, 1) {
-                        Ok(outcome) => {
-                            let action = if outcome == RouteOutcome::Created {
-                                "新增"
-                            } else {
-                                "调跃点"
-                            };
-                            self.log(&format!(
-                                "[路由] {}({}) {} -> 本地 ({})",
-                                cidr,
-                                action,
-                                target.next_hop,
-                                target.display()
-                            ));
-                            self.record_applied(&cidr, &target, "local", outcome);
-                        }
-                        Err(e) => self.log(&format!("[路由] {} 直连例外失败: {}", cidr, e)),
-                    }
-                }
+                Err(e) => self.log(&format!("[路由] {} 下发失败: {}", cidr, e)),
             }
         }
         let _ = self.session.write_status(&self.status);
     }
 
+    fn compiled_rules(&mut self) -> Result<crate::vpn::rule_engine::CompiledRuleSet, String> {
+        use crate::vpn::rule_engine::{compile, Policy, Rule, RuleKind};
+        let enabled: Vec<(String, String, String, bool)> = self
+            .request
+            .rules
+            .iter()
+            .filter(|r| r.enabled)
+            .map(|r| (r.kind.clone(), r.value.clone(), r.policy.clone(), r.no_resolve))
+            .collect();
+        let mut rules = Vec::new();
+        for (kind_s, value, policy_s, no_resolve) in enabled {
+            let kind = RuleKind::parse(&kind_s)
+                .map_err(|e| format!("规则类型非法 {}: {}", kind_s, e))?;
+            let policy = Policy::parse(&policy_s)
+                .map_err(|e| format!("规则出口非法 {}: {}", policy_s, e))?;
+            rules.push(Rule::new(kind, &value, policy).with_no_resolve(no_resolve));
+        }
+        let default = Policy::parse(&self.request.default_policy)
+            .map_err(|e| format!("兜底策略非法 {}: {}", self.request.default_policy, e))?;
+        compile(&rules, &std::collections::HashMap::new(), default)
+    }
+
     /// 路由守护：VPN 客户端或系统可能在后台把我们的路由改掉，这里定期补回来
     fn guard_routes(&mut self) {
-        let mode = self.request.mode;
-        let vpn_target = self.vpn_target();
-        let local_target = self.local_target();
-
-        let checks: Vec<(String, RouteTarget)> = self
+        let target = self.vpn_target();
+        let checks: Vec<String> = self
             .applied
             .iter()
             .filter(|record| record.outcome == RouteOutcome::Created)
-            .map(|record| {
-                let target = match mode {
-                    VpnMode::CustomerFirst => vpn_target.clone(),
-                    VpnMode::CompanyFirst => local_target.clone(),
-                };
-                (record.cidr.clone(), target)
-            })
+            .map(|record| record.cidr.clone())
             .collect();
-
         let mut repaired = 0usize;
-        for (cidr, target) in checks {
+        for cidr in checks {
             match route::route_exists(&cidr, &target) {
                 Ok(true) => {}
                 Ok(false) => {
@@ -431,25 +418,150 @@ impl Worker {
         }
     }
 
+    // ======================= 规则分流引擎（macOS） =======================
+
+    /// 装配引擎：开捕获 TUN、抢半默认路由、给服务器打防环主机路由，
+    /// 再把 netstack + 出口 Router + 规则集 + 进程反查组装成 `Engine`。
+    ///
+    /// 装配成功后过渡期的按 CIDR 下发路由全部作废（清空 `applied`），
+    /// 改由引擎在每条流建立时按规则注入。
+    #[cfg(target_os = "macos")]
+    fn start_engine(&mut self) -> Result<(), String> {
+        // TunDevice 提供 Utun 的 name()/index()，RouteTable 提供捕获路由的增删
+        use crate::vpn::platform::{RouteTable, TunDevice};
+        use crate::vpn::{netstack, platform, proc_lookup, router, tun_device};
+
+        let (vpn_dev, vpn_index) = match (self.status.tun_dev.as_str(), self.status.tun_index) {
+            ("", 0) => return Err("隧道接口信息缺失，无法装配引擎".to_string()),
+            (dev, 0) => (dev.to_string(), self.tunnel_if_index(dev)?),
+            (dev, idx) => (dev.to_string(), idx),
+        };
+
+        let capture = tun_device::Utun::create().map_err(|e| format!("创建捕获 TUN 失败: {}", e))?;
+        // 捕获 TUN 用 10.9.0.0/30，取首个可用地址 10.9.0.1 作为本地点对点地址
+        let capture_ip = crate::vpn::route::first_usable_in_subnet("10.9.0.0", "30")
+            .unwrap_or_else(|| "10.9.0.1".to_string());
+        let mtu = if self.status.mtu == 0 { 1500 } else { self.status.mtu };
+        self.configure_interface(capture.name(), &capture_ip, mtu)?;
+        // 接口名要在 capture 被移进 Engine 之前先留存，供日志使用
+        let capture_name = capture.name().to_string();
+        let capture_index = capture.index();
+        self.capture_index = capture_index;
+
+        let route_table = platform::MacRouteTable::new();
+        route_table.add_capture_routes(capture_index)?;
+
+        let gw = self.snapshot.default_gateway.clone();
+        for ip in filter_server_ips(&resolve_server_ips(&self.request.server), &capture_ip) {
+            if let Ok(v4) = ip.parse() {
+                let _ = route_table.add_server_host_route(v4, &gw);
+            }
+        }
+
+        let pool = crate::vpn::fakedns::FakeIpPool::new(
+            &self.request.fake_ip_range,
+            &self.request.fake_ip_filter,
+        )
+        .map_err(|e| format!("fake-ip 池初始化失败: {}", e))?;
+        self.fake_pool = Some(pool.clone());
+
+        let rules = self.compiled_rules()?;
+        let proc = proc_lookup::SysctlProcLookup::new();
+        let mut engine = router::Engine::assemble(
+            capture,
+            netstack::NetstackConfig {
+                local_ip: capture_ip.parse().map_err(|_| "捕获地址非法".to_string())?,
+                mtu: mtu as usize,
+                fake_domains: std::collections::HashMap::new(),
+            },
+            rules,
+            Box::new(platform::MacRouteTable::new()),
+            Box::new(platform::MacIfBinder::new()),
+            capture_index,
+            vpn_index,
+            Box::new(proc),
+            &self.request.default_policy,
+        )?;
+        // 把假地址池交给引擎：DNS 本地应答与假 IP 反查域名都靠它
+        engine.set_fake_pool(pool);
+        self.engine = Some(engine);
+        self.log(&format!(
+            "[引擎] 已接管：捕获 {} ({}) -> 隧道 {}",
+            capture_name, capture_ip, vpn_dev
+        ));
+        // 过渡期按 CIDR 下发的路由清掉，改由引擎按流注入
+        self.applied.clear();
+        self.status.routes.clear();
+        Ok(())
+    }
+
+    /// 取隧道网卡的接口索引。
+    ///
+    /// `route::list_interfaces()` 在 macOS 分支的 `index` 恒为 0
+    /// （`unix_list_interfaces` 写死 `index: 0`），拿它去做 `IP_BOUND_IF`
+    /// 会绑到无效网卡，所以这里只用它按 `alias` 确认接口存在，真实索引改问内核
+    /// （与 `Utun::create` 取索引的方式保持一致）。
+    #[cfg(target_os = "macos")]
+    fn tunnel_if_index(&self, dev: &str) -> Result<u32, String> {
+        let exists = crate::vpn::route::list_interfaces()
+            .unwrap_or_default()
+            .iter()
+            .any(|i| i.alias.as_str() == dev);
+        if !exists {
+            return Err(format!("找不到隧道接口 {}", dev));
+        }
+        let name = std::ffi::CString::new(dev).map_err(|_| format!("隧道接口名非法: {}", dev))?;
+        let index = unsafe { libc::if_nametoindex(name.as_ptr()) };
+        if index == 0 {
+            return Err(format!("取不到隧道接口 {} 的索引", dev));
+        }
+        Ok(index)
+    }
+
+    /// 给捕获 TUN 配地址与 MTU（openconnect 不会碰这张自建网卡）。
+    #[cfg(target_os = "macos")]
+    fn configure_interface(&self, dev: &str, ip: &str, mtu: u32) -> Result<(), String> {
+        use std::process::Command;
+        let ok = Command::new("/sbin/ifconfig")
+            .args([dev, ip, ip, "up"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !ok {
+            return Err(format!("ifconfig {} 配地址失败", dev));
+        }
+        let ok = Command::new("/sbin/ifconfig")
+            .args([dev, "mtu", &mtu.to_string()])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !ok {
+            return Err(format!("ifconfig {} 配 MTU 失败", dev));
+        }
+        Ok(())
+    }
+
+    /// 把引擎的连接数写进状态，界面据此显示活动连接。
+    #[cfg(target_os = "macos")]
+    fn publish_engine_status(&mut self) {
+        let count = self.engine.as_ref().map(|e| e.flow_count()).unwrap_or(0);
+        self.status.message = format!("已连接，活动连接 {}", count);
+        let _ = self.session.write_status(&self.status);
+    }
+
     // ======================= 学习模式 =======================
 
     /// 隧道本身和本程序发起的连接都不是分流目标，采样时直接排除
     fn self_process_names() -> Vec<String> {
-        ["openconnect.exe", "openconnect", "ws-tools.exe", "ws-tools"]
+        ["openconnect.exe", "openconnect", "ws-workbench.exe", "ws-workbench"]
             .iter()
             .map(|name| name.to_string())
             .collect()
     }
 
-    /// 当前生效的规则表。两种模式的规则列表互斥，取并集即可
+    /// 当前生效的规则表
     fn known_rules(&self) -> Vec<String> {
-        let mut rules = self.request.include_rules.clone();
-        for cidr in &self.request.exclude_rules {
-            if !rules.contains(cidr) {
-                rules.push(cidr.clone());
-            }
-        }
-        rules
+        self.request.rules.iter().filter(|r| r.enabled).map(|r| r.value.clone()).collect()
     }
 
     /// 主进程请求清空采集结果时，重置内存里的报告并删掉文件。
@@ -535,6 +647,28 @@ impl Worker {
 
     /// 回收本程序添加的路由，并把默认路由交还给连接前的物理网关
     fn cleanup_routes(&mut self) {
+        // 引擎接管后：关闭所有流并回收流路由，再拆掉捕获 TUN 抢的那两条半默认路由
+        // 与给服务器加的防环主机路由。TUN 设备本体随 Engine 一起 drop（Utun::Drop 关 fd）。
+        #[cfg(target_os = "macos")]
+        {
+            use crate::vpn::platform::RouteTable;
+            if let Some(mut engine) = self.engine.take() {
+                engine.shutdown();
+            }
+            let route_table = crate::vpn::platform::MacRouteTable::new();
+            let capture_index = self.capture_index;
+            if capture_index != 0 {
+                let _ = route_table.del_capture_routes(capture_index);
+            }
+            for ip in resolve_server_ips(&self.request.server) {
+                if let Ok(v4) = ip.parse() {
+                    let _ = route_table.del_server_host_route(v4);
+                }
+            }
+            self.capture_dev = None;
+            self.capture_index = 0;
+            self.fake_pool = None;
+        }
         let records: Vec<AppliedRouteRecord> = self.applied.drain(..).collect();
         for record in records {
             let result = match record.outcome {
@@ -661,8 +795,6 @@ impl Worker {
         self.clear_stale_server_routes();
         let (file_name, content) = script::generate(&script::ScriptContext {
             session_dir: &self.session.dir,
-            mode: self.request.mode,
-            use_vpn_dns: self.request.use_vpn_dns,
             original_gateway: &self.snapshot.default_gateway,
         });
         let script_path = script_path_for_openconnect(&self.session.script_dir(), file_name)?;
@@ -704,6 +836,17 @@ impl Worker {
             // 所以放在循环顶部判一次，而不是塞进 15 秒那一跳
             self.poll_learn_clear();
 
+            // 引擎的收发循环必须每轮推进：塞进 15s 巡检那一跳会把吞吐卡死。
+            // 引擎尚未装配（隧道未就绪）时是 None，这一跳自然空转。
+            #[cfg(target_os = "macos")]
+            {
+                if let Some(engine) = self.engine.as_mut() {
+                    if let Err(e) = engine.poll() {
+                        self.log(&format!("[引擎] 轮询出错: {}", e));
+                    }
+                }
+            }
+
             if self.session.is_stop_requested() {
                 self.log("[worker] 收到停止请求");
                 break;
@@ -737,20 +880,20 @@ impl Worker {
             }
 
             if !routes_applied && self.tunnel_ready() {
-                self.set_phase(
-                    VpnPhase::ConfiguringRoutes,
-                    &format!(
-                        "隧道就绪 {}，正在按「{}」下发分流路由",
-                        self.status.vpn_ip,
-                        self.request.mode.label()
-                    ),
-                );
-                self.apply_routes();
+                #[cfg(target_os = "macos")]
+                {
+                    if let Err(e) = self.start_engine() {
+                        self.fail(&e);
+                        return EXIT_FAILED;
+                    }
+                    self.set_phase(VpnPhase::Connected, "隧道已建立，引擎已接管");
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    self.apply_routes();
+                    self.set_phase(VpnPhase::Connected, "隧道已建立");
+                }
                 routes_applied = true;
-                self.set_phase(
-                    VpnPhase::Connected,
-                    &format!("已连接（{}）", self.request.mode.label()),
-                );
                 // 隧道刚起来就先采一轮，别让用户干等 15 秒
                 if self.request.learn {
                     self.log("[学习] 学习模式已开启：每 15 秒采集一次实际连通的远端地址");
@@ -802,7 +945,20 @@ impl Worker {
             }
 
             if routes_applied && Instant::now() >= guard_at {
-                self.guard_routes();
+                // 引擎的收发循环已提到每轮执行，这里只做节流的状态发布；
+                // 引擎缺席（装配失败）的窗口仍走 guard_routes 兜底。
+                #[cfg(target_os = "macos")]
+                {
+                    if self.engine.is_some() {
+                        self.publish_engine_status();
+                    } else {
+                        self.guard_routes();
+                    }
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    self.guard_routes();
+                }
                 self.learn_tick();
                 guard_at = Instant::now() + GUARD_INTERVAL;
             }
@@ -975,6 +1131,16 @@ fn resolve_server_ips(server: &str) -> Vec<String> {
     out
 }
 
+/// 捕获 TUN 抢流量用的两条半默认路由。
+pub fn capture_route_cidrs() -> Vec<String> {
+    vec!["0.0.0.0/1".to_string(), "128.0.0.0/1".to_string()]
+}
+
+/// 过滤掉捕获 TUN 自己的地址，避免给自建网卡加服务器主机路由。
+pub fn filter_server_ips(server_ips: &[String], capture_ip: &str) -> Vec<String> {
+    server_ips.iter().filter(|ip| ip.as_str() != capture_ip).cloned().collect()
+}
+
 /// 给 openconnect 用的脚本路径：路径里含空格时改放到不含空格的目录。
 ///
 /// openconnect 执行 `--script` 的方式是「把整条值当成一条 shell 命令行交给 /bin/sh」
@@ -1094,9 +1260,10 @@ mod tests {
             protocol: "anyconnect".into(),
             connector: crate::vpn::models::ConnectorKind::Auto,
             connector_path: "x".into(),
-            mode: VpnMode::CustomerFirst,
-            include_rules: vec![],
-            exclude_rules: vec![],
+            rules: vec![],
+            default_policy: "DIRECT".into(),
+            fake_ip_range: "198.18.0.0/16".into(),
+            fake_ip_filter: vec![],
             use_vpn_dns: false,
             learn: false,
             extra_args: vec![],
@@ -1111,6 +1278,44 @@ mod tests {
     }
 
     #[test]
+    fn compiled_rules_parses_canonical_kind_and_policy() {
+        let session = VpnSession::new(std::env::temp_dir().join("ws-worker-test-compiled"));
+        let request = VpnRequest {
+            profile_id: "p".into(),
+            profile_name: "n".into(),
+            server: "s".into(),
+            username: "u".into(),
+            password: "p".into(),
+            protocol: "anyconnect".into(),
+            connector: crate::vpn::models::ConnectorKind::Auto,
+            connector_path: "x".into(),
+            rules: vec![crate::vpn::models::VpnRule {
+                id: "r1".into(),
+                kind: "IP-CIDR".into(),
+                value: "10.0.0.0/8".into(),
+                policy: "VPN".into(),
+                no_resolve: true,
+                remark: String::new(),
+                enabled: true,
+            }],
+            default_policy: "DIRECT".into(),
+            fake_ip_range: "198.18.0.0/16".into(),
+            fake_ip_filter: vec![],
+            use_vpn_dns: false,
+            learn: false,
+            extra_args: vec![],
+            script_path: "s".into(),
+            hook_exe: "h".into(),
+            created_at: String::new(),
+        };
+        let mut worker = Worker::new(session, request);
+        let set = worker.compiled_rules().expect("规则集应可编译");
+        assert_eq!(set.rules().len(), 1);
+        assert_eq!(set.rules()[0].kind, crate::vpn::rule_engine::RuleKind::IpCidr);
+        assert_eq!(set.rules()[0].policy, crate::vpn::rule_engine::Policy::Vpn);
+    }
+
+    #[test]
     fn tunnel_ready_requires_ip_and_interface() {
         let session = VpnSession::new(std::env::temp_dir().join("ws-worker-test2"));
         let request = VpnRequest {
@@ -1122,9 +1327,10 @@ mod tests {
             protocol: "anyconnect".into(),
             connector: crate::vpn::models::ConnectorKind::Auto,
             connector_path: "x".into(),
-            mode: VpnMode::CustomerFirst,
-            include_rules: vec![],
-            exclude_rules: vec![],
+            rules: vec![],
+            default_policy: "DIRECT".into(),
+            fake_ip_range: "198.18.0.0/16".into(),
+            fake_ip_filter: vec![],
             use_vpn_dns: false,
             learn: false,
             extra_args: vec![],
@@ -1152,9 +1358,10 @@ mod tests {
             protocol: "anyconnect".into(),
             connector: crate::vpn::models::ConnectorKind::Auto,
             connector_path: "x".into(),
-            mode: VpnMode::CustomerFirst,
-            include_rules: vec![],
-            exclude_rules: vec![],
+            rules: vec![],
+            default_policy: "DIRECT".into(),
+            fake_ip_range: "198.18.0.0/16".into(),
+            fake_ip_filter: vec![],
             use_vpn_dns: false,
             learn: false,
             extra_args: vec![],
@@ -1190,7 +1397,7 @@ mod tests {
         // openconnect 把 --script 交给 /bin/sh，空格会被拆成两个词：
         //   /bin/sh: /Users/xxx/Library/Application: is a directory
         //   Script '…/vpnc-script.sh' returned error 126
-        let spaced = PathBuf::from("/Users/someone/Library/Application Support/com.ws.tools/vpn/script");
+        let spaced = PathBuf::from("/Users/someone/Library/Application Support/com.ws.workbench/vpn/script");
         let path = script_path_for_openconnect(&spaced, "vpnc-script.sh").unwrap();
         assert!(
             !path.to_string_lossy().contains(' '),
@@ -1213,5 +1420,19 @@ mod tests {
             dir.join("vpnc-script.sh"),
             "不含空格的路径原样返回，不做无谓搬迁"
         );
+    }
+
+    #[test]
+    fn capture_routes_are_the_two_halves() {
+        assert_eq!(
+            capture_route_cidrs(),
+            vec!["0.0.0.0/1".to_string(), "128.0.0.0/1".to_string()]
+        );
+    }
+
+    #[test]
+    fn vpn_server_ips_excludes_capture_tun_address() {
+        let ips = vec!["1.1.1.1".to_string(), "10.10.0.9".to_string()];
+        assert_eq!(filter_server_ips(&ips, "10.10.0.9"), vec!["1.1.1.1".to_string()]);
     }
 }

@@ -77,7 +77,7 @@ pub fn spawn_openconnect(req: &VpnRequest) -> Result<Child, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vpn::models::{ConnectorKind, VpnMode};
+    use crate::vpn::models::ConnectorKind;
 
     fn request() -> VpnRequest {
         VpnRequest {
@@ -89,14 +89,15 @@ mod tests {
             protocol: "anyconnect".into(),
             connector: ConnectorKind::Auto,
             connector_path: r"C:\app\openconnect\openconnect.exe".into(),
-            mode: VpnMode::CustomerFirst,
-            include_rules: vec![],
-            exclude_rules: vec![],
+            rules: vec![],
+            default_policy: "DIRECT".into(),
+            fake_ip_range: "198.18.0.0/16".into(),
+            fake_ip_filter: vec![],
             use_vpn_dns: false,
             learn: false,
             extra_args: vec![],
             script_path: r"C:\session\script\vpnc-script-win.js".into(),
-            hook_exe: r"C:\app\ws-tools.exe".into(),
+            hook_exe: r"C:\app\ws-workbench.exe".into(),
             created_at: String::new(),
         }
     }

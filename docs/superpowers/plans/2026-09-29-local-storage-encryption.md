@@ -119,9 +119,9 @@ const PREFIX: &str = "v1.";
 
 /// macOS 钥匙串服务名 / 账号
 #[cfg(target_os = "macos")]
-const VAULT_SERVICE: &str = "ws-tools-vault";
+const VAULT_SERVICE: &str = "ws-workbench-vault";
 #[cfg(target_os = "macos")]
-const VAULT_ACCOUNT: &str = "ws-tools";
+const VAULT_ACCOUNT: &str = "ws-workbench";
 
 /// Windows 主密钥落盘文件名（内容为 `dpapi:<hex>`）
 #[cfg(target_os = "windows")]
@@ -1014,7 +1014,7 @@ Expected: 编译通过。此时 `credential` 仍被 `vpn_encrypt_password`（Tas
 Run（仓库根目录）: `pnpm build`
 Expected: `vue-tsc --noEmit` 无类型错误，`vite build` 成功产出。
 
-> 遗留（非本次范围）：迁移成功后旧 macOS 钥匙串条目（`ws-tools-vpn-<key>`）未清理，
+> 遗留（非本次范围）：迁移成功后旧 macOS 钥匙串条目（`ws-workbench-vpn-<key>`）未清理，
 > `credential::forget` 仍无人调用。删除须在配置落盘成功之后进行，否则写盘失败会造成密码丢失，
 > 故本任务不做，另行处理。
 
@@ -1307,7 +1307,7 @@ git commit -m "feat(storage): route localStorage access through encrypted safeSt
 先结束残留的 vite / tauri 进程，再重新拉起（macOS）：
 
 ```bash
-pkill -f "ws-tools" ; pkill -f "vite" ; pkill -f "target/debug/ws-tools"
+pkill -f "ws-workbench" ; pkill -f "vite" ; pkill -f "target/debug/ws-workbench"
 pnpm exec tauri dev
 ```
 
@@ -1319,15 +1319,15 @@ Run/Check:
 1. 打开 `<app_data_dir>/config.json`，内容应为 `v1.` 开头的一行信封密文，肉眼不可读。
 2. 界面中项目分组、VPN 配置与规则、应用路径均正常展示为明文、可正常操作。
 3. 若此前存在明文配置，首次启动后 `config.json` 已被自动重写为密文。
-4. macOS 钥匙串中存在 `ws-tools-vault` / `ws-tools` 条目：
+4. macOS 钥匙串中存在 `ws-workbench-vault` / `ws-workbench` 条目：
 
    ```bash
-   security find-generic-password -a ws-tools -s ws-tools-vault -w
+   security find-generic-password -a ws-workbench -s ws-workbench-vault -w
    ```
 
    能取回十六进制主密钥；重启应用后仍能正确解密。
 5. 手工把 `config.json` 里密文的任意一个字符改掉后重启：应用不崩溃，日志报「数据已被篡改」并走兜底。
-6. 前端 `localStorage` 中更新提示标记（键 `ws-tools:dismissed-update-version`）为 `v1.` 密文。
+6. 前端 `localStorage` 中更新提示标记（键 `ws-workbench:dismissed-update-version`）为 `v1.` 密文。
 7. 旧版 `keychain:` / `dpapi:` 密码的 VPN 配置升级后可正常连接，`config.json` 中不再出现这两个前缀。
 
 Expected: 以上 7 项全部满足。

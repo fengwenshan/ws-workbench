@@ -1,18 +1,22 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from "vue";
+import { ref, computed, watch, onMounted, onUnmounted } from "vue";
 import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getVersion } from "@tauri-apps/api/app";
+import { Modal, Checkbox, ConfigProvider, message } from "ant-design-vue";
+import zhCN from "ant-design-vue/es/locale/zh_CN";
 import { useConfig } from "@/composables/useConfig";
 import { usePack } from "@/composables/usePack";
 import { useUpdater } from "@/composables/useUpdater";
 import { useVpn } from "@/composables/useVpn";
 import { useApps } from "@/composables/useApps";
 import { initPlatform, platform } from "@/platform";
-import { MODE_LABELS, type VpnMode } from "@/types/vpn";
+import { safeGet, safeSet } from "@/composables/safeStorage";
+import type { AttachmentMeta, EntityKind, Selection } from "@/types";
 import ProjectList from "@/components/ProjectList.vue";
-import ProjectConfig from "@/components/ProjectConfig.vue";
+import GroupDetail from "@/components/GroupDetail.vue";
+import ProjectDetail from "@/components/ProjectDetail.vue";
 import PackProgress from "@/components/PackProgress.vue";
 import LogPanel from "@/components/LogPanel.vue";
 import VpnPanel from "@/components/vpn/VpnPanel.vue";
@@ -20,7 +24,7 @@ import SettingsPanel from "@/components/settings/SettingsPanel.vue";
 
 const {
   config,
-  selectedProjectId,
+  loading,
   loadConfig,
   saveConfig,
   addGroup,
@@ -32,7 +36,15 @@ const {
   addProject,
   updateProject,
   deleteProject,
+  findGroup,
   findProject,
+  updateNote,
+  updateUploadDir,
+  setDefaultUploadDir,
+  addAttachment,
+  removeAttachment,
+  renameAttachment,
+  collectAttachments,
 } = useConfig();
 
 const { packing, progress, result, logs, addLog, clearLogs, pack } = usePack();
@@ -57,17 +69,267 @@ const vpn = useVpn(config, saveConfig);
 // 外部应用定位（设置页用），与项目打包、VPN 共用同一套查找结果
 const apps = useApps();
 
-// 一级导航：项目打包 / VPN / 设置
-const activeTab = ref<"projects" | "vpn" | "settings">("projects");
+// 视图：三个工具共享同一个工作台，日志改为工作区底部面板
+type AppView = "home" | "proxy" | "settings";
+const view = ref<AppView>("home");
+
+const VIEW_TITLES: Record<AppView, string> = {
+  home: "项目",
+  proxy: "代理",
+  settings: "设置",
+};
+const toolTitle = computed(() => VIEW_TITLES[view.value]);
+
+// 布局：项目树宽度/折叠、日志面板高度/开合，均持久化到本地
+const TREE_WIDTH_KEY = "ws-workbench:layout:tree-width";
+const TREE_COLLAPSED_KEY = "ws-workbench:layout:tree-collapsed";
+const LOG_HEIGHT_KEY = "ws-workbench:layout:log-height";
+const LOG_OPEN_KEY = "ws-workbench:layout:log-open";
+const TREE_WIDTH_DEFAULT = 260;
+const TREE_WIDTH_MIN = 200;
+const TREE_WIDTH_MAX = 420;
+const LOG_HEIGHT_DEFAULT = 220;
+const LOG_HEIGHT_MIN = 120;
+
+const treeWidth = ref(TREE_WIDTH_DEFAULT);
+const treeCollapsed = ref(false);
+const logHeight = ref(LOG_HEIGHT_DEFAULT);
+const logOpen = ref(false);
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(Math.max(value, min), max);
+}
+
+function setTreeCollapsed(collapsed: boolean) {
+  treeCollapsed.value = collapsed;
+  void safeSet(TREE_COLLAPSED_KEY, String(collapsed));
+}
+
+function toggleTree() {
+  if (view.value !== "home") {
+    view.value = "home";
+    setTreeCollapsed(false);
+    return;
+  }
+  setTreeCollapsed(!treeCollapsed.value);
+}
+
+function setLogOpen(open: boolean) {
+  logOpen.value = open;
+  void safeSet(LOG_OPEN_KEY, String(open));
+}
+
+function toggleLogs() {
+  setLogOpen(!logOpen.value);
+}
+
+function selectTool(tool: AppView) {
+  if (tool === "home" && view.value === "home") {
+    setTreeCollapsed(!treeCollapsed.value);
+    return;
+  }
+  view.value = tool;
+  if (tool === "home" && treeCollapsed.value) setTreeCollapsed(false);
+}
+
+function shortcutTitle(label: string, key: string) {
+  return `${label} (${isMac.value ? "⌘" : "Ctrl+"}${key})`;
+}
+
+const vpnDotClass = computed(() => {
+  if (vpn.isConnected) return "connected";
+  if (vpn.phaseBusy) return "busy";
+  return "";
+});
+const vpnTitle = computed(() => {
+  if (vpn.isConnected) return `VPN 已连接：${vpn.status.message}`;
+  if (vpn.phaseBusy) return "VPN 连接中…";
+  return "VPN 未连接，点击进入代理";
+});
+
+// 拖拽调整面板尺寸：只改视觉尺寸，松手后一次性持久化
+type DragState =
+  | { kind: "tree"; startX: number; startWidth: number }
+  | { kind: "log"; startY: number; startHeight: number };
+let drag: DragState | null = null;
+
+function startTreeResize(event: PointerEvent) {
+  event.preventDefault();
+  drag = { kind: "tree", startX: event.clientX, startWidth: treeWidth.value };
+  (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+}
+
+function startLogResize(event: PointerEvent) {
+  event.preventDefault();
+  drag = { kind: "log", startY: event.clientY, startHeight: logHeight.value };
+  (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+}
+
+// 分隔条也支持键盘微调，避免只能拖鼠标
+function onTreeResizerKeydown(event: KeyboardEvent) {
+  if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+  event.preventDefault();
+  const delta = event.key === "ArrowRight" ? 16 : -16;
+  treeWidth.value = clamp(treeWidth.value + delta, TREE_WIDTH_MIN, TREE_WIDTH_MAX);
+  void safeSet(TREE_WIDTH_KEY, String(treeWidth.value));
+}
+
+function onLogResizerKeydown(event: KeyboardEvent) {
+  if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+  event.preventDefault();
+  const delta = event.key === "ArrowUp" ? 16 : -16;
+  logHeight.value = clamp(
+    logHeight.value + delta,
+    LOG_HEIGHT_MIN,
+    Math.round(window.innerHeight * 0.5),
+  );
+  void safeSet(LOG_HEIGHT_KEY, String(logHeight.value));
+}
+
+function onResizeMove(event: PointerEvent) {
+  if (!drag) return;
+  if (drag.kind === "tree") {
+    treeWidth.value = clamp(
+      drag.startWidth + event.clientX - drag.startX,
+      TREE_WIDTH_MIN,
+      TREE_WIDTH_MAX,
+    );
+  } else {
+    const maxHeight = Math.round(window.innerHeight * 0.5);
+    logHeight.value = clamp(
+      drag.startHeight + drag.startY - event.clientY,
+      LOG_HEIGHT_MIN,
+      maxHeight,
+    );
+  }
+}
+
+function onResizeEnd() {
+  if (!drag) return;
+  if (drag.kind === "tree") void safeSet(TREE_WIDTH_KEY, String(treeWidth.value));
+  else void safeSet(LOG_HEIGHT_KEY, String(logHeight.value));
+  drag = null;
+}
+
+function resetTreeWidth() {
+  setTreeCollapsed(false);
+  treeWidth.value = TREE_WIDTH_DEFAULT;
+  void safeSet(TREE_WIDTH_KEY, String(TREE_WIDTH_DEFAULT));
+}
+
+function resetLogHeight() {
+  logHeight.value = LOG_HEIGHT_DEFAULT;
+  void safeSet(LOG_HEIGHT_KEY, String(LOG_HEIGHT_DEFAULT));
+}
+
+function isEditableTarget(target: EventTarget | null) {
+  const element = target as HTMLElement | null;
+  if (!element) return false;
+  const tag = element.tagName.toLowerCase();
+  return (
+    tag === "input" ||
+    tag === "textarea" ||
+    tag === "select" ||
+    element.isContentEditable
+  );
+}
+
+function handleShortcut(event: KeyboardEvent) {
+  if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
+  if (isEditableTarget(event.target)) return;
+  switch (event.key.toLowerCase()) {
+    case "1":
+      event.preventDefault();
+      selectTool("home");
+      break;
+    case "2":
+      event.preventDefault();
+      selectTool("proxy");
+      break;
+    case "3":
+      event.preventDefault();
+      selectTool("settings");
+      break;
+    case "b":
+      event.preventDefault();
+      toggleTree();
+      break;
+    case "j":
+      event.preventDefault();
+      toggleLogs();
+      break;
+  }
+}
+
+async function restoreLayout() {
+  const width = Number(await safeGet(TREE_WIDTH_KEY));
+  if (Number.isFinite(width) && width > 0) {
+    treeWidth.value = clamp(width, TREE_WIDTH_MIN, TREE_WIDTH_MAX);
+  }
+  const collapsed = await safeGet(TREE_COLLAPSED_KEY);
+  if (collapsed === "true" || collapsed === "false") {
+    treeCollapsed.value = collapsed === "true";
+  }
+  const height = Number(await safeGet(LOG_HEIGHT_KEY));
+  if (Number.isFinite(height) && height > 0) {
+    logHeight.value = clamp(
+      height,
+      LOG_HEIGHT_MIN,
+      Math.round(window.innerHeight * 0.5),
+    );
+  }
+  const open = await safeGet(LOG_OPEN_KEY);
+  if (open === "true" || open === "false") {
+    logOpen.value = open === "true";
+  }
+}
+
+onMounted(() => {
+  void restoreLayout();
+  window.addEventListener("keydown", handleShortcut);
+  window.addEventListener("pointermove", onResizeMove);
+  window.addEventListener("pointerup", onResizeEnd);
+});
+onUnmounted(() => {
+  window.removeEventListener("keydown", handleShortcut);
+  window.removeEventListener("pointermove", onResizeMove);
+  window.removeEventListener("pointerup", onResizeEnd);
+});
+
+// 日志页：在应用日志与 VPN 日志之间切换
+const logSource = ref<"app" | "vpn">("app");
+const activeLogs = computed(() =>
+  logSource.value === "app" ? logs.value : vpn.logs,
+);
+function clearActiveLogs() {
+  if (logSource.value === "app") clearLogs();
+  else vpn.clearLogs();
+}
 
 // 平台判定统一走 platform 模块，不再靠 navigator.userAgent 猜
 const isMac = computed(() => platform.is_macos);
 
 // 托盘菜单只负责转发动作，具体行为在这里决定
 let trayUnlisten: UnlistenFn | null = null;
+let navUnlisten: UnlistenFn | null = null;
 onMounted(async () => {
+  // 托盘里的页面入口：代理 / 设置 / 日志
+  navUnlisten = await listen<string>("nav-tray", (event) => {
+    if (event.payload === "nav-logs") {
+      setLogOpen(true);
+      return;
+    }
+    const map: Record<string, AppView> = {
+      "nav-proxy": "proxy",
+      "nav-settings": "settings",
+    };
+    const target = map[event.payload];
+    if (target) selectTool(target);
+  });
+
   trayUnlisten = await listen<string>("vpn-tray", async (event) => {
-    activeTab.value = "vpn";
+    // VPN 动作统一落到「代理」页展示
+    selectTool("proxy");
     switch (event.payload) {
       case "vpn-connect":
         await vpn.toggleConnection();
@@ -75,24 +337,14 @@ onMounted(async () => {
       case "vpn-disconnect":
         await vpn.disconnect();
         break;
-      case "vpn-mode": {
-        const profile = vpn.selectedProfile;
-        if (!profile) {
-          vpn.pushLog("warn", "还没有选中 VPN 配置");
-          break;
-        }
-        const next: VpnMode =
-          profile.mode === "customer_first" ? "company_first" : "customer_first";
-        await vpn.setMode(next);
-        vpn.pushLog("info", `分流模式已切换为「${MODE_LABELS[next]}」，断开重连后生效`);
-        break;
-      }
     }
   });
 });
 onUnmounted(() => {
   trayUnlisten?.();
   trayUnlisten = null;
+  navUnlisten?.();
+  navUnlisten = null;
 });
 
 // 每天 10:00 / 15:00 自动校验更新
@@ -171,58 +423,102 @@ function handleDismissUpdate() {
   addLog("info", `已忽略 v${version}，本次不再提示`);
 }
 
-const selectedProject = computed(() => {
-  if (!selectedProjectId.value) return null;
-  return findProject(selectedProjectId.value) || null;
+// 选择模型：区分分组与项目，驱动右侧路由
+const selection = ref<Selection | null>(null);
+const selectedId = computed(() => selection.value?.id ?? null);
+const selectedGroup = computed(() => {
+  const sel = selection.value;
+  if (!sel || sel.kind !== "group") return null;
+  return findGroup(sel.id) || null;
 });
+const selectedProject = computed(() => {
+  const sel = selection.value;
+  if (!sel || sel.kind !== "project") return null;
+  return findProject(sel.id) || null;
+});
+
+// 选中项失效（删除/加载完成）时回落到第一个项目
+function ensureSelection() {
+  const sel = selection.value;
+  if (sel) {
+    const alive = sel.kind === "group" ? findGroup(sel.id) : findProject(sel.id);
+    if (alive) return;
+  }
+  const first = config.value.groups.flatMap((g) => g.projects).find(Boolean);
+  selection.value = first ? { kind: "project", id: first.id } : null;
+}
+
+watch(
+  loading,
+  (value) => {
+    if (!value) ensureSelection();
+  },
+  { immediate: true },
+);
 
 // 新建分组
 const showAddGroupForm = ref(false);
 const newGroupName = ref("");
+const newGroupAddress = ref("");
+
+function openAddGroupForm() {
+  newGroupName.value = "";
+  newGroupAddress.value = "";
+  showAddGroupForm.value = true;
+}
+
+async function selectGroupAddress() {
+  const selected = await open({ directory: true, multiple: false });
+  if (selected) newGroupAddress.value = selected as string;
+}
+
+// 新建分组表单的错误反馈：写入日志并弹提示，避免只记日志看不到
+function rejectGroupForm(msg: string) {
+  addLog("error", msg);
+  message.error(msg);
+}
 
 async function handleAddGroup() {
-  if (!newGroupName.value.trim()) {
-    addLog("warn", "请填写分组名称");
+  const name = newGroupName.value.trim();
+  if (!name) {
+    rejectGroupForm("请填写分组名称");
     return;
   }
+  const address = newGroupAddress.value.trim();
+  // 未填写地址时回退到系统默认上传位置
+  let uploadDir: string | null = null;
+  if (address) {
+    // 地址不合法直接拒绝；合法但不存在则由后端按需创建
+    try {
+      uploadDir = await invoke<string>("ensure_dir", { path: address });
+    } catch (err: any) {
+      rejectGroupForm(`地址不可用: ${err}`);
+      return;
+    }
+  }
   try {
-    await addGroup(newGroupName.value.trim());
-    addLog("success", `已创建分组: ${newGroupName.value}`);
+    await addGroup(name, uploadDir);
+    addLog("success", `已创建分组: ${name}`);
     newGroupName.value = "";
+    newGroupAddress.value = "";
     showAddGroupForm.value = false;
   } catch (err: any) {
-    addLog("error", `创建分组失败: ${err}`);
+    rejectGroupForm(`创建分组失败: ${err}`);
   }
 }
 
-// 确认弹窗
-const showConfirmDialog = ref(false);
-const confirmTitle = ref("");
-const confirmMessage = ref("");
-let confirmAction: (() => void) | null = null;
+// 删除确认弹窗：分组/项目共用单次确认，附默认不勾选的「同时删除附件文件」
+const deleteModalOpen = ref(false);
+const deleteWithFiles = ref(false);
+const deleteTarget = ref<{
+  kind: EntityKind;
+  id: string;
+  name: string;
+  suffix: string;
+} | null>(null);
 
-function openConfirm(title: string, message: string, onConfirm: () => void) {
-  confirmTitle.value = title;
-  confirmMessage.value = message;
-  confirmAction = onConfirm;
-  showConfirmDialog.value = true;
-}
-
-function handleConfirmOk() {
-  if (confirmAction) {
-    confirmAction();
-    confirmAction = null;
-  }
-  showConfirmDialog.value = false;
-}
-
-function handleConfirmCancel() {
-  confirmAction = null;
-  showConfirmDialog.value = false;
-}
-
-function handleDeleteGroup(id: string) {
-  const group = config.value.groups.find((g) => g.id === id);
+function requestDeleteGroup(id: string) {
+  const group = findGroup(id);
   if (!group) return;
   // 默认分组不允许删除（内部项目仍可单独删除）
   if (group.is_default) {
@@ -230,15 +526,59 @@ function handleDeleteGroup(id: string) {
     return;
   }
   const projectCount = group.projects.length;
-  const suffix = projectCount > 0 ? `（含 ${projectCount} 个项目）` : "";
-  openConfirm(
-    "删除分组",
-    `确定要删除分组「${group.name}」${suffix}吗？此操作不可恢复。`,
-    async () => {
-      await deleteGroup(id);
-      addLog("info", `已删除分组: ${group.name}`);
-    },
-  );
+  deleteTarget.value = {
+    kind: "group",
+    id,
+    name: group.name,
+    suffix: projectCount > 0 ? `（含 ${projectCount} 个项目）` : "",
+  };
+  deleteWithFiles.value = false;
+  deleteModalOpen.value = true;
+}
+
+function requestDeleteProject(id: string) {
+  const project = findProject(id);
+  if (!project) return;
+  deleteTarget.value = {
+    kind: "project",
+    id,
+    name: project.name,
+    suffix: "",
+  };
+  deleteWithFiles.value = false;
+  deleteModalOpen.value = true;
+}
+
+async function confirmDelete() {
+  const target = deleteTarget.value;
+  if (!target) return;
+  try {
+    if (deleteWithFiles.value) {
+      // 勾选时逐个删除该实体（分组含其名下项目）的附件密文
+      const metas = collectAttachments(target.kind, target.id);
+      for (const meta of metas) {
+        try {
+          await invoke("remove_attachment_file", {
+            blobDir: meta.dir,
+            id: meta.id,
+          });
+        } catch (err: any) {
+          addLog("warn", `删除附件文件失败（${meta.name}）: ${err}`);
+        }
+      }
+    }
+    if (target.kind === "group") {
+      await deleteGroup(target.id);
+      addLog("info", `已删除分组: ${target.name}`);
+    } else {
+      await deleteProject(target.id);
+      addLog("info", `已删除项目: ${target.name}`);
+    }
+    ensureSelection();
+  } finally {
+    deleteModalOpen.value = false;
+    deleteTarget.value = null;
+  }
 }
 
 // 重命名分组（默认分组不允许重命名）
@@ -325,30 +665,50 @@ async function handleAdd() {
     return;
   }
 
-  await addProject(targetGroupId.value, {
+  const created = await addProject(targetGroupId.value, {
     name: projectName,
     source_dir: sourceDir,
     output_dir: outputDir,
     exclude: [],
   });
+  if (created) selection.value = { kind: "project", id: created.id };
   addLog("success", `已添加项目: ${projectName}`);
   showAddForm.value = false;
 }
 
-function handleSelect(id: string) {
-  selectedProjectId.value = id;
+function handleSelect(id: string, kind: EntityKind) {
+  selection.value = { kind, id };
 }
 
-function handleDelete(id: string) {
-  const project = findProject(id);
-  openConfirm(
-    "删除项目",
-    `确定要删除项目「${project?.name ?? ""}」吗？此操作不可恢复。`,
-    async () => {
-      await deleteProject(id);
-      addLog("info", `已删除项目: ${project?.name}`);
-    },
-  );
+// 笔记 / 上传位置 / 附件（分组与项目共用，按当前选中实体落盘）
+async function handleEntityNote(note: string) {
+  const sel = selection.value;
+  if (!sel) return;
+  await updateNote(sel.kind, sel.id, note);
+}
+
+async function handleEntityUploadDir(dir: string | null) {
+  const sel = selection.value;
+  if (!sel) return;
+  await updateUploadDir(sel.kind, sel.id, dir);
+}
+
+async function handleEntityAddAttachment(meta: AttachmentMeta) {
+  const sel = selection.value;
+  if (!sel) return;
+  await addAttachment(sel.kind, sel.id, meta);
+}
+
+async function handleEntityRemoveAttachment(id: string) {
+  const sel = selection.value;
+  if (!sel) return;
+  await removeAttachment(sel.kind, sel.id, id);
+}
+
+async function handleEntityRenameAttachment(id: string, name: string) {
+  const sel = selection.value;
+  if (!sel) return;
+  await renameAttachment(sel.kind, sel.id, id, name);
 }
 
 async function handleUpdate(id: string, data: any) {
@@ -360,86 +720,40 @@ async function handleUpdateDefaultExclude(rules: string[]) {
   await saveConfig();
 }
 
-async function handlePack(project: any, asZip: boolean = false) {
-  await pack(project, config.value.default_exclude, asZip);
+async function handleSetDefaultUploadDir(dir: string | null) {
+  try {
+    await setDefaultUploadDir(dir);
+    addLog(
+      "info",
+      dir ? `全局默认上传目录已设为: ${dir}` : "已清除全局默认上传目录",
+    );
+  } catch (err: any) {
+    addLog("error", `设置全局默认上传目录失败: ${err}`);
+  }
 }
 
-async function openOutputDir() {
-  const project = selectedProject.value;
-  if (!project) return;
-  try {
-    await invoke("open_output_dir", { outputDir: project.output_dir });
-  } catch (err: any) {
-    addLog("error", `打开目录失败: ${err}`);
-  }
+async function handlePack(project: any, asZip: boolean = false) {
+  await pack(project, config.value.default_exclude, asZip);
 }
 </script>
 
 <template>
-  <div class="app-layout" :class="{ 'mac-overlay-titlebar': isMac }">
-    <!-- macOS Overlay 标题栏：顶部这条空白区可拖动窗口，红黄绿按钮浮在它上面 -->
-    <div v-if="isMac" class="titlebar-drag" data-tauri-region data-tauri-drag-region></div>
-
-    <!-- 顶部一级导航：macOS 下整条头部也要能拖动窗口。用 deep 让空白子元素
-         一起生效，而按钮等可点击元素会被 Tauri 自动排除，切页不受影响 -->
-    <header class="app-header" :data-tauri-drag-region="isMac ? 'deep' : undefined">
-      <nav class="tabs">
-        <button
-          class="tab"
-          :class="{ 'tab-active': activeTab === 'projects' }"
-          @click="activeTab = 'projects'"
-        >
-          项目打包
-        </button>
-        <button
-          class="tab"
-          :class="{ 'tab-active': activeTab === 'vpn' }"
-          @click="activeTab = 'vpn'"
-        >
-          VPN
-          <span v-if="vpn.isConnected" class="tab-badge tab-badge-ok">已连接</span>
-          <span v-else-if="vpn.phaseBusy" class="tab-badge tab-badge-busy">连接中</span>
-        </button>
-        <button
-          class="tab"
-          :class="{ 'tab-active': activeTab === 'settings' }"
-          @click="activeTab = 'settings'"
-        >
-          设置
-          <span v-if="apps.missing.length > 0" class="tab-badge tab-badge-warn">
-            {{ apps.missing.length }} 项未找到
-          </span>
-        </button>
-      </nav>
-      <div class="header-right">
-        <span v-if="vpn.isConnected" class="header-chip">
-          {{ vpn.status.profile_name || "VPN" }} · {{ MODE_LABELS[vpn.status.mode] }}
-        </span>
+  <ConfigProvider :locale="zhCN">
+  <div class="app-layout">
+    <!-- 标题栏：整条可拖动窗口；macOS 下红绿灯浮在左侧，留白由 CSS 处理 -->
+    <header
+      class="titlebar"
+      :class="{ 'titlebar-mac': isMac }"
+      :data-tauri-drag-region="isMac ? 'deep' : undefined"
+    >
+      <div class="titlebar-brand">
+        <span class="app-name">ws-workbench</span>
+        <span class="tool-name">{{ toolTitle }}</span>
       </div>
-    </header>
-
-    <!-- 项目打包页 -->
-    <div v-show="activeTab === 'projects'" class="tab-body tab-body-row">
-    <!-- 左侧：项目分组列表 -->
-    <aside class="sidebar">
-      <ProjectList
-        :groups="config.groups"
-        :selected-id="selectedProjectId"
-        @select="handleSelect"
-        @add-group="showAddGroupForm = true"
-        @delete-group="handleDeleteGroup"
-        @rename-group="handleRenameGroup"
-        @add-project="openAddForm"
-        @delete-project="handleDelete"
-        @reorder-groups="reorderGroups"
-        @reorder-projects="reorderProjects"
-        @move-project="moveProject"
-      />
-
-      <!-- 软件更新 -->
-      <div class="update-bar">
+      <div class="titlebar-actions">
+        <span v-if="appVersion" class="version-text">v{{ appVersion }}</span>
         <button
-          class="update-btn"
+          class="update-btn update-btn-titlebar"
           :class="{
             'update-btn-primary':
               updateStatus === 'available' || updateStatus === 'installed',
@@ -449,76 +763,277 @@ async function openOutputDir() {
         >
           {{ updateButtonLabel }}
         </button>
-
-        <div class="version-row">
-          <span class="version-label">当前版本</span>
-          <span class="version-value">v{{ appVersion || "—" }}</span>
-        </div>
-
-        <div v-if="updateStatus === 'available'" class="version-row">
-          <span class="version-label">最新版本</span>
-          <span class="version-value version-value-new">v{{ updateInfo?.version }}</span>
-        </div>
-
-        <div v-if="updateStatus === 'downloading'" class="update-progress">
-          <div
-            class="update-progress-inner"
-            :style="{ width: updatePercentage + '%' }"
-          ></div>
-        </div>
-
-        <p
-          v-if="updateStatus === 'error'"
-          class="update-hint update-hint-error"
-        >
-          {{ updateError }}
-        </p>
-        <p v-else-if="updateStatus === 'installed'" class="update-hint">
-          安装完成，点击上方按钮重启
-        </p>
       </div>
-    </aside>
+    </header>
 
-    <!-- 右侧：配置 + 进度 + 日志 -->
-    <main class="main-content">
-      <!-- 新版本提示（每日定时校验或手动检查后出现） -->
-      <div v-if="hasUpdatePrompt" class="update-banner">
-        <span class="update-banner-text">
-          发现新版本 <strong>v{{ updateInfo?.version }}</strong>
-          <span class="update-banner-sub"
-            >（当前 v{{ updateInfo?.currentVersion }}）</span
-          >
-        </span>
-        <div class="update-banner-actions">
+    <div class="workbench">
+      <!-- 工具图标栏 -->
+      <nav class="rail" aria-label="工具">
+        <div class="rail-group">
           <button
-            class="btn btn-primary"
-            :disabled="updateBusy"
-            @click="handleUpdateAction"
+            class="rail-btn"
+            :class="{ active: view === 'home' }"
+            :aria-current="view === 'home' ? 'page' : undefined"
+            :title="shortcutTitle('项目', '1')"
+            aria-label="项目"
+            @click="selectTool('home')"
           >
-            {{ updateBusy ? "下载中…" : "立即更新" }}
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M3 7a2 2 0 0 1 2-2h4.2a2 2 0 0 1 1.6.8L12 7h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+            </svg>
           </button>
-          <button class="btn btn-secondary" @click="handleDismissUpdate">
-            稍后
+          <button
+            class="rail-btn"
+            :class="{ active: view === 'proxy' }"
+            :aria-current="view === 'proxy' ? 'page' : undefined"
+            :title="shortcutTitle('代理', '2')"
+            aria-label="代理"
+            @click="selectTool('proxy')"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M12 3l7 3v5.2c0 4.5-3 7.9-7 9.8-4-1.9-7-5.3-7-9.8V6z" />
+              <path d="M9.5 12.2l1.8 1.9 3.4-3.7" />
+            </svg>
+          </button>
+          <button
+            class="rail-btn"
+            :class="{ active: view === 'settings' }"
+            :aria-current="view === 'settings' ? 'page' : undefined"
+            :title="shortcutTitle('设置', '3')"
+            aria-label="设置"
+            @click="selectTool('settings')"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
+              <circle cx="12" cy="12" r="3" />
+            </svg>
           </button>
         </div>
-      </div>
+        <div class="rail-bottom">
+          <button
+            class="rail-btn"
+            :class="{ active: logOpen }"
+            :aria-pressed="logOpen"
+            :title="shortcutTitle('日志', 'J')"
+            aria-label="日志"
+            @click="toggleLogs"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="3" y="5" width="18" height="14" rx="2" />
+              <path d="M7 9l3 3-3 3M13 15h4" />
+            </svg>
+          </button>
+          <button
+            class="rail-btn rail-vpn"
+            :title="vpnTitle"
+            aria-label="VPN 状态"
+            @click="selectTool('proxy')"
+          >
+            <span class="rail-vpn-dot" :class="vpnDotClass"></span>
+          </button>
+        </div>
+      </nav>
+
+      <!-- 项目树面板：可拖拽宽度、可折叠 -->
+      <aside
+        v-show="view === 'home' && !treeCollapsed"
+        class="tree-panel"
+        :style="{ width: treeWidth + 'px' }"
+      >
+        <ProjectList
+          :groups="config.groups"
+          :selected-id="selectedId"
+          @select="handleSelect"
+          @add-group="openAddGroupForm"
+          @delete-group="requestDeleteGroup"
+          @rename-group="handleRenameGroup"
+          @add-project="openAddForm"
+          @delete-project="requestDeleteProject"
+          @reorder-groups="reorderGroups"
+          @reorder-projects="reorderProjects"
+          @move-project="moveProject"
+        />
+        <button
+          class="tree-collapse"
+          :title="shortcutTitle('折叠项目树', 'B')"
+          aria-label="折叠项目树"
+          @click="setTreeCollapsed(true)"
+        >
+          ‹
+        </button>
+      </aside>
+      <div
+        v-show="view === 'home' && !treeCollapsed"
+        class="resizer resizer-tree"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="调整项目树宽度"
+        tabindex="0"
+        title="拖动调整项目树宽度，双击恢复默认"
+        @pointerdown="startTreeResize"
+        @keydown="onTreeResizerKeydown"
+        @dblclick="resetTreeWidth"
+      ></div>
+
+      <!-- 工作区：按工具切换内容，日志是底部可折叠面板 -->
+      <main class="workspace">
+        <div v-if="hasUpdatePrompt" class="update-banner">
+          <span class="update-banner-text">
+            发现新版本 <strong>v{{ updateInfo?.version }}</strong>
+            <span class="update-banner-sub"
+              >（当前 v{{ updateInfo?.currentVersion }}）</span
+            >
+          </span>
+          <div class="update-banner-actions">
+            <button
+              class="btn btn-primary"
+              :disabled="updateBusy"
+              @click="handleUpdateAction"
+            >
+              {{ updateBusy ? "下载中…" : "立即更新" }}
+            </button>
+            <button class="btn btn-secondary" @click="handleDismissUpdate">
+              稍后
+            </button>
+          </div>
+        </div>
+
+        <!-- 项目工具 -->
+        <div v-show="view === 'home'" class="workspace-body home-body">
+          <div class="config-section">
+            <GroupDetail
+              v-if="selection && selection.kind === 'group' && selectedGroup"
+              :key="'group-' + selection.id"
+              :group="selectedGroup"
+              :default-upload-dir="config.default_upload_dir"
+              @update-note="handleEntityNote"
+              @update-upload-dir="handleEntityUploadDir"
+              @add-attachment="handleEntityAddAttachment"
+              @remove-attachment="handleEntityRemoveAttachment"
+              @rename-attachment="handleEntityRenameAttachment"
+              @log="addLog"
+            />
+            <ProjectDetail
+              v-else-if="selection && selection.kind === 'project' && selectedProject"
+              :key="'project-' + selection.id"
+              :project="selectedProject"
+              :default-exclude="config.default_exclude"
+              :default-upload-dir="config.default_upload_dir"
+              @update="handleUpdate"
+              @pack="handlePack"
+              @update-default-exclude="handleUpdateDefaultExclude"
+              @update-note="handleEntityNote"
+              @update-upload-dir="handleEntityUploadDir"
+              @add-attachment="handleEntityAddAttachment"
+              @remove-attachment="handleEntityRemoveAttachment"
+              @rename-attachment="handleEntityRenameAttachment"
+              @log="addLog"
+            />
+            <div v-else class="no-selection">
+              <p>请选择左侧的分组或项目</p>
+            </div>
+          </div>
+
+          <PackProgress :progress="progress" :packing="packing" />
+        </div>
+
+        <!-- 代理工具 -->
+        <div v-show="view === 'proxy'" class="workspace-body">
+          <VpnPanel :vpn="vpn" :active="view === 'proxy'" />
+        </div>
+
+        <!-- 设置工具 -->
+        <div v-show="view === 'settings'" class="workspace-body">
+          <SettingsPanel
+            :apps="apps"
+            :default-upload-dir="config.default_upload_dir"
+            @update-default-upload-dir="handleSetDefaultUploadDir"
+          />
+        </div>
+
+        <!-- 日志面板 -->
+        <div
+          v-show="logOpen"
+          class="resizer resizer-log"
+          role="separator"
+          aria-orientation="horizontal"
+          aria-label="调整日志面板高度"
+          tabindex="0"
+          title="拖动调整日志高度，双击恢复默认"
+          @pointerdown="startLogResize"
+          @keydown="onLogResizerKeydown"
+          @dblclick="resetLogHeight"
+        ></div>
+        <section
+          v-show="logOpen"
+          class="log-dock"
+          :style="{ height: logHeight + 'px' }"
+        >
+          <div class="log-dock-header">
+            <div class="log-dock-tabs">
+              <button
+                class="log-dock-tab"
+                :class="{ active: logSource === 'app' }"
+                @click="logSource = 'app'"
+              >
+                应用
+              </button>
+              <button
+                class="log-dock-tab"
+                :class="{ active: logSource === 'vpn' }"
+                @click="logSource = 'vpn'"
+              >
+                VPN
+              </button>
+            </div>
+            <div class="log-dock-actions">
+              <button class="log-dock-action" @click="clearActiveLogs">
+                清空
+              </button>
+              <button
+                class="log-dock-action log-dock-close"
+                :title="shortcutTitle('关闭日志', 'J')"
+                aria-label="关闭日志"
+                @click="setLogOpen(false)"
+              >
+                ×
+              </button>
+            </div>
+          </div>
+          <div class="log-dock-body">
+            <LogPanel :logs="activeLogs" @clear="clearActiveLogs" />
+          </div>
+        </section>
+      </main>
+    </div>
 
       <!-- 新建分组弹窗 -->
-      <div
-        v-if="showAddGroupForm"
-        class="add-form-overlay"
-        @click.self="showAddGroupForm = false"
-      >
+      <div v-if="showAddGroupForm" class="add-form-overlay">
         <div class="add-form add-form-sm">
           <h3>新建分组</h3>
           <div class="form-row">
+            <label>分组名称</label>
             <input
               v-model="newGroupName"
               class="form-input"
-              placeholder="分组名称"
+              placeholder="请输入分组名称"
               @keydown.enter="handleAddGroup"
               autofocus
             />
+          </div>
+          <div class="form-row">
+            <label>地址（可选）</label>
+            <div class="dir-row">
+              <input
+                v-model="newGroupAddress"
+                class="form-input"
+                placeholder="留空则使用系统默认上传位置"
+                @keydown.enter="handleAddGroup"
+              />
+              <button class="btn btn-pick" @click="selectGroupAddress">
+                选择
+              </button>
+            </div>
           </div>
           <div class="form-actions">
             <button class="btn btn-secondary" @click="showAddGroupForm = false">
@@ -582,59 +1097,25 @@ async function openOutputDir() {
         </div>
       </div>
 
-      <!-- 确认弹窗 -->
-      <div
-        v-if="showConfirmDialog"
-        class="add-form-overlay"
-        @click.self="handleConfirmCancel"
+      <!-- 删除确认弹窗：单次确认 + 默认不勾选的「同时删除附件文件」 -->
+      <Modal
+        v-model:open="deleteModalOpen"
+        title="删除确认"
+        ok-text="确认删除"
+        cancel-text="取消"
+        ok-type="danger"
+        :mask-closable="false"
+        @ok="confirmDelete"
       >
-        <div class="confirm-dialog">
-          <h3 class="confirm-title">{{ confirmTitle }}</h3>
-          <p class="confirm-message">{{ confirmMessage }}</p>
-          <div class="form-actions confirm-actions">
-            <button class="btn btn-secondary" @click="handleConfirmCancel">
-              取消
-            </button>
-            <button class="btn btn-danger" @click="handleConfirmOk">
-              确定删除
-            </button>
-          </div>
-        </div>
-      </div>
-
-      <!-- 配置面板 -->
-      <div class="config-section">
-        <ProjectConfig
-          :project="selectedProject"
-          :default-exclude="config.default_exclude"
-          @update="handleUpdate"
-          @pack="handlePack"
-          @open-output="openOutputDir"
-          @log="addLog"
-          @update-default-exclude="handleUpdateDefaultExclude"
-        />
-      </div>
-
-      <!-- 进度条 -->
-      <PackProgress :progress="progress" :packing="packing" />
-
-      <!-- 日志面板 -->
-      <div class="log-section">
-        <LogPanel :logs="logs" @clear="clearLogs" />
-      </div>
-    </main>
-    </div>
-
-    <!-- VPN 页：用 v-show 而不是 v-if，保证切页时连接状态与日志流不中断 -->
-    <div v-show="activeTab === 'vpn'" class="tab-body">
-      <VpnPanel :vpn="vpn" :active="activeTab === 'vpn'" />
-    </div>
-
-    <!-- 设置页 -->
-    <div v-show="activeTab === 'settings'" class="tab-body">
-      <SettingsPanel :apps="apps" />
-    </div>
+        <p class="delete-modal-text">
+          确认删除{{ deleteTarget?.kind === "group" ? "分组" : "项目" }}「{{
+            deleteTarget?.name
+          }}」{{ deleteTarget?.suffix }}？此操作不可恢复。
+        </p>
+        <Checkbox v-model:checked="deleteWithFiles">同时删除附件文件</Checkbox>
+      </Modal>
   </div>
+  </ConfigProvider>
 </template>
 
 <style scoped>
@@ -642,153 +1123,335 @@ async function openOutputDir() {
   display: flex;
   flex-direction: column;
   height: 100vh;
+  background: var(--bg-primary);
 }
 
-/* 顶部一级导航 */
-.app-header {
+/* 标题栏：承载窗口拖动、当前工具、版本与更新按钮 */
+.titlebar {
   flex-shrink: 0;
+  height: 38px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
-  padding: 0 16px;
-  height: 44px;
+  gap: 12px;
+  padding: 0 12px 0 16px;
   border-bottom: 1px solid var(--border-color);
   background: var(--bg-primary);
 }
-.tabs {
-  display: flex;
-  gap: 4px;
+.titlebar-mac {
+  padding-left: 78px;
 }
-.tab {
+.titlebar-brand {
   display: flex;
-  align-items: center;
-  gap: 6px;
-  border: none;
-  background: transparent;
-  padding: 6px 14px;
-  border-radius: 6px;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+.app-name {
   font-size: 13px;
-  color: var(--text-secondary);
-  cursor: pointer;
-}
-.tab:hover {
-  background: var(--bg-hover);
+  font-weight: 600;
   color: var(--text-primary);
-}
-.tab-active {
-  background: var(--bg-active);
-  color: var(--text-active);
-  font-weight: 500;
-}
-.tab-badge {
-  font-size: 11px;
-  border-radius: 9px;
-  padding: 1px 7px;
-}
-.tab-badge-ok {
-  color: var(--success);
-  background: rgba(16, 185, 129, 0.12);
-}
-.tab-badge-busy {
-  color: var(--warning);
-  background: rgba(245, 158, 11, 0.12);
-}
-.tab-badge-warn {
-  color: var(--text-secondary);
-  background: var(--bg-tag);
-}
-.header-right {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.header-chip {
-  font-size: 12px;
-  color: var(--text-secondary);
-  background: var(--bg-tag);
-  border-radius: 10px;
-  padding: 2px 10px;
-  max-width: 320px;
-  overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
+.tool-name {
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.titlebar-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+.version-text {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
 
-/* 页签内容区 */
-.tab-body {
+/* 图标栏 + 项目树 + 工作区 */
+.workbench {
   flex: 1;
   min-height: 0;
   display: flex;
-  flex-direction: column;
   overflow: hidden;
 }
-.tab-body-row {
-  flex-direction: row;
-}
-
-.sidebar {
-  width: 240px;
-  border-right: 1px solid var(--border-color);
-  background: var(--bg-primary);
+.rail {
+  width: 56px;
+  flex-shrink: 0;
   display: flex;
   flex-direction: column;
-  flex-shrink: 0;
+  justify-content: space-between;
+  padding: 8px 0;
+  border-right: 1px solid var(--border-color);
+  background: var(--bg-primary);
 }
-.main-content {
+.rail-group,
+.rail-bottom {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+.rail-btn {
+  position: relative;
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.rail-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.rail-btn.active {
+  background: rgba(59, 130, 246, 0.1);
+  color: var(--primary);
+}
+.rail-btn.active::before {
+  content: "";
+  position: absolute;
+  left: -8px;
+  top: 8px;
+  bottom: 8px;
+  width: 3px;
+  border-radius: 0 2px 2px 0;
+  background: var(--primary);
+}
+.rail-btn:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+.rail-btn svg {
+  width: 20px;
+  height: 20px;
+}
+.rail-vpn {
+  height: 32px;
+}
+.rail-vpn:hover {
+  background: transparent;
+}
+.rail-vpn-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  transition: background 0.15s, box-shadow 0.15s;
+}
+.rail-vpn-dot.connected {
+  background: var(--success);
+  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.15);
+}
+.rail-vpn-dot.busy {
+  background: var(--warning);
+  animation: vpn-pulse 1.2s ease-in-out infinite;
+}
+@keyframes vpn-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+/* 项目树面板 */
+.tree-panel {
+  position: relative;
+  flex-shrink: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border-color);
+  background: var(--bg-primary);
+  overflow: hidden;
+}
+.tree-collapse {
+  position: absolute;
+  top: 10px;
+  right: 8px;
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-input);
+  color: var(--text-secondary);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.tree-collapse:hover {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
+/* 拖拽分隔条 */
+.resizer {
+  flex-shrink: 0;
+  position: relative;
+  background: transparent;
+  touch-action: none;
+  transition: background 0.15s;
+}
+.resizer:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: -2px;
+}
+.resizer-tree {
+  width: 5px;
+  cursor: col-resize;
+}
+.resizer-log {
+  height: 5px;
+  cursor: row-resize;
+  border-bottom: 1px solid var(--border-color);
+}
+.resizer:hover {
+  background: var(--primary);
+  opacity: 0.45;
+}
+
+/* 工作区 */
+.workspace {
+  position: relative;
   flex: 1;
   min-width: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
 }
-/* macOS Overlay 标题栏：整个导航下移 28px，顶部露出可拖拽的空白条给红黄绿按钮 */
-.mac-overlay-titlebar .app-header {
-  margin-top: 28px;
+.workspace-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
-/* 顶部拖拽区（透明，仅占 28px，不遮挡下方内容） */
-.titlebar-drag {
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 28px;
-  z-index: 50;
+.home-body {
+  overflow: hidden;
 }
 
-/* 软件更新栏 */
-.update-bar {
+/* 日志面板（外层容器，与 LogPanel 组件自身的 .log-panel 区分） */
+.log-dock {
   flex-shrink: 0;
-  padding: 10px;
+  display: flex;
+  flex-direction: column;
   border-top: 1px solid var(--border-color);
+  background: var(--bg-primary);
+  overflow: hidden;
 }
-/* 版本号（位于检查更新按钮下方） */
-.version-row {
+.log-dock-header {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-top: 8px;
-  font-size: 12px;
-  color: var(--text-muted);
+  height: 40px;
+  padding: 0 8px 0 12px;
+  border-bottom: 1px solid var(--border-color);
 }
-.version-value {
+.log-dock-tabs {
+  display: flex;
+  gap: 4px;
+}
+.log-dock-tab {
+  padding: 4px 12px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
   color: var(--text-secondary);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
 }
-.version-value-new {
+.log-dock-tab:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.log-dock-tab.active {
+  border-color: var(--primary);
   color: var(--primary);
   font-weight: 500;
 }
-.update-btn {
-  width: 100%;
-  padding: 8px;
+.log-dock-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.log-dock-action {
+  padding: 4px 10px;
   border: 1px solid var(--border-color);
   border-radius: 6px;
   background: var(--bg-input);
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: 12px;
   cursor: pointer;
   transition: all 0.15s;
+}
+.log-dock-action:hover {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+.log-dock-close {
+  width: 28px;
+  padding: 4px 0;
+  font-size: 16px;
+  line-height: 1;
+  text-align: center;
+}
+.log-dock-body {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+/* 日志内容自带「日志 / 清空」表头，与外层标签栏重复，这里只保留内容区 */
+.log-dock-body :deep(.log-header) {
+  display: none;
+}
+
+/* 窄窗口：先收起项目树，再让日志面板覆盖工作区 */
+@media (max-width: 900px) {
+  .tree-panel,
+  .resizer-tree {
+    display: none !important;
+  }
+}
+@media (max-width: 720px) {
+  .log-dock {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    max-height: 50vh;
+    box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.12);
+    z-index: 5;
+  }
+  .resizer-log {
+    display: none;
+  }
+}
+
+/* 软件更新按钮（标题栏内） */
+.update-btn {
+  padding: 4px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-input);
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
 }
 .update-btn:hover:not(:disabled) {
   border-color: var(--primary);
@@ -803,27 +1466,8 @@ async function openOutputDir() {
   color: var(--primary);
   font-weight: 500;
 }
-.update-progress {
-  margin-top: 8px;
-  height: 4px;
-  border-radius: 2px;
-  background: var(--bg-tag);
-  overflow: hidden;
-}
-.update-progress-inner {
-  height: 100%;
-  background: var(--primary);
-  transition: width 0.2s;
-}
-.update-hint {
-  margin: 8px 0 0;
-  font-size: 12px;
-  line-height: 1.45;
-  color: var(--text-muted);
-  word-break: break-word;
-}
-.update-hint-error {
-  color: var(--danger);
+.update-btn-titlebar {
+  width: auto;
 }
 
 /* 新版本提示横幅 */
@@ -858,12 +1502,6 @@ async function openOutputDir() {
   display: flex;
   flex-direction: column;
 }
-.log-section {
-  height: 200px;
-  border-top: 1px solid var(--border-color);
-  background: var(--bg-primary);
-  flex-shrink: 0;
-}
 
 /* 弹窗 */
 .add-form-overlay {
@@ -886,7 +1524,12 @@ async function openOutputDir() {
   max-width: 90vw;
 }
 .add-form-sm {
-  width: 360px;
+  width: 420px;
+}
+.add-form-sm .form-actions {
+  margin-top: 24px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border-color);
 }
 /* 表单内的说明文字 */
 .form-hint {
@@ -936,27 +1579,21 @@ async function openOutputDir() {
   margin-top: 20px;
 }
 
-/* 确认弹窗 */
-.confirm-dialog {
-  background: var(--bg-primary);
-  border-radius: 12px;
-  padding: 24px;
-  width: 380px;
-  max-width: 90vw;
-}
-.confirm-title {
-  font-size: 17px;
-  font-weight: 600;
-  color: var(--text-primary);
-  margin-bottom: 12px;
-}
-.confirm-message {
+/* 删除确认弹窗正文 */
+.delete-modal-text {
   font-size: 14px;
   color: var(--text-secondary);
   line-height: 1.6;
-  margin-bottom: 8px;
+  margin-bottom: 12px;
 }
-.confirm-actions {
-  margin-top: 24px;
+
+/* 未选中任何分组/项目时的占位 */
+.no-selection {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  font-size: 14px;
 }
 </style>

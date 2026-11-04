@@ -1,6 +1,3 @@
-/** 分流模式 */
-export type VpnMode = 'customer_first' | 'company_first'
-
 /** 连接器偏好。现在只有 openconnect 一条通道，两个取值等价 */
 export type ConnectorKind = 'auto' | 'openconnect'
 
@@ -15,11 +12,25 @@ export type VpnPhase =
   | 'disconnecting'
   | 'failed'
 
+/** 规则匹配类型，取值与后端 rule_engine::RuleKind 一致 */
+export type VpnRuleKind =
+  | 'DOMAIN'
+  | 'DOMAIN-SUFFIX'
+  | 'DOMAIN-KEYWORD'
+  | 'PROCESS-NAME'
+  | 'DST-PORT'
+  | 'IP-CIDR'
+
+/** 规则走向，取值与后端 rule_engine::Policy 一致 */
+export type VpnPolicy = 'DIRECT' | 'VPN'
+
 /** 单条分流规则 */
 export interface VpnRule {
   id: string
-  /** CIDR，例如 10.0.0.0/8 */
-  cidr: string
+  kind: VpnRuleKind
+  value: string
+  policy: VpnPolicy
+  no_resolve: boolean
   remark: string
   enabled: boolean
 }
@@ -29,6 +40,8 @@ export interface VpnRuleSet {
   id: string
   name: string
   rules: VpnRule[]
+  /** 所有规则都不命中时的兜底走向 */
+  default_policy: VpnPolicy
   created_at: string
 }
 
@@ -45,8 +58,12 @@ export interface VpnProfile {
   /** openconnect 协议名 */
   protocol: string
   connector: ConnectorKind
-  mode: VpnMode
   rule_set_id: string
+  /** fake-ip 地址池，用于按域名分流时反查真实目标 */
+  fake_ip_range: string
+  /** 不进入 fake-ip 池的地址段（*.后缀 或 关键字） */
+  fake_ip_filter: string[]
+  /** 是否把服务端下发的 DNS 写入 VPN 网卡 */
   use_vpn_dns: boolean
   /** 连接期间是否开启学习模式：采集实际连通的远端地址，反推候选分流网段 */
   learn: boolean
@@ -145,7 +162,6 @@ export interface VpnStatus {
   profile_name: string
   connector: string
   connector_name: string
-  mode: VpnMode
   tun_dev: string
   tun_index: number
   vpn_ip: string
@@ -220,14 +236,19 @@ export const PHASE_LABELS: Record<VpnPhase, string> = {
   failed: '失败',
 }
 
-export const MODE_LABELS: Record<VpnMode, string> = {
-  customer_first: '以客户网络为主',
-  company_first: '以公司网络为主',
+/** 规则类型到展示文案的映射（沿用 Clash 规范大写连字符形式） */
+export const RULE_KIND_LABELS: Record<VpnRuleKind, string> = {
+  DOMAIN: 'DOMAIN',
+  'DOMAIN-SUFFIX': 'DOMAIN-SUFFIX',
+  'DOMAIN-KEYWORD': 'DOMAIN-KEYWORD',
+  'PROCESS-NAME': 'PROCESS-NAME',
+  'DST-PORT': 'DST-PORT',
+  'IP-CIDR': 'IP-CIDR',
 }
 
-export const MODE_DESCRIPTIONS: Record<VpnMode, string> = {
-  customer_first: '只有规则表里命中的网段走 VPN，其余流量（客户内网、互联网）全部保持本地。',
-  company_first: '全部流量走 VPN，只有规则表里列出的网段（客户网段）直连本地。',
+export const POLICY_LABELS: Record<VpnPolicy, string> = {
+  DIRECT: '直连',
+  VPN: '走 VPN',
 }
 
 /** 连接中的阶段，用于禁用按钮 */

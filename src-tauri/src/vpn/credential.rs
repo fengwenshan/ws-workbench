@@ -193,24 +193,40 @@ pub(crate) mod dpapi {
 // ============================== macOS / 钥匙串 ==============================
 
 #[cfg(target_os = "macos")]
-const KEYCHAIN_SERVICE: &str = "ws-tools-vpn";
+const KEYCHAIN_SERVICE: &str = "ws-workbench-vpn";
+/// 钥匙串条目的账号（即应用名）
+#[cfg(target_os = "macos")]
+const KEYCHAIN_ACCOUNT: &str = "ws-workbench";
 
 #[cfg(target_os = "macos")]
 fn keychain_service(key: &str) -> String {
     format!("{}-{}", KEYCHAIN_SERVICE, key)
 }
 
+/// 从钥匙串读取密码；条目不存在时返回 None
 #[cfg(target_os = "macos")]
-fn platform_protect(key: &str, plain: &str) -> Result<String, String> {
-    let service = keychain_service(key);
+fn keychain_lookup(service: &str, account: &str) -> Option<String> {
+    let output = std::process::Command::new("security")
+        .args(["find-generic-password", "-a", account, "-s", service, "-w"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).trim_end().to_string())
+}
+
+/// 写入（覆盖）钥匙串条目
+#[cfg(target_os = "macos")]
+fn keychain_store(service: &str, account: &str, plain: &str) -> Result<(), String> {
     let output = std::process::Command::new("security")
         .args([
             "add-generic-password",
             "-U",
             "-a",
-            "ws-tools",
+            account,
             "-s",
-            &service,
+            service,
             "-w",
             plain,
         ])
@@ -222,6 +238,20 @@ fn platform_protect(key: &str, plain: &str) -> Result<String, String> {
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
+    Ok(())
+}
+
+/// 删除钥匙串条目（不存在时静默忽略）
+#[cfg(target_os = "macos")]
+fn keychain_delete(service: &str, account: &str) {
+    let _ = std::process::Command::new("security")
+        .args(["delete-generic-password", "-a", account, "-s", service])
+        .output();
+}
+
+#[cfg(target_os = "macos")]
+fn platform_protect(key: &str, plain: &str) -> Result<String, String> {
+    keychain_store(&keychain_service(key), KEYCHAIN_ACCOUNT, plain)?;
     Ok(format!("keychain:{}", key))
 }
 
@@ -230,37 +260,14 @@ fn platform_unprotect(stored: &str) -> Result<String, String> {
     let key = stored
         .strip_prefix("keychain:")
         .ok_or_else(|| "密文格式不是钥匙串引用".to_string())?;
-    let service = keychain_service(key);
-    let output = std::process::Command::new("security")
-        .args([
-            "find-generic-password",
-            "-a",
-            "ws-tools",
-            "-s",
-            &service,
-            "-w",
-        ])
-        .output()
-        .map_err(|e| format!("调用 security 失败: {}", e))?;
-    if !output.status.success() {
-        return Err("从钥匙串读取密码失败".to_string());
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim_end().to_string())
+    keychain_lookup(&keychain_service(key), KEYCHAIN_ACCOUNT)
+        .ok_or_else(|| "从钥匙串读取密码失败".to_string())
 }
 
 #[cfg(target_os = "macos")]
 fn platform_forget(stored: &str) {
     if let Some(key) = stored.strip_prefix("keychain:") {
-        let service = keychain_service(key);
-        let _ = std::process::Command::new("security")
-            .args([
-                "delete-generic-password",
-                "-a",
-                "ws-tools",
-                "-s",
-                &service,
-            ])
-            .output();
+        keychain_delete(&keychain_service(key), KEYCHAIN_ACCOUNT);
     }
 }
 

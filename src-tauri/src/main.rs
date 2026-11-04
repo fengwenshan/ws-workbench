@@ -13,11 +13,11 @@ fn main() {
         let dir = args.get(index + 1).cloned().unwrap_or_default();
         if dir.is_empty() {
             eprintln!("[vpn-worker] 缺少会话目录参数");
-            std::process::exit(ws_tools_lib::vpn::worker::EXIT_NO_REQUEST);
+            std::process::exit(ws_workbench_lib::vpn::worker::EXIT_NO_REQUEST);
         }
-        let code = ws_tools_lib::vpn::worker::run(std::path::Path::new(&dir));
+        let code = ws_workbench_lib::vpn::worker::run(std::path::Path::new(&dir));
         std::process::exit(code);
     }
 
-    ws_tools_lib::run();
+    ws_workbench_lib::run();
 }

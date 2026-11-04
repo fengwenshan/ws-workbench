@@ -1,56 +1,96 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
-import type { VpnMode, VpnRule, VpnRuleSet } from '@/types/vpn'
-import { MODE_DESCRIPTIONS } from '@/types/vpn'
+import { computed, reactive, ref, watch } from 'vue'
+import { Button, Input, Select, SelectOption, Switch } from 'ant-design-vue'
+import type { VpnPolicy, VpnRule, VpnRuleKind, VpnRuleSet } from '@/types/vpn'
+import { POLICY_LABELS, RULE_KIND_LABELS } from '@/types/vpn'
 
 const props = defineProps<{
-  ruleSet: VpnRuleSet | null
-  mode: VpnMode
-  overlaps: string[]
+  ruleSet: VpnRuleSet
+  /** 来自 useVpn 的逐条规则校验，失败时 reject */
+  validateRule: (kind: VpnRuleKind, value: string) => Promise<string>
 }>()
 
 const emit = defineEmits<{
-  add: [cidr: string, remark: string]
+  add: [kind: VpnRuleKind, value: string, policy: VpnPolicy, remark: string]
   update: [ruleId: string, patch: Partial<VpnRule>]
   remove: [ruleId: string]
+  'update-default-policy': [policy: VpnPolicy]
 }>()
 
-const newCidr = ref('')
+const KINDS = Object.keys(RULE_KIND_LABELS) as VpnRuleKind[]
+const POLICIES = Object.keys(POLICY_LABELS) as VpnPolicy[]
+
+/** 行内校验错误，按规则 id 记录 */
+const errors = reactive<Record<string, string>>({})
+
+async function ruleMessage(kind: VpnRuleKind, value: string): Promise<string> {
+  if (!value.trim()) return '匹配值不能为空'
+  try {
+    await props.validateRule(kind, value)
+    return ''
+  } catch (err: any) {
+    return String(err)
+  }
+}
+
+function applyError(ruleId: string, message: string) {
+  if (message) errors[ruleId] = message
+  else delete errors[ruleId]
+}
+
+async function validateRow(rule: VpnRule) {
+  applyError(rule.id, await ruleMessage(rule.kind, rule.value))
+}
+
+watch(
+  () =>
+    props.ruleSet.rules
+      .map((rule) => [rule.id, rule.kind, rule.value].join('\u0000'))
+      .join('\u0001'),
+  () => {
+    props.ruleSet.rules.forEach((rule) => validateRow(rule))
+  },
+  { immediate: true },
+)
+
+function onKindChange(rule: VpnRule, kind: VpnRuleKind) {
+  const patch: Partial<VpnRule> = { kind }
+  // no-resolve 只对 IP-CIDR 有意义，切走时复位
+  if (kind !== 'IP-CIDR') patch.no_resolve = false
+  emit('update', rule.id, patch)
+  ruleMessage(kind, rule.value).then((message) => applyError(rule.id, message))
+}
+
+function onValueChange(rule: VpnRule, event: Event) {
+  emit('update', rule.id, { value: (event.target as HTMLInputElement).value })
+}
+
+function onRemarkChange(rule: VpnRule, event: Event) {
+  emit('update', rule.id, { remark: (event.target as HTMLInputElement).value })
+}
+
+const newKind = ref<VpnRuleKind>('DOMAIN')
+const newValue = ref('')
+const newPolicy = ref<VpnPolicy>('DIRECT')
 const newRemark = ref('')
-const error = ref('')
+const addError = ref('')
 
-/** 输入时的即时校验，最终以后端规范化结果为准 */
-const CIDR_PATTERN =
-  /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\/(\d{1,2})$/
-
-function validate(cidr: string): string {
-  const text = cidr.trim()
-  if (!text) return '请填写网段'
-  const matched = CIDR_PATTERN.exec(text)
-  if (!matched) return '格式应为 10.0.0.0/8 这样'
-  const [, a, b, c, d, len] = matched
-  const octets = [a, b, c, d].map((part) => Number(part))
-  if (octets.some((value) => value > 255)) return '每一段必须在 0-255 之间'
-  if (Number(len) > 32) return '前缀长度不能大于 32'
-  return ''
-}
-
-function submit() {
-  error.value = validate(newCidr.value)
-  if (error.value) return
-  emit('add', newCidr.value.trim(), newRemark.value.trim())
-  newCidr.value = ''
+async function submit() {
+  const message = await ruleMessage(newKind.value, newValue.value)
+  if (message) {
+    addError.value = message
+    return
+  }
+  emit('add', newKind.value, newValue.value.trim(), newPolicy.value, newRemark.value.trim())
+  newValue.value = ''
   newRemark.value = ''
-}
-
-function onCellInput(ruleId: string, field: 'cidr' | 'remark', value: string) {
-  emit('update', ruleId, { [field]: value } as Partial<VpnRule>)
+  addError.value = ''
 }
 
 const enabledCount = computed(
-  () => props.ruleSet?.rules.filter((rule) => rule.enabled).length ?? 0,
+  () => props.ruleSet.rules.filter((rule) => rule.enabled).length,
 )
-const totalCount = computed(() => props.ruleSet?.rules.length ?? 0)
+const totalCount = computed(() => props.ruleSet.rules.length)
 </script>
 
 <template>
@@ -59,109 +99,147 @@ const totalCount = computed(() => props.ruleSet?.rules.length ?? 0)
       <div>
         <h4>分流规则表</h4>
         <p class="rule-hint">
-          <template v-if="mode === 'customer_first'">
-            命中的网段走 VPN，未命中的走本地。{{ MODE_DESCRIPTIONS.customer_first }}
-          </template>
-          <template v-else>
-            列出的网段直连本地，其余全部走 VPN。{{ MODE_DESCRIPTIONS.company_first }}
-          </template>
+          规则自上而下匹配，命中即按该条的走向执行；全都不命中时走兜底的 MATCH 走向。
         </p>
       </div>
       <span class="rule-count">{{ enabledCount }} / {{ totalCount }} 条启用</span>
     </div>
 
-    <div v-if="!ruleSet" class="rule-empty">
-      还没有绑定规则集，请先在上面选择一个配置
+    <div class="rule-table">
+      <div class="rule-row rule-row-match">
+        <span class="col-kind mono">MATCH</span>
+        <span class="col-value match-hint">其余全部流量</span>
+        <span class="col-policy">
+          <Select
+            size="small"
+            class="cell-select"
+            :value="ruleSet.default_policy"
+            @change="(value: any) => emit('update-default-policy', value as VpnPolicy)"
+          >
+            <SelectOption v-for="policy in POLICIES" :key="policy" :value="policy">
+              {{ POLICY_LABELS[policy] }}
+            </SelectOption>
+          </Select>
+        </span>
+        <span class="col-noresolve"></span>
+        <span class="col-enabled"></span>
+        <span class="col-remark"></span>
+        <span class="col-actions"></span>
+      </div>
+
+      <div class="rule-row rule-row-head">
+        <span class="col-kind">类型</span>
+        <span class="col-value">匹配值</span>
+        <span class="col-policy">走向</span>
+        <span class="col-noresolve">no-resolve</span>
+        <span class="col-enabled">启用</span>
+        <span class="col-remark">备注</span>
+        <span class="col-actions"></span>
+      </div>
+
+      <div
+        v-for="rule in ruleSet.rules"
+        :key="rule.id"
+        class="rule-row"
+        :class="{ 'rule-row-off': !rule.enabled, 'rule-row-error': !!errors[rule.id] }"
+      >
+        <span class="col-kind">
+          <Select
+            size="small"
+            class="cell-select"
+            :value="rule.kind"
+            @change="(value: any) => onKindChange(rule, value as VpnRuleKind)"
+          >
+            <SelectOption v-for="kind in KINDS" :key="kind" :value="kind">
+              {{ RULE_KIND_LABELS[kind] }}
+            </SelectOption>
+          </Select>
+        </span>
+        <span class="col-value">
+          <Input
+            size="small"
+            class="mono"
+            :value="rule.value"
+            spellcheck="false"
+            @change="(event: Event) => onValueChange(rule, event)"
+          />
+          <span v-if="errors[rule.id]" class="cell-error">{{ errors[rule.id] }}</span>
+        </span>
+        <span class="col-policy">
+          <Select
+            size="small"
+            class="cell-select"
+            :value="rule.policy"
+            @change="(value: any) => emit('update', rule.id, { policy: value as VpnPolicy })"
+          >
+            <SelectOption v-for="policy in POLICIES" :key="policy" :value="policy">
+              {{ POLICY_LABELS[policy] }}
+            </SelectOption>
+          </Select>
+        </span>
+        <span class="col-noresolve">
+          <Switch
+            size="small"
+            :checked="rule.no_resolve"
+            :disabled="rule.kind !== 'IP-CIDR'"
+            @change="(checked: boolean) => emit('update', rule.id, { no_resolve: checked })"
+          />
+        </span>
+        <span class="col-enabled">
+          <Switch
+            size="small"
+            :checked="rule.enabled"
+            @change="(checked: boolean) => emit('update', rule.id, { enabled: checked })"
+          />
+        </span>
+        <span class="col-remark">
+          <Input
+            size="small"
+            :value="rule.remark"
+            placeholder="备注（可选）"
+            @change="(event: Event) => onRemarkChange(rule, event)"
+          />
+        </span>
+        <span class="col-actions">
+          <button class="row-delete" title="删除" @click="emit('remove', rule.id)">删除</button>
+        </span>
+      </div>
+
+      <div v-if="ruleSet.rules.length === 0" class="rule-empty-row">
+        还没有规则，在下面添加一条
+      </div>
     </div>
 
-    <template v-else>
-      <div v-if="overlaps.length > 0" class="rule-warn">
-        <div class="warn-title">规则覆盖提醒</div>
-        <div v-for="(warning, index) in overlaps" :key="index" class="warn-item">
-          {{ warning }}
-        </div>
-      </div>
-
-      <div class="rule-table">
-        <div class="rule-row rule-row-head">
-          <span class="col-enabled">启用</span>
-          <span class="col-cidr">网段 (CIDR)</span>
-          <span class="col-remark">备注</span>
-          <span class="col-actions"></span>
-        </div>
-
-        <div
-          v-for="rule in ruleSet.rules"
-          :key="rule.id"
-          class="rule-row"
-          :class="{ 'rule-row-off': !rule.enabled }"
-        >
-          <span class="col-enabled">
-            <input
-              type="checkbox"
-              :checked="rule.enabled"
-              @change="emit('update', rule.id, { enabled: ($event.target as HTMLInputElement).checked })"
-            />
-          </span>
-          <span class="col-cidr">
-            <input
-              class="cell-input mono"
-              :value="rule.cidr"
-              spellcheck="false"
-              @change="onCellInput(rule.id, 'cidr', ($event.target as HTMLInputElement).value)"
-            />
-          </span>
-          <span class="col-remark">
-            <input
-              class="cell-input"
-              :value="rule.remark"
-              placeholder="例如 公司内网"
-              @change="onCellInput(rule.id, 'remark', ($event.target as HTMLInputElement).value)"
-            />
-          </span>
-          <span class="col-actions">
-            <button class="row-delete" title="删除" @click="emit('remove', rule.id)">
-              删除
-            </button>
-          </span>
-        </div>
-
-        <div v-if="ruleSet.rules.length === 0" class="rule-empty-row">
-          还没有规则，在下面添加一条
-        </div>
-      </div>
-
-      <div class="rule-add">
-        <input
-          v-model="newCidr"
-          class="cell-input mono"
-          placeholder="10.0.0.0/8"
-          spellcheck="false"
-          @keydown.enter="submit"
-          @input="error = ''"
-        />
-        <input
-          v-model="newRemark"
-          class="cell-input"
-          placeholder="备注（可选）"
-          @keydown.enter="submit"
-        />
-        <button class="btn btn-primary" @click="submit">添加规则</button>
-      </div>
-      <p v-if="error" class="rule-error">{{ error }}</p>
-
-      <div class="rule-presets">
-        <span class="preset-label">常用网段：</span>
-        <button
-          v-for="preset in ['198.51.100.0/24', '192.168.1.0/24', '10.0.0.0/8', '172.16.0.0/12']"
-          :key="preset"
-          class="preset"
-          @click="newCidr = preset"
-        >
-          {{ preset }}
-        </button>
-      </div>
-    </template>
+    <div class="rule-add">
+      <Select size="small" class="add-kind" v-model:value="newKind">
+        <SelectOption v-for="kind in KINDS" :key="kind" :value="kind">
+          {{ RULE_KIND_LABELS[kind] }}
+        </SelectOption>
+      </Select>
+      <Input
+        size="small"
+        class="mono add-value"
+        v-model:value="newValue"
+        placeholder="匹配值，例如 10.0.0.0/8"
+        spellcheck="false"
+        @keydown.enter="submit"
+        @change="addError = ''"
+      />
+      <Select size="small" class="add-policy" v-model:value="newPolicy">
+        <SelectOption v-for="policy in POLICIES" :key="policy" :value="policy">
+          {{ POLICY_LABELS[policy] }}
+        </SelectOption>
+      </Select>
+      <Input
+        size="small"
+        class="add-remark"
+        v-model:value="newRemark"
+        placeholder="备注（可选）"
+        @keydown.enter="submit"
+      />
+      <Button type="primary" size="small" @click="submit">新增规则</Button>
+    </div>
+    <p v-if="addError" class="rule-error">{{ addError }}</p>
   </div>
 </template>
 
@@ -196,24 +274,6 @@ const totalCount = computed(() => props.ruleSet?.rules.length ?? 0)
   white-space: nowrap;
   flex-shrink: 0;
 }
-.rule-warn {
-  border: 1px solid rgba(245, 158, 11, 0.35);
-  background: rgba(245, 158, 11, 0.07);
-  border-radius: 6px;
-  padding: 8px 10px;
-  margin-bottom: 10px;
-}
-.warn-title {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--warning);
-  margin-bottom: 4px;
-}
-.warn-item {
-  font-size: 12px;
-  color: var(--text-secondary);
-  line-height: 1.6;
-}
 .rule-table {
   border: 1px solid var(--border-color);
   border-radius: 6px;
@@ -234,43 +294,60 @@ const totalCount = computed(() => props.ruleSet?.rules.length ?? 0)
   font-size: 12px;
   color: var(--text-muted);
 }
+.rule-row-match {
+  background: var(--bg-active);
+}
+.rule-row-match .match-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+}
 .rule-row-off {
   opacity: 0.5;
 }
-.col-enabled {
-  width: 40px;
+.rule-row-error {
+  background: rgba(239, 68, 68, 0.06);
+}
+.col-kind {
+  width: 150px;
+  flex-shrink: 0;
+}
+.col-value {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.col-policy {
+  width: 104px;
+  flex-shrink: 0;
+}
+.col-noresolve {
+  width: 72px;
   flex-shrink: 0;
   text-align: center;
 }
-.col-cidr {
-  width: 200px;
+.col-enabled {
+  width: 52px;
   flex-shrink: 0;
+  text-align: center;
 }
 .col-remark {
-  flex: 1;
-  min-width: 0;
+  width: 168px;
+  flex-shrink: 0;
 }
 .col-actions {
-  width: 52px;
+  width: 44px;
   flex-shrink: 0;
   text-align: right;
 }
-.cell-input {
+.cell-select {
   width: 100%;
-  border: 1px solid transparent;
-  background: transparent;
-  border-radius: 4px;
-  padding: 4px 6px;
-  font-size: 13px;
-  color: var(--text-primary);
-  outline: none;
 }
-.cell-input:hover {
-  border-color: var(--border-color);
-}
-.cell-input:focus {
-  border-color: var(--primary);
-  background: var(--bg-input);
+.cell-error {
+  font-size: 11px;
+  color: var(--danger);
+  line-height: 1.4;
 }
 .mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -286,8 +363,7 @@ const totalCount = computed(() => props.ruleSet?.rules.length ?? 0)
 .row-delete:hover {
   color: var(--danger);
 }
-.rule-empty-row,
-.rule-empty {
+.rule-empty-row {
   padding: 14px;
   text-align: center;
   font-size: 13px;
@@ -298,42 +374,25 @@ const totalCount = computed(() => props.ruleSet?.rules.length ?? 0)
   gap: 8px;
   margin-top: 10px;
 }
-.rule-add .cell-input {
-  border-color: var(--border-color);
-  background: var(--bg-input);
-  flex: 1;
+.add-kind {
+  width: 150px;
+  flex-shrink: 0;
 }
-.rule-add .cell-input:first-child {
-  max-width: 200px;
+.add-value {
+  flex: 1;
+  min-width: 0;
+}
+.add-policy {
+  width: 104px;
+  flex-shrink: 0;
+}
+.add-remark {
+  width: 168px;
+  flex-shrink: 0;
 }
 .rule-error {
   margin-top: 6px;
   font-size: 12px;
   color: var(--danger);
-}
-.rule-presets {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 10px;
-}
-.preset-label {
-  font-size: 12px;
-  color: var(--text-muted);
-}
-.preset {
-  border: 1px solid var(--border-color);
-  background: var(--bg-input);
-  border-radius: 10px;
-  padding: 2px 9px;
-  font-size: 12px;
-  color: var(--text-secondary);
-  cursor: pointer;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-}
-.preset:hover {
-  border-color: var(--primary);
-  color: var(--primary);
 }
 </style>

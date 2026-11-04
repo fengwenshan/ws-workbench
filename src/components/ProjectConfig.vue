@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch, computed, nextTick } from 'vue'
+import { ref, reactive, watch, computed, nextTick } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
 import type { LogLevel, ProjectConfig, ProjectType, VcsInfo } from '@/types'
@@ -318,27 +318,26 @@ async function resetDefaultRules() {
   localDefaultExclude.value = [...defaults]
   emit('updateDefaultExclude', [...defaults])
 }
+
+// 暴露头部操作区所需的状态与方法，供父组件在 Tabs 右侧渲染
+const headerState = reactive({
+  projectType,
+  detecting,
+  canDetect,
+  canPack,
+  typeLabel,
+})
+
+defineExpose({
+  headerState,
+  refreshProjectType,
+  packZip,
+  packFiles,
+})
 </script>
 
 <template>
   <div class="project-config" v-if="selectedProject">
-    <div class="config-header">
-      <h3>项目配置</h3>
-      <div class="header-actions">
-        <span class="type-badge" :class="'type-' + projectType">{{ detecting ? '识别中…' : typeLabel }}</span>
-        <button
-          class="btn-refresh-type"
-          :disabled="detecting || !canDetect"
-          title="重新识别项目类型及版本控制地址"
-          @click="refreshProjectType"
-        >{{ detecting ? '识别中…' : '识别' }}</button>
-        <template v-if="canPack">
-          <button class="btn btn-secondary" @click="packZip">打包 ZIP</button>
-          <button class="btn btn-primary" @click="packFiles">开始打包</button>
-        </template>
-      </div>
-    </div>
-
     <div class="config-body">
       <div class="form-row">
         <label>项目名称</label>
@@ -443,85 +442,10 @@ async function resetDefaultRules() {
   flex-direction: column;
   height: 100%;
 }
-.config-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 16px 20px;
-  border-bottom: 1px solid var(--border-color);
-}
-.config-header h3 {
-  margin: 0;
-  font-size: 16px;
-  color: var(--text-primary);
-}
-.header-actions {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-}
-.type-badge {
-  font-size: 12px;
-  padding: 3px 8px;
-  border-radius: 4px;
-  border: 1px solid var(--border-color);
-  color: var(--text-secondary);
-  white-space: nowrap;
-}
-.type-badge.type-layui {
-  color: #16a34a;
-  border-color: #16a34a;
-  background: rgba(22, 163, 74, 0.08);
-}
-.type-badge.type-vue2,
-.type-badge.type-vue3 {
-  color: #42b883;
-  border-color: #42b883;
-  background: rgba(66, 184, 131, 0.08);
-}
-.type-badge.type-react {
-  color: #087ea4;
-  border-color: #087ea4;
-  background: rgba(8, 126, 164, 0.08);
-}
-.type-badge.type-spring,
-.type-badge.type-springboot {
-  color: #6db33f;
-  border-color: #6db33f;
-  background: rgba(109, 179, 63, 0.08);
-}
-.type-badge.type-struts2 {
-  color: #d22128;
-  border-color: #d22128;
-  background: rgba(210, 33, 40, 0.08);
-}
-.type-badge.type-java {
-  color: #e76f00;
-  border-color: #e76f00;
-  background: rgba(231, 111, 0, 0.08);
-}
-.type-badge.type-unknown {
-  color: var(--text-secondary);
-  border-color: var(--border-color);
-}
-.btn-refresh-type {
-  font-size: 12px;
-  padding: 3px 10px;
-  border-radius: 4px;
-  border: 1px solid var(--border-color);
-  background: transparent;
-  color: var(--text-secondary);
-  cursor: pointer;
-  white-space: nowrap;
-  transition: all 0.15s;
-}
-.btn-refresh-type:hover:not(:disabled) {
-  color: var(--primary);
-  border-color: var(--primary);
-}
-.btn-refresh-type:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
+.config-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px;
 }
 .type-tip {
   margin-top: 12px;
@@ -534,11 +458,6 @@ async function resetDefaultRules() {
   color: var(--text-secondary);
   background: var(--bg-input);
   border: 1px solid var(--border-color);
-}
-.config-body {
-  flex: 1;
-  overflow-y: auto;
-  padding: 20px;
 }
 .form-row {
   margin-bottom: 16px;

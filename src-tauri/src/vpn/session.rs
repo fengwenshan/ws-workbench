@@ -1,4 +1,4 @@
-﻿//! 会话目录：主进程与提权 worker 之间的通信通道
+//! 会话目录：主进程与提权 worker 之间的通信通道
 //!
 //! 为什么不用管道：Windows 上通过 UAC/计划任务提权启动的进程**无法继承父进程的
 //! 标准句柄**，`Start-Process -Verb RunAs` 也拿不到子进程输出。所以两边改为
@@ -305,7 +305,7 @@ impl VpnSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vpn::models::{ConnectorKind, VpnMode};
+    use crate::vpn::models::ConnectorKind;
 
     fn temp_session(name: &str) -> VpnSession {
         let dir = std::env::temp_dir().join(format!(
@@ -329,14 +329,23 @@ mod tests {
             protocol: "anyconnect".into(),
             connector: ConnectorKind::Auto,
             connector_path: r"C:\app\openconnect\openconnect.exe".into(),
-            mode: VpnMode::CustomerFirst,
-            include_rules: vec!["198.51.100.0/24".into()],
-            exclude_rules: vec![],
+            rules: vec![crate::vpn::models::VpnRule {
+                id: "r1".into(),
+                kind: "IP-CIDR".into(),
+                value: "198.51.100.0/24".into(),
+                policy: "VPN".into(),
+                no_resolve: true,
+                remark: String::new(),
+                enabled: true,
+            }],
+            default_policy: "DIRECT".into(),
+            fake_ip_range: "198.18.0.0/16".into(),
+            fake_ip_filter: vec![],
             use_vpn_dns: false,
             learn: false,
             extra_args: vec![],
             script_path: r"C:\session\script\vpnc-script-win.js".into(),
-            hook_exe: r"C:\app\ws-tools.exe".into(),
+            hook_exe: r"C:\app\ws-workbench.exe".into(),
             created_at: "2026-01-01T00:00:00Z".into(),
         }
     }
@@ -347,8 +356,12 @@ mod tests {
         session.write_request(&sample_request()).unwrap();
         let back = session.read_request().unwrap();
         assert_eq!(back.server, "vpn.example.com:1218");
-        assert_eq!(back.mode, VpnMode::CustomerFirst);
-        assert_eq!(back.include_rules, vec!["198.51.100.0/24".to_string()]);
+        assert_eq!(back.default_policy, "DIRECT");
+        assert_eq!(back.rules.len(), 1);
+        assert_eq!(back.rules[0].value, "198.51.100.0/24");
+        // 规则的 kind/policy 必须能被引擎解析，否则运行期会被静默丢弃
+        assert!(crate::vpn::rule_engine::RuleKind::parse(&back.rules[0].kind).is_ok());
+        assert!(crate::vpn::rule_engine::Policy::parse(&back.rules[0].policy).is_ok());
         let _ = fs::remove_dir_all(&session.dir);
     }
 

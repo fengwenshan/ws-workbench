@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import type { VpnMode, VpnProfile } from '@/types/vpn'
-import { MODE_DESCRIPTIONS, MODE_LABELS } from '@/types/vpn'
+import { Input, Switch } from 'ant-design-vue'
+import type { VpnProfile } from '@/types/vpn'
 
 const props = defineProps<{
   profile: VpnProfile
@@ -52,6 +52,18 @@ const extraArgsText = computed({
   set: (value: string) =>
     emit('update', {
       extra_args: value
+        .split('\n')
+        .map((line) => line.trim())
+        .filter(Boolean),
+    }),
+})
+
+/** fake-ip 过滤在界面上按行编辑，落盘仍是 string[] */
+const fakeIpFilterText = computed({
+  get: () => (props.profile.fake_ip_filter ?? []).join('\n'),
+  set: (value: string) =>
+    emit('update', {
+      fake_ip_filter: value
         .split('\n')
         .map((line) => line.trim())
         .filter(Boolean),
@@ -125,22 +137,53 @@ const PROTOCOLS = ['anyconnect', 'nc', 'gp', 'pulse', 'f5', 'fortinet', 'array']
     </div>
 
     <div class="section">
-      <div class="section-label">分流模式</div>
-      <div class="mode-row">
-        <button
-          v-for="mode in (['customer_first', 'company_first'] as VpnMode[])"
-          :key="mode"
-          class="mode-card"
-          :class="{ 'mode-card-active': profile.mode === mode }"
-          @click="emit('update', mode === 'company_first' ? { mode, use_vpn_dns: true } : { mode })"
-        >
-          <strong>{{ MODE_LABELS[mode] }}</strong>
-          <span>{{ MODE_DESCRIPTIONS[mode] }}</span>
-        </button>
+      <div class="section-label">DNS 与 fake-ip</div>
+      <div class="form-grid">
+        <label class="field">
+          <span class="field-label">
+            fake-ip 地址池
+            <em>按域名分流时用于反查真实目标</em>
+          </span>
+          <Input
+            :value="profile.fake_ip_range"
+            placeholder="198.18.0.0/16"
+            @change="
+              (event: Event) =>
+                emit('update', {
+                  fake_ip_range: (event.target as HTMLInputElement).value.trim(),
+                })
+            "
+          />
+        </label>
       </div>
-      <p class="tips">
-        模式随时可以切，但只有断开重连后才会真正生效。
-      </p>
+
+      <label class="field fake-filter-field">
+        <span class="field-label">
+          fake-ip 过滤
+          <em>每行一条，*.后缀 或 关键字；命中的域名不做伪造</em>
+        </span>
+        <textarea
+          class="form-input mono textarea"
+          v-model="fakeIpFilterText"
+          rows="3"
+          placeholder="*.local&#10;corp"
+          spellcheck="false"
+        ></textarea>
+      </label>
+
+      <label class="check-row">
+        <Switch
+          :checked="profile.use_vpn_dns"
+          @change="(checked: boolean) => emit('update', { use_vpn_dns: checked })"
+        />
+        <span>
+          写入 VPN DNS
+          <em>
+            开启后把服务端下发的 DNS 写入 VPN 网卡（本程序会把 VPN 网卡的跃点数降低）；
+            关闭则保持本地 DNS 不变，公司内网域名可能解析不了。
+          </em>
+        </span>
+      </label>
     </div>
 
     <div class="section">
@@ -161,26 +204,6 @@ const PROTOCOLS = ['anyconnect', 'nc', 'gp', 'pulse', 'f5', 'fortinet', 'array']
           </select>
         </label>
       </div>
-
-      <label class="check-row">
-        <input
-          type="checkbox"
-          :checked="profile.mode === 'company_first' || profile.use_vpn_dns"
-          :disabled="profile.mode === 'company_first'"
-          @change="emit('update', { use_vpn_dns: ($event.target as HTMLInputElement).checked })"
-        />
-        <span>
-          使用服务端下发的 DNS
-          <em v-if="profile.mode === 'company_first'">
-            「以公司网络为主」模式下默认路由已交给隧道，解析必须走公司 DNS，
-            公司内网域名才解析得出来，所以这里固定开启。
-          </em>
-          <em v-else>
-            开启后所有域名解析都优先走公司 DNS（本程序会把 VPN 网卡的跃点数降低）；
-            关闭则保持客户环境 DNS 不变，公司内网域名可能解析不了。
-          </em>
-        </span>
-      </label>
     </div>
 
     <div class="section">
@@ -321,49 +344,8 @@ const PROTOCOLS = ['anyconnect', 'nc', 'gp', 'pulse', 'f5', 'fortinet', 'array']
   display: flex;
   gap: 16px;
 }
-.mode-row {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 10px;
-}
-.mode-card {
-  text-align: left;
-  border: 1px solid var(--border-color);
-  background: var(--bg-input);
-  border-radius: 8px;
-  padding: 10px 12px;
-  cursor: pointer;
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-}
-.mode-card strong {
-  font-size: 13px;
-  color: var(--text-primary);
-}
-.mode-card span {
-  font-size: 12px;
-  line-height: 1.55;
-  color: var(--text-muted);
-}
-.mode-card:hover {
-  border-color: var(--primary);
-}
-.mode-card-active {
-  border-color: var(--primary);
-  background: var(--bg-active);
-}
-.mode-card-active strong {
-  color: var(--text-active);
-}
-.tips {
-  margin-top: 8px;
-  font-size: 12px;
-  line-height: 1.6;
-  color: var(--text-muted);
-}
-.tips strong {
-  color: var(--text-secondary);
+.fake-filter-field {
+  margin-top: 12px;
 }
 .check-row {
   display: flex;
@@ -376,6 +358,10 @@ const PROTOCOLS = ['anyconnect', 'nc', 'gp', 'pulse', 'f5', 'fortinet', 'array']
 }
 .check-row input {
   margin-top: 2px;
+}
+.check-row :deep(.ant-switch) {
+  flex-shrink: 0;
+  margin-top: 1px;
 }
 .check-row em {
   display: block;
