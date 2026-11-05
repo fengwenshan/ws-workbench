@@ -990,6 +990,8 @@ pub fn shutdown(app: &AppHandle) {
                 elevate::stop_worker(&session);
             }
         }
+        // 托盘退出、Cmd+Q、菜单退出都走这里：别把控制文件留给下次
+        session.remove_control_files();
     }
 }
 
