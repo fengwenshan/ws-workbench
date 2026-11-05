@@ -653,6 +653,9 @@ pub struct Engine {
     vpn_dns: Vec<Ipv4Addr>,
     /// 域名 -> 已解析出的真实 IPv4，连接期间复用
     real_cache: HashMap<String, Ipv4Addr>,
+    /// 待写进 worker.log 的诊断行：DNS 伪造、每条连接的分流结论、建连失败。
+    /// 引擎跑在独立线程里，自己不开文件，由 worker 每轮取走后落盘。
+    pending_logs: Vec<String>,
 }
 
 impl Engine {
@@ -685,6 +688,7 @@ impl Engine {
             dns_servers: HashMap::new(),
             vpn_dns: Vec::new(),
             real_cache: HashMap::new(),
+            pending_logs: Vec::new(),
         })
     }
 
@@ -696,6 +700,70 @@ impl Engine {
     /// 换一份规则（规则热更新时调用）
     pub fn set_rules(&mut self, rules: CompiledRuleSet) {
         self.rules = Some(rules);
+    }
+
+    /// 取走累积的诊断日志（worker 每轮 poll 后调用）。
+    pub fn take_logs(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.pending_logs)
+    }
+
+    fn note(&mut self, line: String) {
+        // 没人取走时不无限涨：诊断信息只需要最近这些
+        if self.pending_logs.len() >= 256 {
+            self.pending_logs.remove(0);
+        }
+        self.pending_logs.push(line);
+    }
+
+    /// 规则模式下命中的那条规则（类型、值）；非规则模式或兜底命中时为 None。
+    fn hit_desc(
+        &self,
+        domain: Option<&str>,
+        ip: Ipv4Addr,
+        port: u16,
+        process: Option<&str>,
+    ) -> Option<(String, String)> {
+        if self.mode != ProxyMode::Rule {
+            return None;
+        }
+        let rules = self.rules.as_ref()?;
+        let ip_text = ip.to_string();
+        let input = MatchInput {
+            domain,
+            ip: Some(&ip_text),
+            port: Some(port),
+            process,
+        };
+        let (_, rule) = rules.evaluate_hit(&input);
+        rule.map(|rule| (rule.kind.as_str().to_string(), rule.value.clone()))
+    }
+
+    /// 一条连接的分流结论，写成一行便于在日志里对照
+    fn decision_line(
+        &self,
+        domain: Option<&str>,
+        target: SocketAddrV4,
+        egress: Egress,
+        process: Option<&str>,
+    ) -> String {
+        let egress_label = match egress {
+            Egress::Direct => "直连",
+            Egress::Vpn => "VPN",
+        };
+        let who = match domain {
+            Some(name) => format!("{}:{}", name, target.port()),
+            None => format!("{}:{}（无域名）", target.ip(), target.port()),
+        };
+        let mut line = format!("[分流] {} -> {}", who, egress_label);
+        match self.hit_desc(domain, *target.ip(), target.port(), process) {
+            Some((kind, value)) => line.push_str(&format!("（命中 {} {}）", kind, value)),
+            None => match domain {
+                // 没域名时域名类规则本来就匹配不上，说清楚免得误以为是规则没写对
+                None => line.push_str("（兜底，域名类规则不参与匹配）"),
+                Some(_) => line.push_str("（兜底）"),
+            },
+        }
+        line
     }
 
     /// 按当前模式给出一次判定；规则模式下才真正查规则表
@@ -781,7 +849,7 @@ impl Engine {
             // 先按域名（必要时再按真实 IP）定出口。fake-ip 刚到达时只有假地址，
             // 先用域名做一次临时判定去解析真实 IP，再拿真实 IP 重判一次。
             let provisional = self.egress_for(domain.as_deref(), &flow.key, process.as_deref());
-            let (target, egress) = match domain.as_deref() {
+            let (target, egress, resolve_failed) = match domain.as_deref() {
                 Some(d) => match self.resolve_name(d, provisional) {
                     Some(ip) => {
                         let egress = self.egress_for_at(
@@ -790,21 +858,27 @@ impl Engine {
                             flow.key.remote.port(),
                             process.as_deref(),
                         );
-                        (SocketAddrV4::new(ip, flow.key.remote.port()), egress)
+                        (SocketAddrV4::new(ip, flow.key.remote.port()), egress, None)
                     }
-                    None => {
-                        self.netstack.abort_tcp(&flow.key);
-                        continue;
-                    }
+                    None => (flow.key.remote, provisional, Some(d.to_string())),
                 },
-                None => (flow.key.remote, provisional),
+                None => (flow.key.remote, provisional, None),
             };
-            if self
+            if let Some(name) = resolve_failed {
+                self.note(format!("[分流] 解析 {} 失败，连接已放弃", name));
+                self.netstack.abort_tcp(&flow.key);
+                continue;
+            }
+            let line = self.decision_line(domain.as_deref(), target, egress, process.as_deref());
+            match self
                 .router
                 .open_egress_to(&flow.key, target, egress, domain.clone(), process.clone())
-                .is_err()
             {
-                self.netstack.abort_tcp(&flow.key);
+                Ok(()) => self.note(line),
+                Err(err) => {
+                    self.note(format!("{}，建连失败：{}", line, err));
+                    self.netstack.abort_tcp(&flow.key);
+                }
             }
         }
         // 2) TCP 双向搬运
@@ -879,6 +953,12 @@ impl Engine {
             if query.qtype != 1 {
                 return Some(super::dns_srv::build_empty_response(payload, &query));
             }
+            if filtered {
+                self.note(format!(
+                    "[DNS] {} 命中 fake-ip 过滤名单，按真实地址返回（域名规则对它不生效）",
+                    name
+                ));
+            }
             let policy = match self.mode {
                 ProxyMode::Global => Policy::Vpn,
                 ProxyMode::Direct => Policy::Direct,
@@ -910,7 +990,12 @@ impl Engine {
             pool.allocate(&name, now, 300)?
         };
         self.fake_domains.insert(ip, name.clone());
-        self.dns_servers.insert(name, *server.ip());
+        self.dns_servers.insert(name.clone(), *server.ip());
+        self.note(format!(
+            "[DNS] {} -> {}（假地址，连接时会按域名匹配规则）",
+            name,
+            Ipv4Addr::from(ip)
+        ));
         Some(super::dns_srv::build_a_response(payload, &query, Ipv4Addr::from(ip)))
     }
 

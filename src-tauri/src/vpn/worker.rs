@@ -937,10 +937,20 @@ impl Worker {
 
             // 引擎的收发循环必须每轮推进：塞进 15s 巡检那一跳会把吞吐卡死。
             // 引擎尚未装配（隧道未就绪）时是 None，这一跳自然空转。
+            let mut engine_error: Option<String> = None;
+            let mut engine_lines: Vec<String> = Vec::new();
             if let Some(engine) = self.engine.as_mut() {
                 if let Err(e) = engine.poll() {
-                    self.log(&format!("[引擎] 轮询出错: {}", e));
+                    engine_error = Some(format!("[引擎] 轮询出错: {}", e));
                 }
+                // 引擎不开文件：它攒下的 DNS / 分流诊断行在这里统一落盘
+                engine_lines = engine.take_logs();
+            }
+            if let Some(line) = engine_error {
+                self.log(&line);
+            }
+            for line in &engine_lines {
+                self.log(line);
             }
 
             if self.parent_lost || self.session.is_stop_requested() {
