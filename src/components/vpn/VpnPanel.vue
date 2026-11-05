@@ -104,7 +104,36 @@ const canConnect = computed(() => !!vpn.selectedProfile && !vpn.connecting)
 
 // ============================ 代理模式 ============================
 
-const proxyMode = computed<VpnProxyMode>(() => vpn.selectedProfile?.proxy_mode ?? 'rule')
+/**
+ * 乐观值：点下去立刻高亮，不等后端往返。
+ * 成功就等实际状态追上后自动撤掉；失败由 handleModeChange 回选上一个。
+ */
+const optimisticMode = ref<VpnProxyMode | null>(null)
+/** 上次点击的序号：连点时只让最新那一次决定要不要回滚 */
+let switchSeq = 0
+
+const proxyMode = computed<VpnProxyMode>(
+  () => optimisticMode.value ?? vpn.selectedProfile?.proxy_mode ?? 'rule',
+)
+/** 已连接时以 worker 回写的实际模式为准：界面上的选择只代表「下次连接」 */
+const appliedMode = computed<VpnProxyMode | null>(() => {
+  if (!vpn.isConnected) return null
+  const raw = String(vpn.status?.applied_mode ?? '').trim().toLowerCase()
+  if (raw === 'rule' || raw === 'global' || raw === 'direct') return raw
+  return null
+})
+/** 高亮：正在切换的目标 > worker 实际模式 > 配置里的模式 */
+const activeMode = computed<VpnProxyMode>(
+  () => optimisticMode.value ?? appliedMode.value ?? proxyMode.value,
+)
+const modeMismatch = computed(
+  () =>
+    !optimisticMode.value &&
+    !!appliedMode.value &&
+    appliedMode.value !== proxyMode.value,
+)
+const modeLabel = (mode: VpnProxyMode) =>
+  MODE_OPTIONS.find((item) => item.value === mode)?.label ?? mode
 const currentMode = computed(
   () => MODE_OPTIONS.find((item) => item.value === proxyMode.value) ?? MODE_OPTIONS[0],
 )
@@ -121,12 +150,56 @@ const modeLockText = computed(() => {
 })
 
 async function handleModeChange(mode: VpnProxyMode) {
-  if (mode === proxyMode.value || modeLocked.value) return
+  if (mode === activeMode.value || modeLocked.value) return
+  const previous = activeMode.value
+  const seq = ++switchSeq
+  // 先选中，再切换：点下去就有反应，不等 worker 回报
+  optimisticMode.value = mode
   try {
-    await vpn.setProxyMode(mode)
+    const ok = await vpn.setProxyMode(mode)
+    if (seq !== switchSeq) return // 期间又点了别的，交给最新那次
+    if (!ok) {
+      optimisticMode.value = previous
+      vpn.pushLog('warn', `切换没成功，已回到「${modeLabel(previous)}」`)
+      return
+    }
+    settleOptimistic(mode)
   } catch (err: any) {
+    if (seq === switchSeq) optimisticMode.value = previous
     vpn.pushLog('error', `切换代理模式失败: ${err}`)
   }
+}
+
+// 换了一份配置：乐观值属于上一份配置，直接丢掉
+watch(
+  () => vpn.selectedProfile?.id,
+  () => {
+    optimisticMode.value = null
+  },
+)
+
+/**
+ * 切换成功后撤掉乐观值，让高亮交回真实状态。
+ *
+ * 不能立刻撤：已连接时高亮取 worker 回写的 applied_mode，它要等一次状态轮询
+ * 才追上来，立刻撤会看到「闪回旧模式」。最多等 3 秒，等不到也交回真实状态。
+ */
+function settleOptimistic(mode: VpnProxyMode) {
+  const deadline = Date.now() + 3000
+  const timer = window.setInterval(() => {
+    if (optimisticMode.value !== mode) {
+      // 用户又点了别的模式，这次不用管了
+      window.clearInterval(timer)
+      return
+    }
+    const reached = vpn.isConnected
+      ? appliedMode.value === mode || appliedMode.value === null
+      : vpn.selectedProfile?.proxy_mode === mode
+    if (reached || Date.now() > deadline) {
+      optimisticMode.value = null
+      window.clearInterval(timer)
+    }
+  }, 120)
 }
 
 // ============================ 交互 ============================
@@ -198,8 +271,6 @@ async function handleProfileSubmit(input: NewVpnProfileInput) {
         username: input.username ?? '',
         protocol: input.protocol ?? 'anyconnect',
         extra_args: input.extra_args ?? [],
-        fake_ip_range: input.fake_ip_range?.trim() || '198.18.0.0/16',
-        fake_ip_filter: input.fake_ip_filter ?? [],
       }
       if (input.password) {
         patch.password = input.password
@@ -413,9 +484,9 @@ watch(
                 :key="mode.value"
                 type="button"
                 class="proxy-mode-option"
-                :class="{ active: mode.value === proxyMode }"
+                :class="{ active: mode.value === activeMode }"
                 role="radio"
-                :aria-checked="mode.value === proxyMode"
+                :aria-checked="mode.value === activeMode"
                 :disabled="modeLocked"
                 @click="handleModeChange(mode.value)"
               >
@@ -439,8 +510,12 @@ watch(
             </div>
 
             <p v-if="modeLockText" class="proxy-mode-lock">{{ modeLockText }}</p>
+            <p v-else-if="modeMismatch" class="proxy-mode-lock">
+              worker 里实际是「{{ modeLabel(activeMode) }}」，配置里是「{{ modeLabel(proxyMode) }}」——
+              这次切换没有生效，可断开重连后再试。
+            </p>
             <p v-else-if="vpn.isConnected" class="proxy-mode-hint">
-              切换立即生效：新连接按新模式，已建立的连接保持原路径。
+              切换立即生效：规则/全局/直连都是本地布线（路由与 DNS），切换瞬间已建立的连接可能瞬断重连。
             </p>
           </section>
 

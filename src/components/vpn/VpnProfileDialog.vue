@@ -54,8 +54,6 @@ const formState = reactive({
   username: props.profile?.username ?? '',
   password: '',
   extraArgs: (props.profile?.extra_args ?? []).join('\n'),
-  fakeIpRange: props.profile?.fake_ip_range ?? '198.18.0.0/16',
-  fakeIpFilter: (props.profile?.fake_ip_filter ?? []).join('\n'),
 })
 
 const rules = computed<Record<string, Rule[]>>(() => ({
@@ -88,11 +86,6 @@ async function submit() {
     username: formState.username.trim(),
     protocol: formState.protocol,
     extra_args: formState.extraArgs
-      .split('\n')
-      .map((line) => line.trim())
-      .filter(Boolean),
-    fake_ip_range: formState.fakeIpRange.trim(),
-    fake_ip_filter: formState.fakeIpFilter
       .split('\n')
       .map((line) => line.trim())
       .filter(Boolean),
@@ -186,43 +179,6 @@ async function submit() {
           />
         </FormItem>
 
-        <FormItem name="fakeIpRange">
-          <template #label>
-            <span class="field-label-stack">
-              <span class="field-title">fake-ip 地址池</span>
-              <span class="field-desc">
-                一般不用改 —— 仅当内网网段与默认 198.18.0.0/16 冲突时才换一段（例如
-                198.19.0.0/16）；填错会自动退回默认值。
-              </span>
-            </span>
-          </template>
-          <Input
-            v-model:value="formState.fakeIpRange"
-            placeholder="198.18.0.0/16"
-            spellcheck="false"
-            :disabled="busy"
-          />
-        </FormItem>
-
-        <FormItem name="fakeIpFilter">
-          <template #label>
-            <span class="field-label-stack">
-              <span class="field-title">不走 fake-ip 的域名</span>
-              <span class="field-desc">
-                这些域名不再伪造假地址，DNS 直接返回真实 IP —— 给打印机、NAS、投屏这类只认真实地址的本地设备用（例如
-                printer.local）。写进来后这条连接就没有域名了，基于域名的分流规则对它不生效，所以别把要走 VPN
-                的公司内网站点放进来，那种应该写进「分流规则」。
-              </span>
-            </span>
-          </template>
-          <Textarea
-            v-model:value="formState.fakeIpFilter"
-            :rows="3"
-            placeholder="*.local&#10;*.corp.example.com"
-            spellcheck="false"
-            :disabled="busy"
-          />
-        </FormItem>
       </div>
     </Form>
   </Modal>

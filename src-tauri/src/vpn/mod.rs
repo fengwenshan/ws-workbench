@@ -16,14 +16,13 @@
 //! - `models`      数据结构
 //! - `credential`  密码加密存储（Windows DPAPI / macOS 钥匙串）
 //! - `detect`      连接器探测（内置 -> 系统 -> PATH）
-//! - `route`       路由表读写（Windows 走 PowerShell JSON，macOS 走 route 命令）
+//! - `route`       路由表读写（macOS 走 route / netstat 命令）
+//! - `rule_engine` 规则类型解析（DOMAIN / DOMAIN-SUFFIX / IP-CIDR）
 //! - `script`      生成自定义 vpnc-script，抢占「默认路由是否走 VPN」这个开关
 //! - `connector`   真正拉起隧道（openconnect）
 //! - `session`     会话目录 IPC（提权进程拿不到父进程管道，只能靠文件）
-//! - `rule_engine` Clash 式有序列规则：解析、匹配与 RULE-SET 内存展开（纯逻辑）
-//! - `fakedns`     fake-ip 假地址池：分配 / 反查 / 过滤 / 回收（纯逻辑）
-//! - `netstack`    smoltcp 用户态栈：把 TUN 上的 IP 包适配成 smoltcp Device 并终结连接
-//! - `router`      出口选择与双向字节搬运：按规则钉网卡、建出站 TCP、回收流路由
+//! - `split`       路由注入式分流（规则模式）：/etc/resolver + 隧道 /32 + DNS 转发器
+//! - `fulltunnel`  全局模式：半默认路由 + 系统 DNS 指向隧道（等价裸跑 openconnect）
 //! - `elevate`     提权启动（Windows 计划任务免 UAC / macOS 系统授权框）
 //! - `worker`      提权进程入口，连接生命周期主体
 //! - `guide`       openconnect 不可用时的安装引导
@@ -37,18 +36,13 @@ pub mod connector;
 pub mod credential;
 pub mod detect;
 pub mod dns_client;
-pub mod dns_srv;
 pub mod elevate;
-pub mod fakedns;
+pub mod fulltunnel;
 pub mod guide;
 pub mod models;
-pub mod netstack;
-pub mod platform;
-pub mod proc_lookup;
 pub mod route;
-pub mod router;
 pub mod rule_engine;
 pub mod script;
 pub mod session;
-pub mod tun_device;
+pub mod split;
 pub mod worker;

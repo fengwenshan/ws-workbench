@@ -10,8 +10,8 @@ use crate::platform::{Os, Platform};
 use crate::vpn::guide;
 use crate::vpn::models::*;
 use crate::vpn::session::{LogCursor, VpnSession};
-use crate::vpn::router::ProxyMode;
-use crate::vpn::{detect, elevate, route};
+use crate::vpn::models::ProxyMode;
+use crate::vpn::{detect, elevate};
 
 /// 状态轮询间隔：既能让界面反应够快，也不会把磁盘打满
 const POLL_INTERVAL: Duration = Duration::from_millis(600);
@@ -214,35 +214,6 @@ pub fn vpn_remove_managed_openconnect(app: AppHandle) -> Result<String, String> 
     Ok("已移除导入的 OpenConnect".to_string())
 }
 
-/// 程序托管的 openconnect 是否已存在
-#[tauri::command]
-pub fn vpn_managed_openconnect_path(app: AppHandle) -> Option<String> {
-    let data_dir = app.path().app_data_dir().ok()?;
-    let dir = crate::apps::managed_dir(crate::apps::AppId::Openconnect, &data_dir);
-    for name in crate::apps::AppId::Openconnect.executable_names() {
-        let path = dir.join(name);
-        if path.is_file() {
-            return Some(path.to_string_lossy().to_string());
-        }
-    }
-    None
-}
-
-/// 查一个自定义路径上的 openconnect 版本号
-#[tauri::command]
-pub fn vpn_connector_version(path: String) -> String {
-    let info = ConnectorInfo {
-        kind: "openconnect".to_string(),
-        name: String::new(),
-        path,
-        version: String::new(),
-        available: true,
-        source: "custom".to_string(),
-        note: String::new(),
-    };
-    detect::fetch_version(&info)
-}
-
 #[tauri::command]
 pub fn vpn_install_guide(candidates: Vec<ConnectorInfo>) -> InstallGuide {
     let openconnect_available = candidates
@@ -253,70 +224,21 @@ pub fn vpn_install_guide(candidates: Vec<ConnectorInfo>) -> InstallGuide {
 
 // ============================== 规则校验 ==============================
 
-#[tauri::command]
-pub fn vpn_validate_cidr(cidr: String) -> Result<String, String> {
-    route::normalize_cidr(&cidr)
-}
-
-/// 检查规则表里的问题：
-/// 1. 某条规则被另一条更宽泛的规则完全覆盖，永远不会生效
-/// 2. 同一条规则重复出现
-#[tauri::command]
-pub fn vpn_check_rule_overlaps(cidrs: Vec<String>) -> Vec<String> {
-    let mut parsed: Vec<(String, u32, u8)> = Vec::new();
-    for cidr in cidrs {
-        if let Ok((network, prefix)) = route::parse_cidr(&cidr) {
-            let text = route::normalize_cidr(&cidr).unwrap_or(cidr);
-            parsed.push((text, network, prefix));
-        }
-    }
-
-    let mut warnings = Vec::new();
-
-    // 重复项
-    let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-    for (text, _, _) in &parsed {
-        *counts.entry(text.as_str()).or_insert(0) += 1;
-    }
-    for (text, count) in counts {
-        if count > 1 {
-            warnings.push(format!("{} 重复出现 {} 次，可以删掉多余的", text, count));
-        }
-    }
-
-    // 被更宽泛的规则覆盖
-    for (i, (text_a, network_a, prefix_a)) in parsed.iter().enumerate() {
-        for (j, (text_b, network_b, prefix_b)) in parsed.iter().enumerate() {
-            if i == j || prefix_b >= prefix_a {
-                continue;
-            }
-            let mask_b = route::prefix_to_mask(*prefix_b);
-            if network_a & mask_b == *network_b {
-                warnings.push(format!("{} 已被 {} 覆盖，这条规则不会生效", text_a, text_b));
-            }
-        }
-    }
-
-    warnings.sort();
-    warnings.dedup();
-    warnings
-}
-
 /// 单条规则的入参校验，供 UI 即时反馈。
 pub fn validate_rule_input(kind: &str, value: &str) -> Result<(), String> {
-    use crate::vpn::rule_engine::{parse_port_range, RuleKind};
+    use crate::vpn::rule_engine::RuleKind;
     let kind = RuleKind::parse(kind)?;
     if value.trim().is_empty() {
         return Err("匹配值不能为空".to_string());
     }
     match kind {
-        RuleKind::DstPort => {
-            parse_port_range(value)?;
-        }
         RuleKind::IpCidr => {
             crate::vpn::route::normalize_cidr(value)?;
         }
-        _ => {}
+        RuleKind::Domain | RuleKind::DomainSuffix => {
+            crate::vpn::split::normalize_domain(value)
+                .ok_or_else(|| format!("不是合法域名：{}", value))?;
+        }
     }
     Ok(())
 }
@@ -331,32 +253,44 @@ pub fn vpn_validate_rule(kind: String, value: String) -> Result<String, String> 
     })
 }
 
-/// 用给定规则集与一条输入预览命中结果，供 UI 展示「这条会走哪」。
+/// 预览一条输入会走哪：只看「域名/网段是否命中走 VPN 的规则」。
+///
+/// 早期这里按连接匹配（端口、进程都能参与），那是捕获引擎时代的语义；
+/// 现在 macOS 走路由注入，能不能进隧道只取决于域名和网段，所以参数也只剩这两个。
 #[tauri::command]
 pub fn vpn_preview_rules(
     rules: Vec<VpnRule>,
     default_policy: String,
     domain: Option<String>,
     ip: Option<String>,
-    port: Option<u16>,
-    process: Option<String>,
 ) -> Result<String, String> {
-    use crate::vpn::rule_engine::{compile, MatchInput, Policy, Rule, RuleKind};
-    let mut compiled = Vec::new();
-    for r in rules.iter().filter(|r| r.enabled) {
-        let kind = RuleKind::parse(&r.kind)?;
-        let policy = Policy::parse(&r.policy)?;
-        compiled.push(Rule::new(kind, &r.value, policy).with_no_resolve(r.no_resolve));
+    let plan = crate::vpn::split::plan(&rules, &default_policy);
+    if let Some(domain) = domain.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
+        let name = domain.trim_end_matches('.').to_ascii_lowercase();
+        let hit = plan.domains.iter().any(|suffix| {
+            name == *suffix || name.ends_with(&format!(".{}", suffix))
+        });
+        return Ok(if hit { "VPN" } else { "DIRECT" }.to_string());
     }
-    let default = Policy::parse(&default_policy)?;
-    let set = compile(&compiled, &std::collections::HashMap::new(), default)?;
-    let verdict = set.evaluate(&MatchInput {
-        domain: domain.as_deref(),
-        ip: ip.as_deref(),
-        port,
-        process: process.as_deref(),
-    });
-    Ok(verdict.as_str().to_string())
+    if let Some(ip) = ip.as_deref().map(str::trim).filter(|i| !i.is_empty()) {
+        let addr: std::net::Ipv4Addr = ip
+            .parse()
+            .map_err(|_| format!("IP 不合法：{}", ip))?;
+        let hit = plan.cidrs.iter().any(|cidr| {
+            crate::vpn::route::parse_cidr(cidr)
+                .map(|(net, prefix)| {
+                    let mask = if prefix == 0 {
+                        0
+                    } else {
+                        u32::MAX << (32 - prefix)
+                    };
+                    (u32::from(addr) & mask) == net
+                })
+                .unwrap_or(false)
+        });
+        return Ok(if hit { "VPN" } else { "DIRECT" }.to_string());
+    }
+    Err("请提供要预览的域名或 IP".to_string())
 }
 
 // ============================== 提权 ==============================
@@ -471,17 +405,14 @@ fn resolve_proxy_plan(
 /// 编译校验一份规则集；任何一条不合法都返回错误。
 /// 连接与运行期热更新共用，保证「能存进配置的规则」和「能连上的规则」一致。
 fn validate_rule_set(rules: &[VpnRule], default_policy: &str) -> Result<(), String> {
-    use crate::vpn::rule_engine::{compile, Policy, Rule, RuleKind};
-    let mut compiled = Vec::new();
-    for r in rules.iter().filter(|r| r.enabled) {
-        let kind = RuleKind::parse(&r.kind)?;
-        let policy = Policy::parse(&r.policy)?;
-        compiled.push(Rule::new(kind, &r.value, policy).with_no_resolve(r.no_resolve));
+    use crate::vpn::rule_engine::{Policy, RuleKind};
+    for r in rules.iter().filter(|rule| rule.enabled) {
+        RuleKind::parse(&r.kind)?;
+        Policy::parse(&r.policy)?;
+        validate_rule_input(&r.kind, &r.value)?;
     }
-    let default = Policy::parse(default_policy)?;
-    compile(&compiled, &std::collections::HashMap::new(), default)
-        .map(|_| ())
-        .map_err(|e| format!("规则编译失败：{}", e))
+    Policy::parse(default_policy)?;
+    Ok(())
 }
 
 /// 会话是否处于「有活动连接」状态
@@ -666,8 +597,6 @@ pub async fn vpn_connect(
         conn_identity: conn_identity(&profile),
         rules: rules.clone(),
         default_policy: default_policy.clone(),
-        fake_ip_range: profile.fake_ip_range.clone(),
-        fake_ip_filter: profile.fake_ip_filter.clone(),
         extra_args: profile.extra_args.clone(),
         script_path: String::new(), // worker 生成脚本后回填
         hook_exe: exe.to_string_lossy().to_string(),
@@ -1006,72 +935,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn overlap_detection_finds_supernet() {
-        let warnings = vpn_check_rule_overlaps(vec![
-            "192.168.1.0/24".to_string(),
-            "192.168.0.0/16".to_string(),
-        ]);
-        assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("192.168.1.0/24"));
-        assert!(warnings[0].contains("192.168.0.0/16"));
-    }
-
-    #[test]
-    fn overlap_detection_ignores_disjoint_rules() {
-        let warnings = vpn_check_rule_overlaps(vec![
-            "10.0.0.0/8".to_string(),
-            "198.51.100.0/24".to_string(),
-        ]);
-        assert!(warnings.is_empty());
-    }
-
-    #[test]
-    fn overlap_detection_survives_invalid_input() {
-        let warnings = vpn_check_rule_overlaps(vec![
-            "not-a-cidr".to_string(),
-            "10.0.0.0/8".to_string(),
-        ]);
-        assert!(warnings.is_empty());
-    }
-
-    #[test]
-    fn overlap_detection_flags_duplicate_rules() {
-        let warnings = vpn_check_rule_overlaps(vec![
-            "10.0.0.0/8".to_string(),
-            "10.0.0.0/8".to_string(),
-        ]);
-        assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("重复"));
-    }
-
-    #[test]
-    fn overlap_detection_ignores_equal_prefixes_that_differ() {
-        // 同样长度但不同网段，互不覆盖
-        let warnings = vpn_check_rule_overlaps(vec![
-            "10.0.0.0/8".to_string(),
-            "11.0.0.0/8".to_string(),
-        ]);
-        assert!(warnings.is_empty());
-    }
-
-    #[test]
-    fn overlap_detection_reports_supernet_only_once() {
-        let warnings = vpn_check_rule_overlaps(vec![
-            "10.1.0.0/16".to_string(),
-            "10.0.0.0/8".to_string(),
-        ]);
-        assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("不会生效"));
-    }
-
-    #[test]
-    fn validates_known_kinds() {
-        assert!(validate_rule_input("DOMAIN", "a.com").is_ok());
-        assert!(validate_rule_input("DST-PORT", "443").is_ok());
-        assert!(validate_rule_input("DST-PORT", "70000").is_err());
+    fn validates_the_three_live_kinds() {
+        assert!(validate_rule_input("DOMAIN", "oa.example.com").is_ok());
+        assert!(validate_rule_input("DOMAIN-SUFFIX", "example.com").is_ok());
         assert!(validate_rule_input("IP-CIDR", "10.0.0.0/8").is_ok());
         assert!(validate_rule_input("IP-CIDR", "10.0.0.0/33").is_err());
+        assert!(validate_rule_input("DOMAIN", "").is_err());
         assert!(validate_rule_input("bogus", "x").is_err());
+        // 退役的三种类型必须明确报错，而不是静默通过
+        for kind in ["DOMAIN-KEYWORD", "PROCESS-NAME", "DST-PORT", "RULE-SET"] {
+            assert!(
+                validate_rule_input(kind, "443").is_err(),
+                "{} 应该被拒绝",
+                kind
+            );
+        }
     }
 
     #[test]
@@ -1129,7 +1007,6 @@ mod tests {
             kind: "DOMAIN".to_string(),
             value: "example.com".to_string(),
             policy: "VPN".to_string(),
-            no_resolve: true,
             remark: String::new(),
             enabled,
         }

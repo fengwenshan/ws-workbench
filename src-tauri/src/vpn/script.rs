@@ -178,6 +178,23 @@ if [ "$reason" = "connect" ]; then
     report dns "${INTERNAL_IP4_DNS:-}"
     report vpngw "${VPNGATEWAY:-}"
 
+    # 服务端下发的「公司内网覆盖范围」：split-include 网段 + 默认域名。
+    # 这是判断「哪些流量属于公司」最权威的依据（比用户手写规则准），
+    # 所以原样回报给 worker：网段直接注入隧道，默认域名自动生成按域名分流解析。
+    report defdomain "${CISCO_DEF_DOMAIN:-}"
+    report splitexc "${CISCO_SPLIT_EXC:-0}"
+    split_inc="${CISCO_SPLIT_INC:-0}"
+    case "$split_inc" in ''|*[!0-9]*) split_inc=0 ;; esac
+    split_i=0
+    while [ "$split_i" -lt "$split_inc" ]; do
+        eval "split_addr=\${CISCO_SPLIT_INC_${split_i}_ADDR:-}"
+        eval "split_mask=\${CISCO_SPLIT_INC_${split_i}_MASKLEN:-}"
+        if [ -n "$split_addr" ] && [ -n "$split_mask" ]; then
+            report split "$split_addr/$split_mask"
+        fi
+        split_i=$((split_i + 1))
+    done
+
     # 配置 utun 接口地址。openconnect 通常已经做过一次，重复执行是幂等的。
     if [ -n "${INTERNAL_IP4_ADDRESS:-}" ]; then
         if [ -n "${INTERNAL_IP4_MTU:-}" ]; then
@@ -240,11 +257,6 @@ pub fn generate(ctx: &ScriptContext) -> (&'static str, String) {
     }
 }
 
-/// 断开时的兜底：旧的实现会把脚本改过的系统 DNS 还原回去。
-///
-/// 新架构下脚本不再触碰系统 DNS（DNS 拦截由本程序引擎负责），所以这里不再需要做任何事。
-/// 保留同名同参函数只是为了不破坏 worker 的调用点。
-pub fn restore_vpn_dns(_session_dir: &Path, _network_service: &str, _tun_dev: &str) {}
 
 /// JScript 字符串转义：反斜杠和双引号
 fn escape_js_string(text: &str) -> String {
@@ -342,6 +354,17 @@ mod tests {
         assert!(script.contains("/sbin/ifconfig"));
         assert!(script.contains("mtu"));
         assert!(script.starts_with("#!/bin/sh"));
+    }
+
+    #[test]
+    fn macos_script_reports_server_split_scope() {
+        // 服务端下发的「公司内网范围」必须原样回报，否则 worker 只能靠用户手写规则，
+        // 用户漏写一条域名就少覆盖一片内网。
+        let script = macos_script(&ctx());
+        assert!(script.contains(r#"report defdomain "${CISCO_DEF_DOMAIN:-}""#));
+        assert!(script.contains(r#"report splitexc "${CISCO_SPLIT_EXC:-0}""#));
+        assert!(script.contains("CISCO_SPLIT_INC"));
+        assert!(script.contains(r#"report split "$split_addr/$split_mask""#));
     }
 
     #[test]

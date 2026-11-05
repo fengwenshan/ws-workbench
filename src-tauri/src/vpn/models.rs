@@ -77,13 +77,11 @@ impl VpnPhase {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VpnRule {
     pub id: String,
-    /// Clash 规范形式：DOMAIN / DOMAIN-SUFFIX / DOMAIN-KEYWORD / PROCESS-NAME / DST-PORT / IP-CIDR / RULE-SET
+    /// 只有三类会生效：DOMAIN / DOMAIN-SUFFIX / IP-CIDR（见 `rule_engine::RuleKind`）
     pub kind: String,
     pub value: String,
     #[serde(default = "default_policy_str")]
     pub policy: String,
-    #[serde(default = "default_true")]
-    pub no_resolve: bool,
     #[serde(default)]
     pub remark: String,
     #[serde(default = "default_true")]
@@ -139,15 +137,6 @@ pub struct VpnProfile {
     /// 所有规则都不命中时的兜底走向（现在界面固定直连，保留字段兼容老配置）
     #[serde(default = "default_policy_str")]
     pub rules_default_policy: String,
-    /// 老模型里绑定的规则集 id；只为让前端迁移逻辑还能读到它，迁移完会被删掉
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub rule_set_id: String,
-    /// fake-ip 地址池，用于按域名分流时反查真实目标
-    #[serde(default = "default_fake_ip_range")]
-    pub fake_ip_range: String,
-    /// 不进入 fake-ip 池的地址段
-    #[serde(default)]
-    pub fake_ip_filter: Vec<String>,
     /// 额外的 openconnect 参数，每行一条
     #[serde(default)]
     pub extra_args: Vec<String>,
@@ -172,14 +161,10 @@ pub fn conn_identity(profile: &VpnProfile) -> String {
         profile.protocol.clone(),
         format!("{:?}", profile.connector),
         profile.connector_path.clone(),
-        profile.fake_ip_range.clone(),
     ];
     let mut extra = profile.extra_args.clone();
     extra.sort();
     parts.push(extra.join("\u{1e}"));
-    let mut filter = profile.fake_ip_filter.clone();
-    filter.sort();
-    parts.push(filter.join("\u{1e}"));
 
     let joined = parts.join("\u{1f}");
     // FNV-1a 64：不引入依赖，跨进程/跨重启稳定
@@ -195,12 +180,39 @@ fn default_protocol() -> String {
     "anyconnect".to_string()
 }
 
-fn default_proxy_mode() -> String {
-    "rule".to_string()
+/// 代理模式：决定隧道建好之后，这台机器的流量怎么走。
+///
+/// - `Rule`：按规则注入（`split.rs`），只把命中的域名/网段送进隧道；
+/// - `Global`：整机流量走隧道（`fulltunnel.rs`），等价于裸跑 openconnect；
+/// - `Direct`：只建隧道，不接管任何流量。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProxyMode {
+    Rule,
+    Global,
+    Direct,
 }
 
-fn default_fake_ip_range() -> String {
-    crate::vpn::fakedns::DEFAULT_RANGE.to_string()
+impl ProxyMode {
+    pub fn parse(raw: &str) -> Result<Self, String> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "" | "rule" => Ok(ProxyMode::Rule),
+            "global" => Ok(ProxyMode::Global),
+            "direct" => Ok(ProxyMode::Direct),
+            other => Err(format!("不认识的代理模式：{}", other)),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ProxyMode::Rule => "rule",
+            ProxyMode::Global => "global",
+            ProxyMode::Direct => "direct",
+        }
+    }
+}
+
+fn default_proxy_mode() -> String {
+    "rule".to_string()
 }
 
 /// 探测到的连接器
@@ -283,6 +295,13 @@ pub struct VpnStatus {
     /// 隧道接口索引（Windows）
     #[serde(default)]
     pub tun_index: u32,
+    /// 本次会话**实际生效**的代理模式（rule/global/direct）。
+    ///
+    /// 界面上的选择是「下次连接用哪个模式」，两者可能不一致：分流布线是连接时
+    /// 一次做好的，运行期切模式要重布线。把实际模式写出来，界面才不会显示一个
+    /// 正在运行却并不存在的模式（真机上已经误导过一次）。
+    #[serde(default)]
+    pub applied_mode: String,
     /// 隧道内网地址
     #[serde(default)]
     pub vpn_ip: String,
@@ -324,6 +343,7 @@ impl Default for VpnStatus {
             connector_name: String::new(),
             tun_dev: String::new(),
             tun_index: 0,
+            applied_mode: String::new(),
             vpn_ip: String::new(),
             vpn_gateway: String::new(),
             dns: Vec::new(),
@@ -363,12 +383,6 @@ pub struct VpnRequest {
     /// 规则全不命中时的兜底走向
     #[serde(default = "default_policy_str")]
     pub default_policy: String,
-    /// fake-ip 地址池
-    #[serde(default = "default_fake_ip_range")]
-    pub fake_ip_range: String,
-    /// 不进入 fake-ip 池的地址段
-    #[serde(default)]
-    pub fake_ip_filter: Vec<String>,
     #[serde(default)]
     pub extra_args: Vec<String>,
     /// 生成的 vpnc-script 绝对路径
@@ -464,8 +478,7 @@ mod tests {
             "password_encrypted": true,
             "protocol": "anyconnect",
             "mode": "customer_first",
-            "rule_set_id": "",
-            "use_vpn_dns": false,
+                        "use_vpn_dns": false,
             "extra_args": [],
             "connector_path": "",
             "created_at": "",
@@ -483,7 +496,6 @@ mod tests {
         ).unwrap();
         assert_eq!(rule.kind, "DOMAIN");
         assert_eq!(rule.policy, "DIRECT");
-        assert!(rule.no_resolve);
     }
 
     #[test]
@@ -491,7 +503,6 @@ mod tests {
         let raw = r#"{"id":"p1","name":"公司 VPN","server":"vpn.example.com:443","username":"alice","password":"cipher","password_encrypted":true,"protocol":"anyconnect","mode":"company_first","rule_set_id":"rs1","use_vpn_dns":false,"extra_args":[],"connector_path":"","created_at":"","updated_at":""}"#;
         let profile: VpnProfile = serde_json::from_str(raw).expect("老档案必须还能读");
         assert_eq!(profile.server, "vpn.example.com:443");
-        assert_eq!(profile.fake_ip_range, "198.18.0.0/16");
         // 老配置没有 proxy_mode，必须默认落在规则模式，不能变成全局或直连
         assert_eq!(profile.proxy_mode, "rule");
     }
@@ -558,12 +569,6 @@ mod tests {
         cases.push(p);
         let mut p = base.clone();
         p.connector_path = "/usr/local/bin/openconnect".to_string();
-        cases.push(p);
-        let mut p = base.clone();
-        p.fake_ip_range = "198.19.0.0/16".to_string();
-        cases.push(p);
-        let mut p = base.clone();
-        p.fake_ip_filter = vec!["*.local".to_string()];
         cases.push(p);
         let mut p = base.clone();
         p.extra_args = vec!["--no-dtls".to_string()];

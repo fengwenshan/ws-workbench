@@ -46,14 +46,16 @@
 
 弹窗（宽 ~760，左表单 300 + 右列表自适应）：
 
-- 规则类型下拉：完整域名 DOMAIN / 域名后缀 DOMAIN-SUFFIX / 域名关键字 DOMAIN-KEYWORD / 进程名 PROCESS-NAME / 目标端口 DST-PORT / IP 网段 IP-CIDR
+- 规则类型下拉**只保三类**：完整域名 DOMAIN / 域名后缀 DOMAIN-SUFFIX / IP 网段 IP-CIDR。
+  早先还有 DOMAIN-KEYWORD / PROCESS-NAME / DST-PORT，规则模式改成路由注入后这三类
+  没有数据面可用、写了也不生效，已从下拉下架（历史配置里若还留着，列表里打「不生效」标记，
+  能删不生效）。
 - 规则内容输入框，placeholder 跟着类型变：
   - DOMAIN → `example.com`
   - DOMAIN-SUFFIX → `example.com`（连带所有子域）
-  - DOMAIN-KEYWORD → `google`
-  - PROCESS-NAME → `Google Chrome`
-  - DST-PORT → `443`
   - IP-CIDR → `10.0.0.0/8`
+- 新建配置的默认规则：`DOMAIN-SUFFIX example.com` 走 VPN（原来是
+  `DOMAIN-KEYWORD corp`，语义在路由注入模式下做不到）
 - 代理策略下拉：直连 DIRECT / 走 VPN
 - 「添加规则」按钮：校验 → 追加到末尾 → 清空内容框，焦点回内容框
 - 不显示 MATCH 兜底行：没命中就是直连，不需要单独一行；列表为空时只留一句提示文字
@@ -278,3 +280,248 @@ fake-ip 流到达时要先把域名解析成真实 IP，`resolve_name` 以前的
 - 每步超时收紧到 400 / 250 / 250×N / 300 ms
 - 加 60 秒**负缓存**：解析失败的域名直接快速失败，不再反复卡引擎
 
+
+## 根因七：「一连上就全网断」是系统解析器被半默认路由打断
+
+现场日志（worker.log，引擎刚接管之后立刻开始）：
+
+```
+[引擎] 已接管：捕获 utun5 (10.9.0.1) -> 隧道 utun4
+[自检] 系统 DNS 解析失败：failed to lookup address information: nodename nor servname provided
+```
+
+同时 `mDNSResponder` 的系统日志里是：
+
+```
+[DNS] mDNSResponder: Sent 41-byte query #1 to <IPv4:192.0.2.12> over UDP via en0/14
+[DNS] mDNSResponder: sending to <IPv4:192.0.2.12> failed: [51: Network is unreachable]
+```
+
+**系统解析器根本发不出 DNS 查询**。原因：macOS 给每个网络服务建的是「接口限定」的
+resolver，mDNSResponder 的查询 socket 钉在物理网卡（`IP_BOUND_IF(en0)`），
+选路时只认 `en0` 自己的路由。捕获 TUN 抢走 `0.0.0.0/1` + `128.0.0.0/1` 之后，
+`en0` 上已经没有去 DNS 服务器的路由了，`sendto` 直接 `ENETUNREACH(51)`。
+
+后果：所有走系统解析器的 App（Safari、App Store、绝大多数原生应用、命令行、自检）
+一个域名都解析不出来。公网其实没断，但「DNS 全挂」对用户来说就是断网。
+
+修法（安全优先，遵循「宁可这一趟规则不生效，也不能让用户面对断网」）：
+
+1. 把**系统 DNS 服务器**和 VPN 服务器一样，用 /32 主机路由钉在物理网关上
+   （`route::system_dns_servers()` 从 `scutil --dns` 读，去重、跳过回环/IPv6）。
+   系统解析器立刻恢复可用，代价是这类解析不走 fake-ip：系统解析器拿真实地址，
+   这类应用的连接按「无域名」走兜底策略。自带解析器的应用（Chrome/Electron/curl）
+   的查询照样被捕获网卡接住，fake-ip 与域名规则照常生效。
+2. 这些旁路地址同时交给引擎的「不要碰」名单（和 VPN 服务器同一份），
+   引擎既不装也不删它们的路由 —— 否则引擎查一次 DNS 就会把旁路路由删掉，DNS 又挂。
+
+> **注意：这一版的修法已被真机复测推翻。** 加了 /32 直连旁路之后，
+> `mDNSResponder` 的报错从 `[51]` 变成 `[49]`，系统解析器照样解析不出域名。
+> 详见下面的「根因九」，最终落地的是安全阀（探不通就放弃接管），
+> 而不是继续加路由。
+
+## 根因八：路由「已存在」被吞掉，引擎把别人的路由当成自己的
+
+`route -n add` 在 macOS 上遇到 `File exists` 会被 `run_route_macos` 当成成功，
+于是 `retain_flow_route` 认为这条 /32 是自己新建的，返回「按出口绑源地址」；
+但内核实际用的是**现成的那条路由**（例如 vpnc 脚本给 VPN 服务器加的防环主机路由，
+走 en0），源地址绑成隧道地址后 `connect` 直接 `EADDRNOTAVAIL`：
+
+```
+[分流] vpn.example.com:1218 -> VPN（命中 DOMAIN-KEYWORD corp），
+       建连失败：Can't assign requested address (os error 49)
+       （预期VPN if#22 源 198.51.100.39；内核选路 gateway: 192.168.1.1 interface: en0）
+```
+
+更糟的是流结束时 `release_flow_route(created=true)` 会把这条**别人的**路由删掉，
+VPN 服务器的防环路由一没，隧道自己的报文就绕回捕获网卡，隧道随即断。
+
+修法：
+
+- macOS 的 `add_route` 不再容忍 `File exists`，让调用方看见「路由已存在」，
+  从而走「不绑源地址、不删路由」的分支
+- 捕获路由先按前缀清残留再加（`remove_route_prefix`），避免上一轮 SIGKILL 留下的
+  旧半默认路由把新的捕获变成静默失效
+- 服务器/系统 DNS 的防环路由先删再加，残留路由不会让关键路由加不上
+
+## 回归测试
+
+- `route::tests::scutil_dns_picks_ipv4_nameservers`：只取 IPv4、去重、去回环
+- `router::tests::vpn_server_ip_is_forced_direct_even_when_a_rule_matches_it`：
+  `DOMAIN-KEYWORD corp` 命中 `vpn.example.com` 时仍然强制直连
+- `route::tests::resolver_probe_passes_on_healthy_machine`（`--ignored`）：
+  安全阀探针在健康机器上必须一次通过，否则每次连接都会被误判
+
+## 根因九：路由接管和 macOS 系统解析器不能共存 —— 加旁路是死路
+
+根因七 第一次的修法是「把系统 DNS 服务器也按 /32 钉在物理网关上」。真机复测
+（2026-11-05 17:04）结果：
+
+```
+17:04:16.340 [路由] 系统 DNS 192.0.2.12 走直连旁路
+17:04:16.840 mDNSResponder … sending to <…> failed: [49: Can't assign requested address]
+17:04:26.9xx [DNS] settings-bd.feishu.cn -> 198.18.0.1
+17:04:47.xxx [自检] 系统 DNS 解析失败（后面几步跳过）
+```
+
+关键信息是**错误号从 51 变成了 49**：
+
+- `[51: ENETUNREACH]` = 解析器的查询**没有路由**（半默认路由把表抢走了）；
+- `[49: EADDRNOTAVAIL]` = 路由有了，但**源地址分配不出来**。
+
+也就是说 mDNSResponder 的送包姿势是「接口限定 + 源地址指定」，它要么找不到
+接口内的路由，要么找不到能用的源地址。再加任何 /32 路由都只是把 51 换成 49，
+解析照样失败 —— 系统解析器一废，所有走它的 App 集体「断网」。
+同一时间引擎自己的直连建连也偶发同样的 `os error 49`，说明这不是 DNS 独有，
+而是「半默认路由 + 绑源地址」这一套和 XNU 的选路/源地址校验在互相打架。
+
+结论：**「抢默认路由做全量捕获」和「macOS 系统解析器」在这台机器上不能共存，
+靠路由规则去调停是走不通的。** 继续在这条路上打补丁，只会让用户一次一次
+面对「一连上就全网断」。
+
+落地做法（安全阀，已实现）：
+
+1. 抢半默认路由**之前**先量基线（能不能用系统解析器解析一个随机域名）；
+2. 抢完再真实解析两次（各 2.5s），两次都没有结果就判定「接管打断了系统解析器」；
+3. 立刻把捕获路由还回去（`del_capture_routes`），**不装配引擎**，
+   状态显示「已连接（未接管系统流量：…）」，隧道保留、系统流量照常直连；
+4. 基线本来就失败的机器（没网/没 DNS）不参与判定，避免离线环境误判。
+
+关键点：宁可这一趟规则分流不生效，也不能让用户面对「一连上就全网断」。
+探针用随机域名（`probe<nanos>.example.com`）而不是常见域名，是为了绕开缓存 ——
+接管后缓存里的旧答案照样能秒回，用它会骗过探针。
+
+## 下一步：换掉「抢默认路由」这个地基
+
+既然捕获式接管和 macOS 解析器不兼容，规则模式要真正可用，只有两条路：
+
+- **方案 A：本机 DNS 服务 + 接管系统 DNS**（Clash/sing-box 的做法）。
+  worker 起一个 127.0.0.1:53 的 DNS 服务，`networksetup` 把系统 DNS 指向它，
+  解析请求不再需要「经物理网卡去问远端 DNS」，于是半默认路由怎么抢都不影响解析；
+  同时它可以继续返回 fake-ip，域名规则完整保留。代价：要管好 DNS 的改回
+  （异常退出、崩溃、断电都要能还原），实现量最大。
+- **方案 B：路由注入式分流，完全不捕获**。默认路由和系统 DNS 都不动，
+  对命中「走 VPN」的域名：经隧道把域名解析成真实 IP，再给这些 IP 装 /32
+  走 utun4；内网域名用 `/etc/resolver/<域>` 指向 VPN DNS。代价：失去进程规则、
+  失去「按不可见域名分流」的能力，但**结构上不可能再出现「一连上就断网」**。
+
+方案选择需要产品决策（见对话），安全阀的作用是不管选哪条，先把「断网」按住。
+
+**已选方案 B（用户拍板），落地见下一节。**
+
+## 方案 B 落地：路由注入式分流（规则模式，macOS）
+
+代码：`src-tauri/src/vpn/split.rs`，由 `worker.rs::start_split_rules()` 在连接时拉起。
+规则模式下**不再创建捕获 TUN、不抢 `0.0.0.0/1`+`128.0.0.0/1`、不改系统 DNS**。
+
+做法：
+
+1. `split::plan()` 把「走 VPN」的规则翻译成可执行的动作：
+   `DOMAIN`/`DOMAIN-SUFFIX` → 域名清单，`IP-CIDR` → 网段清单；
+   `DOMAIN-KEYWORD`/`PROCESS-NAME`/`DST-PORT`/`RULE-SET` → 逐条给出「这个模式做不到，
+   请改成 DOMAIN-SUFFIX」的提示（没有数据面，确实做不到）。
+2. 给 VPN 下发的 DNS（`223.5.5.5`）和 `IP-CIDR` 网段装 `/32`、`/n` 主机路由，**指向隧道**。
+3. 给每个域名写 `/etc/resolver/<域名>`，内容是 `nameserver 127.0.0.1` ——
+   macOS 官方的「按域名分流解析」机制，系统解析器会把这些域名的查询送到本机。
+4. worker 里起 DNS 转发器（`127.0.0.1:53`）：收到查询 → 经隧道转发给 VPN DNS →
+   拿到真实内网 IP 时给这些 IP 装 `/32` 隧道路由 → 原样回包。
+
+另外，脚本会把服务端下发的 `CISCO_SPLIT_INC*`（split-include 网段）和
+`CISCO_DEF_DOMAIN`（默认域名）回报给 worker，worker 把它们**并进同一份计划**：
+
+- 网段 → 直接注入隧道（正规 VPN 客户端的做法），落这些网段的流量全部走 VPN，
+  不管域名是怎么解析出来的（应用自带 DNS、硬编码 IP 都兜得住）；
+- 默认域名 → 自动写一条 `/etc/resolver`，整族子域自动走 VPN，用户不用逐个列举；
+- 服务端若下发 `0.0.0.0/0`（全隧道），路由注入模式会明确拒绝并提示改用全局模式 ——
+  否则 DNS 仍走原来的服务器、流量却全进隧道，等于自造一次「断网」。
+
+这是「把公司相关请求全覆盖」最权威的依据，比用户手写规则准；规则只用来补
+服务端没下发的那部分。
+5. 收尾：断开时回收 resolver 文件、隧道路由、转发线程并刷新 DNS 缓存；
+   进程被 SIGKILL 时靠 `<会话目录>/resolver-manifest.txt` 在下次连接前清理干净。
+
+为什么这条路上不可能再「断网」：默认路由、系统 DNS、其它流量一个都没动，
+最坏情况是「分流不生效」（规则没翻译出可用动作、53 端口被占用、resolver 文件写不进去），
+此时 worker 只建隧道、不接管任何流量，并在状态里写明原因。
+
+启动 / 变更 / 断开：
+
+- 连接：`start_engine()` 在 macOS 规则模式下直接转 `start_split_rules()`；
+- 规则改动：`poll_rules_change()` 检测到规则变化后 `restart_split()` 重新布线（不用重连）；
+- 模式切换：分流期间拒绝运行期切模式（要重布线），提示断开重连；
+- 断开：`cleanup_routes()` 先 teardown 分流，再走原有回收。
+
+日志关键字（排障按这个顺序看）：
+
+```
+[分流] 路由注入模式：域名 [...]，网段 [...]，VPN DNS [...]，隧道 utun4
+[分流] 路由注入分流已生效：1 个域名走隧道 utun4，1 条固定隧道路由；默认路由与系统 DNS 均未改动
+[分流] 内网 IP 10.10.3.17 已注入隧道 utun4
+[自检] 开始：系统解析器 -> /etc/resolver -> 本机转发器 -> 隧道 -> VPN DNS
+[自检] example.com 解析到 …（已按隧道路由接管，连接会走 VPN）
+```
+
+已知限制（都要让用户知道）：
+
+- `DOMAIN-KEYWORD` 不能直接用于路由注入（没有数据面做关键字匹配），要么改成
+  `DOMAIN-SUFFIX`（例如 `corp` → `DOMAIN-SUFFIX example.com`），要么继续用捕获模式；
+- 自带 DoH/DoT 的应用不经过系统解析器，域名规则管不到它；如果它解析出的 IP
+  命中 `IP-CIDR` 规则，仍能进隧道；
+- 兜底策略是 VPN（全隧道）不适用于本模式，需要「全部走 VPN」请用全局模式；
+- ~~全局模式暂时仍走捕获引擎~~ 已补齐，见下一节。
+
+## 全局模式 / 直连模式 / 运行期切换（macOS）
+
+规则模式走完以后，另外两个模式退化成同一个问题：**要不要把这台机器的流量交给隧道**。
+
+- **直连**：隧道建起来，一条路由都不加、DNS 不动（`start_engine` 直接返回）。
+- **全局**：等价于「在终端里裸跑 openconnect」，照抄系统标准脚本
+  `/opt/homebrew/etc/vpnc/vpnc-script` 在 Darwin 上的动作（`src-tauri/src/vpn/fulltunnel.rs`）：
+  - 路由：`0.0.0.0/1` + `128.0.0.0/1` 指向隧道。**故意不删**系统原有 default ——
+    删掉这两条半默认路由就完整恢复，比标准脚本「备份 default → 重装 → 断开装回」
+    少一次破坏性操作；本地网段是连接路由，天然比 `/1` 更具体，自动保持直连。
+  - DNS（较新 macOS 上标准脚本也是两处都写，实测终端 openconnect 能上网靠的就是它）：
+    `scutil` 给隧道服务写 `State:/Network/Service/<tun>/IPv4` 与 `.../DNS`
+    （带 `OverridePrimary # 1`，让系统优先用这份 DNS）；
+    `networksetup -setdnsservers <当前活动网络服务> <VPN DNS>`。
+  - 还原：断开时隧道服务整段移除，活动网络服务恢复连接前的快照
+    （快照为空 = 原来走 DHCP，设回 `Empty`）。
+  - 崩溃兜底：改 DNS **之前**先写 `fulltunnel.marker`（服务名 + 原 DNS），
+    worker 启动时 `restore_stale()` 先还原。否则被 SIGKILL 后残留的 `223.5.5.5`
+    会被当成「用户自己配的 DNS」快照下来，从此再也回不到 DHCP。
+  - 安全阀：装完立刻 `verify_system_resolution`，连续两次失败就整段回滚
+    （路由与 DNS 都还原）并降级 —— 绝不留「DNS 死了、路由还在」的黑洞。
+- **运行期切换**：三种模式本质都是「布几条路由 + 改不改 DNS」，所以
+  `switch_mode()` 直接撤旧布线、布新线，不必断开重连；`status.applied_mode`
+  记录本次会话实际生效的模式，界面按它高亮（此前的 bug：界面显示「全局」，
+  worker 里其实还是规则模式，内网能通纯属规则分流在干活）。
+
+对比一句话：规则模式结构上不可能断网（默认路由与系统 DNS 都不动）；
+全局模式一定会动系统 DNS，这是全隧道的本质，只能靠快照 + 验证 + 回滚兜住。
+
+
+## 收尾：删掉 Clash 式捕获引擎，只留一条数据面（2026-11-05）
+
+规则模式改成路由注入之后，仓库里还留着一整套**捕获引擎**（`router` / `netstack` /
+`fakedns` / `proc_lookup` / `tun_device` / `platform` 捕获路由）。它在 macOS 上
+一个分支都走不到，在 Windows 上又从未验证过 —— 留着是负债，删掉。
+
+删除清单（净 −4665 行，`src-tauri/src/vpn/` 从 14.5k 行降到 8.7k 行）：
+
+- 模块：`router.rs`(1781) / `netstack.rs`(779) / `fakedns.rs`(361) / `proc_lookup.rs`(230) /
+  `tun_device.rs`(494) / `platform.rs`(470) / `dns_srv.rs`(130)；`rule_engine.rs` 从 657 行
+  缩到 113 行，只留 `RuleKind`（三类）与 `Policy`。
+- worker：`engine` / `capture_index` / `fake_pool` / `engine_ready_at`，
+  捕获装配 `start_engine`（整段）、捕获自检、12 秒探针、引擎统计发布，
+  以及脚本接管时代的 `default_route_taken` / `dns_applied` / `dns_service` 兜底。
+- 命令：`vpn_check_rule_overlaps` / `vpn_validate_cidr` / `vpn_connector_version` /
+  `vpn_managed_openconnect_path`（前端从不调用）；`vpn_preview_rules` 改成路由注入语义，
+  不再接受端口/进程参数。
+- 配置与界面：`fake_ip_range` / `fake_ip_filter`（两个表单里最长的假地址池说明一起删）、
+  `no_resolve`、`rule_set_id`、`DOMAIN-KEYWORD` / `PROCESS-NAME` / `DST-PORT` / `RULE-SET`
+  四种规则类型（后端解析会明确报错，老配置在列表里标「不生效」）。
+
+**平台现状（明说）**：Windows 上不再有分流实现 —— 规则/全局模式会建隧道但**不接管流量**，
+日志里写明「当前平台还没有分流实现」。重建 Windows 支持的路线是复用同一套思路：
+半默认路由 + `Set-DnsClientServerAddress`，域名白名单用 **NRPT**
+（`Add-DnsClientNrptRule`，等价于 macOS 的 `/etc/resolver`），不再需要用户态协议栈。
