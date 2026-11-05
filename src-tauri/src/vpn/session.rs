@@ -321,6 +321,7 @@ mod tests {
 
     fn sample_request() -> VpnRequest {
         VpnRequest {
+            proxy_mode: "rule".to_string(),
             profile_id: "p1".into(),
             profile_name: "公司 VPN".into(),
             server: "vpn.risencn.com:1218".into(),

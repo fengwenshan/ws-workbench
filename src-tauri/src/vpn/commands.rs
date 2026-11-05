@@ -538,6 +538,7 @@ pub async fn vpn_connect(
         protocol: profile.protocol.clone(),
         connector: profile.connector,
         connector_path: connector.path.clone(),
+        proxy_mode: profile.proxy_mode.clone(),
         rules: rules.clone(),
         default_policy: default_policy.clone(),
         fake_ip_range: profile.fake_ip_range.clone(),

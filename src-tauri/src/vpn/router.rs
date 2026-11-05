@@ -45,6 +45,11 @@ struct FlowEgress {
     stream: Option<TcpStream>,
     /// VPN 出口为这条流加的 /32 路由（断开时需要回收）
     installed_route: Option<Ipv4Addr>,
+    /// 建立时的真实目标与判定输入；规则变更后用它重判
+    target: SocketAddrV4,
+    egress: Egress,
+    domain: Option<String>,
+    process: Option<String>,
 }
 
 /// 一条 UDP 流的出站状态。
@@ -54,6 +59,10 @@ struct UdpEgress {
     target: SocketAddrV4,
     /// VPN 出口为这条流加的 /32 路由（断开时需要回收）
     installed_route: Option<Ipv4Addr>,
+    /// 建立时的判定结果与输入；规则变更后用它重判
+    egress: Egress,
+    domain: Option<String>,
+    process: Option<String>,
 }
 
 /// 出口资源持有者。物理网卡索引与隧道网卡索引在连接建立时确定。
@@ -113,7 +122,7 @@ impl Router {
 
     /// 为一条终结后的应用连接建立出站 TCP。
     pub fn open_egress(&mut self, key: &FlowKey, egress: Egress) -> std::io::Result<()> {
-        self.open_egress_to(key, key.remote, egress)
+        self.open_egress_to(key, key.remote, egress, None, None)
     }
 
     /// 同上，但允许出站目标与五元组里的 remote 不同（fake-ip -> 真实 IP）。
@@ -122,6 +131,8 @@ impl Router {
         key: &FlowKey,
         target: SocketAddrV4,
         egress: Egress,
+        domain: Option<String>,
+        process: Option<String>,
     ) -> std::io::Result<()> {
         if self.flows.contains_key(key) {
             return Ok(());
@@ -149,7 +160,10 @@ impl Router {
                 return Err(e);
             }
         };
-        self.flows.insert(key.to_owned(), FlowEgress { stream: Some(stream), installed_route });
+        self.flows.insert(
+            key.to_owned(),
+            FlowEgress { stream: Some(stream), installed_route, target, egress, domain, process },
+        );
         Ok(())
     }
 
@@ -189,7 +203,7 @@ impl Router {
 
     /// 为一条 UDP 流建立出站 socket：钉网卡，必要时装流路由。
     pub fn open_udp_egress(&mut self, key: &FlowKey, egress: Egress) -> std::io::Result<()> {
-        self.open_udp_egress_to(key, key.remote, egress)
+        self.open_udp_egress_to(key, key.remote, egress, None, None)
     }
 
     pub fn open_udp_egress_to(
@@ -197,6 +211,8 @@ impl Router {
         key: &FlowKey,
         target: SocketAddrV4,
         egress: Egress,
+        domain: Option<String>,
+        process: Option<String>,
     ) -> std::io::Result<()> {
         if self.udp_flows.contains_key(key) {
             return Ok(());
@@ -214,7 +230,7 @@ impl Router {
         }
         self.udp_flows.insert(
             key.to_owned(),
-            UdpEgress { socket, target, installed_route },
+            UdpEgress { socket, target, installed_route, egress, domain, process },
         );
         Ok(())
     }
@@ -337,6 +353,30 @@ impl Router {
 
     pub fn flow_keys(&self) -> Vec<FlowKey> {
         self.flows.keys().copied().collect()
+    }
+
+    /// 已建立 TCP 流的判定输入快照，供规则变更后重判
+    pub fn flow_entries(
+        &self,
+    ) -> Vec<(FlowKey, SocketAddrV4, Egress, Option<String>, Option<String>)> {
+        self.flows
+            .iter()
+            .map(|(key, flow)| {
+                (key.to_owned(), flow.target, flow.egress, flow.domain.clone(), flow.process.clone())
+            })
+            .collect()
+    }
+
+    /// 已建立 UDP 流的判定输入快照
+    pub fn udp_flow_entries(
+        &self,
+    ) -> Vec<(FlowKey, SocketAddrV4, Egress, Option<String>, Option<String>)> {
+        self.udp_flows
+            .iter()
+            .map(|(key, flow)| {
+                (key.to_owned(), flow.target, flow.egress, flow.domain.clone(), flow.process.clone())
+            })
+            .collect()
     }
 }
 
@@ -550,13 +590,59 @@ pub fn decide_domain_at(
     Egress::from(rules.evaluate(&input))
 }
 
+/// 代理模式。与 Clash 一致：模式是运行期开关，只影响之后建立的连接。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProxyMode {
+    /// 按规则分流
+    Rule,
+    /// 全部走 VPN
+    Global,
+    /// 全部直连
+    Direct,
+}
+
+impl ProxyMode {
+    pub fn parse(raw: &str) -> Result<Self, String> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "rule" => Ok(Self::Rule),
+            "global" => Ok(Self::Global),
+            "direct" => Ok(Self::Direct),
+            other => Err(format!("未知的代理模式：{other}（仅支持 rule / global / direct）")),
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Rule => "rule",
+            Self::Global => "global",
+            Self::Direct => "direct",
+        }
+    }
+}
+
+/// 用模式覆盖规则判定结果：全局强制 VPN、直连强制 DIRECT，规则模式保持原判定
+pub fn apply_mode(mode: ProxyMode, egress: Egress) -> Egress {
+    match mode {
+        ProxyMode::Global => Egress::Vpn,
+        ProxyMode::Direct => Egress::Direct,
+        ProxyMode::Rule => egress,
+    }
+}
+
+/// 规则变更后是否需要重置这条流
+pub fn decision_changed(old: Egress, new: Egress) -> bool {
+    old != new
+}
+
 /// 引擎：持有 netstack、出口 Router、规则集与进程反查，供 worker 主循环驱动。
 pub struct Engine {
     pub router: Router,
     pub netstack: Netstack<Box<dyn TunDevice>>,
-    pub rules: CompiledRuleSet,
+    /// 只在规则模式下编译；全局/直连模式为 None
+    pub rules: Option<CompiledRuleSet>,
+    /// 当前生效的代理模式，可由 worker 在运行期改
+    pub mode: ProxyMode,
     proc: Box<dyn ProcLookup>,
-    #[allow(dead_code)]
     default_policy: Policy,
     /// fake-ip 分配池（DNS 本地应答时用），由 worker 装配后注入
     fake_pool: Option<FakeIpPool>,
@@ -575,7 +661,8 @@ impl Engine {
     pub fn assemble(
         capture: Box<dyn TunDevice>,
         netstack_cfg: NetstackConfig,
-        rules: CompiledRuleSet,
+        rules: Option<CompiledRuleSet>,
+        mode: ProxyMode,
         route: Box<dyn RouteTable>,
         binder: Box<dyn IfBinder>,
         physical_if: u32,
@@ -591,6 +678,7 @@ impl Engine {
             router,
             netstack: ns,
             rules,
+            mode,
             proc,
             default_policy: Policy::parse(default_policy).unwrap_or(Policy::Direct),
             fake_pool: None,
@@ -599,6 +687,74 @@ impl Engine {
             vpn_dns: Vec::new(),
             real_cache: HashMap::new(),
         })
+    }
+
+    /// 切换代理模式：只改判定开关，不重置已建立的连接
+    pub fn set_mode(&mut self, mode: ProxyMode) {
+        self.mode = mode;
+    }
+
+    /// 换一份规则（规则热更新时调用）
+    pub fn set_rules(&mut self, rules: CompiledRuleSet) {
+        self.rules = Some(rules);
+    }
+
+    /// 按当前模式给出一次判定；规则模式下才真正查规则表
+    fn egress_for_at(
+        &self,
+        domain: Option<&str>,
+        ip: Ipv4Addr,
+        port: u16,
+        process: Option<&str>,
+    ) -> Egress {
+        match self.mode {
+            ProxyMode::Global => Egress::Vpn,
+            ProxyMode::Direct => Egress::Direct,
+            ProxyMode::Rule => match self.rules.as_ref() {
+                Some(rules) => {
+                    let ip_text = ip.to_string();
+                    Egress::from(rules.evaluate(&MatchInput {
+                        domain,
+                        ip: Some(&ip_text),
+                        port: Some(port),
+                        process,
+                    }))
+                }
+                None => Egress::from(self.default_policy),
+            },
+        }
+    }
+
+    /// 用五元组做一次判定（domain 为 fake-ip 反查出的域名，可能为空）
+    fn egress_for(&self, domain: Option<&str>, key: &FlowKey, process: Option<&str>) -> Egress {
+        self.egress_for_at(domain, *key.remote.ip(), key.remote.port(), process)
+    }
+
+    /// 规则热更新后重判已建立的流，只重置出口变了的；模式切换不调用本方法
+    pub fn reset_changed_flows(&mut self) {
+        let mut tcp_stale = Vec::new();
+        for (key, target, egress, domain, process) in self.router.flow_entries() {
+            let decided =
+                self.egress_for_at(domain.as_deref(), *target.ip(), target.port(), process.as_deref());
+            if decision_changed(egress, decided) {
+                tcp_stale.push(key);
+            }
+        }
+        let mut udp_stale = Vec::new();
+        for (key, target, egress, domain, process) in self.router.udp_flow_entries() {
+            let decided =
+                self.egress_for_at(domain.as_deref(), *target.ip(), target.port(), process.as_deref());
+            if decision_changed(egress, decided) {
+                udp_stale.push(key);
+            }
+        }
+        for key in tcp_stale {
+            self.netstack.abort_tcp(&key);
+            self.router.close_flow(&key);
+        }
+        for key in udp_stale {
+            self.router.close_flow(&key);
+        }
     }
 
     /// 注入 fake-ip 池（装配后由 worker 调用）。
@@ -625,16 +781,12 @@ impl Engine {
                 .and_then(|pid| self.proc.name_for_pid(pid));
             // 先按域名（必要时再按真实 IP）定出口。fake-ip 刚到达时只有假地址，
             // 先用域名做一次临时判定去解析真实 IP，再拿真实 IP 重判一次。
-            let provisional = match domain.as_deref() {
-                Some(d) => decide_domain(&self.rules, d, &flow.key, process.as_deref()),
-                None => decide_egress(&self.rules, &flow.key, process.as_deref()),
-            };
+            let provisional = self.egress_for(domain.as_deref(), &flow.key, process.as_deref());
             let (target, egress) = match domain.as_deref() {
                 Some(d) => match self.resolve_name(d, provisional) {
                     Some(ip) => {
-                        let egress = decide_domain_at(
-                            &self.rules,
-                            d,
+                        let egress = self.egress_for_at(
+                            Some(d),
                             ip,
                             flow.key.remote.port(),
                             process.as_deref(),
@@ -648,7 +800,11 @@ impl Engine {
                 },
                 None => (flow.key.remote, provisional),
             };
-            if self.router.open_egress_to(&flow.key, target, egress).is_err() {
+            if self
+                .router
+                .open_egress_to(&flow.key, target, egress, domain.clone(), process.clone())
+                .is_err()
+            {
                 self.netstack.abort_tcp(&flow.key);
             }
         }
@@ -669,16 +825,12 @@ impl Engine {
                 .proc
                 .pid_for(&dg.key)
                 .and_then(|pid| self.proc.name_for_pid(pid));
-            let provisional = match domain.as_deref() {
-                Some(d) => decide_domain(&self.rules, d, &dg.key, process.as_deref()),
-                None => decide_egress(&self.rules, &dg.key, process.as_deref()),
-            };
+            let provisional = self.egress_for(domain.as_deref(), &dg.key, process.as_deref());
             let (target, egress) = match domain.as_deref() {
                 Some(d) => match self.resolve_name(d, provisional) {
                     Some(ip) => {
-                        let egress = decide_domain_at(
-                            &self.rules,
-                            d,
+                        let egress = self.egress_for_at(
+                            Some(d),
                             ip,
                             dg.key.remote.port(),
                             process.as_deref(),
@@ -689,7 +841,11 @@ impl Engine {
                 },
                 None => (dg.key.remote, provisional),
             };
-            if self.router.open_udp_egress_to(&dg.key, target, egress).is_ok() {
+            if self
+                .router
+                .open_udp_egress_to(&dg.key, target, egress, domain.clone(), process.clone())
+                .is_ok()
+            {
                 let _ = self.router.udp_sendto(&dg.key, &dg.payload);
             }
         }
@@ -724,10 +880,17 @@ impl Engine {
             if query.qtype != 1 {
                 return Some(super::dns_srv::build_empty_response(payload, &query));
             }
-            let policy = self.rules.evaluate(&MatchInput {
-                domain: Some(&name),
-                ..Default::default()
-            });
+            let policy = match self.mode {
+                ProxyMode::Global => Policy::Vpn,
+                ProxyMode::Direct => Policy::Direct,
+                ProxyMode::Rule => match self.rules.as_ref() {
+                    Some(rules) => rules.evaluate(&MatchInput {
+                        domain: Some(&name),
+                        ..Default::default()
+                    }),
+                    None => self.default_policy,
+                },
+            };
             let resp = self.router.dns_exchange(
                 *server.ip(),
                 Egress::from(policy),
@@ -941,5 +1104,30 @@ mod tests {
             remote: "8.8.8.8:53".parse().unwrap(),
         };
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn apply_mode_overrides_egress() {
+        assert_eq!(apply_mode(ProxyMode::Global, Egress::Direct), Egress::Vpn);
+        assert_eq!(apply_mode(ProxyMode::Direct, Egress::Vpn), Egress::Direct);
+        assert_eq!(apply_mode(ProxyMode::Rule, Egress::Direct), Egress::Direct);
+        assert_eq!(apply_mode(ProxyMode::Rule, Egress::Vpn), Egress::Vpn);
+    }
+
+    #[test]
+    fn proxy_mode_parse_accepts_three_values_and_rejects_others() {
+        assert_eq!(ProxyMode::parse("rule").unwrap(), ProxyMode::Rule);
+        assert_eq!(ProxyMode::parse("GLOBAL").unwrap(), ProxyMode::Global);
+        assert_eq!(ProxyMode::parse(" direct ").unwrap(), ProxyMode::Direct);
+        assert!(ProxyMode::parse("bogus").is_err());
+        assert_eq!(ProxyMode::Global.as_str(), "global");
+    }
+
+    #[test]
+    fn decision_changed_only_when_egress_differs() {
+        assert!(decision_changed(Egress::Direct, Egress::Vpn));
+        assert!(decision_changed(Egress::Vpn, Egress::Direct));
+        assert!(!decision_changed(Egress::Vpn, Egress::Vpn));
+        assert!(!decision_changed(Egress::Direct, Egress::Direct));
     }
 }

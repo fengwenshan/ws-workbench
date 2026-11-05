@@ -432,7 +432,12 @@ impl Worker {
         }
         self.fake_pool = Some(pool.clone());
 
-        let rules = self.compiled_rules()?;
+        let mode = router::ProxyMode::parse(&self.request.proxy_mode)?;
+        let rules = if mode == router::ProxyMode::Rule {
+            Some(self.compiled_rules()?)
+        } else {
+            None
+        };
         #[cfg(target_os = "macos")]
         let proc: Box<dyn ProcLookup> =
             Box::new(crate::vpn::proc_lookup::SysctlProcLookup::new());
@@ -459,6 +464,7 @@ impl Worker {
                 fake_domains: std::collections::HashMap::new(),
             },
             rules,
+            mode,
             Box::new(platform::SystemRouteTable::new()),
             Box::new(platform::SystemIfBinder::new()),
             physical_if,
@@ -1295,6 +1301,7 @@ mod tests {
     fn tail_summary_picks_error_lines() {
         let session = VpnSession::new(std::env::temp_dir().join("ws-worker-test"));
         let request = VpnRequest {
+            proxy_mode: "rule".to_string(),
             profile_id: "p".into(),
             profile_name: "n".into(),
             server: "s".into(),
@@ -1323,6 +1330,7 @@ mod tests {
     fn compiled_rules_parses_canonical_kind_and_policy() {
         let session = VpnSession::new(std::env::temp_dir().join("ws-worker-test-compiled"));
         let request = VpnRequest {
+            proxy_mode: "rule".to_string(),
             profile_id: "p".into(),
             profile_name: "n".into(),
             server: "s".into(),
@@ -1360,6 +1368,7 @@ mod tests {
     fn tunnel_ready_requires_ip_and_interface() {
         let session = VpnSession::new(std::env::temp_dir().join("ws-worker-test2"));
         let request = VpnRequest {
+            proxy_mode: "rule".to_string(),
             profile_id: "p".into(),
             profile_name: "n".into(),
             server: "s".into(),
@@ -1390,6 +1399,7 @@ mod tests {
     fn tun_setup_failure_gets_actionable_hint() {
         let session = VpnSession::new(std::env::temp_dir().join("ws-worker-test3"));
         let request = VpnRequest {
+            proxy_mode: "rule".to_string(),
             profile_id: "p".into(),
             profile_name: "n".into(),
             server: "s".into(),
