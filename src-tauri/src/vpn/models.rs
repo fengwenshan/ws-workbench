@@ -130,9 +130,6 @@ pub struct VpnProfile {
     /// 代理模式：rule / global / direct。老配置没有这个字段时按规则模式处理。
     #[serde(default = "default_proxy_mode")]
     pub proxy_mode: String,
-    /// 绑定的规则集 id
-    #[serde(default)]
-    pub rule_set_id: String,
     /// fake-ip 地址池，用于按域名分流时反查真实目标
     #[serde(default = "default_fake_ip_range")]
     pub fake_ip_range: String,
@@ -152,6 +149,38 @@ pub struct VpnProfile {
     pub created_at: String,
     #[serde(default)]
     pub updated_at: String,
+}
+
+/// 通道身份：只由「建立隧道所需的连接参数」决定。
+///
+/// 名称、规则、代理模式都不参与比较——它们可以在同一条隧道上热切换。
+/// 输出是稳定哈希，不含明文密码，可以直接写进状态文件与前端。
+pub fn conn_identity(profile: &VpnProfile) -> String {
+    let mut parts: Vec<String> = vec![
+        profile.server.clone(),
+        profile.username.clone(),
+        profile.password.clone(),
+        profile.protocol.clone(),
+        format!("{:?}", profile.connector),
+        profile.connector_path.clone(),
+        profile.fake_ip_range.clone(),
+        profile.learn.to_string(),
+    ];
+    let mut extra = profile.extra_args.clone();
+    extra.sort();
+    parts.push(extra.join("\u{1e}"));
+    let mut filter = profile.fake_ip_filter.clone();
+    filter.sort();
+    parts.push(filter.join("\u{1e}"));
+
+    let joined = parts.join("\u{1f}");
+    // FNV-1a 64：不引入依赖，跨进程/跨重启稳定
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in joined.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
 }
 
 fn default_protocol() -> String {
@@ -554,5 +583,66 @@ mod tests {
     fn rule_set_default_policy_defaults_to_direct() {
         let set: VpnRuleSet = serde_json::from_str(r#"{"id":"rs1","name":"默认"}"#).unwrap();
         assert_eq!(set.default_policy, "DIRECT");
+    }
+
+    fn sample_profile() -> VpnProfile {
+        serde_json::from_str(
+            r#"{"id":"p1","name":"A","server":"vpn.example.com:443","username":"alice","password":"secret","protocol":"anyconnect","extra_args":[],"connector_path":"","created_at":"","updated_at":""}"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn conn_identity_ignores_name_rules_and_mode() {
+        let a = sample_profile();
+        let mut b = a.clone();
+        b.name = "另一个名字".to_string();
+        b.proxy_mode = "global".to_string();
+        assert_eq!(conn_identity(&a), conn_identity(&b));
+        // 同一配置多次计算结果必须稳定
+        assert_eq!(conn_identity(&a), conn_identity(&a));
+    }
+
+    #[test]
+    fn conn_identity_changes_with_each_connection_field() {
+        let base = sample_profile();
+        let mut cases: Vec<VpnProfile> = Vec::new();
+        let mut p = base.clone();
+        p.server = "other.example.com:443".to_string();
+        cases.push(p);
+        let mut p = base.clone();
+        p.username = "bob".to_string();
+        cases.push(p);
+        let mut p = base.clone();
+        p.password = "another".to_string();
+        cases.push(p);
+        let mut p = base.clone();
+        p.protocol = "gp".to_string();
+        cases.push(p);
+        let mut p = base.clone();
+        p.connector = ConnectorKind::Openconnect;
+        cases.push(p);
+        let mut p = base.clone();
+        p.connector_path = "/usr/local/bin/openconnect".to_string();
+        cases.push(p);
+        let mut p = base.clone();
+        p.fake_ip_range = "198.19.0.0/16".to_string();
+        cases.push(p);
+        let mut p = base.clone();
+        p.fake_ip_filter = vec!["*.local".to_string()];
+        cases.push(p);
+        let mut p = base.clone();
+        p.learn = true;
+        cases.push(p);
+        let mut p = base.clone();
+        p.extra_args = vec!["--no-dtls".to_string()];
+        cases.push(p);
+        for case in &cases {
+            assert_ne!(
+                conn_identity(&base),
+                conn_identity(case),
+                "这些连接字段必须参与通道身份计算"
+            );
+        }
     }
 }
