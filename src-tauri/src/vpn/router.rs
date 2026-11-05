@@ -98,6 +98,10 @@ pub struct Router {
     udp_flows: HashMap<FlowKey, UdpEgress>,
     /// 流路由的引用计数：同一真实 IP 的多条流共用一条 /32
     installed_routes: HashMap<(Ipv4Addr, bool), usize>,
+    /// 应用 -> 出站 的累计字节数（判断上行是否真的在走）
+    bytes_to_egress: u64,
+    /// 出站 -> 应用 的累计字节数（判断回程是否真的在走）
+    bytes_to_app: u64,
 
 }
 
@@ -127,6 +131,8 @@ impl Router {
             flows: HashMap::new(),
             udp_flows: HashMap::new(),
             installed_routes: HashMap::new(),
+            bytes_to_egress: 0,
+            bytes_to_app: 0,
         }
     }
 
@@ -325,6 +331,7 @@ impl Router {
         }
         flow.pending_in.extend(data);
         flush_pending_in(flow);
+        self.bytes_to_egress += data.len() as u64;
         true
     }
 
@@ -363,7 +370,13 @@ impl Router {
                 }
             }
         }
+        self.bytes_to_app += out.len() as u64;
         out
+    }
+
+    /// 累计搬运字节数（上行, 回程），给 worker 的统计行用
+    pub fn byte_stats(&self) -> (u64, u64) {
+        (self.bytes_to_egress, self.bytes_to_app)
     }
 
     /// 应用侧窗口不够时，把没发出去的数据退回来，下轮再发。
@@ -473,6 +486,8 @@ impl Router {
                 }
                 _ => {}
             }
+            // socket 是非阻塞的：这里必须自己让出 CPU，但每隔几毫秒就能看一次回包
+            std::thread::sleep(Duration::from_millis(2));
         }
         self.close_flow(&key);
         answer
@@ -578,8 +593,9 @@ fn connect_plain(remote: SocketAddrV4, bind: Option<Ipv4Addr>) -> std::io::Resul
     )?;
     socket.set_tcp_nodelay(true)?;
     let stream: TcpStream = socket.into();
-    stream.set_read_timeout(Some(Duration::from_millis(200)))?;
-    stream.set_write_timeout(Some(Duration::from_millis(200)))?;
+    // 引擎是单线程轮询：读写一旦阻塞，所有流一起卡住（表现就是「网页一直 pending」）。
+    // 建连之后统一转非阻塞，读写拿 WouldBlock 当「这轮没有」处理。
+    stream.set_nonblocking(true)?;
     Ok(stream)
 }
 
@@ -592,7 +608,7 @@ fn udp_socket_plain(bind: Option<Ipv4Addr>) -> std::io::Result<UdpSocket> {
         bind.unwrap_or(Ipv4Addr::UNSPECIFIED),
         0,
     ))))?;
-    socket.set_read_timeout(Some(Duration::from_millis(200)))?;
+    socket.set_nonblocking(true)?;
     let socket: UdpSocket = socket.into();
     Ok(socket)
 }
@@ -727,6 +743,10 @@ pub struct EngineStats {
     pub dns_answered: u64,
     /// 引擎看到的应用侧建连请求数（无论成败）
     pub flows_attempted: u64,
+    /// 应用 -> 出站 的累计字节
+    pub bytes_to_egress: u64,
+    /// 出站 -> 应用 的累计字节
+    pub bytes_to_app: u64,
     /// 成功建出站的应用侧 TCP 流数
     pub flows_opened: u64,
     /// 出站建连失败次数（代表出口这一段有问题）
@@ -802,11 +822,14 @@ impl Engine {
 
     pub fn stats(&self) -> EngineStats {
         let phy = self.netstack.phy.stats();
+        let (bytes_to_egress, bytes_to_app) = self.router.byte_stats();
         EngineStats {
             rx_packets: phy.rx,
             tx_packets: phy.tx,
             dns_answered: self.dns_answered,
             flows_attempted: self.flows_attempted,
+            bytes_to_egress,
+            bytes_to_app,
             flows_opened: self.flows_opened,
             egress_failures: self.egress_failures,
         }
