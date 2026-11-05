@@ -9,15 +9,13 @@ import type {
   VpnProxyMode,
   VpnRule,
   VpnRuleKind,
-  VpnRuleSet,
 } from '@/types/vpn'
-import { POLICY_LABELS, RULE_KIND_LABELS } from '@/types/vpn'
 import { platform } from '@/platform'
 import VpnInstallGuide from './VpnInstallGuide.vue'
 import VpnLearnCard from './VpnLearnCard.vue'
 import VpnProfileDialog from './VpnProfileDialog.vue'
 import VpnRoutePreview from './VpnRoutePreview.vue'
-import VpnRuleSetDialog from './VpnRuleSetDialog.vue'
+import VpnRuleTable from './VpnRuleTable.vue'
 import VpnStatusDot from './VpnStatusDot.vue'
 
 const props = defineProps<{
@@ -31,8 +29,6 @@ const props = defineProps<{
 const vpn = props.vpn
 
 const confirmDelete = ref<VpnProfile | null>(null)
-const confirmDeleteRuleSet = ref<VpnRuleSet | null>(null)
-const editingRuleSetId = ref('')
 const profileDialogOpen = ref(false)
 const editingProfile = ref<VpnProfile | null>(null)
 const savingProfile = ref(false)
@@ -92,12 +88,7 @@ const selectedDotState = computed<ProfileDotState>(() =>
   vpn.selectedProfile ? profileDotState(vpn.selectedProfile) : 'off',
 )
 
-const canConnect = computed(() => {
-  const profile = vpn.selectedProfile
-  if (!profile || vpn.connecting) return false
-  if ((profile.proxy_mode ?? 'rule') === 'rule' && !vpn.selectedRuleSet) return false
-  return true
-})
+const canConnect = computed(() => !!vpn.selectedProfile && !vpn.connecting)
 
 // ============================ 代理模式 ============================
 
@@ -106,70 +97,21 @@ const currentMode = computed(
   () => MODE_OPTIONS.find((item) => item.value === proxyMode.value) ?? MODE_OPTIONS[0],
 )
 const modeLocked = computed(() => vpn.isConnected || vpn.phaseBusy || vpn.connecting)
-const connectBlockedReason = computed(() =>
-  proxyMode.value === 'rule' && !vpn.selectedRuleSet
-    ? '规则模式需要先选择一个规则列表'
-    : '',
-)
 
 async function handleModeChange(mode: VpnProxyMode) {
   if (mode === proxyMode.value || modeLocked.value) return
   try {
     await vpn.setProxyMode(mode)
-    if (mode !== 'rule') editingRuleSetId.value = ''
   } catch (err: any) {
     vpn.pushLog('error', `切换代理模式失败: ${err}`)
   }
 }
 
-// ============================ 规则列表 ============================
+// ============================ 分流规则 ============================
 
-const editingRuleSet = computed(
-  () => vpn.ruleSets.find((set) => set.id === editingRuleSetId.value) ?? null,
+const enabledRuleCount = computed(
+  () => (vpn.selectedProfile?.rules ?? []).filter((rule) => rule.enabled).length,
 )
-
-function enabledRules(set: VpnRuleSet): VpnRule[] {
-  return set.rules.filter((rule) => rule.enabled)
-}
-
-function previewRules(set: VpnRuleSet): VpnRule[] {
-  return enabledRules(set).slice(0, 3)
-}
-
-function hiddenRuleCount(set: VpnRuleSet): number {
-  return Math.max(0, enabledRules(set).length - 3)
-}
-
-async function handleNewRuleSet() {
-  if (!vpn.selectedProfile) return
-  try {
-    const set = await vpn.createRuleSet()
-    editingRuleSetId.value = set.id
-  } catch (err: any) {
-    vpn.pushLog('error', `新建规则列表失败: ${err}`)
-  }
-}
-
-async function handleSelectRuleSet(set: VpnRuleSet) {
-  try {
-    await vpn.selectRuleSet(set.id)
-  } catch (err: any) {
-    vpn.pushLog('error', `切换规则列表失败: ${err}`)
-  }
-}
-
-function openRuleSet(set: VpnRuleSet) {
-  editingRuleSetId.value = set.id
-}
-
-function closeRuleDialog() {
-  editingRuleSetId.value = ''
-}
-
-async function handleRenameRuleSet(name: string) {
-  if (!editingRuleSet.value) return
-  await vpn.updateRuleSet(editingRuleSet.value.id, { name })
-}
 
 async function handleAddRule(
   kind: VpnRuleKind,
@@ -177,41 +119,19 @@ async function handleAddRule(
   policy: VpnPolicy,
   remark: string,
 ) {
-  if (!editingRuleSet.value) return
-  await vpn.addRule(editingRuleSet.value.id, kind, value, policy, remark)
+  await vpn.addRule(kind, value, policy, remark)
 }
 
 async function handleUpdateRule(ruleId: string, patch: Partial<VpnRule>) {
-  if (!editingRuleSet.value) return
-  await vpn.updateRule(editingRuleSet.value.id, ruleId, patch)
+  await vpn.updateRule(ruleId, patch)
 }
 
 async function handleRemoveRule(ruleId: string) {
-  if (!editingRuleSet.value) return
-  await vpn.deleteRule(editingRuleSet.value.id, ruleId)
+  await vpn.deleteRule(ruleId)
 }
 
-async function handleDefaultPolicy(policy: VpnPolicy) {
-  if (!editingRuleSet.value) return
-  await vpn.updateRuleSet(editingRuleSet.value.id, { default_policy: policy })
-}
-
-async function handleRuleSetDefaultPolicy(event: Event) {
-  if (!vpn.selectedRuleSet) return
-  const policy = (event.target as HTMLSelectElement).value as VpnPolicy
-  await vpn.updateRuleSet(vpn.selectedRuleSet.id, { default_policy: policy })
-}
-
-function askDeleteRuleSet(set: VpnRuleSet) {
-  confirmDeleteRuleSet.value = set
-}
-
-async function confirmDeleteSelectedRuleSet() {
-  const set = confirmDeleteRuleSet.value
-  if (!set) return
-  if (editingRuleSetId.value === set.id) editingRuleSetId.value = ''
-  await vpn.deleteRuleSet(set.id)
-  confirmDeleteRuleSet.value = null
+async function handleRulesDefaultPolicy(policy: VpnPolicy) {
+  await vpn.updateRulesDefaultPolicy(policy)
 }
 
 // ============================ 交互 ============================
@@ -402,7 +322,6 @@ watch(
                 class="btn"
                 :class="vpn.isConnected || vpn.phaseBusy ? 'btn-danger' : 'btn-primary'"
                 :disabled="!canConnect && !vpn.isConnected"
-                :title="connectBlockedReason"
                 @click="handleConnect"
               >
                 {{ connectLabel }}
@@ -487,83 +406,32 @@ watch(
             <p v-if="modeLocked" class="proxy-mode-lock">当前连接正在生效，断开 VPN 后才能切换代理模式。</p>
           </section>
 
-          <!-- 规则模式：页面保留多份列表，但同一时刻只有点选的那一份生效 -->
-          <section v-if="proxyMode === 'rule'" class="card rules-card">
+          <!-- 规则模式：规则属于当前配置，直接在面板里编辑 -->
+          <section v-if="proxyMode === 'rule'" class="card">
             <div class="rules-head">
               <div>
-                <h4>规则列表</h4>
+                <h4>分流规则</h4>
                 <p>
-                  页面可以有多份列表，但同一时刻只有一份生效。点击列表切换，规则内容在弹窗里编辑。
+                  从上到下匹配，命中第一条即停止；都不命中时走 MATCH 走向。这些规则只属于当前配置。
                 </p>
               </div>
-              <button class="btn btn-secondary btn-xs" @click="handleNewRuleSet">
-                + 新建列表
-              </button>
+              <span class="rules-count">
+                {{ enabledRuleCount }} / {{ (vpn.selectedProfile?.rules ?? []).length }} 条启用
+              </span>
             </div>
-
-            <div v-if="vpn.ruleSets.length" class="rule-set-list" role="radiogroup" aria-label="规则列表">
-              <div
-                v-for="set in vpn.ruleSets"
-                :key="set.id"
-                class="rule-set-item"
-                :class="{ active: set.id === vpn.selectedRuleSet?.id }"
-                role="radio"
-                :aria-checked="set.id === vpn.selectedRuleSet?.id"
-                tabindex="0"
-                @click="handleSelectRuleSet(set)"
-                @keydown.enter="handleSelectRuleSet(set)"
-              >
-                <span class="rule-set-radio"></span>
-                <div class="rule-set-main">
-                  <div class="rule-set-title">
-                    <span class="rule-set-name">{{ set.name }}</span>
-                    <span v-if="set.id === vpn.selectedRuleSet?.id" class="rule-set-badge">
-                      当前生效
-                    </span>
-                    <span class="rule-set-count">
-                      {{ enabledRules(set).length }} / {{ set.rules.length }} 条启用
-                    </span>
-                  </div>
-                  <div class="rule-set-preview">
-                    <span v-for="rule in previewRules(set)" :key="rule.id" class="rule-chip">
-                      <span class="mono">{{ RULE_KIND_LABELS[rule.kind] }}</span>
-                      <span class="rule-chip-value">{{ rule.value }}</span>
-                      <em :class="rule.policy === 'VPN' ? 'policy-vpn' : 'policy-direct'">
-                        {{ POLICY_LABELS[rule.policy] }}
-                      </em>
-                    </span>
-                    <span v-if="hiddenRuleCount(set)" class="rule-more">
-                      +{{ hiddenRuleCount(set) }}
-                    </span>
-                    <span v-if="enabledRules(set).length === 0" class="rule-set-none">
-                      还没有启用的规则
-                    </span>
-                  </div>
-                </div>
-                <div class="rule-set-actions" @click.stop>
-                  <button type="button" @click="openRuleSet(set)">编辑</button>
-                  <button type="button" class="danger" @click="askDeleteRuleSet(set)">删除</button>
-                </div>
-              </div>
-            </div>
-
-            <div v-else class="rule-set-empty">
-              还没有规则列表。新建一份后，在弹窗里填写规则。
-              <button class="link-btn" @click="handleNewRuleSet">新建一份</button>
-            </div>
-
-            <div v-if="vpn.selectedRuleSet" class="rule-fallback">
-              <span class="rule-fallback-label">全部规则不命中时</span>
-              <select class="rule-fallback-select" :value="vpn.selectedRuleSet.default_policy" @change="handleRuleSetDefaultPolicy">
-                <option value="DIRECT">直连</option>
-                <option value="VPN">走 VPN</option>
-              </select>
-              <span class="rule-fallback-hint">这份列表的 MATCH 走向</span>
-            </div>
+            <VpnRuleTable
+              :rules="vpn.selectedProfile?.rules ?? []"
+              :default-policy="vpn.selectedProfile?.rules_default_policy ?? 'DIRECT'"
+              :validate-rule="vpn.validateRule"
+              @add="handleAddRule"
+              @update="handleUpdateRule"
+              @remove="handleRemoveRule"
+              @update-default-policy="handleRulesDefaultPolicy"
+            />
           </section>
 
           <div v-else class="mode-off-note">
-            当前是{{ currentMode.label }}模式，规则列表不参与分流；切换到「规则」模式后可编辑和选择列表。
+            当前是{{ currentMode.label }}模式，规则不参与分流；切到「规则」模式后生效。
           </div>
 
           <VpnLearnCard :vpn="vpn" />
@@ -604,42 +472,10 @@ watch(
       @cancel="confirmDelete = null"
     >
       <p class="dialog-message">
-        确定要删除「{{ confirmDelete.name }}」吗？规则列表会保留，之后可以在规则列表里单独删除。
+        确定要删除「{{ confirmDelete.name }}」吗？这份配置里的规则也会一起删除。
       </p>
     </Modal>
 
-    <!-- 规则列表删除确认 -->
-    <Modal
-      v-if="confirmDeleteRuleSet"
-      :open="true"
-      title="删除规则列表"
-      ok-text="确定删除"
-      cancel-text="取消"
-      ok-type="danger"
-      :mask-closable="false"
-      @ok="confirmDeleteSelectedRuleSet"
-      @cancel="confirmDeleteRuleSet = null"
-    >
-      <p class="dialog-message">
-        确定要删除「{{ confirmDeleteRuleSet.name }}」吗？列表里的规则会一起删除。
-        <template v-if="confirmDeleteRuleSet.id === vpn.selectedRuleSet?.id">
-          它当前正在生效，删除后需要重新选择一份列表。
-        </template>
-      </p>
-    </Modal>
-
-    <!-- 规则编辑弹窗：页面只展示列表和摘要，完整规则在这里填 -->
-    <VpnRuleSetDialog
-      v-if="editingRuleSet"
-      :rule-set="editingRuleSet"
-      :validate-rule="vpn.validateRule"
-      @close="closeRuleDialog"
-      @rename="handleRenameRuleSet"
-      @add="handleAddRule"
-      @update="handleUpdateRule"
-      @remove="handleRemoveRule"
-      @update-default-policy="handleDefaultPolicy"
-    />
   </div>
 </template>
 
@@ -1054,7 +890,7 @@ watch(
   color: var(--warning);
 }
 
-/* 规则列表：多份可选，但只有一份生效 */
+/* 分流规则：规则属于当前配置，面板内直接编辑 */
 .rules-head {
   display: flex;
   align-items: flex-start;
@@ -1077,98 +913,13 @@ watch(
   flex-shrink: 0;
   white-space: nowrap;
 }
-.rule-set-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.rule-set-item {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px;
-  border: 1px solid var(--border-color);
-  border-radius: 7px;
-  background: var(--bg-secondary);
-  cursor: pointer;
-}
-.rule-set-item:hover {
-  background: var(--bg-hover);
-}
-.rule-set-item.active {
-  border-color: var(--primary);
-  background: color-mix(in srgb, var(--primary) 7%, var(--bg-primary));
-}
-.rule-set-radio {
-  position: relative;
-  width: 14px;
-  height: 14px;
+.rules-count {
   flex-shrink: 0;
-  border: 1.5px solid var(--text-muted);
-  border-radius: 50%;
-}
-.rule-set-item.active .rule-set-radio {
-  border-color: var(--primary);
-}
-.rule-set-item.active .rule-set-radio::after {
-  content: '';
-  position: absolute;
-  inset: 3px;
-  border-radius: 50%;
-  background: var(--primary);
-}
-.rule-set-main {
-  flex: 1;
-  min-width: 0;
-}
-.rule-set-title {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  min-width: 0;
-}
-.rule-set-name {
-  font-size: 13px;
-  color: var(--text-primary);
-  overflow: hidden;
-  text-overflow: ellipsis;
+  font-size: 12px;
+  color: var(--text-muted);
   white-space: nowrap;
 }
-.rule-set-badge {
-  flex-shrink: 0;
-  padding: 1px 6px;
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--primary) 14%, transparent);
-  color: var(--primary);
-  font-size: 10px;
-}
-.rule-set-count {
-  margin-left: auto;
-  flex-shrink: 0;
-  font-size: 11px;
-  color: var(--text-muted);
-}
-.rule-set-preview {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 5px;
-  margin-top: 5px;
-  min-height: 18px;
-}
-.rule-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  max-width: 100%;
-  padding: 1px 6px;
-  border: 1px solid var(--border-color);
-  border-radius: 4px;
-  background: var(--bg-primary);
-  color: var(--text-muted);
-  font-size: 10px;
-}
-.rule-chip .mono {
+.mono {
   color: var(--text-secondary);
 }
 .rule-chip-value {

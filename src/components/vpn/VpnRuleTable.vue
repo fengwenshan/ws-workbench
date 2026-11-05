@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
 import { Button, Input, Select, SelectOption, Switch } from 'ant-design-vue'
-import type { VpnPolicy, VpnRule, VpnRuleKind, VpnRuleSet } from '@/types/vpn'
+import type { VpnPolicy, VpnRule, VpnRuleKind } from '@/types/vpn'
 import { POLICY_LABELS, RULE_KIND_HINTS, RULE_KIND_LABELS } from '@/types/vpn'
 
 const props = defineProps<{
-  ruleSet: VpnRuleSet
+  rules: VpnRule[]
+  /** 所有规则都不命中时的兜底走向 */
+  defaultPolicy: VpnPolicy
   /** 来自 useVpn 的逐条规则校验，失败时 reject */
   validateRule: (kind: VpnRuleKind, value: string) => Promise<string>
   /** 放进弹窗时隐藏卡片标题，只保留规则编辑区 */
@@ -51,11 +53,11 @@ async function validateRow(rule: VpnRule) {
 
 watch(
   () =>
-    props.ruleSet.rules
+    props.rules
       .map((rule) => [rule.id, rule.kind, rule.value].join('\u0000'))
       .join('\u0001'),
   () => {
-    props.ruleSet.rules.forEach((rule) => validateRow(rule))
+    props.rules.forEach((rule) => validateRow(rule))
   },
   { immediate: true },
 )
@@ -96,7 +98,7 @@ async function submit() {
 
 /** 一键补上「域名含 risen 走 VPN」的默认规则，已有同义规则时不重复添加。 */
 function presetRisen() {
-  const exists = props.ruleSet.rules.some(
+  const exists = props.rules.some(
     (rule) =>
       rule.kind === 'DOMAIN-KEYWORD' &&
       rule.value.trim().toLowerCase() === 'risen' &&
@@ -108,9 +110,9 @@ function presetRisen() {
 }
 
 const enabledCount = computed(
-  () => props.ruleSet.rules.filter((rule) => rule.enabled).length,
+  () => props.rules.filter((rule) => rule.enabled).length,
 )
-const totalCount = computed(() => props.ruleSet.rules.length)
+const totalCount = computed(() => props.rules.length)
 </script>
 
 <template>
@@ -133,7 +135,7 @@ const totalCount = computed(() => props.ruleSet.rules.length)
           <Select
             size="small"
             class="cell-select"
-            :value="ruleSet.default_policy"
+            :value="defaultPolicy"
             @change="(value: any) => emit('update-default-policy', value as VpnPolicy)"
           >
             <SelectOption v-for="policy in POLICIES" :key="policy" :value="policy">
@@ -158,7 +160,7 @@ const totalCount = computed(() => props.ruleSet.rules.length)
       </div>
 
       <div
-        v-for="rule in ruleSet.rules"
+        v-for="rule in rules"
         :key="rule.id"
         class="rule-row"
         :class="{ 'rule-row-off': !rule.enabled, 'rule-row-error': !!errors[rule.id] }"
@@ -226,7 +228,7 @@ const totalCount = computed(() => props.ruleSet.rules.length)
         </span>
       </div>
 
-      <div v-if="ruleSet.rules.length === 0" class="rule-empty-row">
+      <div v-if="rules.length === 0" class="rule-empty-row">
         还没有规则，在下面添加一条
       </div>
     </div>
