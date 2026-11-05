@@ -96,7 +96,7 @@ const proxyMode = computed<VpnProxyMode>(() => vpn.selectedProfile?.proxy_mode ?
 const currentMode = computed(
   () => MODE_OPTIONS.find((item) => item.value === proxyMode.value) ?? MODE_OPTIONS[0],
 )
-const modeLocked = computed(() => vpn.isConnected || vpn.phaseBusy || vpn.connecting)
+const modeLocked = computed(() => vpn.phaseBusy || vpn.connecting)
 
 async function handleModeChange(mode: VpnProxyMode) {
   if (mode === proxyMode.value || modeLocked.value) return
@@ -403,7 +403,10 @@ watch(
             </div>
 
             <p class="proxy-mode-desc">{{ currentMode.description }}</p>
-            <p v-if="modeLocked" class="proxy-mode-lock">当前连接正在生效，断开 VPN 后才能切换代理模式。</p>
+            <p v-if="modeLocked" class="proxy-mode-lock">正在连接中，暂时不能切换代理模式。</p>
+            <p v-else-if="vpn.isConnected" class="proxy-mode-hint">
+              切换立即生效：新连接按新模式，已建立的连接保持原路径。
+            </p>
           </section>
 
           <!-- 规则模式：规则属于当前配置，直接在面板里编辑 -->
@@ -888,6 +891,11 @@ watch(
   margin: 6px 0 0;
   font-size: 11px;
   color: var(--warning);
+}
+.proxy-mode-hint {
+  margin: 6px 0 0;
+  font-size: 11px;
+  color: var(--text-muted);
 }
 
 /* 分流规则：规则属于当前配置，面板内直接编辑 */
