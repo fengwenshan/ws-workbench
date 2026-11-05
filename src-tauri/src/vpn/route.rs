@@ -370,16 +370,94 @@ pub fn list_default_routes() -> Result<Vec<DefaultRoute>, String> {
                 route.alias = rest.trim().to_string();
             }
         }
-        if route.next_hop.is_empty() && route.alias.is_empty() {
-            Ok(Vec::new())
+        let mut routes = if route.next_hop.is_empty() && route.alias.is_empty() {
+            Vec::new()
         } else {
-            Ok(vec![route])
+            vec![route]
+        };
+        // `route get default` 只给「电选出来的最佳默认路由」：同时开着别的 VPN
+        // 客户端时它落在对方的 utun 上，这里就看不到物理出口了，再扫一遍完整表兜底。
+        if routes.iter().all(route_is_vpn) {
+            routes.extend(macos_default_routes_from_table());
         }
+        Ok(routes)
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         Ok(Vec::new())
     }
+}
+
+/// 用系统解析器解析一个公网域名，判断「系统 DNS 现在还能用」。
+///
+/// 分流/全局模式都拿它当安全阀：接管后解析不出来就回滚，绝不留「DNS 死了」的状态。
+/// 每次探测都用不同的名字，避免被 DNS 负缓存挡住。
+pub fn verify_system_resolution(timeout: std::time::Duration) -> bool {
+    use std::net::ToSocketAddrs;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let probe = format!("probe-{}.example.com", stamp);
+        let ok = (probe.as_str(), 443u16).to_socket_addrs().is_ok();
+        let _ = tx.send(ok);
+    });
+    matches!(rx.recv_timeout(timeout), Ok(true))
+}
+
+/// 从 `netstat -rn -f inet` 输出里挑出所有默认路由（macOS）。
+///
+/// 只在「最佳默认路由落在 VPN 网卡上」时当兜底用：同时开着两个 VPN
+/// 客户端时，`route get default` 只会给出那个 VPN 的默认路由，靠它才能找回物理出口。
+#[cfg(target_os = "macos")]
+fn macos_default_routes_from_table() -> Vec<DefaultRoute> {
+    use crate::process::run_with_timeout;
+    use std::path::Path;
+    use std::time::Duration;
+
+    let (text, ok) = run_with_timeout(
+        Path::new("/usr/sbin/netstat"),
+        &["-rn", "-f", "inet"],
+        Duration::from_secs(10),
+    );
+    if !ok {
+        return Vec::new();
+    }
+    parse_netstat_default_routes(&text)
+}
+
+/// 解析 netstat 路由表里的 `default` 行（纯逻辑，便于测试）。
+pub fn parse_netstat_default_routes(text: &str) -> Vec<DefaultRoute> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        let mut cols = trimmed.split_whitespace();
+        let Some(dest) = cols.next() else { continue };
+        if dest != "default" {
+            continue;
+        }
+        let gateway = cols.next().unwrap_or("");
+        let flags = cols.next().unwrap_or("");
+        let netif = cols.next().unwrap_or("");
+        if netif.is_empty() || !flags.contains('U') {
+            continue;
+        }
+        let next_hop = if gateway.parse::<std::net::Ipv4Addr>().is_ok() {
+            gateway.to_string()
+        } else {
+            String::new()
+        };
+        out.push(DefaultRoute {
+            next_hop,
+            index: 0,
+            alias: netif.to_string(),
+            metric: 0,
+            description: String::new(),
+        });
+    }
+    out
 }
 
 /// 接口跃点数（Windows 才有意义）
@@ -405,18 +483,6 @@ pub fn list_interface_metrics() -> Result<Vec<InterfaceMetric>, String> {
     {
         Ok(Vec::new())
     }
-}
-
-/// 按隧道内网地址反查网卡 —— 定位 VPN 网卡最可靠的方式，
-/// 比拼网卡名稳定（名字会被系统本地化，还可能带随机后缀）
-pub fn find_interface_by_ip(ip: &str) -> Result<Option<InterfaceInfo>, String> {
-    let target = parse_ipv4(ip).ok_or_else(|| format!("{} 不是合法的 IPv4 地址", ip))?;
-    for info in list_interfaces()? {
-        if parse_ipv4(&info.ip) == Some(target) {
-            return Ok(Some(info));
-        }
-    }
-    Ok(None)
 }
 
 /// 挑出「真正的物理出口」：排除 VPN 虚拟网卡，再按有效跃点数取最小的一条
@@ -490,21 +556,6 @@ pub fn add_route(cidr: &str, target: &RouteTarget, metric: u32) -> Result<(), St
         let _ = (target, metric);
         Err(format!("当前平台暂不支持添加路由，目标 {}", cidr))
     }
-}
-
-/// Windows：按目的前缀删除路由，不限定接口。
-///
-/// 清理捕获网卡的半默认路由时，接口可能已经被移除（或索引变了），
-/// 按接口删会漏掉旧条目，这里直接按前缀清。
-#[cfg(target_os = "windows")]
-pub fn remove_route_prefix(cidr: &str) -> Result<(), String> {
-    let cidr = normalize_cidr(cidr)?;
-    let script = format!(
-        "Remove-NetRoute -DestinationPrefix '{}' -Confirm:$false \
-         -PolicyStore ActiveStore -ErrorAction SilentlyContinue | Out-Null",
-        cidr
-    );
-    powershell(&script).map(|_| ())
 }
 
 /// 删除一条临时路由；路由不存在时不报错
@@ -581,39 +632,6 @@ pub fn delete_host_route(ip: &str) -> Result<(), String> {
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let _ = ip;
-        Ok(())
-    }
-}
-
-/// 把默认路由交还给连接前的物理网关。
-///
-/// 「以公司网络为主」模式下脚本会把 `default` 抢给隧道，而 worker 停止隧道走的是
-/// SIGKILL —— openconnect 根本没机会执行脚本的 disconnect 分支，所以必须由 worker
-/// 自己交还。不交还的话断开后整机没有任何默认路由，本地网络和公网会一起断掉。
-pub fn restore_default_route(original_gateway: &str) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    {
-        // 隧道网卡消失时系统会带走挂在它上面的默认路由，这里删一次只是兜底，
-        // 删不到就当没这回事，别让「删」的失败挡住后面的「加」。
-        let delete_args = vec!["-n".to_string(), "delete".to_string(), "default".to_string()];
-        let _ = run_route_macos(
-            &delete_args,
-            &["not in table", "No such process", "no such process"],
-        );
-        if original_gateway.is_empty() {
-            return Ok(());
-        }
-        let add_args = vec![
-            "-n".to_string(),
-            "add".to_string(),
-            "default".to_string(),
-            original_gateway.to_string(),
-        ];
-        run_route_macos(&add_args, &["File exists"])
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = original_gateway;
         Ok(())
     }
 }
@@ -1182,6 +1200,22 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn parses_defaults_from_netstat_table() {
+        let text = "Routing tables\n\nInternet:\nDestination        Gateway            Flags               Netif Expire\n\
+                    default            link#22            UCSg                utun4       \n\
+                    default            192.168.3.1        UGScIg                en0         \n\
+                    192.168.3.0/24     link#14            UCSg                en0         \n";
+        let routes = parse_netstat_default_routes(text);
+        assert_eq!(routes.len(), 2, "只认 default 行");
+        assert_eq!(routes[0].alias, "utun4");
+        assert!(routes[0].next_hop.is_empty(), "link#NN 网关不是 IP");
+        assert_eq!(routes[1].alias, "en0");
+        assert_eq!(routes[1].next_hop, "192.168.3.1");
+        let physical = pick_physical_default(&routes, &[]).expect("应该挑出 en0");
+        assert_eq!(physical.alias, "en0");
+    }
+
+    #[test]
     fn macos_route_binary_path_exists_and_query_works() {
         assert!(
             std::path::Path::new(MACOS_ROUTE_BIN).exists(),
@@ -1193,7 +1227,12 @@ mod tests {
             !routes.is_empty(),
             "读不到默认路由，分流规则就拿不到物理出口（现场表现为「未找到可用的物理默认路由」）"
         );
-        let physical = pick_physical_default(&routes, &[]).expect("应该能挑出物理默认路由");
+        let Some(physical) = pick_physical_default(&routes, &[]) else {
+            // 同时开着别的 VPN 客户端时，默认路由可能全落在 utun 上，
+            // 这种环境没有「物理默认路由」可言，跳过而不是误报失败。
+            eprintln!("跳过：当前没有物理默认路由（可能挂着别的 VPN 客户端）");
+            return;
+        };
         assert!(
             !physical.alias.is_empty(),
             "物理默认路由必须带接口名，否则 route add 的 -interface 会是空值"

@@ -16,13 +16,13 @@ export type VpnPhase =
 export type VpnProxyMode = 'rule' | 'global' | 'direct'
 
 /** 规则匹配类型，取值与后端 rule_engine::RuleKind 一致 */
-export type VpnRuleKind =
-  | 'DOMAIN'
-  | 'DOMAIN-SUFFIX'
-  | 'DOMAIN-KEYWORD'
-  | 'PROCESS-NAME'
-  | 'DST-PORT'
-  | 'IP-CIDR'
+export type VpnRuleKind = 'DOMAIN' | 'DOMAIN-SUFFIX' | 'IP-CIDR'
+
+/**
+ * 历史上还有这几种规则类型，但需要「按连接抓包 + 按进程/端口匹配」的数据面，
+ * 路由注入模式没有落点，后端会直接拒绝。留着这份名单只为把老配置标成「不生效」。
+ */
+export const RETIRED_RULE_KINDS = ['DOMAIN-KEYWORD', 'PROCESS-NAME', 'DST-PORT', 'RULE-SET'] as const
 
 /** 规则走向，取值与后端 rule_engine::Policy 一致 */
 export type VpnPolicy = 'DIRECT' | 'VPN'
@@ -33,7 +33,6 @@ export interface VpnRule {
   kind: VpnRuleKind
   value: string
   policy: VpnPolicy
-  no_resolve: boolean
   remark: string
   enabled: boolean
 }
@@ -67,10 +66,6 @@ export interface VpnProfile {
   rules: VpnRule[]
   /** 所有规则都不命中时的兜底走向 */
   rules_default_policy: VpnPolicy
-  /** fake-ip 地址池，用于按域名分流时反查真实目标 */
-  fake_ip_range: string
-  /** 不进入 fake-ip 池的地址段（*.后缀 或 关键字） */
-  fake_ip_filter: string[]
   extra_args: string[]
   /** 手动指定的连接器路径 */
   connector_path: string
@@ -86,10 +81,6 @@ export interface NewVpnProfileInput {
   password?: string
   protocol?: string
   extra_args?: string[]
-  /** fake-ip 地址池；不填用后端默认值 */
-  fake_ip_range?: string
-  /** 不走 fake-ip 的域名（*.后缀 / .后缀 / 关键字） */
-  fake_ip_filter?: string[]
 }
 
 /** 探测到的连接器 */
@@ -126,6 +117,8 @@ export interface NetworkSnapshot {
 export interface VpnStatus {
   phase: VpnPhase
   message: string
+  /** 本次会话实际生效的模式（界面上的选择只代表「下次连接」） */
+  applied_mode?: string
   profile_id: string
   profile_name: string
   /** 通道身份哈希：连接参数相同的配置共享同一条隧道 */
@@ -210,9 +203,6 @@ export const PHASE_LABELS: Record<VpnPhase, string> = {
 export const RULE_KIND_LABELS: Record<VpnRuleKind, string> = {
   DOMAIN: 'DOMAIN',
   'DOMAIN-SUFFIX': 'DOMAIN-SUFFIX',
-  'DOMAIN-KEYWORD': 'DOMAIN-KEYWORD',
-  'PROCESS-NAME': 'PROCESS-NAME',
-  'DST-PORT': 'DST-PORT',
   'IP-CIDR': 'IP-CIDR',
 }
 
@@ -220,9 +210,6 @@ export const RULE_KIND_LABELS: Record<VpnRuleKind, string> = {
 export const RULE_KIND_HINTS: Record<VpnRuleKind, string> = {
   DOMAIN: '域名',
   'DOMAIN-SUFFIX': '域名后缀',
-  'DOMAIN-KEYWORD': '域名关键词',
-  'PROCESS-NAME': '进程名',
-  'DST-PORT': '目标端口',
   'IP-CIDR': 'IP 网段',
 }
 

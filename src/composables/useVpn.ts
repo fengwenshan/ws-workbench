@@ -306,20 +306,21 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
   // ============================ 配置增删改 ============================
 
   function newRule(
-    kind: VpnRuleKind = 'DOMAIN',
+    kind: VpnRuleKind = 'DOMAIN-SUFFIX',
     value = '',
     policy: VpnPolicy = 'DIRECT',
   ): VpnRule {
-    return { id: crypto.randomUUID(), kind, value, policy, no_resolve: true, remark: '', enabled: true }
+    return { id: crypto.randomUUID(), kind, value, policy, remark: '', enabled: true }
   }
 
   async function addProfile(input: NewVpnProfileInput) {
     const name = input.name.trim() || '新建 VPN 配置'
     const server = input.server.trim()
-    // 新配置默认带一条 Risen 规则：域名里含 risen 的请求走 VPN，其余直连。
-    // 用户仍可在规则表里改顺序、加网段或删掉这条。
-    const risen = newRule('DOMAIN-KEYWORD', 'risen', 'VPN')
-    risen.remark = 'risen 相关域名走 VPN'
+    // 新配置默认带一条公司内网规则：risencn.com 及其子域走 VPN，其余直连。
+    // 用 DOMAIN-SUFFIX 而不是 DOMAIN-KEYWORD —— 规则模式靠路由注入实现，
+    // 关键字匹配没有数据面可用，做不到（见 vpn/split.rs）。
+    const risen = newRule('DOMAIN-SUFFIX', 'risencn.com', 'VPN')
+    risen.remark = '公司内网域名走 VPN'
 
     const now = nowIso()
     const profile: VpnProfile = {
@@ -334,8 +335,6 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
       proxy_mode: 'rule',
       rules: [risen],
       rules_default_policy: 'DIRECT',
-      fake_ip_range: input.fake_ip_range?.trim() || '198.18.0.0/16',
-      fake_ip_filter: input.fake_ip_filter ?? [],
       extra_args: input.extra_args ?? [],
       connector_path: '',
       created_at: now,
@@ -368,24 +367,44 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
     await saveConfig()
   }
 
-  async function setProxyMode(mode: VpnProxyMode) {
+  /**
+   * 切换代理模式。返回是否切换成功 —— 界面先乐观高亮，失败时据此回选上一个。
+   *
+   * 已连接时走 worker 的运行期切换（规则/全局/直连都是本地布线，立即生效）。
+   */
+  async function setProxyMode(mode: VpnProxyMode): Promise<boolean> {
     const profile = selectedProfile.value
-    if (!profile || profile.proxy_mode === mode) return
+    if (!profile) return true
+    // 配置里已经是这个模式、但 worker 里跑的是另一个：允许再点一次把 worker 纠过来
+    const appliedRaw = String(status.value?.applied_mode ?? '').trim().toLowerCase()
+    const drifted = isConnected.value && !!appliedRaw && appliedRaw !== mode
+    if (profile.proxy_mode === mode && !drifted) return true
+    const previous = profile.proxy_mode
     await updateProfile(profile.id, { proxy_mode: mode })
     const label = mode === 'rule' ? '规则' : mode === 'global' ? '全局' : '直连'
     if (isConnected.value) {
       try {
         await invoke('vpn_set_proxy_mode', { mode })
-        pushLog(
-          'info',
-          `代理模式已切换为${label}：新连接按新模式，已建立的连接保持原路径`,
-        )
+        pushLog('info', `代理模式已切换为${label}：切换即刻生效`)
+        // worker 按约 200ms 轮询 mode 文件，稍等一下抓一次最新状态，
+        // 界面上的「正在切换」高亮才能尽快交回真实状态
+        window.setTimeout(() => {
+          void refreshSnapshot()
+        }, 400)
+        return true
       } catch (err: any) {
         pushLog('error', `切换代理模式失败: ${err}`)
+        // 配置也要跟着回滚，否则下次连接会用一个根本没切成功的模式
+        try {
+          await updateProfile(profile.id, { proxy_mode: previous })
+        } catch {
+          /* 回滚失败就保持原样，至少日志里已经说明 */
+        }
+        return false
       }
-      return
     }
     pushLog('info', `代理模式已切换为${label}，下次连接生效`)
+    return true
   }
 
   /**
@@ -443,19 +462,21 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
     return await invoke<string>('vpn_validate_rule', { kind, value })
   }
 
-  /** 用给定规则集与一条输入预览命中结果 */
+  /**
+   * 预览一条输入会走哪。
+   *
+   * 路由注入模式下没有按连接分流，端口/进程都不参与判定，只认域名和网段。
+   */
   async function previewRule(
     rules: VpnRule[],
     defaultPolicy: VpnPolicy,
-    probe: { domain?: string; ip?: string; port?: number; process?: string },
+    probe: { domain?: string; ip?: string },
   ): Promise<VpnPolicy> {
     const verdict = await invoke<string>('vpn_preview_rules', {
       rules,
       defaultPolicy,
       domain: probe.domain ?? null,
       ip: probe.ip ?? null,
-      port: probe.port ?? null,
-      process: probe.process ?? null,
     })
     return verdict as VpnPolicy
   }

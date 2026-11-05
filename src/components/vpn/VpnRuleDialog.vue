@@ -3,7 +3,7 @@ import { computed, nextTick, ref } from 'vue'
 import { Input, Modal, Select, SelectOption, Switch } from 'ant-design-vue'
 import type { VpnApi } from '@/composables/useVpn'
 import type { VpnPolicy, VpnRule, VpnRuleKind } from '@/types/vpn'
-import { POLICY_LABELS } from '@/types/vpn'
+import { POLICY_LABELS, RETIRED_RULE_KINDS } from '@/types/vpn'
 
 const props = defineProps<{
   vpn: VpnApi
@@ -15,15 +15,24 @@ const emit = defineEmits<{
 
 const vpn = props.vpn
 
-/** 六个类型按「域名三种 → 其它」排，前三个覆盖绝大多数用法 */
+/**
+ * 只保留路由注入模式（规则模式的实际实现）能生效的类型：
+ * 域名类靠 `/etc/resolver` + 隧道路由，网段类直接注入隧道。
+ * `DOMAIN-KEYWORD` / `PROCESS-NAME` / `DST-PORT` 没有数据面可用，做了也不生效，
+ * 已从下拉里下架；历史配置里若还留着这种规则，列表里会打「不生效」标记。
+ */
 const KIND_OPTIONS: { value: VpnRuleKind; label: string; placeholder: string }[] = [
   { value: 'DOMAIN', label: '完整域名 (DOMAIN)', placeholder: 'example.com' },
   { value: 'DOMAIN-SUFFIX', label: '域名后缀 (DOMAIN-SUFFIX)', placeholder: 'example.com（连带所有子域）' },
-  { value: 'DOMAIN-KEYWORD', label: '域名关键字 (DOMAIN-KEYWORD)', placeholder: 'google' },
-  { value: 'PROCESS-NAME', label: '进程名 (PROCESS-NAME)', placeholder: 'Google Chrome' },
-  { value: 'DST-PORT', label: '目标端口 (DST-PORT)', placeholder: '443' },
   { value: 'IP-CIDR', label: 'IP 网段 (IP-CIDR)', placeholder: '10.0.0.0/8' },
 ]
+
+/** 历史规则里可能还存着这些类型：能显示、能删，但不会再生效 */
+const RETIRED_KINDS = new Set<string>(RETIRED_RULE_KINDS)
+
+function retired(rule: VpnRule): boolean {
+  return RETIRED_KINDS.has(rule.kind)
+}
 
 const POLICIES: VpnPolicy[] = ['DIRECT', 'VPN']
 
@@ -80,7 +89,6 @@ async function addRule() {
       kind: kind.value,
       value: finalValue,
       policy: policy.value,
-      no_resolve: true,
       remark: '',
       enabled: true,
     })
@@ -171,6 +179,9 @@ async function closeDialog() {
               {{ option.label }}
             </SelectOption>
           </Select>
+          <p class="form-note">
+            只保留能真正生效的类型：域名类（按域名分流解析）、网段类（按网段注入隧道）。
+          </p>
         </div>
 
         <div class="form-field">
@@ -227,6 +238,13 @@ async function closeDialog() {
                 <span class="row-kind">{{ rule.kind }}</span>
                 <span class="row-policy" :class="rule.policy.toLowerCase()">
                   {{ POLICY_LABELS[rule.policy] }}
+                </span>
+                <span
+                  v-if="retired(rule)"
+                  class="row-retired"
+                  title="这个类型在路由注入模式下做不到，不会生效：域名请改用 DOMAIN-SUFFIX"
+                >
+                  不生效
                 </span>
                 <span v-if="rule.remark" class="row-remark">{{ rule.remark }}</span>
               </div>
@@ -414,6 +432,15 @@ async function closeDialog() {
   border: 1px solid var(--border-color);
   border-radius: 3px;
   padding: 0 4px;
+  white-space: nowrap;
+}
+.row-retired {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: #b45309;
+  background: rgba(245, 158, 11, 0.12);
+  border-radius: 3px;
+  padding: 1px 5px;
   white-space: nowrap;
 }
 .row-policy {

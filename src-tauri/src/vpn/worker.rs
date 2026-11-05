@@ -8,7 +8,6 @@
 //! 所以一切状态通过会话目录里的文件回传。
 
 use std::io::{BufRead, BufReader, Read};
-use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -16,21 +15,18 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::vpn::connector;
-use crate::vpn::models::{
-    NetworkSnapshot, VpnPhase, VpnRequest, VpnRule, VpnStatus,
-};
-use crate::vpn::router::{EngineStats, ProxyMode};
-use crate::vpn::rule_engine::CompiledRuleSet;
+use crate::vpn::models::{NetworkSnapshot, ProxyMode, VpnPhase, VpnRequest, VpnRule, VpnStatus};
 use crate::vpn::route::{self, RouteOutcome, RouteTarget};
 use crate::vpn::script;
 use crate::vpn::session::VpnSession;
 
 /// 路由守护的巡检间隔
 const GUARD_INTERVAL: Duration = Duration::from_secs(15);
+/// 主循环节拍：只看控制文件与子进程状态，200ms 足够
+const POLL_INTERVAL_MS: u64 = 200;
 /// 等待隧道就绪的最长时间
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(120);
 /// 引擎接管后观察捕获链路的时间窗口：窗口内一个包都没收到就撤掉捕获路由
-const CAPTURE_PROBE_WINDOW: Duration = Duration::from_secs(12);
 
 /// worker 退出码
 pub const EXIT_OK: i32 = 0;
@@ -50,24 +46,22 @@ struct Worker {
     status: VpnStatus,
     snapshot: NetworkSnapshot,
     applied: Vec<AppliedRouteRecord>,
-    /// 「以公司网络为主」时默认路由已被脚本交给隧道，断开时必须交还
-    default_route_taken: bool,
-    /// 脚本是否已把 VPN DNS 写到本机（macOS 走 scutil/networksetup），断开时同样要还原
-    dns_applied: bool,
-    /// 脚本下发 DNS 时用的物理网络服务名，断开的兜底还原要用
-    dns_service: String,
     /// 连接时解析出的 VPN 服务器 IP，用来清理脚本残留的防环主机路由
     vpn_server_ips: Vec<String>,
+    /// 安全阀把接管放弃掉时的原因：隧道仍然连着，只是不劫持系统流量
+    degraded_reason: Option<String>,
+    /// 路由注入式分流（规则模式，macOS）：不捕获、不抢默认路由
+    split: Option<crate::vpn::split::SplitTunnel>,
+    /// 全局模式（macOS）：半默认路由 + 系统 DNS 都指向隧道
+    full: Option<crate::vpn::fulltunnel::FullTunnel>,
+    /// 服务端下发的 split-include 网段（「公司内网」最权威的覆盖范围）
+    server_split_routes: Vec<String>,
+    /// 服务端下发的默认域名（AnyConnect 的 default domain），有它就能自动覆盖整族子域
+    server_def_domain: Option<String>,
     /// 最近几行输出，失败时作为诊断信息
     tail: Vec<String>,
     /// script.log 已经读过的行数（脚本的 stdout 接不到管道，只能靠这个文件回传）
     script_log_lines: usize,
-    /// 规则分流引擎；Windows 与 macOS 都用它接管流量
-    engine: Option<crate::vpn::router::Engine>,
-    /// 捕获 TUN 的接口索引，断开时按它回收半默认路由
-    capture_index: u32,
-    /// fake-ip 假地址池（由引擎消费）
-    fake_pool: Option<crate::vpn::fakedns::FakeIpPool>,
     /// 当前生效的代理模式（可由主进程通过 mode 文件改）
     applied_mode: ProxyMode,
     /// 当前生效的规则与兜底走向（可由主进程通过 rules.json 改）
@@ -78,8 +72,6 @@ struct Worker {
     last_mode_check: Instant,
     last_rules_check: Instant,
     last_alive_check: Instant,
-    /// 引擎装配时刻；父进程心跳宽限期从这里算
-    engine_ready_at: Option<Instant>,
     /// 心跳过期：主进程已经不在了，循环里看到就把隧道收掉
     parent_lost: bool,
 }
@@ -94,6 +86,8 @@ impl Worker {
         status.started_at = now();
         status.updated_at = now();
         let applied_mode = ProxyMode::parse(&request.proxy_mode).unwrap_or(ProxyMode::Rule);
+        // 让界面知道这条会话实际按哪个模式在跑（界面上的选择只代表「下次连接」）
+        status.applied_mode = applied_mode.as_str().to_string();
         let current_rules: Vec<VpnRule> =
             request.rules.iter().filter(|r| r.enabled).cloned().collect();
         let current_default_policy = request.default_policy.clone();
@@ -103,15 +97,14 @@ impl Worker {
             status,
             snapshot: NetworkSnapshot::default(),
             applied: Vec::new(),
-            default_route_taken: false,
-            dns_applied: false,
-            dns_service: String::new(),
             vpn_server_ips: Vec::new(),
+            degraded_reason: None,
+            split: None,
+            full: None,
+            server_split_routes: Vec::new(),
+            server_def_domain: None,
             tail: Vec::new(),
             script_log_lines: 0,
-            engine: None,
-            capture_index: 0,
-            fake_pool: None,
             applied_mode,
             current_rules,
             current_default_policy,
@@ -119,7 +112,6 @@ impl Worker {
             last_mode_check: Instant::now(),
             last_rules_check: Instant::now(),
             last_alive_check: Instant::now(),
-            engine_ready_at: None,
             parent_lost: false,
         }
     }
@@ -175,12 +167,22 @@ impl Worker {
                         .collect();
                 }
                 "done" => {}
-                // 脚本接管/交还默认路由的回报；断开时据此决定要不要还原
-                "default_route" => self.default_route_taken = value == "vpn",
-                // 脚本把 VPN DNS 下发到本机了；断开时据此还原 DNS（脚本 disconnect 分支
-                // 在 SIGKILL 下不会执行，只能靠这里兜底）
-                "dns_applied" => self.dns_applied = true,
-                "dns_service" => self.dns_service = value,
+                // 服务端下发的默认域名：给它写 /etc/resolver 就能覆盖整族子域，
+                // 不用用户把每个内网域名都列出来
+                "defdomain" => {
+                    let domain = value.trim().trim_end_matches('.').to_ascii_lowercase();
+                    if !domain.is_empty() {
+                        self.server_def_domain = Some(domain);
+                    }
+                }
+                // 服务端下发的 split-include 网段：正规 VPN 客户端的做法就是把这些
+                // 网段的路由指向隧道。这里只记下来，装配分流时统一注入。
+                "split" => {
+                    let cidr = value.trim();
+                    if !cidr.is_empty() && !self.server_split_routes.iter().any(|item| item == cidr) {
+                        self.server_split_routes.push(cidr.to_string());
+                    }
+                }
                 _ => {}
             }
         }
@@ -329,26 +331,6 @@ impl Worker {
     }
 
     /// 把规则编译成规则集；连接与运行期热更新共用同一套校验
-    fn compile_rules(rules: &[VpnRule], default_policy: &str) -> Result<CompiledRuleSet, String> {
-        use crate::vpn::rule_engine::{compile, Policy, Rule, RuleKind};
-        let enabled: Vec<(String, String, String, bool)> = rules
-            .iter()
-            .filter(|r| r.enabled)
-            .map(|r| (r.kind.clone(), r.value.clone(), r.policy.clone(), r.no_resolve))
-            .collect();
-        let mut compiled = Vec::new();
-        for (kind_s, value, policy_s, no_resolve) in enabled {
-            let kind = RuleKind::parse(&kind_s)
-                .map_err(|e| format!("规则类型非法 {}: {}", kind_s, e))?;
-            let policy = Policy::parse(&policy_s)
-                .map_err(|e| format!("规则出口非法 {}: {}", policy_s, e))?;
-            compiled.push(Rule::new(kind, &value, policy).with_no_resolve(no_resolve));
-        }
-        let default = Policy::parse(default_policy)
-            .map_err(|e| format!("兜底策略非法 {}: {}", default_policy, e))?;
-        compile(&compiled, &std::collections::HashMap::new(), default)
-    }
-
     /// 心跳守卫：主进程被强杀时没人来收尾，心跳停了就自己走正常停止流程
     fn check_parent_alive(&mut self) {
         if self.last_alive_check.elapsed() < Duration::from_secs(1) {
@@ -388,33 +370,12 @@ impl Worker {
         if target == self.applied_mode {
             return;
         }
-        // 切到规则模式时需要一份编译好的规则集；全局/直连时引擎里是 None
-        let needs_rules = target == ProxyMode::Rule
-            && self.engine.as_ref().map(|e| e.rules.is_none()).unwrap_or(false);
-        if needs_rules {
-            match Self::compile_rules(&self.current_rules, &self.current_default_policy) {
-                Ok(set) => {
-                    if let Some(engine) = self.engine.as_mut() {
-                        engine.set_rules(set);
-                    }
-                }
-                Err(e) => {
-                    let keep = self.applied_mode;
-                    self.log(&format!(
-                        "[模式] 规则编译失败，保持 {}：{}",
-                        keep.as_str(),
-                        e
-                    ));
-                    let _ = self.session.write_mode(keep.as_str());
-                    return;
-                }
-            }
-        }
-        if let Some(engine) = self.engine.as_mut() {
-            engine.set_mode(target);
-        }
-        self.applied_mode = target;
-        self.log(&format!("[模式] 已切换为 {}", target.as_str()));
+        self.log(&format!(
+            "[模式] 运行期切换：{} -> {}",
+            self.applied_mode.as_str(),
+            target.as_str()
+        ));
+        self.switch_mode(target);
     }
 
     /// 轮询 rules.json：内容变了才重新编译；规则模式下只重置受影响的连接
@@ -433,36 +394,35 @@ impl Worker {
             return;
         };
         let enabled: Vec<VpnRule> = rules.into_iter().filter(|r| r.enabled).collect();
-        match Self::compile_rules(&enabled, &default_policy) {
-            Ok(set) => {
-                self.last_rules_raw = Some(raw);
-                self.current_rules = enabled;
-                self.current_default_policy = default_policy;
-                if self.engine.is_some() {
-                    if self.applied_mode == ProxyMode::Rule {
-                        if let Some(engine) = self.engine.as_mut() {
-                            engine.set_rules(set);
-                            engine.reset_changed_flows();
-                        }
-                        self.log(&format!(
-                            "[规则] 已更新 {} 条规则，只重置受影响的连接",
-                            self.current_rules.len()
-                        ));
-                    } else {
-                        self.log(&format!(
-                            "[规则] 已更新 {} 条规则，当前是{}模式，切回规则模式后生效",
-                            self.current_rules.len(),
-                            self.applied_mode.as_str()
-                        ));
-                    }
-                }
-            }
-            Err(e) => self.log(&format!("[规则] 新规则编译失败，继续用旧规则：{}", e)),
+        self.last_rules_raw = Some(raw);
+        self.current_rules = enabled;
+        self.current_default_policy = default_policy;
+        if self.split.is_some() {
+            self.log(&format!(
+                "[规则] 已更新 {} 条规则，正在重新下发路由注入分流",
+                self.current_rules.len()
+            ));
+            self.restart_split();
+        } else {
+            self.log(&format!(
+                "[规则] 已更新 {} 条规则，当前是{}模式，切回规则模式后生效",
+                self.current_rules.len(),
+                self.applied_mode.as_str()
+            ));
         }
     }
-
     /// 路由守护：VPN 客户端或系统可能在后台把我们的路由改掉，这里定期补回来
     fn guard_routes(&mut self) {
+        // 全局模式：守护半默认路由 + 隧道 DNS
+        if let Some(full) = self.full.as_ref() {
+            full.guard();
+            return;
+        }
+        // 路由注入模式：守护的是「隧道路由 + resolver 文件」，不是旧式 CIDR 下发
+        if let Some(split) = self.split.as_ref() {
+            split.guard();
+            return;
+        }
         let target = self.vpn_target();
         let checks: Vec<String> = self
             .applied
@@ -488,6 +448,242 @@ impl Worker {
         }
     }
 
+    // ======================= 路由注入式分流（规则模式，macOS） =======================
+
+    /// 规则模式的落地实现：不捕获、不抢默认路由、不改系统 DNS，只做两件事——
+    ///
+    /// 1. 把命中「走 VPN」的域名写进 `/etc/resolver/<域名>`，让系统解析器把这些
+    ///    域名的查询交给本机 DNS 转发器；
+    /// 2. 转发器经隧道问 VPN DNS，拿到真实内网 IP 时给这些 IP 装 `/32` 隧道路由。
+    ///
+    /// 默认路由和系统 DNS 一律不动，所以结构上不可能再出现「一连上就全网断」。
+    /// 任何一步失败都只是「本次分流不生效」，隧道照旧，网络不受影响。
+    fn start_split_rules(&mut self) -> Result<(), String> {
+        #[cfg(not(target_os = "macos"))]
+        {
+            // 路由注入依赖 `/etc/resolver`，目前只有 macOS 有；Windows 仍走捕获引擎。
+            self.degraded_reason =
+                Some("路由注入式分流目前只支持 macOS".to_string());
+            return Ok(());
+        }
+        #[cfg(target_os = "macos")]
+        {
+        let mut plan = crate::vpn::split::plan(&self.current_rules, &self.current_default_policy);
+        for note in &plan.notes {
+            self.log(&format!("[分流] {}", note));
+        }
+        // 服务端下发的「公司内网」范围：默认域名 + split-include 网段。
+        // 这是 VPN 管理员配的权威范围，比用户手写规则更全 —— 默认域名一条就能
+        // 覆盖整族子域，网段则把「落在内网的 IP」全部兜住（应用自己解析域名也跑不掉）。
+        if let Some(domain) = self.server_def_domain.clone() {
+            if plan.add_domain(&domain) {
+                self.log(&format!(
+                    "[分流] 服务端下发默认域名 {}：该域及其所有子域自动走 VPN",
+                    domain
+                ));
+            }
+        }
+        let mut pushed = 0usize;
+        let mut all_tunnel = false;
+        for cidr in self.server_split_routes.clone() {
+            match crate::vpn::route::parse_cidr(&cidr) {
+                Ok((_, 0)) => all_tunnel = true,
+                Ok(_) => {
+                    if plan.add_cidr(&cidr) {
+                        pushed += 1;
+                    }
+                }
+                Err(e) => self.log(&format!(
+                    "[分流] 服务端下发的网段 {} 无法解析，跳过：{}",
+                    cidr, e
+                )),
+            }
+        }
+        if all_tunnel {
+            self.log(
+                "[分流] 服务端下发的是全隧道（0.0.0.0/0）：路由注入模式不接管全隧道，                 要「全部走 VPN」请用全局模式",
+            );
+        }
+        if pushed > 0 {
+            self.log(&format!(
+                "[分流] 服务端下发 {} 条分流网段，已并入隧道路由（落这些网段的流量都走 VPN）",
+                pushed
+            ));
+        }
+        let tun_dev = self.status.tun_dev.clone();
+        if tun_dev.is_empty() {
+            return Err("隧道接口名未知，无法注入隧道路由".to_string());
+        }
+        // 断开时要回收脚本留下的「VPN 服务器防环主机路由」：断开走 SIGKILL，
+        // 脚本的 disconnect 分支根本不会执行。分流模式不装捕获路由，但这一步照做。
+        if self.vpn_server_ips.is_empty() {
+            self.vpn_server_ips = resolve_server_ips(&self.request.server);
+        }
+        let vpn_dns: Vec<std::net::Ipv4Addr> = self
+            .status
+            .dns
+            .iter()
+            .filter_map(|item| item.trim().parse().ok())
+            .collect();
+        self.log(&format!(
+            "[分流] 路由注入模式：域名 {:?}，网段 {:?}，VPN DNS {:?}，隧道 {}",
+            plan.domains, plan.cidrs, vpn_dns, tun_dev
+        ));
+        match crate::vpn::split::SplitTunnel::apply(&self.session, &tun_dev, &vpn_dns, plan) {
+            Ok(split) => {
+                self.log(&format!(
+                    "[分流] 路由注入分流已生效：{} 个域名走隧道 {}，{} 条固定隧道路由；\
+                     默认路由与系统 DNS 均未改动（系统解析器不受影响）",
+                    split.domain_count(),
+                    tun_dev,
+                    split.static_route_count()
+                ));
+                split.spawn_self_check(self.session.clone());
+                self.status.routes = split.routes_for_status();
+                self.split = Some(split);
+                Ok(())
+            }
+            Err(e) => {
+                self.degraded_reason = Some(format!("路由注入分流未能启动：{}", e));
+                self.log(&format!(
+                    "[分流] 路由注入分流未能启动：{}（本次只建隧道、不接管任何流量，网络不受影响）",
+                    e
+                ));
+                Ok(())
+            }
+        }
+        }
+    }
+
+    /// 全局模式（macOS）：整机流量走隧道。
+    ///
+    /// 照抄系统标准 vpnc-script 在 Darwin 上的动作（见 fulltunnel.rs 注释）：
+    /// 半默认路由指向隧道 + 隧道服务/活动网络服务两处 DNS 都改成 VPN DNS，
+    /// 装完立刻验证解析器还能解析，不通就整段回滚。
+    fn start_full_tunnel(&mut self) -> Result<(), String> {
+        #[cfg(not(target_os = "macos"))]
+        {
+            self.degraded_reason = Some("全隧道接管目前只实现了 macOS".to_string());
+            return Ok(());
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let tun_dev = self.status.tun_dev.clone();
+            if tun_dev.is_empty() {
+                return Err("隧道接口名未知，无法接管默认路由".to_string());
+            }
+            // SIGKILL 时脚本的 disconnect 分支不执行，服务器防环路由要自己收
+            if self.vpn_server_ips.is_empty() {
+                self.vpn_server_ips = resolve_server_ips(&self.request.server);
+            }
+            let vpn_dns: Vec<std::net::Ipv4Addr> = self
+                .status
+                .dns
+                .iter()
+                .filter_map(|item| item.trim().parse().ok())
+                .collect();
+            self.log(&format!(
+                "[全局] 接管整机流量：0.0.0.0/1 + 128.0.0.0/1 → {}，系统 DNS → {:?}，本地网段保持直连",
+                tun_dev, vpn_dns
+            ));
+            match crate::vpn::fulltunnel::FullTunnel::apply(
+                &self.session,
+                &tun_dev,
+                &self.status.vpn_ip,
+                &vpn_dns,
+            ) {
+                Ok(full) => {
+                    self.log(&format!(
+                        "[全局] 全局模式已生效：{} 条半默认路由指向 {}，DNS 已切到 {:?}（断开时还原）",
+                        full.route_count(),
+                        full.tun_dev(),
+                        full.dns_servers()
+                    ));
+                    self.status.routes = full.routes_for_status();
+                    self.full = Some(full);
+                    Ok(())
+                }
+                Err(e) => {
+                    self.degraded_reason = Some(format!("全局模式未能接管整机流量：{}", e));
+                    self.log(&format!(
+                        "[全局] 未能接管整机流量：{}（本次只建隧道，网络不受影响）",
+                        e
+                    ));
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    /// 运行期切换代理模式：撤掉旧布线，按目标模式重新布线。
+    ///
+    /// 规则/全局/直连本质都是「布几条路由 + 改不改 DNS」，所以切换就是替换，
+    /// 不需要断开重连（界面上点了就生效）。
+    fn switch_mode(&mut self, target: ProxyMode) {
+        if let Some(mut split) = self.split.take() {
+            split.teardown();
+            self.log(&format!(
+                "[模式] 已撤掉规则分流的布线（{} 个域名、动态注入的内网 IP 一并回收）",
+                split.domain_count()
+            ));
+        }
+        if let Some(mut full) = self.full.take() {
+            full.teardown();
+            self.log("[模式] 已撤掉全局模式的布线（半默认路由与系统 DNS 已还原）");
+        }
+        self.degraded_reason = None;
+        self.status.routes.clear();
+        self.applied_mode = target;
+        self.status.applied_mode = target.as_str().to_string();
+        let result = match target {
+            ProxyMode::Direct => {
+                self.log("[模式] 直连模式：隧道保留，不接管任何流量");
+                Ok(())
+            }
+            ProxyMode::Rule => self.start_split_rules(),
+            ProxyMode::Global => self.start_full_tunnel(),
+        };
+        if let Err(e) = result {
+            self.log(&format!("[模式] 切换为 {} 失败：{}", target.as_str(), e));
+        }
+        let message = match (&self.split, &self.full, &self.degraded_reason) {
+            (_, Some(_), _) => "隧道已建立，全局模式生效（全部流量走 VPN）".to_string(),
+            (Some(split), None, _) => format!(
+                "隧道已建立，路由注入分流已生效（{} 个域名 → {}）",
+                split.domain_count(),
+                split.tun_dev()
+            ),
+            (None, None, Some(reason)) => format!("已连接（未接管系统流量：{}）", reason),
+            (None, None, None) if target == ProxyMode::Direct => {
+                "隧道已建立（直连模式，未接管任何流量）".to_string()
+            }
+            _ => "隧道已建立".to_string(),
+        };
+        self.set_phase(VpnPhase::Connected, &message);
+    }
+
+    /// 规则改了之后重新下发分流（域名、网段都可能变）。
+    fn restart_split(&mut self) {
+        if let Some(mut old) = self.split.take() {
+            old.teardown();
+        }
+        self.degraded_reason = None;
+        self.status.routes.clear();
+        if let Err(e) = self.start_split_rules() {
+            self.log(&format!("[分流] 重新下发分流失败：{}", e));
+        }
+        let message = match (&self.split, &self.degraded_reason) {
+            (Some(split), _) => format!(
+                "隧道已建立，路由注入分流已生效（{} 个域名 → {}）",
+                split.domain_count(),
+                split.tun_dev()
+            ),
+            (None, Some(reason)) => format!("已连接（未接管系统流量：{}）", reason),
+            (None, None) => "隧道已建立".to_string(),
+        };
+        self.set_phase(VpnPhase::Connected, &message);
+    }
+
     // ======================= 规则分流引擎（macOS） =======================
 
     /// 装配引擎：开捕获 TUN、抢半默认路由、给服务器打防环主机路由，
@@ -496,356 +692,42 @@ impl Worker {
     /// 装配成功后过渡期的按 CIDR 下发路由全部作废（清空 `applied`），
     /// 改由引擎在每条流建立时按规则注入。
     fn start_engine(&mut self) -> Result<(), String> {
-        // TunDevice 提供捕获网卡的 name()/index()，RouteTable 提供捕获路由的增删
-        use crate::vpn::platform::{ProcLookup, RouteTable, TunDevice};
-        use crate::vpn::{netstack, platform, router, tun_device};
-
-        let (vpn_dev, vpn_index) = match (self.status.tun_dev.as_str(), self.status.tun_index) {
-            ("", 0) => return Err("隧道接口信息缺失，无法装配引擎".to_string()),
-            (dev, 0) => (dev.to_string(), self.tunnel_if_index(dev)?),
-            (dev, idx) => (dev.to_string(), idx),
-        };
-
-        let capture = tun_device::create_capture(&self.request.connector_path)
-            .map_err(|e| format!("创建捕获网卡失败: {}", e))?;
-        // 捕获网卡用 10.9.0.0/30，取首个可用地址 10.9.0.1 作为本地点对点地址
-        let capture_ip = crate::vpn::route::first_usable_in_subnet("10.9.0.0", "30")
-            .unwrap_or_else(|| "10.9.0.1".to_string());
-        let mtu = if self.status.mtu == 0 { 1500 } else { self.status.mtu };
-        self.configure_interface(capture.name(), &capture_ip, mtu)?;
-        // 接口名要在 capture 被移进 Engine 之前先留存，供日志使用
-        let capture_name = capture.name().to_string();
-        let capture_index = capture.index();
-        self.capture_index = capture_index;
-
-        let route_table = platform::SystemRouteTable::new();
-
-        // 防环主机路由必须在捕获路由之前生效：否则发往 VPN 服务器本身的
-        // 流量会被捕获网卡再抓回来，形成回环。
-        let gw = self.snapshot.default_gateway.clone();
-        let server_ips = filter_server_ips(&resolve_server_ips(&self.request.server), &capture_ip);
-        let mut v4_tried = 0usize;
-        let mut v4_added = 0usize;
-        for ip in &server_ips {
-            if let Ok(v4) = ip.parse::<std::net::Ipv4Addr>() {
-                v4_tried += 1;
-                match route_table.add_server_host_route(v4, &gw) {
-                    Ok(()) => v4_added += 1,
-                    Err(e) => self.log(&format!("[路由] 服务器防环路由 {} 添加失败: {}", ip, e)),
-                }
-            }
+        // 规则模式（macOS）不再捕获：抢半默认路由会让系统解析器彻底失效
+        // （见设计文档根因九），改成路由注入式分流。
+        // 直连模式：隧道留着就行，不需要捕获、也不需要注入任何路由
+        if self.applied_mode == ProxyMode::Direct {
+            self.log("[模式] 直连模式：隧道已建立，不接管任何流量");
+            return Ok(());
         }
-        if v4_tried > 0 && v4_added == 0 {
-            return Err(format!(
-                "无法为 VPN 服务器添加防环路由（网关 {:?}），已中止以免流量回环",
-                gw
-            ));
-        }
-
-        // 最后才抢半默认路由：此时服务器流量已经钉在物理网关上。
-        route_table.add_capture_routes(capture_index)?;
-
-        let (pool, pool_warning) = crate::vpn::fakedns::FakeIpPool::from_profile(
-            &self.request.fake_ip_range,
-            &self.request.fake_ip_filter,
-        );
-        if let Some(warning) = pool_warning {
-            self.log(&format!(
-                "[fake-ip] {}，已退回默认地址池 {}",
-                warning,
-                crate::vpn::fakedns::DEFAULT_RANGE
-            ));
-        }
-        self.fake_pool = Some(pool.clone());
-
-        let mode = self.applied_mode;
-        let rules = if mode == ProxyMode::Rule {
-            Some(Self::compile_rules(&self.current_rules, &self.current_default_policy)?)
-        } else {
-            None
-        };
         #[cfg(target_os = "macos")]
-        let proc: Box<dyn ProcLookup> =
-            Box::new(crate::vpn::proc_lookup::SysctlProcLookup::new());
-        #[cfg(windows)]
-        let proc: Box<dyn ProcLookup> = Box::new(platform::WindowsProcLookup::new());
-
-        // DIRECT 出口必须钉在物理默认网卡上。macOS 的快照里只有接口名、索引恒为 0
-        // （`unix_list_interfaces` 写死），要按名字再问内核取索引。
-        // 拿不到索引时绝不能退回捕获网卡：那会让直连流量从自己的捕获口绕回来，
-        // 表现就是「一连上就全网断」。
-        let physical_if = if self.snapshot.default_if_index != 0 {
-            self.snapshot.default_if_index
-        } else if !self.snapshot.default_if_alias.is_empty() {
-            route::if_index_for_name(&self.snapshot.default_if_alias).ok_or_else(|| {
-                format!(
-                    "找不到物理默认网卡 {} 的接口索引，已中止以免流量回环",
-                    self.snapshot.default_if_alias
-                )
-            })?
-        } else {
-            return Err("找不到物理默认网卡，无法确定直连出口（已中止以免回环）".to_string());
-        };
-
-        // 出站 socket 显式绑源地址：捕获网卡占着半默认路由时，内核选源会失败。
-        let physical_ip = platform::interface_ipv4(&self.snapshot.default_if_alias);
-        let tunnel_ip: Option<std::net::Ipv4Addr> = self.status.vpn_ip.parse().ok();
-        self.log(&format!(
-            "[引擎] 直连出口 if#{}（{}），源地址 {}，网关 {}",
-            physical_if,
-            self.snapshot.default_if_alias,
-            physical_ip.map(|ip| ip.to_string()).unwrap_or_else(|| "自动".to_string()),
-            self.snapshot.default_gateway
-        ));
-
-        let mut engine = router::Engine::assemble(
-            capture,
-            netstack::NetstackConfig {
-                local_ip: capture_ip.parse().map_err(|_| "捕获地址非法".to_string())?,
-                mtu: mtu as usize,
-                fake_domains: std::collections::HashMap::new(),
-            },
-            rules,
-            mode,
-            Box::new(platform::SystemRouteTable::new()),
-            &self.snapshot.default_gateway,
-            &self.snapshot.local_subnets,
-            physical_if,
-            vpn_index,
-            physical_ip,
-            tunnel_ip,
-            resolve_server_ips(&self.request.server)
-                .iter()
-                .filter_map(|ip| ip.parse().ok())
-                .collect(),
-            proc,
-            &self.request.default_policy,
-        )?;
-        // 把假地址池交给引擎：DNS 本地应答与假 IP 反查域名都靠它
-        engine.set_fake_pool(pool);
-        // 服务端下发的 DNS 固定注入，作为内网域名的兜底解析器。
-        // 它排在「应用自己的 DNS」和「换出口重试」之后，只在内网域名解析不出来时才用到，
-        // 所以没有关掉的必要 —— 这个选项已经内置，不再暴露给用户。
-        let vpn_dns: Vec<std::net::Ipv4Addr> = self
-            .status
-            .dns
-            .iter()
-            .flat_map(|s| s.split_whitespace())
-            .filter_map(|s| s.parse().ok())
-            .collect();
-        engine.set_vpn_dns(vpn_dns);
-        self.engine = Some(engine);
-        self.log(&format!(
-            "[引擎] 已接管：捕获 {} ({}) -> 隧道 {}",
-            capture_name, capture_ip, vpn_dev
-        ));
-        // 过渡期按 CIDR 下发的路由清掉，改由引擎按流注入
-        self.applied.clear();
-        self.status.routes.clear();
-        // 装配完成后立刻按应用真实路径自检一次
-        self.spawn_self_check();
+        if self.applied_mode == ProxyMode::Rule {
+            return self.start_split_rules();
+        }
+        // 全局模式：整机流量走隧道 —— 等价于裸跑 openconnect，见 fulltunnel.rs
+        #[cfg(target_os = "macos")]
+        if self.applied_mode == ProxyMode::Global {
+            return self.start_full_tunnel();
+        }
+        // 其它平台还没有路由注入实现：隧道建起来，但不接管任何流量。
+        // 宁可什么都不做，也不要在没验证过的平台上瞎改路由表。
+        self.degraded_reason = Some("路由注入式接管目前只实现了 macOS".to_string());
+        self.log("[模式] 当前平台还没有分流实现：隧道已建立，未接管任何流量");
         Ok(())
-    }
-
-    /// 连接后自检：按应用真实走的路径跑一次，把结果写进 worker.log。
-    ///
-    /// 「连上就没网」这种反馈，光看「引擎已接管」分不清是捕获网卡没收到包、
-    /// DNS 没应答，还是直连出口建不起来。这里用一条真实连接把
-    /// 「应用 -> 捕获网卡 -> 引擎 -> 直连出口 -> 回包」整条链路串起来，
-    /// 日志里直接能看出断在哪一段。跑在独立线程里，不阻塞引擎收发。
-    fn spawn_self_check(&self) {
-        let session = self.session.clone();
-        // 判定 fake-ip 用配置里的地址池，而不是写死 198.18.0.0/16
-        let fake_range = route::parse_cidr(&self.request.fake_ip_range)
-            .ok()
-            .map(|(net, prefix)| (net, route::prefix_to_mask(prefix)));
-        thread::spawn(move || {
-            let log = |line: &str| session.append_log(line);
-            let in_fake_range = |ip: std::net::IpAddr| match (ip, fake_range) {
-                (std::net::IpAddr::V4(v4), Some((net, mask))) => {
-                    (u32::from(v4) & mask) == net
-                }
-                _ => false,
-            };
-            log("[自检] 开始：系统 DNS -> 捕获网卡 -> 引擎 -> 直连出口");
-            let addrs = match ("www.baidu.com", 443u16).to_socket_addrs() {
-                Ok(addrs) => addrs.collect::<Vec<_>>(),
-                Err(e) => {
-                    log(&format!("[自检] 系统 DNS 解析失败：{}（后面几步跳过）", e));
-                    return;
-                }
-            };
-            let shown = addrs
-                .iter()
-                .take(3)
-                .map(|a| a.ip().to_string())
-                .collect::<Vec<_>>()
-                .join(", ");
-            match addrs.first() {
-                Some(addr) if in_fake_range(addr.ip()) => log(&format!(
-                    "[自检] 系统 DNS 返回 {shown}（fake-ip，DNS 接管生效）"
-                )),
-                Some(_) => log(&format!(
-                    "[自检] 系统 DNS 返回 {shown}（真实地址，说明这次的解析没经过捕获网卡）"
-                )),
-                None => {
-                    log("[自检] 系统 DNS 没有返回地址，后面几步跳过");
-                    return;
-                }
-            }
-            let Some(addr) = addrs.first().copied() else { return };
-            match TcpStream::connect_timeout(&addr, Duration::from_secs(8)) {
-                Ok(_) => log(&format!(
-                    "[自检] 建连 {} 成功：捕获网卡、引擎转发、直连出口都正常",
-                    addr
-                )),
-                Err(e) => log(&format!(
-                    "[自检] 建连 {} 失败：{}（这一段断了，应用侧就是「连上没网」）",
-                    addr, e
-                )),
-            }
-        });
-    }
-
-    /// 取隧道网卡的接口索引。
-    ///
-    /// `route::list_interfaces()` 在 macOS 分支的 `index` 恒为 0
-    /// （`unix_list_interfaces` 写死 `index: 0`），拿它去做 `IP_BOUND_IF`
-    /// 会绑到无效网卡，所以这里只用它按 `alias` 确认接口存在，真实索引改问内核
-    /// （与 `Utun::create` 取索引的方式保持一致）。
-    #[cfg(target_os = "macos")]
-    fn tunnel_if_index(&self, dev: &str) -> Result<u32, String> {
-        let exists = crate::vpn::route::list_interfaces()
-            .unwrap_or_default()
-            .iter()
-            .any(|i| i.alias.as_str() == dev);
-        if !exists {
-            return Err(format!("找不到隧道接口 {}", dev));
-        }
-        let name = std::ffi::CString::new(dev).map_err(|_| format!("隧道接口名非法: {}", dev))?;
-        let index = unsafe { libc::if_nametoindex(name.as_ptr()) };
-        if index == 0 {
-            return Err(format!("取不到隧道接口 {} 的索引", dev));
-        }
-        Ok(index)
-    }
-
-    /// Windows：隧道接口索引直接由脚本回报；缺失时按名字回查。
-    #[cfg(windows)]
-    fn tunnel_if_index(&self, dev: &str) -> Result<u32, String> {
-        crate::vpn::route::list_interfaces()?
-            .into_iter()
-            .find(|info| info.alias == dev && info.index != 0)
-            .map(|info| info.index)
-            .ok_or_else(|| format!("找不到隧道接口 {} 的索引", dev))
-    }
-
-    /// 给捕获 TUN 配地址与 MTU（openconnect 不会碰这张自建网卡）。
-    #[cfg(target_os = "macos")]
-    fn configure_interface(&self, dev: &str, ip: &str, mtu: u32) -> Result<(), String> {
-        use std::process::Command;
-        let ok = Command::new("/sbin/ifconfig")
-            .args([dev, ip, ip, "up"])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        if !ok {
-            return Err(format!("ifconfig {} 配地址失败", dev));
-        }
-        let ok = Command::new("/sbin/ifconfig")
-            .args([dev, "mtu", &mtu.to_string()])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        if !ok {
-            return Err(format!("ifconfig {} 配 MTU 失败", dev));
-        }
-        Ok(())
-    }
-
-    /// Windows：Wintun 网卡刚建出来时网络栈可能还没就绪，netsh 失败要短暂重试。
-    #[cfg(windows)]
-    fn configure_interface(&self, dev: &str, ip: &str, mtu: u32) -> Result<(), String> {
-        use std::os::windows::process::CommandExt;
-        use std::process::Command;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
-        let netsh = crate::vpn::platform::system32_tool("netsh.exe");
-        let mut last = String::new();
-        for _ in 0..25 {
-            let output = Command::new(&netsh)
-                .args([
-                    "interface",
-                    "ipv4",
-                    "set",
-                    "address",
-                    &format!("name={}", dev),
-                    "static",
-                    ip,
-                    "255.255.255.252",
-                ])
-                .creation_flags(CREATE_NO_WINDOW)
-                .output();
-            match output {
-                Ok(out) if out.status.success() => {
-                    let _ = Command::new(&netsh)
-                        .args([
-                            "interface",
-                            "ipv4",
-                            "set",
-                            "subinterface",
-                            dev,
-                            &format!("mtu={}", mtu),
-                            "store=active",
-                        ])
-                        .creation_flags(CREATE_NO_WINDOW)
-                        .status();
-                    return Ok(());
-                }
-                Ok(out) => {
-                    last = String::from_utf8_lossy(&out.stderr).trim().to_string();
-                }
-                Err(e) => last = e.to_string(),
-            }
-            std::thread::sleep(Duration::from_millis(200));
-        }
-        Err(format!(
-            "给捕获网卡 {} 配地址失败：{}",
-            dev,
-            if last.is_empty() { "netsh 未返回错误信息".to_string() } else { last }
-        ))
-    }
-
-    /// 把引擎的连接数写进状态，界面据此显示活动连接。
-    fn publish_engine_status(&mut self) {
-        let count = self.engine.as_ref().map(|e| e.flow_count()).unwrap_or(0);
-        self.status.message = format!("已连接，活动连接 {}", count);
-        let _ = self.session.write_status(&self.status);
     }
 
     /// 回收本程序添加的路由，并把默认路由交还给连接前的物理网关
     fn cleanup_routes(&mut self) {
-        // 引擎接管后：关闭所有流并回收流路由，再拆掉捕获 TUN 抢的那两条半默认路由
-        // 与给服务器加的防环主机路由。TUN 设备本体随 Engine 一起 drop。
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
-        {
-            use crate::vpn::platform::RouteTable;
-            if let Some(mut engine) = self.engine.take() {
-                engine.shutdown();
-            }
-            let route_table = crate::vpn::platform::SystemRouteTable::new();
-            let capture_index = self.capture_index;
-            if capture_index != 0 {
-                let _ = route_table.del_capture_routes(capture_index);
-            }
-            for ip in resolve_server_ips(&self.request.server) {
-                if let Ok(v4) = ip.parse() {
-                    let _ = route_table.del_server_host_route(v4);
-                }
-            }
-            self.capture_index = 0;
-            self.fake_pool = None;
+        // 路由注入分流优先回收：resolver 文件、隧道路由、转发线程都得清干净，
+        // 否则断开后内网域名会继续被指向一个没人监听的 127.0.0.1:53。
+        if let Some(mut full) = self.full.take() {
+            full.teardown();
+            self.log("[清理] 全局模式已回收（半默认路由与系统 DNS 已还原）");
         }
+        if let Some(mut split) = self.split.take() {
+            split.teardown();
+            self.log("[清理] 路由注入分流已回收（resolver 文件、隧道路由、DNS 转发器）");
+        }
+        self.status.routes.clear();
         let records: Vec<AppliedRouteRecord> = self.applied.drain(..).collect();
         for record in records {
             let result = match record.outcome {
@@ -856,33 +738,12 @@ impl Worker {
                 self.log(&format!("[清理] {} 回收失败: {}", record.cidr, e));
             }
         }
-        // 停止隧道走的是 SIGKILL，脚本的 disconnect 分支不会执行，
-        // 默认路由只能在这里交还，否则断开后整机失去默认路由
-        if self.default_route_taken {
-            self.default_route_taken = false;
-            let gateway = self.snapshot.default_gateway.clone();
-            match route::restore_default_route(&gateway) {
-                Ok(()) => self.log("[清理] 默认路由已交还给物理网关"),
-                Err(e) => self.log(&format!("[清理] 默认路由还原失败: {}", e)),
-            }
-        }
         // 脚本给 VPN 服务器加的防环主机路由不在这份记录里，SIGKILL 停止时脚本的
         // disconnect 分支不会执行，它会一直残留并可能让下次连接选源失败，这里一并清掉。
         for ip in std::mem::take(&mut self.vpn_server_ips) {
             if let Err(e) = route::delete_host_route(&ip) {
                 self.log(&format!("[清理] 服务器主机路由 {} 回收失败: {}", ip, e));
             }
-        }
-        // DNS 同理：脚本的 disconnect 分支在 SIGKILL 下不会执行，
-        // 这里必须兜底还原，否则断开后 /etc/resolv.conf 还指着内网 DNS，
-        // 上不了网也解析不出公网域名。默认路由已交还，正好能问到物理网络服务名。
-        if self.dns_applied {
-            self.dns_applied = false;
-            let dir = self.session.dir.clone();
-            let service = self.dns_service.clone();
-            let tun = self.status.tun_dev.clone();
-            script::restore_vpn_dns(&dir, &service, &tun);
-            self.log("[清理] VPN DNS 已还原");
         }
         self.status.routes.clear();
     }
@@ -1006,100 +867,12 @@ impl Worker {
 
         let mut routes_applied = false;
         let mut guard_at = Instant::now() + GUARD_INTERVAL;
-        // 引擎计数定期落盘：收发全为 0 就说明链路根本没通到引擎
-        let mut stats_at = Instant::now() + Duration::from_secs(5);
-        let mut last_stats: Option<EngineStats> = None;
-        let mut capture_checked = false;
-
         loop {
             self.drain_output(&rx);
             // 运行期开关：模式与规则都可能在任何时刻被主进程改写
             self.poll_mode_change();
             self.poll_rules_change();
             self.check_parent_alive();
-
-            // 引擎的收发循环必须每轮推进：塞进 15s 巡检那一跳会把吞吐卡死。
-            // 引擎尚未装配（隧道未就绪）时是 None，这一跳自然空转。
-            let mut engine_error: Option<String> = None;
-            let mut engine_lines: Vec<String> = Vec::new();
-            if let Some(engine) = self.engine.as_mut() {
-                if let Err(e) = engine.poll() {
-                    engine_error = Some(format!("[引擎] 轮询出错: {}", e));
-                }
-                // 引擎不开文件：它攒下的 DNS / 分流诊断行在这里统一落盘
-                engine_lines = engine.take_logs();
-            }
-            if let Some(line) = engine_error {
-                self.log(&line);
-            }
-            for line in &engine_lines {
-                self.log(line);
-            }
-            if Instant::now() >= stats_at {
-                if let Some(stats) = self.engine.as_ref().map(|engine| engine.stats()) {
-                    if last_stats != Some(stats) {
-                        self.log(&format!(
-                            "[引擎] 收 {} 包 / 发 {} 包 / DNS 应答 {} / 连接尝试 {} / 新连接 {} / 出站异常 {} / 上行 {} KB / 回程 {} KB",
-                            stats.rx_packets,
-                            stats.tx_packets,
-                            stats.dns_answered,
-                            stats.flows_attempted,
-                            stats.flows_opened,
-                            stats.egress_failures,
-                            stats.bytes_to_egress / 1024,
-                            stats.bytes_to_app / 1024
-                        ));
-                        last_stats = Some(stats);
-                    }
-                }
-                stats_at = Instant::now() + Duration::from_secs(5);
-            }
-
-            // 兜底：接管后整整一个窗口都没收到任何包，说明捕获这条路不通，
-            // 继续占着半默认路由只会让整台机器没网。撤掉捕获路由先把网还回去，
-            // 规则分流这一趟作废——总比用户面对「一连上就全网断」好。
-            if !capture_checked {
-                if let Some(ready_at) = self.engine_ready_at {
-                    if ready_at.elapsed() >= CAPTURE_PROBE_WINDOW {
-                        capture_checked = true;
-                        let rx = self
-                            .engine
-                            .as_ref()
-                            .map(|engine| engine.stats().rx_packets)
-                            .unwrap_or(0);
-                        if rx == 0 {
-                            use crate::vpn::platform::RouteTable;
-                            let capture_index = self.capture_index;
-                            if capture_index != 0 {
-                                let _ = crate::vpn::platform::SystemRouteTable::new()
-                                    .del_capture_routes(capture_index);
-                            }
-                            self.capture_index = 0;
-                            // 假地址还留在系统 DNS 缓存里，不刷新的话应用会继续去连
-                            // 198.18.x.x，看起来还是「没网」
-                            #[cfg(target_os = "macos")]
-                            {
-                                let _ = std::process::Command::new("/usr/sbin/dscacheutil")
-                                    .arg("-flushcache")
-                                    .output();
-                                let _ = std::process::Command::new("/usr/bin/killall")
-                                    .arg("-HUP")
-                                    .arg("mDNSResponder")
-                                    .output();
-                            }
-                            self.log(
-                                "[引擎] 捕获网卡 12 秒内没收到任何数据包，已撤掉捕获路由并刷新 DNS 缓存：\
-                                 本次规则分流不生效，网络恢复直连（请把这段日志反馈给开发者）",
-                            );
-                        } else {
-                            self.log(&format!(
-                                "[引擎] 捕获链路正常：12 秒内收到 {} 个包",
-                                rx
-                            ));
-                        }
-                    }
-                }
-            }
 
             if self.parent_lost || self.session.is_stop_requested() {
                 if !self.parent_lost {
@@ -1137,14 +910,42 @@ impl Worker {
 
             if !routes_applied && self.tunnel_ready() {
                 if let Err(e) = self.start_engine() {
-                    // 引擎装配失败必须把隧道一起收掉，否则留下一个没人管辖的
-                    // openconnect 进程和一张半配置的网卡，网络会处于黑洞状态。
+                    // 接管失败必须把隧道一起收掉，否则留下一个没人管辖的
+                    // openconnect 进程，网络可能处于黑洞状态。
                     let _ = child.kill();
                     let _ = child.wait();
                     return self.fail(&e);
                 }
-                self.set_phase(VpnPhase::Connected, "隧道已建立，引擎已接管");
-                self.engine_ready_at = Some(Instant::now());
+                match self.degraded_reason.clone() {
+                    // 降级：隧道在建，但没有接管系统流量（例如当前平台还没有分流实现）
+                    Some(reason) => {
+                        self.set_phase(
+                            VpnPhase::Connected,
+                            &format!("已连接（未接管系统流量：{}）", reason),
+                        );
+                        self.log(&format!(
+                            "[安全] 本次连接只建隧道、不接管系统流量：{}",
+                            reason
+                        ));
+                    }
+                    None => {
+                        let message = match (&self.split, &self.full, self.applied_mode) {
+                            (_, Some(_), _) => {
+                                "隧道已建立，全局模式生效（全部流量走 VPN）".to_string()
+                            }
+                            (Some(split), _, _) => format!(
+                                "隧道已建立，路由注入分流已生效（{} 个域名 → {}）",
+                                split.domain_count(),
+                                split.tun_dev()
+                            ),
+                            (None, None, ProxyMode::Direct) => {
+                                "隧道已建立（直连模式，未接管任何流量）".to_string()
+                            }
+                            (None, None, _) => "隧道已建立（未接管系统流量）".to_string(),
+                        };
+                        self.set_phase(VpnPhase::Connected, &message);
+                    }
+                }
                 self.last_mode_check = Instant::now();
                 self.last_rules_check = Instant::now();
                 routes_applied = true;
@@ -1194,19 +995,11 @@ impl Worker {
             }
 
             if routes_applied && Instant::now() >= guard_at {
-                // 引擎的收发循环已提到每轮执行，这里只做节流的状态发布；
-                // 引擎缺席（装配失败）的窗口仍走 guard_routes 兜底。
-                if self.engine.is_some() {
-                    self.publish_engine_status();
-                } else {
-                    self.guard_routes();
-                }
+                self.guard_routes();
                 guard_at = Instant::now() + GUARD_INTERVAL;
             }
 
-            // 引擎接管后要更勤地推进协议栈：200ms 一轮会把交互式请求拖到
-            // 几秒才完成。未接管时仍按 200ms 节流，避免空转。
-            thread::sleep(Duration::from_millis(if self.engine.is_some() { 10 } else { 200 }));
+            thread::sleep(Duration::from_millis(POLL_INTERVAL_MS));
         }
 
         // 正常停止流程
@@ -1329,6 +1122,12 @@ pub fn run(session_dir: &Path) -> i32 {
         }
     };
 
+    // 上一轮被 SIGKILL 时留下的 /etc/resolver 文件先清掉：
+    // 这些文件会把内网域名指向一个没人监听的 127.0.0.1:53，清不干净就是「内网域名全解析不了」。
+    crate::vpn::split::cleanup_stale(&session);
+    // 全局模式崩溃现场：DNS 被改到 VPN DNS、标记文件还在 —— 先还原再连，
+    // 否则会把残留的 VPN DNS 当成「用户自己配的」快照下来，再也回不到 DHCP。
+    crate::vpn::fulltunnel::restore_stale(&session);
     let mut worker = Worker::new(session, request);
 
     if worker.request.connector_path.is_empty() {
@@ -1338,8 +1137,14 @@ pub fn run(session_dir: &Path) -> i32 {
     // 只剩 openconnect 一条通道，连接器路径一定是 openconnect 可执行文件
     let code = worker.run_openconnect();
 
-    // 兜底：任何路径退出前都确保路由被回收
-    if !worker.applied.is_empty() {
+    // 兜底：任何路径退出前都确保路由被回收。
+    // 分流模式没有 applied 路由表，但它有 resolver 文件、隧道路由和转发线程要收，
+    // 所以这几个条件都要算上，否则异常退出会把 `/etc/resolver` 留在地上。
+    if !worker.applied.is_empty()
+        || worker.split.is_some()
+        || worker.full.is_some()
+        || !worker.vpn_server_ips.is_empty()
+    {
         worker.cleanup_routes();
     }
     let _ = worker.session.write_status(&worker.status);
@@ -1508,8 +1313,6 @@ mod tests {
             connector_path: "x".into(),
             rules: vec![],
             default_policy: "DIRECT".into(),
-            fake_ip_range: "198.18.0.0/16".into(),
-            fake_ip_filter: vec![],
             extra_args: vec![],
             script_path: "s".into(),
             hook_exe: "h".into(),
@@ -1522,41 +1325,33 @@ mod tests {
     }
 
     #[test]
-    fn compiled_rules_parses_canonical_kind_and_policy() {
-        let session = VpnSession::new(std::env::temp_dir().join("ws-worker-test-compiled"));
-        let request = VpnRequest {
-            conn_identity: String::new(),
-            proxy_mode: "rule".to_string(),
-            profile_id: "p".into(),
-            profile_name: "n".into(),
-            server: "s".into(),
-            username: "u".into(),
-            password: "p".into(),
-            protocol: "anyconnect".into(),
-            connector: crate::vpn::models::ConnectorKind::Auto,
-            connector_path: "x".into(),
-            rules: vec![crate::vpn::models::VpnRule {
+    fn split_plan_only_nudges_supported_kinds() {
+        // 规则能不能生效，现在完全取决于 split::plan 能翻译出什么动作
+        let rules = vec![
+            crate::vpn::models::VpnRule {
                 id: "r1".into(),
-                kind: "IP-CIDR".into(),
-                value: "10.0.0.0/8".into(),
+                kind: "DOMAIN-SUFFIX".into(),
+                value: "risencn.com".into(),
                 policy: "VPN".into(),
-                no_resolve: true,
                 remark: String::new(),
                 enabled: true,
-            }],
-            default_policy: "DIRECT".into(),
-            fake_ip_range: "198.18.0.0/16".into(),
-            fake_ip_filter: vec![],
-            extra_args: vec![],
-            script_path: "s".into(),
-            hook_exe: "h".into(),
-            created_at: String::new(),
-        };
-        let set = Worker::compile_rules(&request.rules, &request.default_policy)
-            .expect("规则集应可编译");
-        assert_eq!(set.rules().len(), 1);
-        assert_eq!(set.rules()[0].kind, crate::vpn::rule_engine::RuleKind::IpCidr);
-        assert_eq!(set.rules()[0].policy, crate::vpn::rule_engine::Policy::Vpn);
+            },
+            crate::vpn::models::VpnRule {
+                id: "r2".into(),
+                kind: "DOMAIN-KEYWORD".into(),
+                value: "risen".into(),
+                policy: "VPN".into(),
+                remark: String::new(),
+                enabled: true,
+            },
+        ];
+        let plan = crate::vpn::split::plan(&rules, "DIRECT");
+        assert_eq!(plan.domains, vec!["risencn.com".to_string()]);
+        assert!(
+            plan.notes.iter().any(|n| n.contains("DOMAIN-KEYWORD")),
+            "不支持的规则类型必须给出可执行的建议：{:?}",
+            plan.notes
+        );
     }
 
     #[test]
@@ -1575,8 +1370,6 @@ mod tests {
             connector_path: "x".into(),
             rules: vec![],
             default_policy: "DIRECT".into(),
-            fake_ip_range: "198.18.0.0/16".into(),
-            fake_ip_filter: vec![],
             extra_args: vec![],
             script_path: "s".into(),
             hook_exe: "h".into(),
@@ -1606,8 +1399,6 @@ mod tests {
             connector_path: "x".into(),
             rules: vec![],
             default_policy: "DIRECT".into(),
-            fake_ip_range: "198.18.0.0/16".into(),
-            fake_ip_filter: vec![],
             extra_args: vec![],
             script_path: "s".into(),
             hook_exe: "h".into(),
