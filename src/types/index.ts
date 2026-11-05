@@ -59,8 +59,8 @@ export interface AppConfig {
   default_include_version?: number
   /** VPN 配置列表 */
   vpn_profiles: VpnProfile[]
-  /** VPN 规则集列表 */
-  vpn_rule_sets: VpnRuleSet[]
+  /** @deprecated 老版本全局规则集，只读，仅用于一次性迁移到各配置 */
+  vpn_rule_sets?: VpnRuleSet[]
   /** 上次选中的 VPN 配置 */
   vpn_active_profile_id: string
   /** 全局默认附件上传目录 */
