@@ -419,59 +419,17 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
     }, 300)
   }
 
-  async function addRule(kind: VpnRuleKind, value: string, policy: VpnPolicy, remark = '') {
-    const profile = selectedProfile.value
-    if (!profile) return
-    const rule = newRule(kind, value, policy)
-    rule.remark = remark
-    profile.rules = [...(profile.rules ?? []), rule]
-    await saveConfig()
-    await pushRulesIfConnected()
-  }
-
-  async function updateRule(ruleId: string, patch: Partial<VpnRule>) {
-    const profile = selectedProfile.value
-    if (!profile) return
-    profile.rules = (profile.rules ?? []).map((rule) =>
-      rule.id === ruleId ? { ...rule, ...patch } : rule,
-    )
-    await saveConfig()
-    await pushRulesIfConnected()
-  }
-
   /**
-   * 上下移动一条规则。
+   * 一次性保存整份规则表与兜底走向（规则弹窗关闭时调用）。
    *
-   * 规则是从上往下第一条命中，所以顺序本身就是语义的一部分；
-   * 越界时什么都不做，避免把规则推丢。
+   * 弹窗里所有改动都只在草稿上，关掉时才会走到这里：
+   * 写配置一次，已连接且是当前生效配置时再热推送一次。
    */
-  async function moveRule(ruleId: string, delta: number) {
+  async function saveRules(rules: VpnRule[], defaultPolicy: VpnPolicy) {
     const profile = selectedProfile.value
     if (!profile) return
-    const rules = [...(profile.rules ?? [])]
-    const index = rules.findIndex((rule) => rule.id === ruleId)
-    if (index < 0) return
-    const target = index + delta
-    if (target < 0 || target >= rules.length) return
-    const [moved] = rules.splice(index, 1)
-    rules.splice(target, 0, moved)
-    profile.rules = rules
-    await saveConfig()
-    await pushRulesIfConnected()
-  }
-
-  async function deleteRule(ruleId: string) {
-    const profile = selectedProfile.value
-    if (!profile) return
-    profile.rules = (profile.rules ?? []).filter((rule) => rule.id !== ruleId)
-    await saveConfig()
-    await pushRulesIfConnected()
-  }
-
-  async function updateRulesDefaultPolicy(policy: VpnPolicy) {
-    const profile = selectedProfile.value
-    if (!profile) return
-    profile.rules_default_policy = policy
+    profile.rules = rules.map((rule) => ({ ...rule }))
+    profile.rules_default_policy = defaultPolicy
     await saveConfig()
     await pushRulesIfConnected()
   }
@@ -625,11 +583,7 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
     updateProfile,
     deleteProfile,
     setProxyMode,
-    addRule,
-    updateRule,
-    deleteRule,
-    moveRule,
-    updateRulesDefaultPolicy,
+    saveRules,
     selectProfile,
     validateRule,
     previewRule,
