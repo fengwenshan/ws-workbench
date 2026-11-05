@@ -410,7 +410,9 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
   async function pushRulesIfConnected() {
     const profile = selectedProfile.value
     if (!profile) return
-    if (!isConnected.value || status.value.profile_id !== profile.id) return
+    // 运行期的规则表属于「当前生效配置」，不是隧道拥有者。
+    // 同通道切换后两者会不同，推错对象会把别人的规则顶上去。
+    if (!isConnected.value || policyProfileId.value !== profile.id) return
     window.clearTimeout(rulesPushTimer)
     rulesPushTimer = window.setTimeout(async () => {
       try {

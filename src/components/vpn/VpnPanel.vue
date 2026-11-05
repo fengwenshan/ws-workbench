@@ -480,6 +480,7 @@ watch(
               </span>
             </div>
             <VpnRuleTable
+              embedded
               :rules="vpn.selectedProfile?.rules ?? []"
               :default-policy="vpn.selectedProfile?.rules_default_policy ?? 'DIRECT'"
               :validate-rule="vpn.validateRule"
