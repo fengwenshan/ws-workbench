@@ -403,7 +403,7 @@ watch(
               </span>
               <div class="proxy-mode-title">
                 <h4>代理模式</h4>
-                <p>决定连接后流量从 VPN 隧道还是本机出口走</p>
+                <p>{{ currentMode.description }}</p>
               </div>
               <span class="proxy-mode-current">{{ currentMode.label }}</span>
             </div>
@@ -418,7 +418,6 @@ watch(
                 role="radio"
                 :aria-checked="mode.value === proxyMode"
                 :disabled="modeLocked"
-                :title="modeLocked ? modeLockText : mode.description"
                 @click="handleModeChange(mode.value)"
               >
                 <span class="mode-icon">
@@ -440,7 +439,6 @@ watch(
               </button>
             </div>
 
-            <p class="proxy-mode-desc">{{ currentMode.description }}</p>
             <p v-if="modeLockText" class="proxy-mode-lock">{{ modeLockText }}</p>
             <p v-else-if="vpn.isConnected" class="proxy-mode-hint">
               切换立即生效：新连接按新模式，已建立的连接保持原路径。
@@ -929,16 +927,6 @@ watch(
   width: 18px;
   height: 18px;
   display: block;
-}
-.proxy-mode-desc {
-  margin: 10px 0 0;
-  padding: 8px 10px;
-  border: 1px solid color-mix(in srgb, var(--primary) 40%, var(--border-color));
-  border-radius: 5px;
-  background: color-mix(in srgb, var(--primary) 5%, transparent);
-  color: var(--text-secondary);
-  font-size: 12px;
-  line-height: 1.6;
 }
 .proxy-mode-lock {
   margin: 6px 0 0;
