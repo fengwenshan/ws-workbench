@@ -292,6 +292,37 @@ pub fn list_interfaces() -> Result<Vec<InterfaceInfo>, String> {
     }
 }
 
+/// 按接口名取系统接口索引。
+///
+/// macOS 的 `list_interfaces` 索引恒为 0（`unix_list_interfaces` 写死），
+/// 而直连出口要 `IP_BOUND_IF` 钉物理网卡、按流注入路由也要真实索引，
+/// 所以这里单独问内核要。拿不到就返回 None，由调用方决定是中止还是退让。
+#[cfg(target_os = "macos")]
+pub fn if_index_for_name(name: &str) -> Option<u32> {
+    let name = std::ffi::CString::new(name).ok()?;
+    let index = unsafe { libc::if_nametoindex(name.as_ptr()) };
+    if index == 0 {
+        None
+    } else {
+        Some(index)
+    }
+}
+
+/// Windows 的接口索引本来就在 `list_interfaces` 里，按别名/描述反查即可。
+#[cfg(windows)]
+pub fn if_index_for_name(name: &str) -> Option<u32> {
+    list_interfaces()
+        .ok()?
+        .into_iter()
+        .find(|info| info.alias == name || info.description == name)
+        .map(|info| info.index)
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+pub fn if_index_for_name(_name: &str) -> Option<u32> {
+    None
+}
+
 /// 列出所有默认路由
 pub fn list_default_routes() -> Result<Vec<DefaultRoute>, String> {
     #[cfg(target_os = "windows")]
@@ -829,6 +860,14 @@ fn unix_list_interfaces() -> Result<Vec<InterfaceInfo>, String> {
 
 #[cfg(test)]
 mod tests {
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn if_index_for_name_resolves_loopback() {
+        assert_eq!(super::if_index_for_name("lo0"), Some(1));
+        assert_eq!(super::if_index_for_name("definitely-not-an-if"), None);
+    }
+
     use super::*;
 
     fn route(alias: &str, next_hop: &str, index: u32, metric: u32) -> DefaultRoute {
