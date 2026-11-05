@@ -114,6 +114,17 @@ fn listen_endpoint(ip: Ipv4Addr, port: u16) -> IpListenEndpoint {
     }
 }
 
+/// 捕获网卡上的收发计数；排障时用来判断「有没有流量进来 / 有没有写回去」。
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct PhyStats {
+    /// 从捕获网卡读到的 IP 包数
+    pub rx: u64,
+    /// 写回捕获网卡的 IP 包数
+    pub tx: u64,
+    /// 因端口尚未建 socket 而被压回重投队列的包数
+    pub retried: u64,
+}
+
 /// 把 `TunDevice` 适配成 smoltcp 的 `Device`（medium = Ip，无以太头）。
 pub struct TunPhy<D: TunDevice> {
     inner: D,
@@ -123,6 +134,7 @@ pub struct TunPhy<D: TunDevice> {
     pending: Arc<Mutex<PendingPorts>>,
     /// 因「发现的端口尚未建 socket」而被压回、待下一轮重投的包
     retry: VecDeque<Vec<u8>>,
+    stats: PhyStats,
 }
 
 impl<D: TunDevice> TunPhy<D> {
@@ -133,12 +145,17 @@ impl<D: TunDevice> TunPhy<D> {
             rx_buf: vec![0u8; mtu],
             pending: Arc::new(Mutex::new(PendingPorts::default())),
             retry: VecDeque::new(),
+            stats: PhyStats::default(),
         }
     }
 
     /// 注入由 `Netstack` 建立的共享集合，保证两侧看到同一份待建端口/已建键。
     pub fn set_pending(&mut self, p: Arc<Mutex<PendingPorts>>) {
         self.pending = p;
+    }
+
+    pub fn stats(&self) -> PhyStats {
+        self.stats
     }
 }
 
@@ -148,6 +165,7 @@ pub struct TunRxToken {
 
 pub struct TunTxToken<'a, D: TunDevice> {
     device: &'a mut D,
+    stats: &'a mut PhyStats,
 }
 
 impl RxToken for TunRxToken {
@@ -166,7 +184,10 @@ impl<'a, D: TunDevice> TxToken for TunTxToken<'a, D> {
     {
         let mut buf = vec![0u8; len];
         let r = f(&mut buf);
-        let _ = self.device.write_packet(&buf);
+        match self.device.write_packet(&buf) {
+            Ok(_) => self.stats.tx += 1,
+            Err(_) => {}
+        }
         r
     }
 }
@@ -185,12 +206,14 @@ impl<D: TunDevice> Device for TunPhy<D> {
     fn receive(&mut self, _ts: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
         // 先看重投队列：这些包对应的 socket 现在已建好
         let buf = if let Some(b) = self.retry.pop_front() {
+            self.stats.retried += 1;
             b
         } else {
             let n = self.inner.read_packet(&mut self.rx_buf).ok()?;
             if n == 0 {
                 return None;
             }
+            self.stats.rx += 1;
             self.rx_buf[..n].to_vec()
         };
         // 学习端口：仅当该 (dst_ip, port) 是首次出现时才延迟交付
@@ -219,11 +242,14 @@ impl<D: TunDevice> Device for TunPhy<D> {
                 return None;
             }
         }
-        Some((TunRxToken { buffer: buf }, TunTxToken { device: &mut self.inner }))
+        Some((
+            TunRxToken { buffer: buf },
+            TunTxToken { device: &mut self.inner, stats: &mut self.stats },
+        ))
     }
 
     fn transmit(&mut self, _ts: Instant) -> Option<Self::TxToken<'_>> {
-        Some(TunTxToken { device: &mut self.inner })
+        Some(TunTxToken { device: &mut self.inner, stats: &mut self.stats })
     }
 }
 
@@ -643,6 +669,29 @@ mod tests {
         fn write_packet(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
             Ok(0)
         }
+    }
+
+    #[test]
+    fn phy_stats_count_received_and_retried_packets() {
+        let pkt = tcp_syn(40000, 443);
+        let mut phy = TunPhy::new(MockDev::new(vec![pkt]), 1500);
+        let pending = Arc::new(Mutex::new(PendingPorts::default()));
+        phy.set_pending(pending.clone());
+        assert_eq!(phy.stats(), PhyStats::default());
+
+        // 新端口首包：读到了但要压回重投队列
+        assert!(phy.receive(Instant::now()).is_none());
+        let stats = phy.stats();
+        assert_eq!(stats.rx, 1, "从网卡读到的包要计入 rx");
+        assert_eq!(stats.retried, 0);
+
+        // 下一轮取回重投包
+        {
+            let taken = phy.receive(Instant::now());
+            assert!(taken.is_some());
+        }
+        assert_eq!(phy.stats().retried, 1);
+        assert_eq!(phy.stats().rx, 1, "重投不算新收到的包");
     }
 
     #[test]
