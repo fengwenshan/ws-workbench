@@ -115,6 +115,7 @@ pub fn apply_mode(mode: ProxyMode, egress: Egress) -> Egress  // 纯函数
 - `vpn_connect` 增加并发守卫：`status.phase` 非 `Disconnected`/`Failed` 时返回「请先断开当前连接」。
 - `useVpn.setProxyMode`：`updateProfile` 持久化 → 若已连接调 `vpn_set_proxy_mode`。
 - 规则变更（增删改、启停、MATCH 走向）→ `saveConfig()` + 防抖 300ms 的 `pushRulesIfConnected()`。
+- **推送目标必须等于连接中的配置**：`pushRulesIfConnected()` 内部检查 `已连接 && selectedProfile.id === status.profile_id` 才调用 `vpn_push_rules`；否则只存盘。这样"连着 A 却在编辑 B 的规则"不会把 B 的规则推给正在跑的 A（运行时规则表只有一份，推错就是运行期错乱）。
 
 ## 7. UI 变更（`VpnPanel.vue` 等）
 
@@ -178,7 +179,9 @@ pub fn apply_mode(mode: ProxyMode, egress: Egress) -> Egress  // 纯函数
 4. 断开后 `mode` / `rules.json` 不存在、无残留路由；
 5. 托盘退出 / Cmd+Q 后 worker 已退出、路由已还原；
 6. 连接状态下强杀主进程，8s 内 worker 自行收尾；
-7. 已连接时对另一个配置发起连接被拒绝并提示。
+7. 已连接时对另一个配置发起连接被拒绝并提示；
+8. 连接 A 时在左侧切到 B 并编辑 B 的规则：A 的运行期规则不受影响，B 的改动只存盘并提示"下次连接生效"；
+9. 连接 A 时编辑 A 的规则：只重置受影响的连接即生效。
 
 ## 12. 影响面与风险
 
