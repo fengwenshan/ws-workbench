@@ -16,7 +16,6 @@ import { platform } from '@/platform'
 import VpnInstallGuide from './VpnInstallGuide.vue'
 import VpnLearnCard from './VpnLearnCard.vue'
 import VpnProfileDialog from './VpnProfileDialog.vue'
-import VpnProfileForm from './VpnProfileForm.vue'
 import VpnRoutePreview from './VpnRoutePreview.vue'
 import VpnRuleSetDialog from './VpnRuleSetDialog.vue'
 import VpnStatusDot from './VpnStatusDot.vue'
@@ -254,6 +253,8 @@ async function handleProfileSubmit(input: NewVpnProfileInput) {
         username: input.username ?? '',
         protocol: input.protocol ?? 'anyconnect',
         extra_args: input.extra_args ?? [],
+        fake_ip_range: input.fake_ip_range?.trim() || '198.18.0.0/16',
+        fake_ip_filter: input.fake_ip_filter ?? [],
       }
       if (input.password) {
         patch.password = input.password
@@ -281,12 +282,6 @@ async function confirmDeleteProfile() {
   if (!confirmDelete.value) return
   await vpn.deleteProfile(confirmDelete.value.id)
   confirmDelete.value = null
-}
-
-async function handleUpdate(patch: Partial<VpnProfile>) {
-  const profile = vpn.selectedProfile
-  if (!profile) return
-  await vpn.updateProfile(profile.id, patch)
 }
 
 /** 切回 VPN 页时刷新连接器与快照，保证看到的是当前机器状态 */
@@ -569,18 +564,6 @@ watch(
 
           <div v-else class="mode-off-note">
             当前是{{ currentMode.label }}模式，规则列表不参与分流；切换到「规则」模式后可编辑和选择列表。
-          </div>
-
-          <div class="card">
-            <div class="card-head">
-              <h4>连接配置</h4>
-              <span class="card-sub">修改会自动保存</span>
-            </div>
-            <VpnProfileForm
-              :profile="vpn.selectedProfile"
-              :busy="vpn.isConnected || vpn.phaseBusy"
-              @update="handleUpdate"
-            />
           </div>
 
           <VpnLearnCard :vpn="vpn" />
@@ -949,16 +932,6 @@ watch(
   padding: 14px;
   background: var(--bg-primary);
 }
-.card-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 12px;
-}
-.card-head h4 {
-  font-size: 14px;
-  color: var(--text-primary);
-}
 .rule-empty {
   border: 1px solid var(--border-color);
   border-radius: 8px;
@@ -967,10 +940,6 @@ watch(
   font-size: 13px;
   color: var(--text-muted);
   background: var(--bg-primary);
-}
-.card-sub {
-  font-size: 12px;
-  color: var(--text-muted);
 }
 
 /* 代理模式 */
@@ -1049,6 +1018,12 @@ watch(
   background: var(--primary);
   color: #fff;
   box-shadow: 0 4px 12px color-mix(in srgb, var(--primary) 22%, transparent);
+}
+/* 选中项 hover 时不要再改文字颜色（上面那条 hover 会把白字压成深色，
+   蓝底上很难看），轻微压暗表示可点即可 */
+.proxy-mode-option.active:hover:not(:disabled) {
+  color: #fff;
+  opacity: 0.8;
 }
 .proxy-mode-option:disabled {
   cursor: not-allowed;

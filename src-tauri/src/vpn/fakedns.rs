@@ -13,10 +13,15 @@ use std::collections::HashMap;
 
 use super::route;
 
-/// 一条 `fake_ip_filter` 规则：`*.example.com`（后缀）或 `keyword`（包含）。
+/// 默认 fake-ip 地址池：RFC 2544 保留段，正常网络不会用到。
+///
+/// 界面上只在「高级选项」里暴露，绝大多数用户不需要改。
+pub const DEFAULT_RANGE: &str = "198.18.0.0/16";
+
+/// 一条 `fake_ip_filter` 规则：后缀（`*.a.com` / `.a.com` / `+.a.com`）或 `keyword`（包含）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum FilterRule {
-    /// 形如 `*.example.com`：命中 `example.com` 及其子域。
+    /// 命中 `a.com` 及其子域。
     Suffix(String),
     /// 其它形式：按「域名包含该串」匹配。
     Keyword(String),
@@ -28,15 +33,21 @@ impl FilterRule {
         if t.is_empty() {
             return None;
         }
-        if let Some(rest) = t.strip_prefix("*.") {
-            let rest = rest.trim_start_matches('.');
+        // 与 Clash 的 fake-ip-filter 对齐：`*.a.com`、`.a.com`、`+.a.com` 都算后缀。
+        // 用户从 Clash 配置里抄过来的 `.local` 必须有后缀语义 —— 否则它会被当成
+        // 「包含 .local」的关键字规则，而关键字写法会顺手命中 mycorp.io 这类误伤。
+        let rest = t
+            .strip_prefix("*.")
+            .or_else(|| t.strip_prefix("+."))
+            .or_else(|| t.strip_prefix('.'))
+            .map(|rest| rest.trim_start_matches('.'));
+        if let Some(rest) = rest {
             if rest.is_empty() {
                 return None;
             }
-            Some(FilterRule::Suffix(rest.to_string()))
-        } else {
-            Some(FilterRule::Keyword(t))
+            return Some(FilterRule::Suffix(rest.to_string()));
         }
+        Some(FilterRule::Keyword(t))
     }
 
     fn matches(&self, domain: &str) -> bool {
@@ -103,6 +114,21 @@ impl FakeIpPool {
             by_domain: HashMap::new(),
             cursor: 1,
         })
+    }
+
+    /// 用配置里的参数建池；参数不可用时退回默认池，并把原因交给调用方记日志。
+    ///
+    /// 地址池参数历史上允许在界面上手填（老配置里可能存着非法 CIDR）。这种值
+    /// 不该让整条连接失败 —— 退回默认池后域名分流照常工作，用户只是少了自定义。
+    pub fn from_profile(range: &str, filter: &[String]) -> (Self, Option<String>) {
+        match Self::new(range, filter) {
+            Ok(pool) => (pool, None),
+            Err(err) => {
+                // 默认段与前缀是常量，过滤规则解析也不会失败，这里不可能出错
+                let pool = Self::new(DEFAULT_RANGE, filter).expect("默认 fake-ip 池参数必须可用");
+                (pool, Some(err))
+            }
+        }
     }
 
     /// 池容量（可用地址数）。
@@ -253,6 +279,31 @@ mod tests {
         let mut pool = FakeIpPool::new("198.18.0.0/24", &[]).unwrap();
         let a = pool.allocate("a.com", 0, 60).unwrap();
         assert!(pool.contains(a));
+    }
+
+    #[test]
+    fn dot_and_plus_prefixed_filters_are_suffix_matches() {
+        // 用户从 Clash 配置里抄过来的写法：`.local` / `+.lan` 必须是后缀匹配，
+        // 否则会被当成「包含」关键字，连带命中本不该放过的域名。
+        let filter = vec![".local".to_string(), "+.lan".to_string(), "corp".to_string()];
+        let pool = FakeIpPool::new(DEFAULT_RANGE, &filter).unwrap();
+        assert!(pool.is_filtered("printer.local"));
+        assert!(pool.is_filtered("local"));
+        assert!(pool.is_filtered("nas.lan"));
+        assert!(!pool.is_filtered("localdomain.example.com"));
+        // 不带前缀的仍按「包含」匹配，这是历史行为，保持不变
+        assert!(pool.is_filtered("mycorp.io"));
+    }
+
+    #[test]
+    fn invalid_range_falls_back_to_default_pool() {
+        let (pool, warning) = FakeIpPool::from_profile("not-a-cidr", &[]);
+        assert!(warning.is_some());
+        assert_eq!(pool.capacity(), (1u32 << 16) - 2);
+        assert!(pool.contains(0xC612_0001)); // 198.18.0.1
+
+        let (_, warning) = FakeIpPool::from_profile("198.19.0.0/24", &[]);
+        assert!(warning.is_none(), "合法参数不该产生告警");
     }
 
     #[test]
