@@ -398,6 +398,12 @@ pub fn run() {
             }
         }
 
+        // 退出（Cmd+Q / 菜单退出 / 系统关机）时也要让提权 worker 收尾：
+        // 只处理窗口关闭是不够的，那条路径会隐藏到托盘、不退出进程。
+        if let tauri::RunEvent::ExitRequested { .. } = event {
+            vpn::commands::shutdown(app_handle);
+        }
+
         // 非 macOS 平台没有 Reopen 事件，这里显式忽略参数避免 unused 警告
         #[cfg(not(target_os = "macos"))]
         {
