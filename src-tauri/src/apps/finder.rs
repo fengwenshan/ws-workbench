@@ -501,21 +501,74 @@ pub fn spawn_with_target(executable: &Path, target: &str) -> Result<(), String> 
         return Err(format!("启动程序不存在: {}", executable.display()));
     }
 
+    // Electron 系的编辑器（VS Code / Trae / Cursor）直接用 <应用>.exe <目录>
+    // 在部分机器上什么都不发生，走它们自带的 CLI（bin\code.cmd 之类）才稳，
+    // CLI 负责单实例转发和「在哪个窗口打开」。CLI 是隐藏控制台跑的，
+    // 编辑器窗口由它自己拉起，所以这里用 spawn_detached。
+    #[cfg(target_os = "windows")]
+    if let Some(shim) = cli_shim_for(executable) {
+        let shell = std::env::var_os("COMSPEC").unwrap_or_else(|| "cmd.exe".into());
+        return crate::process::spawn_detached(
+            Path::new(&shell),
+            &[
+                "/C",
+                &shim.to_string_lossy(),
+                &quote_launch_argument(target),
+            ],
+        )
+        .map_err(|e| format!("启动失败: {}", e));
+    }
+
+    // 其余程序交给 ShellExecuteW：和资源管理器里双击是同一套激活逻辑，
+    // 工作目录、控制台、单实例转发都由 shell 处理。直接用 CreateProcess
+    // 会带上 CREATE_NO_WINDOW，控制台程序拿不到窗口（终端、PowerShell 点了
+    // 没反应就是这个原因）。
     #[cfg(target_os = "windows")]
     {
         if is_script(executable) {
-            // .cmd/.bat 必须交给 cmd.exe 解释；CreateProcess 不会做 PATHEXT 扩展
+            // .cmd/.bat 交给 cmd 解释；CreateProcess 不做 PATHEXT 扩展
             let shell = std::env::var_os("COMSPEC").unwrap_or_else(|| "cmd.exe".into());
-            return crate::process::spawn_detached(
+            return crate::process::shell_launch(
                 Path::new(&shell),
-                &["/C", &executable.to_string_lossy(), target],
+                &[
+                    "/C",
+                    &executable.to_string_lossy(),
+                    &quote_launch_argument(target),
+                ],
+                Some(Path::new(target)),
             )
             .map_err(|e| format!("启动失败: {}", e));
         }
+
+        return crate::process::shell_launch(executable, &[target], Some(Path::new(target)))
+            .map_err(|e| format!("启动失败: {}", e));
     }
 
-    crate::process::spawn_detached(executable, &[target])
-        .map_err(|e| format!("启动失败: {}", e))
+    #[cfg(not(target_os = "windows"))]
+    crate::process::spawn_detached(executable, &[target]).map_err(|e| format!("启动失败: {}", e))
+}
+
+/// 找 Electron 编辑器自带的命令行入口：`<安装目录>\bin\<名字>.cmd`
+///
+/// 只有这些「exe 直接传目录不灵」的编辑器才需要，其它程序返回 `None`。
+#[cfg(target_os = "windows")]
+pub fn cli_shim_for(executable: &Path) -> Option<PathBuf> {
+    let stem = executable.file_stem()?.to_string_lossy().to_lowercase();
+    let shim_name = match stem.as_str() {
+        "code" | "code - insiders" => "code.cmd",
+        "trae cn" | "trae" => "trae.cmd",
+        "trae-solo-cn" => "trae-solo-cn.cmd",
+        "cursor" => "cursor.cmd",
+        _ => return None,
+    };
+    let shim = executable.parent()?.join("bin").join(shim_name);
+    shim.is_file().then_some(shim)
+}
+
+/// 交给 `cmd /C "<脚本>" <参数>` 的路径：去掉引号再加引号，防止被二次解析
+#[cfg(target_os = "windows")]
+fn quote_launch_argument(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', ""))
 }
 
 #[cfg(test)]
@@ -535,6 +588,35 @@ mod tests {
         assert!(is_script(Path::new(r"C:\x\code.BAT")));
         assert!(!is_script(Path::new(r"C:\x\Code.exe")));
         assert!(!is_script(Path::new("/usr/bin/code")));
+    }
+
+    /// VS Code / Trae 这类编辑器要优先用自带的 CLI（bin\code.cmd），
+    /// 直接给 exe 传目录在部分机器上什么都没发生
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn electron_editors_use_their_cli_shim() {
+        // 不用 temp_dir()：这台机器上 %TEMP% 建目录会被拒（权限问题），
+        // 放在 target 里更省事
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-tmp")
+            .join("cli-shim");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+
+        let exe = dir.join("Code.exe");
+        std::fs::write(&exe, b"stub").unwrap();
+        assert!(cli_shim_for(&exe).is_none(), "没有 bin\\code.cmd 时不该瞎猜");
+
+        std::fs::write(bin.join("code.cmd"), b"@echo off").unwrap();
+        assert_eq!(cli_shim_for(&exe), Some(bin.join("code.cmd")));
+
+        // JetBrains 不走这套，给了 shim 也不该用
+        assert!(cli_shim_for(&dir.join("idea64.exe")).is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

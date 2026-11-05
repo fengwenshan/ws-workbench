@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, reactive, watch, computed, nextTick } from 'vue'
+import { ref, reactive, watch, computed, nextTick, onUnmounted } from 'vue'
 import type { LogLevel, ProjectConfig, ProjectType, VcsInfo } from '@/types'
 import {
   detectProjectType as detectProjectTypeCommand,
@@ -32,6 +32,9 @@ const emit = defineEmits<{
 
 const localProject = ref<ProjectConfig | null>(null)
 const projectType = ref<ProjectType>('unknown')
+// 仓库地址复制反馈（需要在项目切换的 watch 之前声明）
+const copied = ref(false)
+let copiedTimer: ReturnType<typeof setTimeout> | null = null
 let saveTimer: any = null
 
 watch(() => props.project, (newVal) => {
@@ -40,6 +43,7 @@ watch(() => props.project, (newVal) => {
     clearTimeout(saveTimer)
     saveTimer = null
   }
+  copied.value = false
   if (newVal) {
     localProject.value = { ...newVal }
   } else {
@@ -193,6 +197,49 @@ const vcsTypeLabel = computed(() => {
   }
 })
 
+// 点击 Git / SVN 标签或地址复制远程仓库地址，短暂显示「已复制」反馈
+async function copyText(text: string) {
+  try {
+    await navigator.clipboard.writeText(text)
+    return true
+  } catch {
+    // 某些 WebView 下 Clipboard API 不可用，退回文本框复制
+  }
+  try {
+    const textarea = document.createElement('textarea')
+    textarea.value = text
+    textarea.style.position = 'fixed'
+    textarea.style.opacity = '0'
+    document.body.appendChild(textarea)
+    textarea.select()
+    const ok = document.execCommand('copy')
+    document.body.removeChild(textarea)
+    return ok
+  } catch {
+    return false
+  }
+}
+
+async function copyVcsUrl() {
+  const url = vcsInfo.value?.url
+  if (!url) return
+  const ok = await copyText(url)
+  if (!ok) {
+    emit('log', 'error', '复制仓库地址失败，请手动选中地址复制')
+    return
+  }
+  copied.value = true
+  emit('log', 'success', `已复制仓库地址: ${url}`)
+  if (copiedTimer) clearTimeout(copiedTimer)
+  copiedTimer = setTimeout(() => {
+    copied.value = false
+  }, 1500)
+}
+
+onUnmounted(() => {
+  if (copiedTimer) clearTimeout(copiedTimer)
+})
+
 const selectedProject = computed(() => localProject.value)
 
 function debouncedSave() {
@@ -279,9 +326,23 @@ defineExpose({
           @input="onNameChange"
         />
         <div v-if="vcsInfo" class="vcs-info">
-          <span class="vcs-badge" :class="'vcs-' + vcsInfo.vcs_type">{{ vcsTypeLabel }}</span>
-          <span v-if="vcsInfo.url" class="vcs-url" :title="vcsInfo.url">{{ vcsInfo.url }}</span>
+          <button
+            type="button"
+            class="vcs-badge"
+            :class="['vcs-' + vcsInfo.vcs_type, { 'vcs-badge-copy': !!vcsInfo.url }]"
+            :title="vcsInfo.url ? `点击复制仓库地址：${vcsInfo.url}` : '未检测到仓库地址'"
+            @click="copyVcsUrl"
+          >
+            {{ vcsTypeLabel }}
+          </button>
+          <span
+            v-if="vcsInfo.url"
+            class="vcs-url"
+            :title="`点击复制：${vcsInfo.url}`"
+            @click="copyVcsUrl"
+          >{{ vcsInfo.url }}</span>
           <span v-else class="vcs-empty">未检测到仓库地址</span>
+          <span v-if="copied" class="vcs-copied">已复制</span>
         </div>
       </div>
 
@@ -426,7 +487,26 @@ defineExpose({
   padding: 2px 6px;
   border: 1px solid var(--border-color);
   border-radius: 3px;
+  background: transparent;
   color: var(--text-secondary);
+  font: inherit;
+  line-height: 1.2;
+}
+.vcs-badge-copy {
+  cursor: pointer;
+  transition: border-color 0.12s, box-shadow 0.12s, filter 0.12s;
+}
+.vcs-badge-copy:hover {
+  filter: brightness(0.96);
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.12);
+}
+.vcs-badge-copy:focus-visible {
+  outline: 1px solid var(--primary);
+  outline-offset: 1px;
+}
+.vcs-copied {
+  flex: none;
+  color: var(--success);
 }
 .vcs-badge.vcs-git {
   color: #f05032;
@@ -447,6 +527,13 @@ defineExpose({
   color: var(--text-secondary);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   user-select: text;
+  cursor: pointer;
+  transition: color 0.12s;
+}
+.vcs-url:hover {
+  color: var(--primary);
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 .vcs-empty {
   color: var(--text-muted);

@@ -838,45 +838,232 @@ fn extract_repo_url(bytes: &[u8]) -> Option<String> {
         .map(|(url, _, _)| url)
 }
 
-/// 通过 svn 命令行读取工作副本地址
-fn svn_cli_url(root: &Path) -> Option<String> {
-    let output = std::process::Command::new("svn")
-        .arg("info")
-        .arg("--show-item")
-        .arg("url")
-        .arg(root)
-        .output()
-        .ok()?;
-    if output.status.success() {
-        let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !url.is_empty() {
-            return Some(url);
+/// svn 命令行可能不在 PATH 里：Windows 上 TortoiseSVN / SlikSVN 默认都不写 PATH，
+/// macOS 上 Homebrew / MacPorts 也可能只装了链接。这里按平台列一遍常见位置。
+fn svn_command_candidates() -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+
+    #[cfg(target_os = "windows")]
+    {
+        let roots: Vec<PathBuf> = ["ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "LOCALAPPDATA"]
+            .iter()
+            .filter_map(|name| std::env::var_os(name).map(PathBuf::from))
+            .collect();
+        for root in roots {
+            for relative in [
+                r"TortoiseSVN\bin\svn.exe",
+                r"SlikSvn\bin\svn.exe",
+                r"VisualSVN Server\bin\svn.exe",
+                r"VisualSVN\bin\svn.exe",
+            ] {
+                let path = root.join(relative);
+                if path.is_file() {
+                    out.push(path);
+                }
+            }
         }
     }
 
-    // 兼容不支持 --show-item 的旧版本 svn，退回到解析 info 输出的 URL 行
-    let output = std::process::Command::new("svn")
-        .arg("info")
-        .arg(root)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
+    #[cfg(target_os = "macos")]
+    for raw in ["/opt/homebrew/bin/svn", "/usr/local/bin/svn", "/usr/bin/svn"] {
+        let path = PathBuf::from(raw);
+        if path.is_file() {
+            out.push(path);
+        }
     }
-    String::from_utf8_lossy(&output.stdout).lines().find_map(|line| {
-        line.trim()
-            .strip_prefix("URL:")
-            .map(|url| url.trim().to_string())
-            .filter(|url| !url.is_empty())
-    })
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    for raw in ["/usr/bin/svn", "/usr/local/bin/svn", "/snap/bin/svn"] {
+        let path = PathBuf::from(raw);
+        if path.is_file() {
+            out.push(path);
+        }
+    }
+
+    out
 }
 
-/// 获取 svn 工作副本地址：优先命令行，未安装 svn 时退回到工作副本数据库
-fn svn_remote_url(root: &Path) -> Option<String> {
-    if let Some(url) = svn_cli_url(root) {
+/// 传给 svn 的路径文本。
+///
+/// Windows 的 `canonicalize` 会带 `\\?\` 前缀，svn.exe 不认这种写法，
+/// 会把目录当成不存在的路径直接失败。
+fn svn_path_argument(path: &Path) -> String {
+    let text = path.to_string_lossy().to_string();
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+            return format!(r"\\{}", rest);
+        }
+        if let Some(rest) = text.strip_prefix(r"\\?\") {
+            return rest.to_string();
+        }
+    }
+    text
+}
+
+/// 通过 svn 命令行读取工作副本地址（传入源目录本身，URL 才带仓库内路径）
+fn svn_cli_url(source: &Path) -> Option<String> {
+    use std::time::Duration;
+
+    let target = svn_path_argument(source);
+    let mut programs: Vec<PathBuf> = vec![PathBuf::from("svn")];
+    programs.extend(svn_command_candidates());
+
+    for program in programs {
+        // 优先 --show-item（svn 1.9+）：只回一行纯 URL
+        let (text, ok) = crate::process::run_with_timeout(
+            &program,
+            &["info", "--show-item", "url", &target],
+            Duration::from_secs(8),
+        );
+        if ok {
+            if let Some(url) = text.lines().map(str::trim).find(|line| line.contains("://")) {
+                return Some(url.to_string());
+            }
+        }
+
+        // 兼容不支持 --show-item 的旧版本 svn，退回到解析 info 输出的 URL 行
+        let (text, ok) = crate::process::run_with_timeout(
+            &program,
+            &["info", &target],
+            Duration::from_secs(8),
+        );
+        if !ok {
+            continue;
+        }
+        if let Some(url) = text.lines().find_map(|line| {
+            line.trim()
+                .strip_prefix("URL:")
+                .map(|url| url.trim().to_string())
+                .filter(|url| !url.is_empty())
+        }) {
+            return Some(url);
+        }
+    }
+    None
+}
+
+/// 工作副本根目录到源目录之间的相对路径（用 `/` 分隔，供拼 URL）
+fn relative_url_path(root: &Path, source: &Path) -> String {
+    let relative = source.strip_prefix(root).unwrap_or(Path::new(""));
+    relative
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(part) => Some(part.to_string_lossy().to_string()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// URL 里不能出现的字符（空格、非 ASCII、控制字符、Windows 保留字符）转成 `%XX`。
+///
+/// 已经存在的 `%XX` 原样保留，避免把库里可能已编码的路径二次编码。
+fn encode_url_path(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for ch in path.chars() {
+        let keep = ch.is_ascii()
+            && !ch.is_ascii_control()
+            && !ch.is_ascii_whitespace()
+            && !matches!(ch, '"' | '<' | '>' | '`' | '{' | '}' | '|' | '\\' | '^');
+        if keep {
+            out.push(ch);
+        } else {
+            let mut buffer = [0u8; 4];
+            for byte in ch.encode_utf8(&mut buffer).as_bytes() {
+                out.push_str(&format!("%{:02X}", byte));
+            }
+        }
+    }
+    out
+}
+
+/// 拼出完整 URL：仓库根 + 工作副本根在仓库内的路径 + 源目录相对工作副本根的路径
+fn compose_repo_url(repo_root: &str, base_path: &str, relative_path: &str) -> String {
+    let mut url = repo_root.trim_end_matches('/').to_string();
+    for part in [base_path.trim_matches('/'), relative_path.trim_matches('/')] {
+        if part.is_empty() {
+            continue;
+        }
+        url.push('/');
+        url.push_str(&encode_url_path(part));
+    }
+    url
+}
+
+/// 直接读工作副本数据库，拼出完整地址。
+///
+/// 没装 svn 命令行的机器（Windows 上很常见）只能靠这条：`wc.db` 里
+/// `REPOSITORY.root` 只是仓库根，工作副本在仓库里的位置在 `NODES.repos_path`，
+/// 只看前者会得到 `.../svn/NewApp` 这种「少了后半截」的地址。
+fn svn_wc_db_url(root: &Path, source: &Path) -> Option<String> {
+    use rusqlite::{Connection, OpenFlags};
+
+    let db = root.join(".svn").join("wc.db");
+    if !db.is_file() {
+        return None;
+    }
+
+    let conn = Connection::open_with_flags(
+        &db,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()?;
+    let _ = conn.busy_timeout(std::time::Duration::from_millis(500));
+
+    // 工作副本根节点对应的仓库与仓库内路径
+    let root_node: Option<(Option<i64>, Option<String>)> = conn
+        .query_row(
+            "select repos_id, repos_path from NODES where local_relpath = '' and op_depth = 0 limit 1",
+            [],
+            |row| Ok((row.get(0).ok(), row.get(1).ok())),
+        )
+        .ok();
+
+    let (repos_id, base_path) = root_node.unwrap_or((None, None));
+
+    let repo_root: Option<String> = match repos_id {
+        Some(id) => conn
+            .query_row("select root from REPOSITORY where id = ?1", [id], |row| {
+                row.get(0)
+            })
+            .ok(),
+        // 数据库里没有根节点记录时，退回到第一条仓库记录
+        None => conn
+            .query_row("select root from REPOSITORY order by id limit 1", [], |row| {
+                row.get(0)
+            })
+            .ok(),
+    };
+    let repo_root = repo_root?;
+
+    Some(compose_repo_url(
+        &repo_root,
+        base_path.as_deref().unwrap_or(""),
+        &relative_url_path(root, source),
+    ))
+}
+
+/// 获取 svn 工作副本地址。优先级：
+/// 1. svn 命令行（装了就有，和 `svn info` 完全一致）
+/// 2. 工作副本数据库 `wc.db`（没装命令行时，靠它补全仓库内路径）
+/// 3. `wc.db` 二进制扫描（数据库读不开时的兜底）
+/// 4. SVN 1.6 及更早的 `.svn/entries`
+fn svn_remote_url(root: &Path, source: &Path) -> Option<String> {
+    if let Some(url) = svn_cli_url(source) {
         return Some(url);
     }
-    fs::read(root.join(".svn").join("wc.db"))
+    if let Some(url) = svn_wc_db_url(root, source) {
+        return Some(url);
+    }
+    let svn_dir = root.join(".svn");
+    if let Some(url) = fs::read(svn_dir.join("wc.db"))
+        .ok()
+        .and_then(|bytes| extract_repo_url(&bytes))
+    {
+        return Some(url);
+    }
+    fs::read(svn_dir.join("entries"))
         .ok()
         .and_then(|bytes| extract_repo_url(&bytes))
 }
@@ -906,7 +1093,7 @@ pub fn detect_vcs(source_dir: &str) -> VcsInfo {
         VcsType::Git => git_config_path(&root)
             .and_then(|path| fs::read_to_string(path).ok())
             .and_then(|content| parse_git_config_url(&content)),
-        VcsType::Svn => svn_remote_url(&root),
+        VcsType::Svn => svn_remote_url(&root, &start),
         VcsType::None => None,
     };
 
@@ -1162,7 +1349,7 @@ mod tests {
     /// 默认包含规则：浏览器能直接用的才进包，开发期文件一个不进
     #[test]
     fn only_browser_assets_are_included_by_default() {
-        let src = tempfile::tempdir().unwrap();
+        let src = temp_dir("browser-assets");
         write_file(src.path(), "index.html", "<html></html>");
         write_file(src.path(), "js/app.js", "var a=1;");
         write_file(src.path(), "css/main.css", ".a{color:red}");
@@ -1173,6 +1360,7 @@ mod tests {
         write_file(src.path(), "xmodules/pcip/tpl/comp/js/list.tjs", "layui.render()");
         write_file(src.path(), "xmodules/pcip/module/lib/wps/Normal.dotm", "docm");
         write_file(src.path(), "xmodules/pcip/module/lib/weboffice/newDocument.docx", "docx");
+        write_file(src.path(), "xmodules/pcip/module/lib/weboffice/legacyTemplate.doc", "doc");
         write_file(src.path(), "src/main.ts", "export {}");
         write_file(src.path(), "src/App.vue", "<template/>");
         write_file(src.path(), "styles/main.scss", "$a: 1;");
@@ -1185,7 +1373,7 @@ mod tests {
         write_file(src.path(), "build.log", "log");
         write_file(src.path(), "README.md", "# readme");
 
-        let out_parent = tempfile::tempdir().unwrap();
+        let out_parent = temp_dir("browser-assets-out");
         let output_dir = out_parent.path().join("dist");
         let project = make_project(src.path(), &output_dir);
         let includes = crate::models::default_include_rules();
@@ -1204,6 +1392,7 @@ mod tests {
             "dist/xmodules/pcip/tpl/comp/js/list.tjs",
             "dist/xmodules/pcip/module/lib/wps/Normal.dotm",
             "dist/xmodules/pcip/module/lib/weboffice/newDocument.docx",
+            "dist/xmodules/pcip/module/lib/weboffice/legacyTemplate.doc",
         ] {
             assert!(entries.contains(&expect.to_string()), "缺少 {}: {:?}", expect, entries);
         }
@@ -1470,5 +1659,126 @@ mod tests {
     #[test]
     fn extract_repo_url_returns_none_without_scheme() {
         assert_eq!(extract_repo_url(b"/local/path/only"), None);
+    }
+
+    /// 测试临时目录：优先系统临时目录；系统临时目录被沙箱或组策略限制时，
+    /// 退到仓库内的 `target/test-tmp`（那里一定可写）
+    fn temp_dir(prefix: &str) -> tempfile::TempDir {
+        if let Ok(dir) = tempfile::Builder::new().prefix(prefix).tempdir() {
+            return dir;
+        }
+        let fallback = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/test-tmp");
+        fs::create_dir_all(&fallback).expect("创建 target/test-tmp 失败");
+        tempfile::Builder::new()
+            .prefix(prefix)
+            .tempdir_in(fallback)
+            .expect("在 target/test-tmp 下创建临时目录失败")
+    }
+
+    /// 完整地址 = 仓库根 + 工作副本根在仓库内的路径 + 源目录的相对路径
+    #[test]
+    fn compose_repo_url_completes_path_inside_repository() {
+        assert_eq!(
+            compose_repo_url(
+                "https://svn.example.com/svn/NewApp/",
+                "2025/risen-xhfjmsq-oa/xhfjmsq-oa-layui",
+                "xmodules/pcip",
+            ),
+            "https://svn.example.com/svn/NewApp/2025/risen-xhfjmsq-oa/xhfjmsq-oa-layui/xmodules/pcip"
+        );
+        // 工作副本就是仓库根时不多加斜杠
+        assert_eq!(
+            compose_repo_url("svn://svn.example.com/repo", "", ""),
+            "svn://svn.example.com/repo"
+        );
+    }
+
+    /// URL 里的空格、中文要转义，已经编码过的 %XX 不能二次编码
+    #[test]
+    fn encode_url_path_escapes_only_illegal_characters() {
+        assert_eq!(encode_url_path("a b/中文"), "a%20b/%E4%B8%AD%E6%96%87");
+        assert_eq!(encode_url_path("already%20encoded"), "already%20encoded");
+        assert_eq!(encode_url_path("normal/path-1.0"), "normal/path-1.0");
+    }
+
+    /// 没装 svn 命令行的机器：从 wc.db 读出「工作副本根在仓库内的路径」，
+    /// 否则只能拿到仓库根，地址会少掉后半截（Windows 上的实际表现）
+    #[test]
+    fn wc_db_url_includes_repository_relative_path() {
+        use rusqlite::Connection;
+
+        let root = temp_dir("svn-wc");
+        let svn_dir = root.path().join(".svn");
+        fs::create_dir_all(&svn_dir).unwrap();
+        fs::create_dir_all(root.path().join("xmodules/pcip")).unwrap();
+
+        let conn = Connection::open(svn_dir.join("wc.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE REPOSITORY (id INTEGER PRIMARY KEY, root TEXT, uuid TEXT);
+             CREATE TABLE NODES (
+                wc_id INTEGER, local_relpath TEXT, op_depth INTEGER,
+                repos_id INTEGER, repos_path TEXT, kind TEXT
+             );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO REPOSITORY (id, root, uuid) VALUES (1, 'https://svn.example.com/svn/NewApp', 'uuid')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO NODES VALUES (1, '', 0, 1, '2025/team/oa', 'dir')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO NODES VALUES (1, 'xmodules/pcip', 0, 1, '2025/team/oa/xmodules/pcip', 'dir')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        assert_eq!(
+            svn_wc_db_url(root.path(), root.path()),
+            Some("https://svn.example.com/svn/NewApp/2025/team/oa".to_string())
+        );
+        assert_eq!(
+            svn_wc_db_url(root.path(), &root.path().join("xmodules/pcip")),
+            Some("https://svn.example.com/svn/NewApp/2025/team/oa/xmodules/pcip".to_string())
+        );
+    }
+
+    /// 工作副本根节点没有 repos_path（新增未提交）时，退回到相对路径拼接，不 panic
+    #[test]
+    fn wc_db_url_falls_back_to_relative_path() {
+        use rusqlite::Connection;
+
+        let root = temp_dir("svn-wc");
+        let svn_dir = root.path().join(".svn");
+        fs::create_dir_all(&svn_dir).unwrap();
+        fs::create_dir_all(root.path().join("sub")).unwrap();
+
+        let conn = Connection::open(svn_dir.join("wc.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE REPOSITORY (id INTEGER PRIMARY KEY, root TEXT, uuid TEXT);
+             CREATE TABLE NODES (
+                wc_id INTEGER, local_relpath TEXT, op_depth INTEGER,
+                repos_id INTEGER, repos_path TEXT, kind TEXT
+             );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO REPOSITORY (id, root, uuid) VALUES (2, 'https://svn.example.com/svn/Other', 'uuid')",
+            [],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO NODES VALUES (1, '', 0, 2, NULL, 'dir')", [])
+            .unwrap();
+        drop(conn);
+
+        assert_eq!(
+            svn_wc_db_url(root.path(), &root.path().join("sub")),
+            Some("https://svn.example.com/svn/Other/sub".to_string())
+        );
     }
 }

@@ -96,7 +96,7 @@ const emit = defineEmits<{
   flex-direction: column;
   height: 100%;
   min-height: 0;
-  padding: 12px 20px 0;
+  padding: 0 20px;
 }
 .detail-tabs {
   flex: 1;
@@ -104,9 +104,28 @@ const emit = defineEmits<{
   display: flex;
   flex-direction: column;
 }
+/* 标题栏压到固定高度，和左侧「项目分组」的下边线同一水平线 */
 .detail-tabs :deep(.ant-tabs-nav) {
-  margin-bottom: 12px;
+  height: var(--panel-header-height);
+  margin: 0 0 12px;
   flex-shrink: 0;
+}
+.detail-tabs :deep(.ant-tabs-nav-wrap),
+.detail-tabs :deep(.ant-tabs-nav-list) {
+  height: 100%;
+}
+.detail-tabs :deep(.ant-tabs-tab) {
+  height: 100%;
+  padding: 0;
+  margin: 0 28px 0 0;
+}
+.detail-tabs :deep(.ant-tabs-ink-bar) {
+  bottom: 0;
+}
+.detail-tabs :deep(.ant-tabs-extra-content) {
+  display: flex;
+  align-items: center;
+  height: 100%;
 }
 .detail-tabs :deep(.ant-tabs-content-holder) {
   flex: 1;
@@ -130,6 +149,21 @@ const emit = defineEmits<{
   display: flex;
   gap: 8px;
   align-items: center;
+  height: 100%;
+}
+/* 类型标签和右侧两个操作按钮统一成同一高度，避免标题栏里高矮不齐 */
+.header-actions .btn,
+.header-actions .btn-type,
+.header-actions .type-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 26px;
+  padding: 0 10px;
+  font-size: 12px;
+  line-height: 1;
+  white-space: nowrap;
+  box-sizing: border-box;
 }
 .type-badge,
 .btn-type {

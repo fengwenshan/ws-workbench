@@ -2,12 +2,14 @@
 import { computed, reactive, ref, watch } from 'vue'
 import { Button, Input, Select, SelectOption, Switch } from 'ant-design-vue'
 import type { VpnPolicy, VpnRule, VpnRuleKind, VpnRuleSet } from '@/types/vpn'
-import { POLICY_LABELS, RULE_KIND_LABELS } from '@/types/vpn'
+import { POLICY_LABELS, RULE_KIND_HINTS, RULE_KIND_LABELS } from '@/types/vpn'
 
 const props = defineProps<{
   ruleSet: VpnRuleSet
   /** 来自 useVpn 的逐条规则校验，失败时 reject */
   validateRule: (kind: VpnRuleKind, value: string) => Promise<string>
+  /** 放进弹窗时隐藏卡片标题，只保留规则编辑区 */
+  embedded?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -19,6 +21,11 @@ const emit = defineEmits<{
 
 const KINDS = Object.keys(RULE_KIND_LABELS) as VpnRuleKind[]
 const POLICIES = Object.keys(POLICY_LABELS) as VpnPolicy[]
+
+/** 下拉里同时显示 Clash 类型和中文含义，例如 DOMAIN（域名） */
+function kindLabel(kind: VpnRuleKind) {
+  return `${RULE_KIND_LABELS[kind]}（${RULE_KIND_HINTS[kind]}）`
+}
 
 /** 行内校验错误，按规则 id 记录 */
 const errors = reactive<Record<string, string>>({})
@@ -107,8 +114,8 @@ const totalCount = computed(() => props.ruleSet.rules.length)
 </script>
 
 <template>
-  <div class="rule-card">
-    <div class="rule-head">
+  <div class="rule-card" :class="{ 'rule-card-embedded': embedded }">
+    <div v-if="!embedded" class="rule-head">
       <div>
         <h4>分流规则表</h4>
         <p class="rule-hint">
@@ -160,11 +167,12 @@ const totalCount = computed(() => props.ruleSet.rules.length)
           <Select
             size="small"
             class="cell-select"
+            :popup-match-select-width="true"
             :value="rule.kind"
             @change="(value: any) => onKindChange(rule, value as VpnRuleKind)"
           >
             <SelectOption v-for="kind in KINDS" :key="kind" :value="kind">
-              {{ RULE_KIND_LABELS[kind] }}
+              {{ kindLabel(kind) }}
             </SelectOption>
           </Select>
         </span>
@@ -224,9 +232,14 @@ const totalCount = computed(() => props.ruleSet.rules.length)
     </div>
 
     <div class="rule-add">
-      <Select size="small" class="add-kind" v-model:value="newKind">
+      <Select
+        size="small"
+        class="add-kind"
+        :popup-match-select-width="true"
+        v-model:value="newKind"
+      >
         <SelectOption v-for="kind in KINDS" :key="kind" :value="kind">
-          {{ RULE_KIND_LABELS[kind] }}
+          {{ kindLabel(kind) }}
         </SelectOption>
       </Select>
       <Input
@@ -263,6 +276,11 @@ const totalCount = computed(() => props.ruleSet.rules.length)
   border-radius: 8px;
   padding: 14px;
   background: var(--bg-primary);
+}
+.rule-card-embedded {
+  border: none;
+  border-radius: 0;
+  padding: 0;
 }
 .rule-head {
   display: flex;
@@ -322,7 +340,7 @@ const totalCount = computed(() => props.ruleSet.rules.length)
   background: rgba(239, 68, 68, 0.06);
 }
 .col-kind {
-  width: 150px;
+  width: 260px;
   flex-shrink: 0;
 }
 .col-value {
@@ -390,7 +408,7 @@ const totalCount = computed(() => props.ruleSet.rules.length)
   margin-top: 10px;
 }
 .add-kind {
-  width: 150px;
+  width: 260px;
   flex-shrink: 0;
 }
 .add-value {

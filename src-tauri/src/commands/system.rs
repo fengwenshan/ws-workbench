@@ -36,18 +36,28 @@ pub(crate) fn open_path(path: &str) -> Result<(), String> {
     if !Path::new(path).exists() {
         return Err(format!("路径不存在: {}", path));
     }
+
+    // Windows 交给 ShellExecute，和资源管理器里双击是同一条路；
+    // 直接 CreateProcess 起 explorer.exe 在某些环境里不会真的弹出窗口
+    #[cfg(target_os = "windows")]
+    {
+        return crate::process::shell_open(Path::new(path))
+            .map_err(|e| format!("打开目录失败: {}", e));
+    }
+
     #[cfg(target_os = "macos")]
     let cmd = "open";
-    #[cfg(target_os = "windows")]
-    let cmd = "explorer";
     #[cfg(all(unix, not(target_os = "macos")))]
     let cmd = "xdg-open";
 
-    std::process::Command::new(cmd)
-        .arg(path)
-        .spawn()
-        .map_err(|e| format!("打开失败: {}", e))?;
-    Ok(())
+    #[cfg(not(target_os = "windows"))]
+    {
+        std::process::Command::new(cmd)
+            .arg(path)
+            .spawn()
+            .map_err(|e| format!("打开失败: {}", e))?;
+        Ok(())
+    }
 }
 
 /// 组装查找上下文：应用数据目录 / 资源目录 / 可执行文件目录。
@@ -105,52 +115,112 @@ pub fn get_network_info() -> Result<NetworkInfo, String> {
     NetworkInfo::current()
 }
 
+/// Windows Terminal 的图标来源：包里真正的 `WindowsTerminal.exe`。
+///
+/// 菜单里的「终端」启动的是控制台程序，但图标要取 Windows Terminal 的：
+/// `%LOCALAPPDATA%\Microsoft\WindowsApps\wt.exe` 是 0 字节的应用别名，
+/// 从它身上只能抽到通用的「快捷方式」图标。
+#[cfg(target_os = "windows")]
+pub(crate) fn windows_terminal_icon() -> Option<PathBuf> {
+    let dir = windows_terminal_package()?;
+    let exe = dir.join("WindowsTerminal.exe");
+    exe.is_file().then_some(exe)
+}
+
+/// `C:\Program Files\WindowsApps` 下版本最高的 Windows Terminal 包目录
+#[cfg(target_os = "windows")]
+fn windows_terminal_package() -> Option<PathBuf> {
+    let apps = PathBuf::from(std::env::var_os("ProgramFiles")?).join("WindowsApps");
+    let mut candidates: Vec<(Vec<u32>, PathBuf)> = std::fs::read_dir(&apps)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let rest = name.strip_prefix("Microsoft.WindowsTerminal_")?;
+            // 只要 x64 包，跳过 neutral 资源包
+            if !name.contains("_x64__") {
+                return None;
+            }
+            let version = rest
+                .split('_')
+                .next()?
+                .split('.')
+                .map(|part| part.parse::<u32>().unwrap_or(0))
+                .collect();
+            Some((version, entry.path()))
+        })
+        .collect();
+
+    // 版本号逐段比较，避免字符串排序把 1.9 排到 1.24 后面
+    candidates.sort_by(|a, b| a.0.cmp(&b.0));
+    candidates.pop().map(|(_, path)| path)
+}
+
+/// PowerShell：装了 PowerShell 7 就用 pwsh，否则用系统自带的 Windows PowerShell
+#[cfg(target_os = "windows")]
+pub(crate) fn powershell_exe() -> Option<PathBuf> {
+    if let Some(program_files) = std::env::var_os("ProgramFiles") {
+        let pwsh = PathBuf::from(program_files).join(r"PowerShell\7\pwsh.exe");
+        if pwsh.is_file() {
+            return Some(pwsh);
+        }
+    }
+    let root = std::env::var_os("SystemRoot").map(PathBuf::from)?;
+    let legacy = root.join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
+    legacy.is_file().then_some(legacy)
+}
+
 /// 在终端里打开一个「已经确认存在」的目录。
 ///
 /// 只有 `open_with` 的非 macOS 分支会用到：macOS 那边直接 `open -a Terminal.app`，
 /// 走的是 `openwith` 里同一个启动函数，不需要这份平台分支。
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
 pub(crate) fn open_terminal_dir(target_str: &str) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    {
-        std::process::Command::new("cmd")
-            .arg("/c")
-            .arg("start")
-            .arg("cmd")
-            .arg("/K")
-            .arg(format!("cd /d {}", target_str))
+    // 走 shell 激活：工作目录交给 ShellExecuteW，控制台窗口由 shell 创建。
+    // 用 CreateProcess + CREATE_NO_WINDOW 起 cmd 是拿不到窗口的。
+    let shell = std::env::var_os("COMSPEC")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("cmd.exe"));
+    crate::process::shell_launch(&shell, &["/K"], Some(Path::new(target_str)))
+        .map_err(|e| format!("打开终端失败: {}", e))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+pub(crate) fn open_terminal_dir(target_str: &str) -> Result<(), String> {
+    let candidates = [
+        "x-terminal-emulator",
+        "gnome-terminal",
+        "konsole",
+        "xfce4-terminal",
+        "xterm",
+    ];
+    let mut last_err = String::new();
+    let mut opened = false;
+    for cmd in candidates {
+        match std::process::Command::new(cmd)
+            .current_dir(target_str)
             .spawn()
-            .map_err(|e| format!("打开终端失败: {}", e))?;
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        let candidates = [
-            "x-terminal-emulator",
-            "gnome-terminal",
-            "konsole",
-            "xfce4-terminal",
-            "xterm",
-        ];
-        let mut last_err = String::new();
-        let mut opened = false;
-        for cmd in candidates {
-            match std::process::Command::new(cmd)
-                .current_dir(&target_str)
-                .spawn()
-            {
-                Ok(_) => {
-                    opened = true;
-                    break;
-                }
-                Err(e) => last_err = e.to_string(),
+        {
+            Ok(_) => {
+                opened = true;
+                break;
             }
+            Err(e) => last_err = e.to_string(),
         }
-        if !opened {
-            return Err(format!("打开终端失败: {}", last_err));
-        }
+    }
+    if !opened {
+        return Err(format!("打开终端失败: {}", last_err));
     }
 
     Ok(())
+}
+
+/// 在 PowerShell 里打开目录：`-NoExit` 让窗口留着，工作目录交给 ShellExecuteW。
+#[cfg(target_os = "windows")]
+pub(crate) fn open_powershell_dir(target_str: &str) -> Result<(), String> {
+    let shell = powershell_exe().ok_or_else(|| "没找到 PowerShell".to_string())?;
+    crate::process::shell_launch(&shell, &["-NoExit"], Some(Path::new(target_str)))
+        .map_err(|e| format!("打开 PowerShell 失败: {}", e))
 }
 
 /// 目录检测结果：判断记录里保存的目录是否还在

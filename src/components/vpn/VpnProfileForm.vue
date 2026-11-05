@@ -10,42 +10,18 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   update: [patch: Partial<VpnProfile>]
-  'save-password': [plain: string]
-  remove: []
 }>()
 
-const passwordInput = ref(props.profile.password)
 const showPassword = ref(false)
 const showAdvanced = ref(false)
-const passwordSaved = ref(false)
 
-// 切换配置时把该配置已保存的密码回填到输入框（默认遮蔽显示）
+// 切换配置时恢复遮蔽显示
 watch(
   () => props.profile.id,
   () => {
-    passwordInput.value = props.profile.password
-    passwordSaved.value = false
     showPassword.value = false
   },
 )
-
-// 与已保存密码保持同步（保存成功、外部刷新后都回到真实值）
-watch(
-  () => props.profile.password,
-  (value) => {
-    passwordInput.value = value
-  },
-)
-
-const hasPassword = computed(() => !!props.profile.password)
-
-function savePassword() {
-  const plain = passwordInput.value
-  if (!plain) return
-  emit('save-password', plain)
-  passwordSaved.value = true
-  setTimeout(() => (passwordSaved.value = false), 2500)
-}
 
 const extraArgsText = computed({
   get: () => (props.profile.extra_args ?? []).join('\n'),
@@ -108,31 +84,26 @@ const PROTOCOLS = ['anyconnect', 'nc', 'gp', 'pulse', 'f5', 'fortinet', 'array']
       </label>
 
       <div class="field">
-        <span class="field-label">
-          密码
-          <em v-if="hasPassword" class="saved-tag">已加密保存</em>
-        </span>
+        <span class="field-label">密码</span>
         <div class="password-row">
           <input
             class="form-input"
             :type="showPassword ? 'text' : 'password'"
-            v-model="passwordInput"
-            placeholder="填写后点右侧保存"
+            :value="profile.password"
+            placeholder="填写 VPN 密码"
             spellcheck="false"
-            @keydown.enter="savePassword"
+            @change="
+              emit('update', {
+                password: ($event.target as HTMLInputElement).value,
+                password_encrypted: false,
+              })
+            "
+            @keydown.enter="($event.target as HTMLInputElement).blur()"
           />
           <button class="btn btn-secondary btn-xs" @click="showPassword = !showPassword">
             {{ showPassword ? '隐藏' : '显示' }}
           </button>
-          <button
-            class="btn btn-primary btn-xs"
-            :disabled="!passwordInput"
-            @click="savePassword"
-          >
-            保存
-          </button>
         </div>
-        <span v-if="passwordSaved" class="field-ok">密码已加密写入本地配置</span>
       </div>
     </div>
 
@@ -244,12 +215,6 @@ const PROTOCOLS = ['anyconnect', 'nc', 'gp', 'pulse', 'f5', 'fortinet', 'array']
         </label>
       </div>
     </div>
-
-    <div class="form-footer">
-      <button class="btn btn-danger btn-xs" :disabled="busy" @click="emit('remove')">
-        删除这个配置
-      </button>
-    </div>
   </div>
 </template>
 
@@ -285,15 +250,6 @@ const PROTOCOLS = ['anyconnect', 'nc', 'gp', 'pulse', 'f5', 'fortinet', 'array']
   font-size: 11px;
   color: var(--text-muted);
 }
-.saved-tag {
-  font-style: normal;
-  font-size: 11px;
-  color: var(--success);
-  border: 1px solid rgba(16, 185, 129, 0.4);
-  background: rgba(16, 185, 129, 0.08);
-  border-radius: 8px;
-  padding: 0 6px;
-}
 .form-input {
   width: 100%;
   padding: 7px 10px;
@@ -326,10 +282,6 @@ const PROTOCOLS = ['anyconnect', 'nc', 'gp', 'pulse', 'f5', 'fortinet', 'array']
   padding: 5px 10px;
   font-size: 12px;
   white-space: nowrap;
-}
-.field-ok {
-  font-size: 11px;
-  color: var(--success);
 }
 .section {
   border-top: 1px solid var(--border-color);
@@ -384,11 +336,5 @@ const PROTOCOLS = ['anyconnect', 'nc', 'gp', 'pulse', 'f5', 'fortinet', 'array']
   flex-direction: column;
   gap: 12px;
   margin-top: 12px;
-}
-.form-footer {
-  display: flex;
-  justify-content: flex-end;
-  border-top: 1px solid var(--border-color);
-  padding-top: 12px;
 }
 </style>

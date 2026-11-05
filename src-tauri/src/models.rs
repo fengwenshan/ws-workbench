@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 ///
 /// 面向 layui 工程的打包白名单：只放浏览器/控件运行时真的会请求的类型。
 /// `scss`/`ts`/`map`/`md`/设计源文件、构建配置这些开发期产物不在列表里；
-/// `.thm`/`.tjs`/`.dotm` 是 layui 模板与 WPS 控件，`.docx` 是 WebOffice 新建正文的
-/// 空白模板，都按运行时资源处理。
+/// `.thm`/`.tjs`/`.dotm` 是 layui 模板与 WPS 控件，`.doc`/`.docx` 是 WebOffice
+/// 新建正文的空白模板（旧版 Word 用 `.doc`），都按运行时资源处理。
 /// 路径里以 `.` 或 `_` 开头的段一律跳过，由 `packer::scan_files` 硬编码处理。
 pub const DEFAULT_INCLUDE: &[&str] = &[
     "*.html",
@@ -42,13 +42,16 @@ pub const DEFAULT_INCLUDE: &[&str] = &[
     "*.thm",
     "*.tjs",
     "*.dotm",
-    // WebOffice 新建正文的空白模板：rsWebOffice.js 用 $.ajax 直接 GET 这个 docx
+    // WebOffice 新建正文的空白模板：rsWebOffice.js 用 $.ajax 直接 GET newDocument.doc(x)
+    // - .docx: 新版本 Office 模板
+    // - .doc: 旧版 Word 模板，部分 layui 工程只放了这一份
     "*.docx",
+    "*.doc",
 ];
 
 /// 当前包含规则版本号。以后新增默认规则时递增，老配置由
 /// [`migrate_default_include`] 补齐（只追加缺的，不动用户已有规则）。
-pub const DEFAULT_INCLUDE_VERSION: u32 = 3;
+pub const DEFAULT_INCLUDE_VERSION: u32 = 4;
 
 /// 默认包含规则列表
 pub fn default_include_rules() -> Vec<String> {
@@ -275,7 +278,7 @@ mod default_include_tests {
             "*.html", "*.htm", "*.css", "*.js", "*.json", "*.png", "*.jpg", "*.svg",
             "*.woff2", "*.ttf", "*.mp4", "*.txt",
             // layui 工程特有
-            "*.thm", "*.tjs", "*.dotm", "*.docx",
+            "*.thm", "*.tjs", "*.dotm", "*.docx", "*.doc",
         ] {
             assert!(has(rule), "默认包含规则缺少 {}", rule);
         }
