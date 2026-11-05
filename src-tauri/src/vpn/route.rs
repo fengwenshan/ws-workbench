@@ -564,10 +564,24 @@ pub fn delete_route(cidr: &str, target: &RouteTarget) -> Result<(), String> {
 
     #[cfg(target_os = "windows")]
     {
+        // 同上：先判存在再删。这个函数在断开时对每条路由都会调一次，
+        // 第二轮删除（或本来就没装成功）不能让 PowerShell 以退出码 1 收场，
+        // 否则日志里全是「删除失败」，看日志的人只会以为权限不够。
+        let filter = if target.if_index == 0 {
+            format!("-DestinationPrefix '{}'", cidr)
+        } else {
+            format!(
+                "-DestinationPrefix '{}' -InterfaceIndex {}",
+                cidr, target.if_index
+            )
+        };
         let script = format!(
-            "Remove-NetRoute -DestinationPrefix '{}' -InterfaceIndex {} -Confirm:$false \
-             -PolicyStore ActiveStore -ErrorAction SilentlyContinue | Out-Null",
-            cidr, target.if_index
+            "$r = @(Get-NetRoute {filter} -PolicyStore ActiveStore \
+             -ErrorAction SilentlyContinue); \
+             if ($r.Count -gt 0) {{ \
+               Remove-NetRoute {filter} -Confirm:$false -PolicyStore ActiveStore \
+                 -ErrorAction Stop | Out-Null }}",
+            filter = filter
         );
         powershell(&script).map(|_| ())
     }
@@ -622,10 +636,17 @@ pub fn delete_host_route(ip: &str) -> Result<(), String> {
     }
     #[cfg(target_os = "windows")]
     {
+        // 先判存在再删：`Remove-NetRoute` 找不到目标时 `$?` 会变成 false，
+        // `-Command` 因此返回退出码 1 而没有任何输出，日志里就成了一句
+        // 「清理失败: PowerShell 执行失败: 」——明明只是本来就没有这条路由。
+        // 这条日志每次连接都会打，最容易被误读成权限问题。
         let script = format!(
-            "Remove-NetRoute -DestinationPrefix '{}/32' -Confirm:$false \
-             -PolicyStore ActiveStore -ErrorAction SilentlyContinue | Out-Null",
-            ip
+            "$r = @(Get-NetRoute -DestinationPrefix '{ip}/32' -PolicyStore ActiveStore \
+             -ErrorAction SilentlyContinue); \
+             if ($r.Count -gt 0) {{ \
+               Remove-NetRoute -DestinationPrefix '{ip}/32' -PolicyStore ActiveStore \
+                 -Confirm:$false -ErrorAction Stop | Out-Null }}",
+            ip = ip
         );
         powershell(&script).map(|_| ())
     }
