@@ -144,3 +144,28 @@ if !self.has_ip_addr(dst) && ... {
 
 修法：装配 iface 时补一条默认路由，网关指向自己的捕获地址 `10.9.0.1`。回归测试 `packets_for_arbitrary_destinations_are_accepted` 覆盖（去掉这行路由测试立刻失败）。
 
+## 根因二：绑网卡（IP_BOUND_IF）在捕获路由下必然失败
+
+AnyIP 修好后引擎活了（`收 732 包 / 发 498 包 / DNS 应答 16`），但所有出站都失败：
+
+```
+[分流] www.baidu.com:443 -> 直连（兜底），建连失败：Network is unreachable (os error 51)
+[分流] vpn.risencn.com:1218 -> 直连（兜底），建连失败：Can't assign requested address (os error 49)
+```
+
+原因是出站 socket 用 `IP_BOUND_IF` 钉在物理网卡上。绑定后 socket 的选路只看**绑定网卡自己的路由**，
+而捕获网卡已经抢了 `0.0.0.0/1` + `128.0.0.0/1`（覆盖全部 IPv4），于是绑定物理网卡的 connect
+找不到可用路由，直接 `ENETUNREACH`/`EADDRNOTAVAIL`。整机所有直连都断，表现就是「百度一直 pending」。
+
+改成按需装 /32 路由，不再绑网卡：
+
+- 直连流：`route add -host <真 IP> <物理网关>`
+- VPN 流：`route add -host <真 IP> -interface utun4`（原有逻辑）
+- 落在本机直连网段（如 `192.168.1.0/24`）的地址：`-interface en0` 走 on-link，不能经网关绕一圈
+- 同 IP 多条流共用一条路由，引用计数归零才删
+
+好处：不依赖各平台 socket 选路实现（`IP_BOUND_IF` / `IP_UNICAST_IF` 的语义差别很大），
+行为与其它分流工具一致；代价是每个新目的地址一次 `route` 调用。
+
+顺带把重复的建连失败日志收敛成「第 1/2/10/20… 次」，避免一次断网刷出上百行。
+
