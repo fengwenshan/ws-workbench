@@ -30,10 +30,10 @@ const POLICIES: VpnPolicy[] = ['DIRECT', 'VPN']
 const profile = vpn.selectedProfile
 /** 编辑期只改草稿；关闭弹窗时有改动才一次性落盘并热推送 */
 const draftRules = ref<VpnRule[]>((profile?.rules ?? []).map((rule) => ({ ...rule })))
-const draftDefaultPolicy = ref<VpnPolicy>(profile?.rules_default_policy ?? 'DIRECT')
+/** 没匹配到任何规则就走直连，不再提供兜底走向选项 */
+const DEFAULT_POLICY: VpnPolicy = 'DIRECT'
 
 const originalRules = JSON.stringify(profile?.rules ?? [])
-const originalDefaultPolicy = profile?.rules_default_policy ?? 'DIRECT'
 
 const kind = ref<VpnRuleKind>('DOMAIN-SUFFIX')
 const value = ref('')
@@ -43,18 +43,13 @@ const adding = ref(false)
 const saving = ref(false)
 
 const rules = computed(() => draftRules.value)
-const defaultPolicy = computed(() => draftDefaultPolicy.value)
 
 const placeholder = computed(
   () => KIND_OPTIONS.find((option) => option.value === kind.value)?.placeholder ?? '',
 )
 
 /** 有改动才写盘：只是打开看一眼再关掉，不应该产生任何写入 */
-const dirty = computed(
-  () =>
-    JSON.stringify(draftRules.value) !== originalRules ||
-    draftDefaultPolicy.value !== originalDefaultPolicy,
-)
+const dirty = computed(() => JSON.stringify(draftRules.value) !== originalRules)
 
 const valueInput = ref<{ focus: () => void } | null>(null)
 
@@ -123,10 +118,6 @@ function removeRule(ruleId: string) {
   draftRules.value = draftRules.value.filter((rule) => rule.id !== ruleId)
 }
 
-function setDefaultPolicy(next: VpnPolicy) {
-  draftDefaultPolicy.value = next
-}
-
 function moveRule(ruleId: string, delta: number) {
   const list = [...draftRules.value]
   const index = list.findIndex((rule) => rule.id === ruleId)
@@ -143,7 +134,7 @@ async function closeDialog() {
   if (dirty.value) {
     saving.value = true
     try {
-      await vpn.saveRules(draftRules.value, draftDefaultPolicy.value)
+      await vpn.saveRules(draftRules.value, DEFAULT_POLICY)
     } catch (err: any) {
       vpn.pushLog('error', `保存规则失败: ${err}`)
     } finally {
@@ -276,30 +267,6 @@ async function closeDialog() {
               :checked="rule.enabled"
               @change="(checked: any) => toggleRule(rule.id, !!checked)"
             />
-          </div>
-
-          <!-- 兜底：有规则时才有意义（没规则本来就全直连），固定不可删 -->
-          <div v-if="rules.length > 0" class="rule-row rule-row-match">
-            <span class="row-index">—</span>
-            <div class="row-main">
-              <span class="row-value mono">MATCH</span>
-              <div class="row-meta">
-                <span class="row-kind">兜底</span>
-                <span class="row-remark">其余全部流量</span>
-              </div>
-            </div>
-            <div class="row-policy-select">
-              <Select
-                size="small"
-                :value="defaultPolicy"
-                @change="(next: any) => setDefaultPolicy(next as VpnPolicy)"
-              >
-                <SelectOption v-for="item in POLICIES" :key="item" :value="item">
-                  {{ POLICY_LABELS[item] }}
-                </SelectOption>
-              </Select>
-            </div>
-            <span class="match-spacer"></span>
           </div>
         </div>
       </div>
@@ -463,10 +430,6 @@ async function closeDialog() {
   color: var(--text-secondary);
   background: var(--bg-secondary);
 }
-.row-policy-select {
-  width: 84px;
-  flex-shrink: 0;
-}
 .row-actions {
   display: flex;
   gap: 2px;
@@ -500,14 +463,6 @@ async function closeDialog() {
 .icon-btn.danger:hover:not(:disabled) {
   border-color: var(--danger);
   color: var(--danger);
-}
-.rule-row-match {
-  background: var(--bg-secondary);
-  border-color: var(--border-color);
-}
-.match-spacer {
-  width: 22px;
-  flex-shrink: 0;
 }
 .rule-editor-footer {
   display: flex;
