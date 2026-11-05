@@ -180,6 +180,8 @@ export interface VpnStatus {
   message: string
   profile_id: string
   profile_name: string
+  /** 通道身份哈希：连接参数相同的配置共享同一条隧道 */
+  conn_identity: string
   connector: string
   connector_name: string
   tun_dev: string
@@ -201,6 +203,8 @@ export interface VpnStatus {
 export interface VpnSnapshotPayload {
   status: VpnStatus
   elevation: string
+  /** 运行期「当前生效配置」；同通道切换后是切过去的那份配置 */
+  policy_profile_id: string
 }
 
 export interface ConnectResult {

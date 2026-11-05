@@ -29,6 +29,8 @@ const props = defineProps<{
 const vpn = props.vpn
 
 const confirmDelete = ref<VpnProfile | null>(null)
+/** 需要断开重连的切换目标（等用户在弹窗里确认） */
+const reconnectTarget = ref<VpnProfile | null>(null)
 const profileDialogOpen = ref(false)
 const editingProfile = ref<VpnProfile | null>(null)
 const savingProfile = ref(false)
@@ -60,8 +62,9 @@ const MODE_OPTIONS: Array<{
 
 const connectLabel = computed(() => {
   if (vpn.phaseBusy) return '处理中…'
-  if (vpn.isConnected) return '断开 VPN'
-  return '连接 VPN'
+  if (!vpn.isConnected) return '连接 VPN'
+  if (isPolicyOwner.value) return '断开 VPN'
+  return vpn.sharesTunnel(vpn.selectedProfile?.id) ? '切换到该配置' : '切换（需断开重连）'
 })
 
 // ============================ 状态点 ============================
@@ -70,10 +73,18 @@ type ProfileDotState = 'off' | 'on' | 'busy'
 
 /** 正在连接/已连接的配置；连接阶段后端还没写 profile_id 时回退到当前选中项 */
 const activeProfileId = computed(() => vpn.status.profile_id || vpn.selectedProfileId)
+/** 运行期「当前生效配置」：同通道共享隧道时，规则来自它 */
+const policyOwnerId = computed(() => vpn.policyProfileId || vpn.status.profile_id)
+const isPolicyOwner = computed(
+  () => !!vpn.selectedProfile && vpn.selectedProfile.id === policyOwnerId.value,
+)
 
 function profileDotState(profile: VpnProfile): ProfileDotState {
+  if (vpn.isConnected) {
+    // 共用同一条隧道但不是当前生效配置：灰点，点一下就能切过去
+    return policyOwnerId.value === profile.id ? 'on' : 'off'
+  }
   if (activeProfileId.value !== profile.id) return 'off'
-  if (vpn.isConnected) return 'on'
   if (vpn.phaseBusy || vpn.connecting) return 'busy'
   return 'off'
 }
@@ -96,7 +107,17 @@ const proxyMode = computed<VpnProxyMode>(() => vpn.selectedProfile?.proxy_mode ?
 const currentMode = computed(
   () => MODE_OPTIONS.find((item) => item.value === proxyMode.value) ?? MODE_OPTIONS[0],
 )
-const modeLocked = computed(() => vpn.phaseBusy || vpn.connecting)
+const modeLocked = computed(
+  () => vpn.phaseBusy || vpn.connecting || (vpn.isConnected && !isPolicyOwner.value),
+)
+
+const modeLockText = computed(() => {
+  if (vpn.phaseBusy || vpn.connecting) return '正在连接中，暂时不能切换代理模式。'
+  if (vpn.isConnected && !isPolicyOwner.value) {
+    return '这份配置当前没有生效，切过去之后才能改它的代理模式。'
+  }
+  return ''
+})
 
 async function handleModeChange(mode: VpnProxyMode) {
   if (mode === proxyMode.value || modeLocked.value) return
@@ -137,8 +158,38 @@ async function handleRulesDefaultPolicy(policy: VpnPolicy) {
 // ============================ 交互 ============================
 
 async function handleConnect() {
-  // 已连接或正在收尾时，同一个按钮要执行断开，否则会出现「点断开反而重连」
-  await vpn.toggleConnection()
+  // 未连接或收尾中：走原来的连接/断开逻辑
+  if (!vpn.isConnected || vpn.phaseBusy) {
+    await vpn.toggleConnection()
+    return
+  }
+  const profile = vpn.selectedProfile
+  if (!profile) return
+  // 选中的就是当前生效配置：同一个按钮负责断开
+  if (isPolicyOwner.value) {
+    await vpn.disconnect()
+    return
+  }
+  // 同通道：隧道复用，秒级切换
+  if (vpn.sharesTunnel(profile.id)) {
+    try {
+      const result = await vpn.switchToProfile(profile)
+      if (result === 'reconnect') reconnectTarget.value = profile
+    } catch (err: any) {
+      vpn.pushLog('error', `切换配置失败: ${err}`)
+    }
+    return
+  }
+  // 不同通道：先让用户确认，再断开重连
+  reconnectTarget.value = profile
+}
+
+async function confirmReconnect() {
+  const profile = reconnectTarget.value
+  if (!profile) return
+  reconnectTarget.value = null
+  await vpn.disconnect()
+  await vpn.connect(profile)
 }
 
 async function handleImport() {
@@ -230,16 +281,22 @@ watch(
             v-for="profile in vpn.profiles"
             :key="profile.id"
             class="list-item"
-            :class="{ active: profile.id === vpn.selectedProfileId }"
+            :class="{
+              active: profile.id === vpn.selectedProfileId,
+              'list-item--shared': vpn.sharesTunnel(profile.id),
+            }"
             @click="vpn.selectProfile(profile.id)"
           >
             <div class="item-main">
               <VpnStatusDot
                 class="item-dot"
                 :state="profileDotState(profile)"
-                :label="dotLabel(profileDotState(profile))"
+                :label="vpn.sharesTunnel(profile.id) ? '共用通道' : dotLabel(profileDotState(profile))"
               />
-              <span class="item-name">{{ profile.name }}</span>
+              <span class="item-name">
+                {{ profile.name }}
+                <em v-if="vpn.sharesTunnel(profile.id)" class="item-shared">共用通道</em>
+              </span>
               <span class="item-sub" :class="{ mono: profile.server }">{{ profile.server || '未填写服务器' }}</span>
             </div>
             <button
@@ -380,7 +437,7 @@ watch(
                 role="radio"
                 :aria-checked="mode.value === proxyMode"
                 :disabled="modeLocked"
-                :title="modeLocked ? '当前连接正在生效，断开 VPN 后可切换代理模式' : mode.description"
+                :title="modeLocked ? modeLockText : mode.description"
                 @click="handleModeChange(mode.value)"
               >
                 <span class="mode-icon">
@@ -403,7 +460,7 @@ watch(
             </div>
 
             <p class="proxy-mode-desc">{{ currentMode.description }}</p>
-            <p v-if="modeLocked" class="proxy-mode-lock">正在连接中，暂时不能切换代理模式。</p>
+            <p v-if="modeLockText" class="proxy-mode-lock">{{ modeLockText }}</p>
             <p v-else-if="vpn.isConnected" class="proxy-mode-hint">
               切换立即生效：新连接按新模式，已建立的连接保持原路径。
             </p>
@@ -452,6 +509,24 @@ watch(
         </div>
       </section>
     </div>
+
+    <!-- 不同通道：确认后才断开重连，避免用户没意识到会断开 -->
+    <Modal
+      v-if="reconnectTarget"
+      :open="true"
+      title="需要断开重连"
+      ok-text="断开并连接"
+      cancel-text="取消"
+      :mask-closable="false"
+      :confirm-loading="vpn.connecting"
+      @ok="confirmReconnect"
+      @cancel="reconnectTarget = null"
+    >
+      <p class="dialog-message">
+        「{{ reconnectTarget.name }}」与当前通道的连接参数不同（服务器、账号、连接器或 fake-ip
+        设置有变化），需要先断开当前连接，再重新建立隧道。
+      </p>
+    </Modal>
 
     <!-- 新建 / 编辑配置：同一个表单，传 profile 即为编辑 -->
     <VpnProfileDialog
@@ -635,6 +710,23 @@ watch(
 .list-item.active {
   background: var(--bg-active);
   box-shadow: inset 0 0 0 1px rgba(59, 130, 246, 0.18);
+}
+/* 共用同一条隧道但不是当前生效配置：灰掉，点一下即可秒切过去 */
+.list-item--shared {
+  color: var(--text-muted);
+}
+.list-item--shared .item-name {
+  color: var(--text-muted);
+}
+.item-shared {
+  margin-left: 6px;
+  padding: 0 4px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  font-size: 10px;
+  font-style: normal;
+  color: var(--text-muted);
+  white-space: nowrap;
 }
 .item-main {
   flex: 1;
