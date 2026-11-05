@@ -182,12 +182,14 @@ async function setDefaultPolicy(next: VpnPolicy) {
             <span class="row-index">{{ index + 1 }}</span>
             <div class="row-main">
               <span class="row-value">{{ rule.value }}</span>
-              <span v-if="rule.remark" class="row-remark">{{ rule.remark }}</span>
+              <div class="row-meta">
+                <span class="row-kind">{{ rule.kind }}</span>
+                <span class="row-policy" :class="rule.policy.toLowerCase()">
+                  {{ POLICY_LABELS[rule.policy] }}
+                </span>
+                <span v-if="rule.remark" class="row-remark">{{ rule.remark }}</span>
+              </div>
             </div>
-            <span class="row-kind">{{ rule.kind }}</span>
-            <span class="row-policy" :class="rule.policy.toLowerCase()">
-              {{ POLICY_LABELS[rule.policy] }}
-            </span>
             <div class="row-actions">
               <button
                 class="icon-btn"
@@ -231,9 +233,11 @@ async function setDefaultPolicy(next: VpnPolicy) {
             <span class="row-index">—</span>
             <div class="row-main">
               <span class="row-value mono">MATCH</span>
-              <span class="row-remark">其余全部流量</span>
+              <div class="row-meta">
+                <span class="row-kind">兜底</span>
+                <span class="row-remark">其余全部流量</span>
+              </div>
             </div>
-            <span class="row-kind">兜底</span>
             <div class="row-policy-select">
               <Select
                 size="small"
@@ -245,7 +249,6 @@ async function setDefaultPolicy(next: VpnPolicy) {
                 </SelectOption>
               </Select>
             </div>
-            <div class="row-actions"></div>
             <span class="match-spacer"></span>
           </div>
         </div>
@@ -365,13 +368,19 @@ async function setDefaultPolicy(next: VpnPolicy) {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: 3px;
 }
 .row-value {
   color: var(--text-primary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.row-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
 }
 .row-remark {
   font-size: 11px;
@@ -390,12 +399,10 @@ async function setDefaultPolicy(next: VpnPolicy) {
   white-space: nowrap;
 }
 .row-policy {
-  width: 60px;
   flex-shrink: 0;
-  text-align: center;
-  font-size: 11px;
+  font-size: 10px;
   border-radius: 3px;
-  padding: 1px 0;
+  padding: 1px 5px;
 }
 .row-policy.vpn {
   color: #2563eb;
@@ -413,7 +420,7 @@ async function setDefaultPolicy(next: VpnPolicy) {
   display: flex;
   gap: 2px;
   flex-shrink: 0;
-  opacity: 0;
+  opacity: 0.45;
   transition: opacity 0.12s;
 }
 .rule-row:hover .row-actions {
