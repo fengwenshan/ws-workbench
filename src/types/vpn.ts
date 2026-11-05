@@ -38,7 +38,7 @@ export interface VpnRule {
   enabled: boolean
 }
 
-/** 规则集 */
+/** @deprecated 仅用于老配置迁移（vpn_rule_sets → profile.rules），不再参与运行期 */
 export interface VpnRuleSet {
   id: string
   name: string
@@ -61,10 +61,12 @@ export interface VpnProfile {
   /** openconnect 协议名 */
   protocol: string
   connector: ConnectorKind
-  /** rule：按规则列表分流；global：全部走 VPN；direct：全部直连 */
+  /** rule：按本配置的规则分流；global：全部走 VPN；direct：全部直连 */
   proxy_mode: VpnProxyMode
-  /** 当前生效的规则列表；只有规则模式下会参与分流 */
-  rule_set_id: string
+  /** 这份配置自带的分流规则；只有规则模式下会参与分流 */
+  rules: VpnRule[]
+  /** 所有规则都不命中时的兜底走向 */
+  rules_default_policy: VpnPolicy
   /** fake-ip 地址池，用于按域名分流时反查真实目标 */
   fake_ip_range: string
   /** 不进入 fake-ip 池的地址段（*.后缀 或 关键字） */
