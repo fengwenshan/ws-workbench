@@ -551,7 +551,9 @@ async function handlePack(project: any, asZip: boolean = false) {
         class="titlebar-drag-layer"
         data-tauri-drag-region
       ></div>
-      <div class="titlebar-brand">
+      <!-- macOS 有原生红绿灯、应用名也在菜单栏里，标题栏不再重复品牌；
+           Windows 自绘标题栏需要品牌标识，保持原样 -->
+      <div v-if="!isMac" class="titlebar-brand">
         <img class="app-icon" :src="appIcon" alt="" draggable="false" />
         <span class="app-name">ws-workbench</span>
       </div>
