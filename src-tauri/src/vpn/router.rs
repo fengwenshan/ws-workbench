@@ -40,6 +40,9 @@ pub fn is_dns_port(port: u16) -> bool {
     port == DNS_PORT
 }
 
+/// 一条流建立时的判定输入快照：五元组键、真实目标、出口、域名、进程
+type FlowEntry = (FlowKey, SocketAddrV4, Egress, Option<String>, Option<String>);
+
 /// 每条流的出站状态。
 struct FlowEgress {
     stream: Option<TcpStream>,
@@ -356,9 +359,7 @@ impl Router {
     }
 
     /// 已建立 TCP 流的判定输入快照，供规则变更后重判
-    pub fn flow_entries(
-        &self,
-    ) -> Vec<(FlowKey, SocketAddrV4, Egress, Option<String>, Option<String>)> {
+    pub fn flow_entries(&self) -> Vec<FlowEntry> {
         self.flows
             .iter()
             .map(|(key, flow)| {
@@ -368,9 +369,7 @@ impl Router {
     }
 
     /// 已建立 UDP 流的判定输入快照
-    pub fn udp_flow_entries(
-        &self,
-    ) -> Vec<(FlowKey, SocketAddrV4, Egress, Option<String>, Option<String>)> {
+    pub fn udp_flow_entries(&self) -> Vec<FlowEntry> {
         self.udp_flows
             .iter()
             .map(|(key, flow)| {
