@@ -395,6 +395,9 @@ impl Default for VpnStatus {
 /// 写入 request.json 的连接请求（worker 读取）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VpnRequest {
+    /// 代理模式：rule / global / direct
+    #[serde(default = "default_proxy_mode")]
+    pub proxy_mode: String,
     pub profile_id: String,
     pub profile_name: String,
     pub server: String,
