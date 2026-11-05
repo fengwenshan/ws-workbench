@@ -1,4 +1,5 @@
 import { ref, onMounted } from 'vue'
+import { migrateVpnRuleSets } from '@/utils/vpnConfigMigration'
 import { loadAppConfig, saveAppConfig } from '@/api/config'
 import { nowIso } from '@/utils/time'
 import type { AppConfig, AttachmentMeta, EntityKind, ProjectConfig, ProjectGroup } from '@/types'
@@ -35,6 +36,16 @@ export function useConfig() {
         vpn_rule_sets: loaded.vpn_rule_sets ?? [],
         vpn_active_profile_id: loaded.vpn_active_profile_id ?? '',
         default_upload_dir: loaded.default_upload_dir ?? null,
+      }
+      // 老配置把规则放在全局列表里用 rule_set_id 引用，这里一次性搬进各配置
+      const migration = migrateVpnRuleSets(config.value)
+      if (migration.changed) {
+        await saveConfig()
+        if (migration.orphanLists > 0) {
+          console.warn(
+            `[vpn] 已迁移为“规则内嵌配置”模型；${migration.orphanLists} 份未被任何配置引用的旧规则列表仍保留在 config.json 中`,
+          )
+        }
       }
       // 补齐 note / attachments，并清掉旧版本单独存的上传目录
       config.value.groups.forEach(normalizeEntity)
