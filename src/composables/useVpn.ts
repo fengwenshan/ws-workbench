@@ -33,6 +33,7 @@ function emptyStatus(): VpnStatus {
     message: '',
     profile_id: '',
     profile_name: '',
+    conn_identity: '',
     connector: '',
     connector_name: '',
     tun_dev: '',
@@ -92,6 +93,37 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
   const proxyMode = computed<VpnProxyMode>(
     () => selectedProfile.value?.proxy_mode ?? 'rule',
   )
+
+  /** 运行期「当前生效配置」；同通道切换后指向切过去的那份 */
+  const policyProfileId = ref('')
+  /** 配置 id -> 通道身份哈希，用于渲染「共用通道」 */
+  const identities = ref<Record<string, string>>({})
+
+  /** 与当前通道参数相同、但不是当前生效的配置 */
+  function sharesTunnel(profileId?: string | null): boolean {
+    if (!profileId) return false
+    const active = status.value.conn_identity
+    if (!active || profiles.value.length === 0) return false
+    if (profileId === policyProfileId.value) return false
+    return identities.value[profileId] === active
+  }
+
+  async function refreshIdentities() {
+    const list = profiles.value
+    if (list.length === 0) {
+      identities.value = {}
+      return
+    }
+    try {
+      const hashes = await invoke<string[]>('vpn_conn_identities', { profiles: list })
+      identities.value = Object.fromEntries(list.map((profile, index) => [profile.id, hashes[index]]))
+    } catch {
+      // 旧后端没有这个命令时忽略，界面退化成不显示「共用通道」
+    }
+  }
+
+  // 配置内容（服务器、账号、连接器参数等）一变，通道身份就跟着变
+  watch(profiles, () => { void refreshIdentities() }, { deep: true, immediate: true })
 
   const activeConnectors = computed(() => connectors.value.filter((c) => c.available))
   const bestConnector = computed<ConnectorInfo | null>(
@@ -170,6 +202,7 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
     try {
       const payload = await invoke<VpnSnapshotPayload>('vpn_get_snapshot')
       status.value = payload.status
+      policyProfileId.value = payload.policy_profile_id || payload.status.profile_id || ''
       if (payload.elevation) {
         elevation.value = { ...(elevation.value ?? ({} as ElevationInfo)), hint: payload.elevation } as ElevationInfo
       }
@@ -231,6 +264,7 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
         `开始连接：连接器 ${result.connector_name}，提权方式 ${result.elevation}`,
       )
       await refreshElevation()
+      await refreshSnapshot()
     } catch (err: any) {
       pushLog('error', `连接失败: ${err}`)
       await refreshSnapshot()
@@ -248,6 +282,28 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
     } finally {
       await refreshSnapshot()
     }
+  }
+
+  /**
+   * 同通道切换：隧道不动，只把运行期策略换成这份配置的规则与模式。
+   * 返回 'shared' 表示已切换；'reconnect' 表示通道参数不同，需要断开重连。
+   */
+  async function switchToProfile(
+    profile: VpnProfile,
+  ): Promise<'shared' | 'reconnect' | 'none'> {
+    if (!isConnected.value) return 'none'
+    const shared = await invoke<boolean>('vpn_switch_profile', {
+      profile,
+      rules: profile.rules ?? [],
+      defaultPolicy: profile.rules_default_policy ?? 'DIRECT',
+    })
+    if (!shared) return 'reconnect'
+    policyProfileId.value = profile.id
+    config.value.vpn_active_profile_id = profile.id
+    selectedProfileId.value = profile.id
+    await saveConfig()
+    pushLog('info', `已切换到配置「${profile.name}」：通道复用，规则已生效`)
+    return 'shared'
   }
 
   async function toggleConnection() {
@@ -555,6 +611,8 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
     unlisteners.push(
       await listen<VpnSnapshotPayload>(EVENT_STATUS, (event) => {
         status.value = event.payload.status
+        policyProfileId.value =
+          event.payload.policy_profile_id || event.payload.status.profile_id || ''
         if (event.payload.elevation) {
           elevation.value = { ...(elevation.value ?? ({} as ElevationInfo)), hint: event.payload.elevation }
         }
@@ -594,6 +652,10 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
     selectedProfileId,
     selectedProfile,
     proxyMode,
+    policyProfileId,
+    identities,
+    sharesTunnel,
+    switchToProfile,
     profiles,
     // 行为
     refreshConnectors,
