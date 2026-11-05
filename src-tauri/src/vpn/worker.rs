@@ -1039,13 +1039,15 @@ impl Worker {
                 if let Some(stats) = self.engine.as_ref().map(|engine| engine.stats()) {
                     if last_stats != Some(stats) {
                         self.log(&format!(
-                            "[引擎] 收 {} 包 / 发 {} 包 / DNS 应答 {} / 连接尝试 {} / 新连接 {} / 出站异常 {}",
+                            "[引擎] 收 {} 包 / 发 {} 包 / DNS 应答 {} / 连接尝试 {} / 新连接 {} / 出站异常 {} / 上行 {} KB / 回程 {} KB",
                             stats.rx_packets,
                             stats.tx_packets,
                             stats.dns_answered,
                             stats.flows_attempted,
                             stats.flows_opened,
-                            stats.egress_failures
+                            stats.egress_failures,
+                            stats.bytes_to_egress / 1024,
+                            stats.bytes_to_app / 1024
                         ));
                         last_stats = Some(stats);
                     }
