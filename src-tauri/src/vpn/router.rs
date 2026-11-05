@@ -11,6 +11,9 @@
 //! 不依赖各平台选路实现，行为也更接近其它分流工具。
 
 use std::collections::{HashMap, VecDeque};
+
+/// 域名解析失败后多久内不再重试（负缓存）
+const RESOLVE_RETRY_AFTER: Duration = Duration::from_secs(60);
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddrV4, TcpStream, UdpSocket};
 use std::time::{Duration, Instant};
@@ -312,6 +315,9 @@ impl Router {
 
     /// 应用 -> 出站 的缓冲上限。到顶就先不再从应用侧读，靠 TCP 窗口反压。
     const PENDING_IN_CAP: usize = 1 << 20;
+
+    /// 域名解析失败后多久内不再重试
+    const RESOLVE_RETRY_AFTER: Duration = Duration::from_secs(60);
 
     /// 出站缓冲还有空间吗（没空间就先别读应用侧 socket，免得丢字节）
     pub fn can_accept_from_app(&self, key: &FlowKey) -> bool {
@@ -725,6 +731,8 @@ pub struct Engine {
     vpn_dns: Vec<Ipv4Addr>,
     /// 域名 -> 已解析出的真实 IPv4，连接期间复用
     real_cache: HashMap<String, Ipv4Addr>,
+    /// 解析失败的域名 + 时间：负缓存，避免同一域名每次重连都把引擎循环卡满
+    failed_cache: HashMap<String, std::time::Instant>,
     /// 同一出站目标连续失败的次数：只记前两次和每第十次，避免重试刷屏
     egress_error_counts: HashMap<(Ipv4Addr, u16), u32>,
     /// 待写进 worker.log 的诊断行：DNS 伪造、每条连接的分流结论、建连失败。
@@ -801,6 +809,7 @@ impl Engine {
             dns_servers: HashMap::new(),
             vpn_dns: Vec::new(),
             real_cache: HashMap::new(),
+            failed_cache: HashMap::new(),
             egress_error_counts: HashMap::new(),
             pending_logs: Vec::new(),
             dns_answered: 0,
@@ -1159,6 +1168,13 @@ impl Engine {
         if let Some(ip) = self.real_cache.get(&key) {
             return Some(*ip);
         }
+        // 负缓存：刚失败过的域名不再重试，否则同一页面每次重连都要卡几秒
+        if let Some(failed_at) = self.failed_cache.get(&key) {
+            if failed_at.elapsed() < RESOLVE_RETRY_AFTER {
+                return None;
+            }
+            self.failed_cache.remove(&key);
+        }
         let server = self
             .dns_servers
             .get(&key)
@@ -1179,7 +1195,7 @@ impl Engine {
             server,
             egress,
             &query,
-            Duration::from_millis(1200),
+            Duration::from_millis(400),
         );
         if !has_a(&answer) {
             let other = match egress {
@@ -1190,7 +1206,7 @@ impl Engine {
                 server,
                 other,
                 &query,
-                Duration::from_millis(800),
+                Duration::from_millis(250),
             );
         }
         // 应用的 DNS 可能只解析公网域名；内网域名再问一遍 VPN 下发的 DNS。
@@ -1203,7 +1219,7 @@ impl Engine {
                     dns,
                     Egress::Vpn,
                     &query,
-                    Duration::from_millis(700),
+                    Duration::from_millis(250),
                 );
                 if has_a(&answer) {
                     break;
@@ -1216,7 +1232,7 @@ impl Engine {
                 public,
                 Egress::Direct,
                 &query,
-                Duration::from_millis(800),
+                Duration::from_millis(300),
             );
         }
 
@@ -1226,9 +1242,17 @@ impl Engine {
             .map(dns_client::parse_a_records)
             .unwrap_or_default()
             .into_iter()
-            .next()?;
-        self.real_cache.insert(key, ip);
-        Some(ip)
+            .next();
+        match ip {
+            Some(ip) => {
+                self.real_cache.insert(key, ip);
+                Some(ip)
+            }
+            None => {
+                self.failed_cache.insert(key, std::time::Instant::now());
+                None
+            }
+        }
     }
 
     pub fn flow_count(&self) -> usize {
