@@ -9,7 +9,6 @@ import type {
   ConnectResult,
   ElevationInfo,
   InstallGuide,
-  LearnReport,
   NewVpnProfileInput,
   SessionDirInfo,
   VpnPolicy,
@@ -44,7 +43,6 @@ function emptyStatus(): VpnStatus {
     mtu: 0,
     routes: [],
     snapshot: null,
-    learn: null,
     error: '',
     pid: 0,
     started_at: '',
@@ -74,9 +72,6 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
   const selectedProfileId = ref<string>('')
   const detecting = ref(false)
   const connecting = ref(false)
-  /** 学习模式明细，只在用户展开面板时才拉（几十 KB，不进 status.json） */
-  const learnReport = ref<LearnReport | null>(null)
-  const learnLoading = ref(false)
 
   let logId = 0
   const unlisteners: UnlistenFn[] = []
@@ -132,8 +127,6 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
   const noConnector = computed(() => activeConnectors.value.length === 0)
   const phaseBusy = computed(() => BUSY_PHASES.includes(status.value.phase))
   const isConnected = computed(() => status.value.phase === 'connected')
-  /** 当前配置是否开了学习模式 */
-  const learnEnabled = computed(() => selectedProfile.value?.learn ?? false)
 
   // ============================ 数据加载 ============================
 
@@ -347,7 +340,6 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
       rules_default_policy: 'DIRECT',
       fake_ip_range: input.fake_ip_range?.trim() || '198.18.0.0/16',
       fake_ip_filter: input.fake_ip_filter ?? [],
-      learn: false,
       extra_args: input.extra_args ?? [],
       connector_path: '',
       created_at: now,
@@ -493,68 +485,6 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
     return verdict as VpnPolicy
   }
 
-  // ============================ 学习模式 ============================
-
-  /** 开关学习模式。只写配置，开关本身不影响正在进行的连接 */
-  async function setLearn(enabled: boolean) {
-    const profile = selectedProfile.value
-    if (!profile) return
-    await updateProfile(profile.id, { learn: enabled })
-    pushLog('info', enabled ? '已开启学习模式，下次连接开始采集' : '已关闭学习模式')
-  }
-
-  /** 拉取学习明细。明细单独存放在 learn.json，不会跟着状态事件推过来 */
-  async function loadLearnReport() {
-    learnLoading.value = true
-    try {
-      learnReport.value = await invoke<LearnReport | null>('vpn_read_learn_report')
-    } catch {
-      learnReport.value = null
-    } finally {
-      learnLoading.value = false
-    }
-  }
-
-  /**
-   * 清空采集结果。
-   *
-   * 后端只是放一个标志文件，真正清空由 worker 完成 —— 报告本体在 worker 内存里，
-   * 主进程直接把 learn.json 删掉的话，下一轮采样会立刻把它写回来。
-   */
-  async function clearLearnReport() {
-    try {
-      await invoke('vpn_clear_learn_report')
-      learnReport.value = null
-      pushLog('info', '已清空学习采集结果')
-    } catch (err: any) {
-      pushLog('error', `清空学习结果失败: ${err}`)
-    }
-  }
-
-  /**
-   * 把一条候选网段采纳进当前规则集。
-   *
-   * 只动规则表，不碰其它配置；采纳动作本身也不会自动开连接。
-   * 每一步都显式由用户点，避免自动往里塞网段之后没人知道流量被引到哪儿去了。
-   */
-  async function adoptLearnedCidr(cidr: string, remark = '') {
-    const profile = selectedProfile.value
-    if (!profile) {
-      pushLog('warn', '请先选择一个 VPN 配置')
-      return
-    }
-    if ((profile.rules ?? []).some((rule) => rule.kind === 'IP-CIDR' && rule.value === cidr)) {
-      pushLog('info', `${cidr} 已经在规则表里了`)
-      return
-    }
-    const rule = newRule('IP-CIDR', cidr, 'VPN')
-    rule.remark = remark
-    profile.rules = [...(profile.rules ?? []), rule]
-    await saveConfig()
-    await pushRulesIfConnected()
-    pushLog('success', `已把 ${cidr} 加入规则表`)
-  }
-
   async function openSessionDir() {
     try {
       await invoke('vpn_open_session_dir')
@@ -648,9 +578,6 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
     connecting,
     phaseBusy,
     isConnected,
-    learnEnabled,
-    learnReport,
-    learnLoading,
     selectedProfileId,
     selectedProfile,
     proxyMode,
@@ -684,10 +611,6 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
     selectProfile,
     validateRule,
     previewRule,
-    setLearn,
-    loadLearnReport,
-    clearLearnReport,
-    adoptLearnedCidr,
     pushLog,
   })
 }
