@@ -405,7 +405,6 @@ watch(
                 <h4>代理模式</h4>
                 <p>{{ currentMode.description }}</p>
               </div>
-              <span class="proxy-mode-current">{{ currentMode.label }}</span>
             </div>
 
             <div class="proxy-mode-options" role="radiogroup" aria-label="代理模式">
@@ -444,10 +443,6 @@ watch(
               切换立即生效：新连接按新模式，已建立的连接保持原路径。
             </p>
           </section>
-
-          <div v-if="proxyMode !== 'rule'" class="mode-off-note">
-            当前是{{ currentMode.label }}模式，规则不参与分流；切到「规则」模式后生效。
-          </div>
 
           <VpnRoutePreview :status="vpn.status" />
         </template>
@@ -871,14 +866,6 @@ watch(
   margin: 0;
   font-size: 11px;
   color: var(--text-muted);
-}
-.proxy-mode-current {
-  flex-shrink: 0;
-  padding: 2px 9px;
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--primary) 12%, transparent);
-  color: var(--primary);
-  font-size: 11px;
 }
 .proxy-mode-options {
   display: grid;
