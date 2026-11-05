@@ -24,6 +24,7 @@
 - M4 退出清理：已完成（`853bd7e`、`549dd05`）
 - 自动验证：`cargo test --lib` 307 passed / 1 failed（既有 macOS 环境失败 `vpn::detect::tests::bundled_openconnect_is_probed_not_skipped`）；`vue-tsc --noEmit` 与 `pnpm build` 通过
 - Task 17 的手动验收项需要在真机上连一次 VPN 才能完成，尚未执行
+- 学习模式已整块移除（前端卡片、`vpn/learn.rs`、两个命令、`learn.json`/`learn.clear`、`learn` 字段）；通道身份不再含 `learn`
 
 ---
 
@@ -625,7 +626,7 @@ fn poll_mode_change(&mut self) {
 
 `poll_rules_change()`：读 `read_rules_raw()`，与上次字符串比较；变化则反序列化 + `compile`，成功则更新 `raw_rules` / `default_policy`，`Rule` 模式下 `set_rules` + `reset_changed_flows()`。
 
-两个轮询放在主循环 `self.poll_learn_clear();` 之后。
+两个轮询放在主循环顶部（原 `poll_learn_clear()` 的位置，该调用已随学习模式一起删除）。
 
 正常停止路径（`self.session.scrub_request();` 旁边）追加清理，避免控制文件残留：
 
@@ -808,7 +809,6 @@ pub fn conn_identity(profile: &VpnProfile) -> String {
         format!("{:?}", profile.connector),
         profile.connector_path.clone(),
         profile.fake_ip_range.clone(),
-        profile.learn.to_string(),
     ];
     let mut extra = profile.extra_args.clone();
     extra.sort();
