@@ -241,3 +241,11 @@ pub fn apply_mode(mode: ProxyMode, egress: Egress) -> Egress   // 纯函数
 ## 后续变更
 
 - **学习模式整块移除**：面板卡片、`vpn/learn.rs`（632 行）、`vpn_read_learn_report` / `vpn_clear_learn_report` 命令、`learn.json` / `learn.clear` 会话文件、配置里的 `learn` 字段全部删除。理由是规则按域名写，采集回来的 IP/CIDR 对用户没有可操作性；顺带把 `learn` 从通道身份里去掉，两个配置仅因学习开关不同就不能共享隧道的问题一并消失。
+
+## 修复：macOS 一连上就全网断
+
+**现象**：连接后规则模式下访问内网或外网全部不通，浏览器直接报「网络连接已断开」，系统路由表被捕获网卡的 `0.0.0.0/1` + `128.0.0.0/1` 接管。
+
+**根因**：引擎把 DIRECT 出口钉在「物理网卡索引」上，而 macOS 的快照里索引恒为 0（`unix_list_interfaces` 写死），装配引擎时退回了捕获网卡索引。于是所有直连流量（规则模式下绝大多数）的出站 socket 被 `IP_BOUND_IF` 钉到捕获 utun 自己身上，数据包从自己的捕获口绕回来，等于黑洞。
+
+**改法**：macOS 按默认路由给出的接口名（如 `en0`）用 `if_nametoindex` 取真实索引（`route::if_index_for_name`）；拿不到索引直接中止连接，不再退回捕获网卡。日志里新增 `[引擎] 直连出口 if#N（en0）` 便于确认。

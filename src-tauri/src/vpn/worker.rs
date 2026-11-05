@@ -567,17 +567,26 @@ impl Worker {
         #[cfg(windows)]
         let proc: Box<dyn ProcLookup> = Box::new(platform::WindowsProcLookup::new());
 
-        // DIRECT 出口要钉物理网卡；快照拿不到索引时退回捕获索引（macOS 的
-        // `unix_list_interfaces` 索引恒为 0，保持旧行为）。
-        #[cfg(windows)]
-        if self.snapshot.default_if_index == 0 {
-            return Err("找不到物理默认网卡，无法确定直连出口（已中止以免回环）".to_string());
-        }
+        // DIRECT 出口必须钉在物理默认网卡上。macOS 的快照里只有接口名、索引恒为 0
+        // （`unix_list_interfaces` 写死），要按名字再问内核取索引。
+        // 拿不到索引时绝不能退回捕获网卡：那会让直连流量从自己的捕获口绕回来，
+        // 表现就是「一连上就全网断」。
         let physical_if = if self.snapshot.default_if_index != 0 {
             self.snapshot.default_if_index
+        } else if !self.snapshot.default_if_alias.is_empty() {
+            route::if_index_for_name(&self.snapshot.default_if_alias).ok_or_else(|| {
+                format!(
+                    "找不到物理默认网卡 {} 的接口索引，已中止以免流量回环",
+                    self.snapshot.default_if_alias
+                )
+            })?
         } else {
-            capture_index
+            return Err("找不到物理默认网卡，无法确定直连出口（已中止以免回环）".to_string());
         };
+        self.log(&format!(
+            "[引擎] 直连出口 if#{}（{}）",
+            physical_if, self.snapshot.default_if_alias
+        ));
 
         let mut engine = router::Engine::assemble(
             capture,
