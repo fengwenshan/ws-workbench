@@ -122,3 +122,25 @@
 
 另外加了兜底：引擎接管后 12 秒内捕获网卡一个包都没收到，就撤掉半默认路由并刷新 DNS 缓存，把网络还给直连——宁可这一趟规则分流不生效，也不能让用户面对「一连上就全网断」。
 
+## 根因：smoltcp 0.11 的 AnyIP 还要求一条默认路由
+
+日志证据：接管后 `收 N 包 / 发 0 包 / DNS 应答 0 / 新连接 0`，系统 DNS 最终解析失败，整机没网。
+
+`Interface::set_any_ip(true)` 只打开了开关，smoltcp 0.11 的接受条件比这严格（`iface/interface/ipv4.rs`）：
+
+```rust
+if !self.has_ip_addr(dst) && ... {
+    if !self.any_ip                       // 1. 开了 AnyIP
+        || !dst.is_unicast()              // 2. 目的是单播
+        || self.routes.lookup(&dst, now)  // 3. 路由表里能查到一条前缀
+            .map_or(true, |gw| !self.has_ip_addr(gw))  // 且其网关是本接口自己的地址
+    {
+        return None;   // 静默丢弃
+    }
+}
+```
+
+捕获网卡只配了 `10.9.0.1/32`、路由表是空的，第 3 条永远不成立 → **所有包在进入 socekt 分发前就被丢光**，于是收包计数一直涨、发包恒为 0、DNS 不应答、整机失联（这个版本之前用旧版 smoltcp 时没有这条限制，所以是升级后引入的回归）。
+
+修法：装配 iface 时补一条默认路由，网关指向自己的捕获地址 `10.9.0.1`。回归测试 `packets_for_arbitrary_destinations_are_accepted` 覆盖（去掉这行路由测试立刻失败）。
+
