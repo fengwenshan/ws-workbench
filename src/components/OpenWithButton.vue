@@ -2,12 +2,13 @@
 /**
  * 「用其它应用打开」分体按钮。
  *
- * 左半边：用当前选中的应用打开目录（首次是后端探测到的默认应用，如访达）；
- * 右半边：展开本机装了的外部应用（图标来自后端从 .icns 转出的 PNG）。
- *
- * 选择记在 localStorage 里，下次进项目页沿用；上次选的应用没了就退回默认。
+ * 左半边：固定用默认应用打开目录（访达 / 资源管理器），不随菜单选择变化；
+ * 右半边：菜单每一项都是「用这个应用打开当前目录」的动作，点了立刻用该应用
+ * 打开，不是切换器，也不记住上次选了谁。图标由后端从 .icns（macOS）或
+ * exe（Windows）转成 PNG。
  */
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { message } from 'ant-design-vue'
 import { listOpenWithApps, openWith, type OpenWithApp } from '@/api/system'
 import type { LogLevel } from '@/types'
 
@@ -16,22 +17,16 @@ const emit = defineEmits<{
   log: [level: LogLevel, message: string]
 }>()
 
-/** 用户上次选的打开方式，全局共用一份 */
-const STORAGE_KEY = 'ws-workbench.open-with.choice'
-
 const apps = ref<OpenWithApp[]>([])
 const loading = ref(true)
 const busy = ref(false)
 const open = ref(false)
 const root = ref<HTMLElement | null>(null)
-const chosenId = ref(localStorage.getItem(STORAGE_KEY) ?? '')
 
 const hasPath = computed(() => props.path.trim().length > 0)
 
-/** 当前生效的应用：记住的那个还在就用它，否则退回列表第一个（通常是默认应用） */
-const current = computed<OpenWithApp | null>(
-  () => apps.value.find((app) => app.id === chosenId.value) ?? apps.value[0] ?? null,
-)
+/** 左半边固定用列表第一个（后端把默认应用排在第一位） */
+const current = computed<OpenWithApp | null>(() => apps.value[0] ?? null)
 
 const mainTitle = computed(() => {
   if (!hasPath.value) return '还没有选择目录'
@@ -73,17 +68,18 @@ function toggle() {
   open.value = !open.value
 }
 
+/** 用指定应用打开当前目录：纯动作，不改变按钮上显示的应用 */
 async function run(app: OpenWithApp) {
   if (!hasPath.value || busy.value) return
   busy.value = true
   open.value = false
   try {
     await openWith(props.path, app.id)
-    chosenId.value = app.id
-    localStorage.setItem(STORAGE_KEY, app.id)
     emit('log', 'info', `用 ${app.name} 打开: ${props.path}`)
   } catch (err) {
-    emit('log', 'error', `打开失败: ${err}`)
+    // 失败时给个可见反馈，否则用户只会觉得「点了没反应」
+    message.error(`用 ${app.name} 打开失败: ${err}`)
+    emit('log', 'error', `用 ${app.name} 打开失败: ${err}`)
   } finally {
     busy.value = false
   }
@@ -118,7 +114,7 @@ function glyph(app: OpenWithApp | null) {
         :disabled="loading || apps.length === 0"
         aria-haspopup="menu"
         :aria-expanded="open"
-        title="选择打开方式"
+        title="用其它应用打开"
         @click="toggle"
       >
         <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
@@ -139,10 +135,8 @@ function glyph(app: OpenWithApp | null) {
         v-for="app in apps"
         :key="app.id"
         type="button"
-        role="menuitemradio"
-        :aria-checked="app.id === current?.id"
+        role="menuitem"
         class="ow-item"
-        :class="{ active: app.id === current?.id }"
         @click="run(app)"
       >
         <img v-if="app.icon" class="ow-icon" :src="app.icon" alt="" />
@@ -259,9 +253,6 @@ function glyph(app: OpenWithApp | null) {
 }
 .ow-item:hover {
   background: var(--bg-hover);
-}
-.ow-item.active {
-  background: #eff6ff;
   color: var(--primary);
 }
 .ow-name {
@@ -272,8 +263,5 @@ function glyph(app: OpenWithApp | null) {
   flex-shrink: 0;
   font-size: 12px;
   color: var(--text-secondary);
-}
-.ow-item.active .ow-tag {
-  color: var(--primary);
 }
 </style>

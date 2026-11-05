@@ -258,7 +258,7 @@ async function run(action: () => Promise<unknown>, failureLabel: string) {
         只有命中下面规则的文件才会进包，没命中的一律不打包；以 <code>.</code> 或 <code>_</code>
         开头的文件/目录始终跳过，路径里含空格的也跳过。默认已包含 layui 工程运行时用到的
         <code>.thm</code> 模板、<code>.tjs</code> 模板脚本、WPS 控件的 <code>.dotm</code>，
-        以及 WebOffice 新建正文用的 <code>.docx</code> 空白模板。
+        以及 WebOffice 新建正文用的 <code>.doc</code> / <code>.docx</code> 空白模板。
       </p>
       <RulesEditor
         v-model="localIncludeRules"

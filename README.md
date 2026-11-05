@@ -8,8 +8,8 @@
 
 - 两级结构：分组 → 项目。默认分组不可删除，但组内项目可删；分组与项目都支持拖拽排序，项目可以在分组之间拖动
 - 分组和项目各自带一份 Markdown 笔记、一组加密附件（上传目录统一在「设置 → 附件上传」里配）
-- 项目配置：源目录、输出目录。目录旁边是「打开方式」分体按钮：左半边用当前选中的应用打开（默认访达 / 资源管理器），右半边展开本机真正装了的编辑器与终端（VS Code、Trae、Cursor、Xcode、IntelliJ IDEA、PyCharm、WebStorm、GoLand、iTerm、终端），图标从各应用的 `.icns` 里取，菜单里标「（默认）」；选择记在 localStorage，下次沿用。目录不存在时自动退到最近存在的上级目录
-- 新建项目时识别类型（Layui / Vue2 / Vue3 / React / SpringBoot / Spring / Struts2 / Java）和版本控制远端（Git / SVN），并做源目录校验
+- 项目配置：源目录、输出目录。目录旁边是「打开方式」分体按钮：左半边固定用默认应用打开（访达 / 资源管理器），右半边是「用某个应用打开」的动作列表，点哪一项就立刻用那个应用打开当前目录，不切换、也不记住上次选了谁，菜单里给默认项标「（默认）」。macOS 列访达、VS Code、Trae、Cursor、Xcode、IntelliJ IDEA、PyCharm、WebStorm、GoLand、iTerm、终端，图标从各应用的 `.icns` 里取；Windows 列资源管理器、VS Code、IntelliJ IDEA、PyCharm、WebStorm、GoLand、RustRover、Cursor、Trae、终端、PowerShell，图标用 `PrivateExtractIcons` 从 exe 里取 64px PNG——终端取的是 Windows Terminal 的 `WindowsTerminal.exe`（`WindowsApps\wt.exe` 只是 0 字节别名），`.cmd` 启动器（如 Trae 的 `bin\trae.cmd`）会先解析出它真正启动的 exe 再取图标，否则拿到的是脚本或快捷方式的通用图标。打开失败会弹提示而不是静默无反应；目录不存在时自动退到最近存在的上级目录。Windows 上「打开」统一走 `ShellExecuteW`（也就是资源管理器里双击那条路），不再用 `CreateProcess`——后者必须带 `CREATE_NO_WINDOW` 才不闪黑框，控制台程序因此拿不到窗口（终端、PowerShell 点了没反应就是这个原因）。VS Code / Trae / Cursor 这类 Electron 编辑器改走它们自带的 `bin\code.cmd`、`bin\trae.cmd`（直接给 `.exe` 传目录在部分机器上什么都不发生，由 CLI 负责单实例转发和「在哪个窗口打开」），图标仍然从真正的 exe 上取
+- 新建项目时识别类型（Layui / Vue2 / Vue3 / React / SpringBoot / Spring / Struts2 / Java）和版本控制远端（Git / SVN），并做源目录校验；项目名称下方的 Git / SVN 标签和仓库地址都可以点击复制
 
 ### 笔记与附件
 
@@ -28,6 +28,8 @@
 ### 项目打包
 
 先识别项目类型（Layui / Vue2 / Vue3 / React / SpringBoot 等）并读出 Git 或 SVN 的远端地址，再决定能不能打包。
+
+SVN 地址取的是「仓库根 + 工作副本在仓库内的路径」（如 `https://host/svn/NewApp/2025/team/oa`），不是只有仓库根的半截地址。顺序是：`svn` 命令行（含 TortoiseSVN / SlikSVN / Homebrew 的常见安装位置）→ 直接读 `.svn/wc.db` 的 `REPOSITORY` / `NODES` 表 → 二进制扫描 `wc.db` → SVN 1.6 的 `.svn/entries`。所以没装 svn 命令行的 Windows 机器也能拿到完整地址，源目录是工作副本的子目录时同样能补全。
 
 打包只对 Layui 项目开放：
 
@@ -52,18 +54,18 @@ const canPack = computed(() => projectType.value === 'layui')
 *.mp4 *.webm *.mp3 *.wav *.ogg
 *.txt *.xml
 *.thm *.tjs *.dotm     # layui 模板 / 模板脚本 / WPS 控件模板
-*.docx                 # WebOffice 新建正文的空白模板
+*.doc *.docx           # WebOffice 新建正文的空白模板（旧版 / 新版 Word）
 ```
 
 - 只列运行时真的会被请求的类型；`scss`/`ts`/`vue`/`map`/`md`、构建配置（`package.json`、`vite.config.*`）、设计源文件、压缩包这些开发期产物都不在里面
 - layui 特有：`.thm`（表单/列表模板，`rsViewRender.js` 按 `APP_ROOT + '/xmodules/.../**.thm'` 拉取）、`.tjs`（模板脚本）、`.dotm`（WPS 控件的 `Normal.dotm`）都是运行时资源，默认收
-- `.docx` 只收运行时真会 GET 的那类模板（`rsWebOffice.js` 用 `$.ajax` 拉 `weboffice/newDocument.docx` 当新建正文模板）；上传控件 accept 里出现的 `.doc`/`.pdf`/`.wps` 等字符串不算引用，工程里没有对应资源的仍不收
+- `.doc`/`.docx` 只收运行时真会 GET 的那类模板（`rsWebOffice.js` 用 `$.ajax` 拉 `weboffice/newDocument.doc(x)` 当新建正文模板，旧版 Word 模板是 `.doc`）；上传控件 accept 里出现的 `.pdf`/`.wps` 等字符串不算引用，工程里没有对应资源的仍不收
 - **`.` 或 `_` 开头的路径段一律跳过**（任意层级，文件或目录都算）：`.svn`/`.git`/`.idea`/`.vscode`、`.DS_Store`、`_draft.html`、`partials/_header.html` 都由这一条硬规则兜住，不占规则名额
 - 匹配语义：不带 `/` 的规则按**文件名**匹配、任意层级都算（`*.png`）；带 `/` 的按**相对源目录的路径**匹配（`assets/**`、`js/app.js`）
 - 规则清空 = 视为未配置：除 `.`/`_` 开头的条目外全部打包（避免误删规则后打出空包）
 - 路径里含空格的文件始终跳过
 
-默认规则定义在 `src-tauri/src/models.rs` 的 `DEFAULT_INCLUDE`，带版本号（当前 `DEFAULT_INCLUDE_VERSION = 3`）：老配置（没有 include 字段）加载时自动补上默认集，之后用户自己删掉的规则不会被重新塞回去。「恢复默认」按钮调用 `get_default_include_rules` 取同一份清单。
+默认规则定义在 `src-tauri/src/models.rs` 的 `DEFAULT_INCLUDE`，带版本号（当前 `DEFAULT_INCLUDE_VERSION = 4`）：老配置（没有 include 字段）加载时自动补上默认集，之后用户自己删掉的规则不会被重新塞回去。「恢复默认」按钮调用 `get_default_include_rules` 取同一份清单。
 
 遍历由 `ignore::WalkBuilder` 完成，标准过滤全部关闭、不跟随符号链接；`.`/`_` 开头的条目在 `filter_entry` 里直接剪掉，包含规则用 `globset` 在遍历结果上过滤（文件名匹配 + 路径匹配两个集合）。相对路径中任一段含空格的文件会被跳过。输出目录与 zip 自身通过 `extra_excludes` 整棵子树剪掉，避免上一次的产物被再打一遍。
 
@@ -258,7 +260,7 @@ git push origin v1.0.16   # 只有推 tag 才会触发 GitHub 构建
 
 > `updates/latest.json` 由发布脚本生成；仓库里这份仍是 v1.0.14 的旧记录，下次发版会被完整重写。
 
-客户端每天 10:00 与 15:00 各校验一次；用户选择忽略的版本记在 localStorage 的 `ws-workbench:dismissed-update-version` 下，不再重复提示。
+客户端启动时静默校验一次，之后每天 10:00 与 16:00 各校验一次；平时标题栏不显示更新入口，只有发现新版本时才在原位置显示「更新」按钮；用户选择忽略的版本记在 localStorage 的 `ws-workbench:dismissed-update-version` 下，不再重复提示。
 
 ## 配置与数据
 

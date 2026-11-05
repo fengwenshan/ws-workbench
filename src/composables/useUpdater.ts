@@ -21,10 +21,10 @@ export interface UpdateInfo {
 
 type PendingUpdate = NonNullable<Awaited<ReturnType<typeof check>>>
 
-/** 每日自动校验时间点（时, 分） */
+/** 每日自动校验时间点（时, 分）：上午 10:00、下午 16:00 */
 export const DAILY_CHECK_TIMES: ReadonlyArray<readonly [number, number]> = [
   [10, 0],
-  [15, 0],
+  [16, 0],
 ]
 
 /** 已忽略的版本，避免重启后重复打扰 */
@@ -79,7 +79,13 @@ export function useUpdater() {
     void safeSet(DISMISS_KEY, info.value.version)
   }
 
-  async function checkUpdate(): Promise<UpdateInfo | null> {
+  /**
+   * 检查更新。
+   * silent 用于启动时与每日定时检查：没有新版本或检查失败都回到 idle，
+   * 不把「已是最新 / 重试」这类瞬态文案留在标题栏上。
+   */
+  async function checkUpdate(options: { silent?: boolean } = {}): Promise<UpdateInfo | null> {
+    const silent = options.silent === true
     status.value = 'checking'
     errorMessage.value = ''
     info.value = null
@@ -87,7 +93,7 @@ export function useUpdater() {
       const update = await check()
       if (!update) {
         pending = null
-        status.value = 'up-to-date'
+        status.value = silent ? 'idle' : 'up-to-date'
         return null
       }
       pending = update
@@ -101,7 +107,7 @@ export function useUpdater() {
       return info.value
     } catch (err: any) {
       pending = null
-      status.value = 'error'
+      status.value = silent ? 'idle' : 'error'
       errorMessage.value = String(err)
       return null
     }
@@ -153,7 +159,7 @@ export function useUpdater() {
     scheduleTimer = setTimeout(async () => {
       // 正在检查或下载时不打断当前流程
       if (status.value !== 'checking' && status.value !== 'downloading') {
-        await checkUpdate()
+        await checkUpdate({ silent: true })
       }
       startDailyCheck()
     }, wait)

@@ -331,6 +331,7 @@ function toggleCollapse(groupId: string) {
   <div class="project-list">
     <div class="list-header">
       <span>项目分组</span>
+      <button class="add-group-btn" @click="emit('addGroup')">+ 新建</button>
     </div>
     <div class="list-body" @dragover="onGroupListDragOver" @drop="onGroupListDrop">
       <template v-for="(group, groupIndex) in groups" :key="group.id">
@@ -362,9 +363,18 @@ function toggleCollapse(groupId: string) {
             <button
               class="group-toggle"
               :title="isCollapsed(group.id) ? '展开分组' : '收起分组'"
+              :aria-expanded="!isCollapsed(group.id)"
               @click.stop="toggleCollapse(group.id)"
-            >{{ isCollapsed(group.id) ? '▸' : '▾' }}</button>
-            <span class="group-drag-handle" title="拖拽排序">⋮⋮</span>
+            >
+              <svg
+                class="group-chevron"
+                :class="{ open: !isCollapsed(group.id) }"
+                viewBox="0 0 12 12"
+                aria-hidden="true"
+              >
+                <path d="M4.5 2.5 8 6l-3.5 3.5" />
+              </svg>
+            </button>
             <input
               v-if="editingGroupId === group.id"
               :ref="setRenameInputEl"
@@ -393,12 +403,26 @@ function toggleCollapse(groupId: string) {
                 class="group-rename"
                 @click.stop="startRename(group)"
                 title="重命名分组"
-              >✎</button>
+                aria-label="重命名分组"
+              >
+                <svg viewBox="64 64 896 896" aria-hidden="true">
+                  <path
+                    d="M257.7 752c2 0 4-.2 6-.5L431.9 722c2-.4 3.9-1.3 5.3-2.8l423.9-423.9a9.96 9.96 0 000-14.1L694.9 114.9c-1.9-1.9-4.4-2.9-7.1-2.9s-5.2 1-7.1 2.9L256.8 538.8c-1.5 1.5-2.4 3.3-2.8 5.3l-29.5 168.2a33.5 33.5 0 009.4 29.8c6.6 6.4 14.9 9.9 23.8 9.9zm67.4-174.4L687.8 215l73.3 73.3-362.7 362.6-88.9 15.7 15.6-89zM880 836H144c-17.7 0-32 14.3-32 32v36c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-36c0-17.7-14.3-32-32-32z"
+                  />
+                </svg>
+              </button>
               <button
                 class="group-delete"
                 @click.stop="emit('deleteGroup', group.id)"
                 title="删除分组"
-              >×</button>
+                aria-label="删除分组"
+              >
+                <svg viewBox="64 64 896 896" aria-hidden="true">
+                  <path
+                    d="M799.86 166.31c.02 0 .04.02.08.06l57.69 57.7c.04.03.05.05.06.08a.12.12 0 010 .06c0 .03-.02.05-.06.09L569.93 512l287.7 287.7c.04.04.05.06.06.09a.12.12 0 010 .07c0 .02-.02.04-.06.08l-57.7 57.69c-.03.04-.05.05-.07.06a.12.12 0 01-.07 0c-.03 0-.05-.02-.09-.06L512 569.93l-287.7 287.7c-.04.04-.06.05-.09.06a.12.12 0 01-.07 0c-.02 0-.04-.02-.08-.06l-57.69-57.7c-.04-.03-.05-.05-.06-.07a.12.12 0 010-.07c0-.03.02-.05.06-.09L454.07 512l-287.7-287.7c-.04-.04-.05-.06-.06-.09a.12.12 0 010-.07c0-.02.02-.04.06-.08l57.7-57.69c.03-.04.05-.05.07-.06a.12.12 0 01.07 0c.03 0 .05.02.09.06L512 454.07l287.7-287.7c.04-.04.06-.05.09-.06a.12.12 0 01.07 0z"
+                  />
+                </svg>
+              </button>
             </template>
           </div>
           <div
@@ -430,14 +454,19 @@ function toggleCollapse(groupId: string) {
                 @drop="onProjectDrop($event, group.id, projIndex)"
                 @dragend="onDragEnd"
               >
-                <span class="project-drag-handle" title="拖拽排序/移动">⋮⋮</span>
                 <span class="item-name">{{ project.name }}</span>
                 <button
-                  v-if="project.id === selectedId"
                   class="item-delete"
                   @click.stop="emit('deleteProject', project.id)"
                   title="删除项目"
-                >×</button>
+                  aria-label="删除项目"
+                >
+                  <svg viewBox="64 64 896 896" aria-hidden="true">
+                    <path
+                      d="M799.86 166.31c.02 0 .04.02.08.06l57.69 57.7c.04.03.05.05.06.08a.12.12 0 010 .06c0 .03-.02.05-.06.09L569.93 512l287.7 287.7c.04.04.05.06.06.09a.12.12 0 010 .07c0 .02-.02.04-.06.08l-57.7 57.69c-.03.04-.05.05-.07.06a.12.12 0 01-.07 0c-.03 0-.05-.02-.09-.06L512 569.93l-287.7 287.7c-.04.04-.06.05-.09.06a.12.12 0 01-.07 0c-.02 0-.04-.02-.08-.06l-57.69-57.7c-.04-.03-.05-.05-.06-.07a.12.12 0 010-.07c0-.03.02-.05.06-.09L454.07 512l-287.7-287.7c-.04-.04-.05-.06-.06-.09a.12.12 0 010-.07c0-.02.02-.04.06-.08l57.7-57.69c.03-.04.05-.05.07-.06a.12.12 0 01.07 0c.03 0 .05.02.09.06L512 454.07l287.7-287.7c.04-.04.06-.05.09-.06a.12.12 0 01.07 0z"
+                    />
+                  </svg>
+                </button>
               </div>
             </template>
 
@@ -459,10 +488,9 @@ function toggleCollapse(groupId: string) {
       ></div>
 
       <div v-if="groups.length === 0" class="empty-tip">
-        暂无分组，点击下方新建
+        暂无分组，点击右上角「+ 新建」
       </div>
     </div>
-    <button class="add-group-btn" @click="emit('addGroup')">+ 新建分组</button>
   </div>
 </template>
 
@@ -474,20 +502,25 @@ function toggleCollapse(groupId: string) {
   min-height: 0;
 }
 .list-header {
-  padding: 16px;
-  font-size: 14px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  height: var(--panel-header-height);
+  padding: 0 16px;
+  font-size: 12px;
   font-weight: 600;
-  color: var(--text-primary);
+  letter-spacing: 0.2px;
+  color: #000;
   border-bottom: 1px solid var(--border-color);
 }
 .list-body {
   flex: 1;
   overflow-y: auto;
-  padding: 8px;
+  padding: 6px 8px 8px;
 }
 .group-section {
-  margin-bottom: 8px;
-  border-radius: 8px;
+  margin-bottom: 4px;
+  border-radius: 6px;
   transition: opacity 0.15s;
 }
 .group-section.dragging {
@@ -496,51 +529,65 @@ function toggleCollapse(groupId: string) {
 .group-header {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 6px 8px;
+  gap: 4px;
+  height: 28px;
+  padding: 0 6px;
+  border-radius: 6px;
   font-size: 12px;
   font-weight: 600;
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  cursor: grab;
+  color: var(--text-secondary);
+  user-select: none;
+  cursor: default;
+  transition: background 0.12s, color 0.12s;
 }
-.group-header:active {
-  cursor: grabbing;
+.group-header:hover {
+  background: var(--bg-hover);
 }
 .group-header.active {
   background: var(--bg-active);
   color: var(--text-active);
-  border-radius: 6px;
 }
-.group-drag-handle {
-  font-size: 12px;
-  color: var(--text-secondary);
-  user-select: none;
-  flex-shrink: 0;
-  letter-spacing: -1px;
-}
-.group-drag-handle:hover,
-.project-drag-handle:hover {
-  color: var(--primary);
-}
-/* 展开/收起分组 */
+/* 展开/收起分组：用细线箭头，展开时旋转 90°，比 ▸/▾ 更贴合中文排版 */
 .group-toggle {
+  display: grid;
+  place-items: center;
   flex-shrink: 0;
-  width: 18px;
+  width: 16px;
+  height: 16px;
   padding: 0;
   border: none;
+  border-radius: 4px;
   background: transparent;
-  color: var(--text-secondary);
-  font-size: 13px;
-  line-height: 1;
+  color: var(--text-muted);
   cursor: pointer;
+  transition: color 0.12s;
 }
 .group-toggle:hover {
   color: var(--primary);
 }
+.group-toggle:focus-visible {
+  outline: 1px solid var(--primary);
+  outline-offset: 0;
+}
+.group-chevron {
+  width: 11px;
+  height: 11px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: transform 0.15s ease;
+}
+.group-chevron.open {
+  transform: rotate(90deg);
+}
 .group-name {
   flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .name-readonly {
   cursor: default;
@@ -548,140 +595,195 @@ function toggleCollapse(groupId: string) {
 .group-name-input {
   flex: 1;
   min-width: 0;
+  height: 22px;
   padding: 2px 4px;
   border: 1px solid var(--primary);
-  border-radius: 3px;
+  border-radius: 4px;
   font-size: 12px;
   font-weight: 600;
   font-family: inherit;
   background: var(--bg-input);
   color: var(--text-primary);
   outline: none;
-  text-transform: none;
   letter-spacing: normal;
 }
-.group-rename {
-  border: none;
-  background: none;
-  cursor: pointer;
-  color: var(--text-muted);
-  font-size: 12px;
-  padding: 0;
-  line-height: 1;
-  flex-shrink: 0;
-  transform: scaleX(-1);
-}
-.group-rename:hover {
-  color: var(--primary);
-}
 .group-default-badge {
-  font-size: 10px;
-  padding: 1px 6px;
-  border-radius: 3px;
-  color: var(--text-muted);
-  border: 1px solid var(--border-color);
   flex-shrink: 0;
+  height: 16px;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: var(--bg-tag);
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 16px;
   user-select: none;
 }
+.group-rename,
 .group-delete {
-  border: none;
-  background: none;
-  cursor: pointer;
-  color: var(--text-muted);
-  font-size: 16px;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
   padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
   line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s, background 0.12s, color 0.12s;
+}
+.group-header:hover .group-rename,
+.group-header:hover .group-delete,
+.group-header:focus-within .group-rename,
+.group-header:focus-within .group-delete {
+  opacity: 1;
+  pointer-events: auto;
+}
+.group-rename svg,
+.group-delete svg,
+.item-delete svg {
+  width: 14px;
+  height: 14px;
+  fill: currentColor;
+}
+.group-rename:hover {
+  background: var(--bg-tag);
+  color: var(--text-primary);
 }
 .group-delete:hover {
+  background: rgba(239, 68, 68, 0.12);
   color: var(--danger);
 }
+.group-rename:focus-visible,
+.group-delete:focus-visible {
+  outline: 1px solid var(--primary);
+}
+/* 项目列表：左侧一条细竖线表达层级，行高统一，长名称省略 */
 .group-projects {
-  padding-left: 8px;
-  min-height: 10px;
+  margin-left: 12px;
+  padding: 0 0 2px 8px;
+  border-left: 1px solid var(--border-color);
 }
 .list-item {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 8px 12px 8px 4px;
+  gap: 4px;
+  height: 30px;
+  padding: 0 6px 0 16px;
   border-radius: 6px;
-  cursor: pointer;
-  font-size: 14px;
+  font-size: 13px;
   color: var(--text-secondary);
-  transition: opacity 0.15s;
+  user-select: none;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s, box-shadow 0.12s;
 }
 .list-item:hover {
   background: var(--bg-hover);
+  color: var(--text-primary);
 }
 .list-item.active {
   background: var(--bg-active);
   color: var(--text-active);
   font-weight: 500;
+  box-shadow: inset 0 0 0 1px rgba(59, 130, 246, 0.18);
 }
 .list-item.dragging {
   opacity: 0.4;
 }
-.project-drag-handle {
-  font-size: 12px;
-  color: var(--text-secondary);
-  user-select: none;
-  flex-shrink: 0;
-  cursor: grab;
-  letter-spacing: -1px;
-  padding: 0 2px;
-}
-.project-drag-handle:active {
-  cursor: grabbing;
-}
 .item-name {
   flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .item-delete {
-  border: none;
-  background: none;
-  cursor: pointer;
-  color: var(--text-muted);
-  font-size: 18px;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
   padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s, background 0.12s, color 0.12s;
+}
+.list-item:hover .item-delete,
+.list-item.active .item-delete,
+.list-item:focus-within .item-delete {
+  opacity: 1;
+  pointer-events: auto;
 }
 .item-delete:hover {
+  background: rgba(239, 68, 68, 0.12);
   color: var(--danger);
 }
+.item-delete:focus-visible {
+  outline: 1px solid var(--primary);
+}
 .add-project-btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
   width: 100%;
-  padding: 6px;
+  height: 28px;
+  margin: 2px 0;
+  padding: 0 6px;
   border: none;
   border-radius: 6px;
   background: transparent;
-  cursor: pointer;
   color: var(--text-muted);
   font-size: 12px;
   text-align: left;
-  padding-left: 20px;
+  cursor: pointer;
+  opacity: 0.75;
+  transition: opacity 0.12s, background 0.12s, color 0.12s;
 }
 .add-project-btn:hover {
-  color: var(--primary);
+  opacity: 1;
   background: var(--bg-hover);
+  color: var(--primary);
 }
 .empty-tip {
-  padding: 20px;
+  padding: 18px 12px;
   text-align: center;
   color: var(--text-muted);
-  font-size: 13px;
+  font-size: 12px;
 }
 .add-group-btn {
-  margin: 8px;
-  padding: 10px;
-  border: 1px dashed var(--border-color);
-  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  margin-left: auto;
+  padding: 0;
+  border: none;
   background: transparent;
+  color: var(--primary);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
   cursor: pointer;
-  color: var(--text-secondary);
-  font-size: 14px;
 }
 .add-group-btn:hover {
-  border-color: var(--primary);
-  color: var(--primary);
+  color: var(--primary-hover);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.add-group-btn:focus-visible {
+  outline: 1px solid var(--primary);
+  outline-offset: 1px;
 }
 
 /* 拖拽插入指示线 */

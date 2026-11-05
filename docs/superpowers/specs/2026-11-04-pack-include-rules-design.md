@@ -44,3 +44,7 @@
 - `models::default_include_tests`：默认集覆盖浏览器类型、不含开发期类型、无重复、老配置迁移补齐、版本已最新时不回塞
 - `packer::tests`：`.`/`_` 硬跳过（含子目录）、默认集只收浏览器资源、文件名/路径两种匹配、空规则放行、输出目录剪枝
 - 前端 `vue-tsc --noEmit` + `vite build`
+
+## 后续变更
+
+- 2026-11-04：默认包含集加入 `*.doc`（旧版 Word 模板，部分 layui 工程的 WebOffice 新建正文只提供 `.doc`），`DEFAULT_INCLUDE_VERSION` 升到 4；老配置加载时由 `migrate_default_include` 自动追加该规则。

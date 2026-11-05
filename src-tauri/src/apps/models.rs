@@ -12,6 +12,11 @@ use serde::{Deserialize, Serialize};
 pub enum AppId {
     Vscode,
     Idea,
+    Pycharm,
+    Webstorm,
+    Goland,
+    Rustrover,
+    Cursor,
     Trae,
     /// VPN 唯一的连接程序：命令行版 openconnect。
     /// Windows 上优先用随程序分发的内置副本，macOS 上走 Homebrew 装的那份。
@@ -22,6 +27,11 @@ impl AppId {
     pub const ALL: &'static [AppId] = &[
         AppId::Vscode,
         AppId::Idea,
+        AppId::Pycharm,
+        AppId::Webstorm,
+        AppId::Goland,
+        AppId::Rustrover,
+        AppId::Cursor,
         AppId::Trae,
         AppId::Openconnect,
     ];
@@ -30,6 +40,11 @@ impl AppId {
         match self {
             AppId::Vscode => "vscode",
             AppId::Idea => "idea",
+            AppId::Pycharm => "pycharm",
+            AppId::Webstorm => "webstorm",
+            AppId::Goland => "goland",
+            AppId::Rustrover => "rustrover",
+            AppId::Cursor => "cursor",
             AppId::Trae => "trae",
             AppId::Openconnect => "openconnect",
         }
@@ -46,6 +61,11 @@ impl AppId {
         match self {
             AppId::Vscode => "Visual Studio Code",
             AppId::Idea => "IntelliJ IDEA",
+            AppId::Pycharm => "PyCharm",
+            AppId::Webstorm => "WebStorm",
+            AppId::Goland => "GoLand",
+            AppId::Rustrover => "RustRover",
+            AppId::Cursor => "Cursor",
             AppId::Trae => "Trae",
             AppId::Openconnect => "OpenConnect（命令行）",
         }
@@ -55,6 +75,11 @@ impl AppId {
         match self {
             AppId::Vscode => "在 VS Code 里打开项目目录",
             AppId::Idea => "在 IntelliJ IDEA 里打开项目目录",
+            AppId::Pycharm => "在 PyCharm 里打开项目目录",
+            AppId::Webstorm => "在 WebStorm 里打开项目目录",
+            AppId::Goland => "在 GoLand 里打开项目目录",
+            AppId::Rustrover => "在 RustRover 里打开项目目录",
+            AppId::Cursor => "在 Cursor 里打开项目目录",
             AppId::Trae => "在 Trae 里打开项目目录",
             AppId::Openconnect => {
                 "VPN 唯一的连接程序：支持免手输密码自动登录，\
@@ -69,11 +94,23 @@ impl AppId {
         match self {
             AppId::Vscode => &["Code.exe", "code.cmd", "code.bat", "code"],
             AppId::Idea => &["idea64.exe", "idea.exe", "idea.cmd", "idea.bat"],
+            AppId::Pycharm => &["pycharm64.exe", "pycharm.exe", "pycharm.cmd", "pycharm.bat"],
+            AppId::Webstorm => &["webstorm64.exe", "webstorm.exe", "webstorm.cmd", "webstorm.bat"],
+            AppId::Goland => &["goland64.exe", "goland.exe", "goland.cmd", "goland.bat"],
+            AppId::Rustrover => &[
+                "rustrover64.exe",
+                "rustrover.exe",
+                "rustrover.cmd",
+                "rustrover.bat",
+            ],
+            AppId::Cursor => &["Cursor.exe", "cursor.cmd", "cursor.bat", "cursor"],
             AppId::Trae => &[
+                "Trae CN.exe",
+                "Trae.exe",
                 "trae-solo-cn.exe",
                 "trae-solo-cn.cmd",
-                "Trae.exe",
                 "trae.exe",
+                "trae-cn.cmd",
                 "trae.cmd",
                 "trae.bat",
             ],
@@ -86,6 +123,11 @@ impl AppId {
         match self {
             AppId::Vscode => &["Visual Studio Code", "VS Code", "VSCode"],
             AppId::Idea => &["IntelliJ IDEA", "JetBrains Toolbox"],
+            AppId::Pycharm => &["PyCharm"],
+            AppId::Webstorm => &["WebStorm"],
+            AppId::Goland => &["GoLand"],
+            AppId::Rustrover => &["RustRover"],
+            AppId::Cursor => &["Cursor"],
             AppId::Trae => &["Trae"],
             AppId::Openconnect => &["OpenConnect"],
         }
@@ -102,7 +144,12 @@ impl AppId {
                 "Programs\\VSCode",
                 "Programs\\Microsoft VS Code Insiders",
             ],
-            AppId::Idea => &["JetBrains\\Toolbox\\scripts"],
+            AppId::Idea
+            | AppId::Pycharm
+            | AppId::Webstorm
+            | AppId::Goland
+            | AppId::Rustrover => &["JetBrains\\Toolbox\\scripts"],
+            AppId::Cursor => &["Programs\\cursor", "Cursor"],
             AppId::Trae => &[
                 "TRAE SOLO CN",
                 "Trae CN",
@@ -119,6 +166,10 @@ impl AppId {
     pub const fn windows_versioned_dirs(&self) -> &'static [&'static str] {
         match self {
             AppId::Idea => &["IntelliJ IDEA", "IDEA"],
+            AppId::Pycharm => &["PyCharm"],
+            AppId::Webstorm => &["WebStorm"],
+            AppId::Goland => &["GoLand"],
+            AppId::Rustrover => &["RustRover"],
             // 手工解压出来的目录通常带版本号，例如 openconnect-9.21_MINGW64
             AppId::Openconnect => &["openconnect"],
             _ => &[],
@@ -128,7 +179,11 @@ impl AppId {
     /// 版本化目录里的最大搜索深度
     pub const fn windows_search_depth(&self) -> usize {
         match self {
-            AppId::Idea => 4,
+            AppId::Idea
+            | AppId::Pycharm
+            | AppId::Webstorm
+            | AppId::Goland
+            | AppId::Rustrover => 4,
             _ => 2,
         }
     }
@@ -145,6 +200,14 @@ impl AppId {
                 "/Applications/IntelliJ IDEA.app/Contents/MacOS/idea",
                 "/Applications/IntelliJ IDEA CE.app/Contents/MacOS/idea",
             ],
+            AppId::Pycharm => &[
+                "/Applications/PyCharm.app/Contents/MacOS/pycharm",
+                "/Applications/PyCharm CE.app/Contents/MacOS/pycharm",
+            ],
+            AppId::Webstorm => &["/Applications/WebStorm.app/Contents/MacOS/webstorm"],
+            AppId::Goland => &["/Applications/GoLand.app/Contents/MacOS/goland"],
+            AppId::Rustrover => &["/Applications/RustRover.app/Contents/MacOS/rustrover"],
+            AppId::Cursor => &["/Applications/Cursor.app/Contents/MacOS/Cursor"],
             AppId::Trae => &["/Applications/Trae.app/Contents/MacOS/Trae"],
             AppId::Openconnect => &[
                 "/opt/homebrew/bin/openconnect",

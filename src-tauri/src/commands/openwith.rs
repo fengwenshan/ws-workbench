@@ -4,15 +4,16 @@
 //! 在各平台可能的安装位置，运行时按顺序取第一个存在的，一个都找不到就
 //! 不进菜单（所以菜单里永远只出现真正装了的东西）。
 //!
-//! 图标只在 macOS 上提供：`sips` 把包里的 `.icns` 转成 64px PNG，编码成
-//! data URL 交给前端，前端直接 `<img>` 显示；其它平台先不给图标，前端用
+//! 图标来源按平台区分：
+//! - macOS：`sips` 把包里的 `.icns` 转成 64px PNG
+//! - Windows：`PrivateExtractIcons` 从可执行文件里取 64px 图标，转 PNG
+//!
+//! 两者都编码成 data URL 交给前端直接 `<img>` 显示；取不到图标时前端用
 //! 首字母兜底。
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-#[cfg(target_os = "macos")]
-use std::path::PathBuf;
 #[cfg(target_os = "macos")]
 use std::process::Command;
 
@@ -356,47 +357,302 @@ fn mac_open(app_id: &str, dir: &str) -> Result<(), String> {
 
 // ============================== Windows / Linux ==============================
 
-/// 非 macOS 上能用的打开方式少一些：文件管理器、终端，外加 `apps` 模块能定位到的编辑器
+/// 非 macOS 的菜单顺序：文件管理器 → 编辑器 / IDE → 终端。
+/// 顺序和 DeepSeek Harness 的 open-in-app 一致，装了哪个才出现哪个。
+#[cfg(not(target_os = "macos"))]
+const DESKTOP_EDITORS: &[(&str, &str, crate::apps::AppId)] = &[
+    ("vscode", "VS Code", crate::apps::AppId::Vscode),
+    ("idea", "IntelliJ IDEA", crate::apps::AppId::Idea),
+    ("pycharm", "PyCharm", crate::apps::AppId::Pycharm),
+    ("webstorm", "WebStorm", crate::apps::AppId::Webstorm),
+    ("goland", "GoLand", crate::apps::AppId::Goland),
+    ("rustrover", "RustRover", crate::apps::AppId::Rustrover),
+    ("cursor", "Cursor", crate::apps::AppId::Cursor),
+    ("trae", "Trae", crate::apps::AppId::Trae),
+];
+
+/// 非 macOS 菜单里的一项。
+///
+/// 只带取图标用的路径：启动时按 `id` 重新定位（`open_with` 和扫描走同一套
+/// [`crate::apps::locate`]，保证「菜单里看到的」就是「点下去启动的」）。
+/// `icon_from` 大多数时候就是启动文件本身，但启动器可能是 `.cmd` 包装脚本
+/// （Trae 的 `bin\trae.cmd`）或 0 字节的应用别名（`WindowsApps\wt.exe`），
+/// 从它们身上只能抽到脚本 / 快捷方式的通用图标，这时图标要从背后的真正的
+/// exe 上取。
+#[cfg(not(target_os = "macos"))]
+struct Entry {
+    id: &'static str,
+    name: &'static str,
+    icon_from: Option<PathBuf>,
+}
+
+#[cfg(not(target_os = "macos"))]
+impl Entry {
+    /// 启动文件与图标来源相同的普通项（编辑器、资源管理器）
+    fn simple(id: &'static str, name: &'static str, executable: Option<PathBuf>) -> Self {
+        Self {
+            id,
+            name,
+            icon_from: executable,
+        }
+    }
+}
+
+/// 非 macOS 的菜单：文件管理器 + 本机装了的外部应用 + 终端 + PowerShell。
+///
+/// `apps::locate` 会走注册表 / 常见安装目录 / PATH 六条来源，找不到的编辑器
+/// 不进菜单，所以菜单里永远是点得开的项。图标从各自的可执行文件里取。
 #[cfg(not(target_os = "macos"))]
 fn other_scan(app: &AppHandle) -> Vec<OpenWithApp> {
-    #[cfg(target_os = "windows")]
-    let shell = ("explorer", "资源管理器");
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let shell = ("filemanager", "文件管理器");
-
-    let mut apps = vec![OpenWithApp {
-        id: shell.0.to_string(),
-        name: shell.1.to_string(),
-        icon: None,
-        is_default: true,
-    }];
-
-    // 编辑器：复用 `apps::locate` 的六条探测路径，找不到就不出现
     let ctx = crate::commands::app_context(app);
-    let editors = [
-        ("vscode", "VS Code", crate::apps::AppId::Vscode),
-        ("idea", "IntelliJ IDEA", crate::apps::AppId::Idea),
-        ("trae", "Trae", crate::apps::AppId::Trae),
-    ];
-    for (id, name, app_id) in editors {
-        if crate::apps::locate(app_id, &ctx, "").available {
-            apps.push(OpenWithApp {
-                id: id.to_string(),
-                name: name.to_string(),
-                icon: None,
-                is_default: false,
-            });
+    collect(desktop_entries(&ctx))
+}
+
+/// 菜单条目：文件管理器 → 本机装了的外编辑器 → 终端 / PowerShell。
+///
+/// 和 `AppHandle` 无关，单独拆出来是为了能在测试里直接看菜单内容。
+#[cfg(not(target_os = "macos"))]
+fn desktop_entries(ctx: &crate::apps::AppContext) -> Vec<Entry> {
+    let mut entries: Vec<Entry> = Vec::new();
+
+    #[cfg(target_os = "windows")]
+    entries.push(Entry::simple(
+        "explorer",
+        "资源管理器",
+        system_exe("explorer.exe"),
+    ));
+    #[cfg(all(unix, not(target_os = "macos")))]
+    entries.push(Entry::simple("filemanager", "文件管理器", None));
+
+    for &(id, name, app_id) in DESKTOP_EDITORS {
+        let location = crate::apps::locate(app_id, ctx, "");
+        if location.available {
+            // 找到的是 `.cmd` 启动器时换成它背后的 exe，图标才对
+            let exec = real_executable(Path::new(&location.path));
+            entries.push(Entry::simple(id, name, Some(exec)));
         }
     }
 
-    apps.push(OpenWithApp {
-        id: "terminal".to_string(),
-        name: "终端".to_string(),
-        icon: None,
-        is_default: false,
-    });
-    apps
+    #[cfg(target_os = "windows")]
+    {
+        // 终端：启动走 cmd（Windows 11 下控制台默认由 Windows Terminal 承载），
+        // 图标从 WindowsTerminal.exe 取
+        let icon_from = crate::commands::windows_terminal_icon().or_else(|| system_exe("cmd.exe"));
+        entries.push(Entry {
+            id: "terminal",
+            name: "终端",
+            icon_from,
+        });
+
+        let powershell = crate::commands::powershell_exe();
+        entries.push(Entry::simple("powershell", "PowerShell", powershell));
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    entries.push(Entry::simple("terminal", "终端", None));
+
+    entries
 }
+
+/// 取图标并转成前端用的 `OpenWithApp`
+#[cfg(not(target_os = "macos"))]
+#[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
+fn collect(mut entries: Vec<Entry>) -> Vec<OpenWithApp> {
+    #[cfg(target_os = "windows")]
+    let mut icons = {
+        let paths = entries
+            .iter()
+            .filter_map(|entry| entry.icon_from.as_deref())
+            .collect::<Vec<_>>();
+        windows_icons(&paths)
+    };
+    #[cfg(target_os = "windows")]
+    {
+        // 受限环境里 PowerShell 可能读不了 WindowsApps 目录，这时终端图标
+        // 退回 cmd.exe 的，别让菜单里空一格
+        let terminal_icon_missing = entries
+            .iter()
+            .find(|entry| entry.id == "terminal")
+            .and_then(|entry| entry.icon_from.as_deref())
+            .is_some_and(|path| !icons.contains_key(path));
+        if terminal_icon_missing {
+            if let Some(cmd) = system_exe("cmd.exe") {
+                if let Some(entry) = entries.iter_mut().find(|entry| entry.id == "terminal") {
+                    entry.icon_from = Some(cmd.clone());
+                }
+                icons.extend(windows_icons(&[cmd.as_path()]));
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    let icons: std::collections::HashMap<PathBuf, String> = std::collections::HashMap::new();
+
+    entries
+        .into_iter()
+        .map(|entry| OpenWithApp {
+            id: entry.id.to_string(),
+            name: entry.name.to_string(),
+            icon: entry
+                .icon_from
+                .as_deref()
+                .and_then(|path| icons.get(path).cloned()),
+            is_default: entry.id == "explorer" || entry.id == "filemanager",
+        })
+        .collect()
+}
+
+/// 系统目录里的可执行文件。
+///
+/// explorer.exe 在 `%SystemRoot%` 下，cmd.exe 在 `%SystemRoot%\System32`，
+/// 两个位置都找一遍。
+#[cfg(target_os = "windows")]
+fn system_exe(name: &str) -> Option<PathBuf> {
+    let root = std::env::var_os("SystemRoot").map(PathBuf::from)?;
+    for candidate in [root.join(name), root.join("System32").join(name)] {
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// 从 `.cmd` / `.bat` 启动器里找出它真正启动的 exe。
+///
+/// 这类包装脚本不长：Trae 的 `bin\trae.cmd` 里就写着
+/// `"%~dp0..\Trae CN.exe" "%~dp0..\resources\app\out\cli.js" %*`。
+/// 用它起程序的同时也用它的图标，否则菜单里显示的是 cmd 脚本的通用图标。
+#[cfg(target_os = "windows")]
+fn real_executable(path: &Path) -> PathBuf {
+    let is_shim = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("cmd") || ext.eq_ignore_ascii_case("bat"))
+        .unwrap_or(false);
+    if !is_shim {
+        return path.to_path_buf();
+    }
+    shim_target(path).unwrap_or_else(|| path.to_path_buf())
+}
+
+#[cfg(target_os = "windows")]
+fn shim_target(shim: &Path) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(shim).ok()?;
+    let dir = shim.parent()?;
+    for raw in text.split(['"', '\r', '\n']) {
+        let token = raw.trim();
+        if !token.to_ascii_lowercase().ends_with(".exe") {
+            continue;
+        }
+        let candidate = if let Some(rest) = token.strip_prefix("%~dp0") {
+            dir.join(rest.trim_start_matches(['\\', '/']))
+        } else if Path::new(token).is_absolute() {
+            PathBuf::from(token)
+        } else {
+            continue;
+        };
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// 非 Windows 上没有 `.cmd` 包装脚本，原样返回
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+fn real_executable(path: &Path) -> PathBuf {
+    path.to_path_buf()
+}
+
+/// 从一组可执行文件里批量取 64px 图标，返回「可执行文件路径 → data URL」。
+///
+/// 一次 PowerShell 调用处理整张菜单：`PrivateExtractIcons` 直接向 shell 要
+/// 指定尺寸的图标（比 `ExtractAssociatedIcon` 的 32px 清楚），取不到再退回
+/// `ExtractAssociatedIcon`。结果由 [`CACHE`] 缓存，每次启动只算一次。
+#[cfg(target_os = "windows")]
+fn windows_icons(paths: &[&Path]) -> std::collections::HashMap<PathBuf, String> {
+    use std::collections::HashMap;
+
+    let mut icons: HashMap<PathBuf, String> = HashMap::new();
+    if paths.is_empty() {
+        return icons;
+    }
+
+    let list = paths
+        .iter()
+        .map(|path| format!("'{}'", path.to_string_lossy().replace('\'', "''")))
+        .collect::<Vec<_>>()
+        .join(",");
+
+    let script = WINDOWS_ICON_SCRIPT.replace("{LIST}", &list);
+
+    #[derive(serde::Deserialize)]
+    struct IconEntry {
+        path: String,
+        png: String,
+    }
+
+    let Ok(value) = crate::winps::run_json(&script) else {
+        return icons;
+    };
+    for entry in crate::winps::parse_list::<IconEntry>(value) {
+        if entry.png.is_empty() {
+            continue;
+        }
+        icons.insert(
+            PathBuf::from(&entry.path),
+            format!("data:image/png;base64,{}", entry.png),
+        );
+    }
+    icons
+}
+
+/// 批量提取图标的 PowerShell 脚本，`{LIST}` 会被替换成 `@('C:\a.exe','C:\b.exe')`
+///
+/// `PrivateExtractIcons` 能取到 64px 图标，但需要 `Add-Type` 现场编译，编译要往
+/// `%TEMP%` 写临时文件 —— 受限环境（沙箱、组策略禁用临时目录）里会失败。
+/// 所以编译放在 try 里：成功就用 64px，失败就退回 `ExtractAssociatedIcon` 的 32px，
+/// 图标质量差一点，但不至于整个菜单没图标。
+#[cfg(target_os = "windows")]
+const WINDOWS_ICON_SCRIPT: &str = r#"Add-Type -AssemblyName System.Drawing
+$shellReady = $false
+try {
+  Add-Type -TypeDefinition 'using System;using System.Runtime.InteropServices;public static class WsIconShell{[DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern uint PrivateExtractIcons(string file,int index,int cx,int cy,IntPtr[] icons,uint[] ids,uint count,uint flags);[DllImport("user32.dll")] public static extern bool DestroyIcon(IntPtr icon);}'
+  $shellReady = $true
+} catch { }
+$paths = @({LIST})
+$out = @()
+foreach ($path in $paths) {
+  if (-not (Test-Path -LiteralPath $path)) { continue }
+  $icon = $null
+  $handle = [IntPtr]::Zero
+  if ($shellReady) {
+    try {
+      $handles = New-Object IntPtr[] 1
+      $ids = New-Object uint32[] 1
+      $count = [WsIconShell]::PrivateExtractIcons($path, 0, 64, 64, $handles, $ids, 1, 0)
+      if ($count -gt 0 -and $handles[0] -ne [IntPtr]::Zero) {
+        $handle = $handles[0]
+        $icon = [System.Drawing.Icon]::FromHandle($handle)
+      }
+    } catch { }
+  }
+  if ($null -eq $icon) {
+    try { $icon = [System.Drawing.Icon]::ExtractAssociatedIcon($path) } catch { }
+  }
+  if ($null -eq $icon) { continue }
+  try {
+    $bitmap = $icon.ToBitmap()
+    $stream = New-Object System.IO.MemoryStream
+    $bitmap.Save($stream, [System.Drawing.Imaging.ImageFormat]::Png)
+    $out += [pscustomobject]@{ path = $path; png = [Convert]::ToBase64String($stream.ToArray()) }
+    $stream.Dispose()
+    $bitmap.Dispose()
+  } catch { }
+  finally {
+    if ($handle -ne [IntPtr]::Zero) { [void][WsIconShell]::DestroyIcon($handle) }
+    $icon.Dispose()
+  }
+}
+ConvertTo-Json -InputObject @($out) -Compress"#;
 
 #[cfg(not(target_os = "macos"))]
 fn other_open(app: &AppHandle, app_id: &str, dir: &str) -> Result<(), String> {
@@ -406,9 +662,18 @@ fn other_open(app: &AppHandle, app_id: &str, dir: &str) -> Result<(), String> {
     if app_id == "terminal" {
         return crate::commands::open_terminal_dir(dir);
     }
+    #[cfg(target_os = "windows")]
+    if app_id == "powershell" {
+        return crate::commands::open_powershell_dir(dir);
+    }
     let app_id = match app_id {
         "vscode" => crate::apps::AppId::Vscode,
         "idea" => crate::apps::AppId::Idea,
+        "pycharm" => crate::apps::AppId::Pycharm,
+        "webstorm" => crate::apps::AppId::Webstorm,
+        "goland" => crate::apps::AppId::Goland,
+        "rustrover" => crate::apps::AppId::Rustrover,
+        "cursor" => crate::apps::AppId::Cursor,
         "trae" => crate::apps::AppId::Trae,
         other => return Err(format!("未知的打开方式: {}", other)),
     };
@@ -417,7 +682,119 @@ fn other_open(app: &AppHandle, app_id: &str, dir: &str) -> Result<(), String> {
     if !location.available {
         return Err(format!("未找到 {}。{}", app_id.display_name(), location.note));
     }
-    crate::apps::finder::spawn_with_target(Path::new(&location.path), dir)
+    // 和菜单里的图标保持一致：启动器是 .cmd 时用背后的 exe
+    let executable = real_executable(Path::new(&location.path));
+    crate::apps::finder::spawn_with_target(&executable, dir)
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod windows_tests {
+    use super::*;
+
+    /// 真机验证：Windows 上能从可执行文件里取到 PNG 图标
+    #[test]
+    fn icons_are_extracted_from_executables() {
+        let exe = system_exe("explorer.exe").expect("系统里应该有 explorer.exe");
+        let icons = windows_icons(&[exe.as_path()]);
+        let icon = icons
+            .get(exe.as_path())
+            .expect("explorer.exe 应该能取到图标");
+        assert!(icon.starts_with("data:image/png;base64,"), "实际: {}", icon);
+        assert!(icon.len() > 200, "图标数据太短: {}", icon.len());
+    }
+
+    /// 取不到图标时安静返回空表，不影响菜单
+    #[test]
+    fn missing_executable_has_no_icon() {
+        let icons = windows_icons(&[Path::new(r"C:\definitely\not\here.exe")]);
+        assert!(icons.is_empty());
+    }
+
+    /// 测试目录：放 `target/test-tmp` 下，避免受限环境里 %TEMP% 不可写
+    fn test_dir(name: &str) -> PathBuf {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target/test-tmp")
+            .join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// `.cmd` 启动器要换成它背后真正的 exe，否则图标是脚本的通用图标
+    #[test]
+    fn cmd_shim_resolves_to_the_real_executable() {
+        let dir = test_dir("trae-shim");
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let exe = dir.join("Trae CN.exe");
+        std::fs::write(&exe, b"stub").unwrap();
+        let shim = bin.join("trae.cmd");
+        std::fs::write(
+            &shim,
+            "@echo off\r\n\"%~dp0..\\Trae CN.exe\" \"%~dp0..\\resources\\app\\out\\cli.js\" %*\r\n",
+        )
+        .unwrap();
+
+        let resolved = real_executable(&shim);
+        assert_eq!(
+            resolved.canonicalize().unwrap(),
+            exe.canonicalize().unwrap(),
+            "实际解析到: {}",
+            resolved.display()
+        );
+
+        // 本来就是 exe 的不动
+        assert_eq!(real_executable(&exe), exe);
+    }
+
+    /// 真机自检：菜单里每一项都该有图标（除了确实没有图标的项）
+    #[test]
+    fn desktop_menu_has_icons_for_every_entry() {
+        let entries = desktop_entries(&crate::apps::AppContext::default());
+        let apps = collect(entries);
+        let mut missing = Vec::new();
+        for app in &apps {
+            match &app.icon {
+                Some(icon) => assert!(
+                    icon.starts_with("data:image/png;base64,"),
+                    "{} 的图标不是 data URL",
+                    app.id
+                ),
+                None => missing.push(app.id.clone()),
+            }
+        }
+        // 至少这些必须有图标
+        for required in ["terminal", "powershell", "vscode"] {
+            assert!(
+                apps.iter()
+                    .any(|app| app.id == required && app.icon.is_some()),
+                "{} 没有图标，缺失项: {:?}",
+                required,
+                missing
+            );
+        }
+    }
+
+    /// 真机：终端图标来自 WindowsTerminal.exe（不是 0 字节的 wt.exe 别名），
+    /// PowerShell 也有图标
+    #[test]
+    fn terminal_and_powershell_icons_are_extracted() {
+        if let Some(icon_path) = crate::commands::windows_terminal_icon() {
+            let icons = windows_icons(&[icon_path.as_path()]);
+            let icon = icons
+                .get(&icon_path)
+                .expect("WindowsTerminal.exe 应该能取到图标");
+            assert!(icon.starts_with("data:image/png;base64,"));
+            assert!(icon.len() > 500, "图标数据太短: {}", icon.len());
+        }
+
+        let powershell = crate::commands::powershell_exe().expect("系统里应该有 PowerShell");
+        let icons = windows_icons(&[powershell.as_path()]);
+        assert!(
+            icons.contains_key(&powershell),
+            "PowerShell 没取到图标: {}",
+            powershell.display()
+        );
+    }
 }
 
 #[cfg(all(test, target_os = "macos"))]

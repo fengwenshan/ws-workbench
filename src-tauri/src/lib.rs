@@ -177,7 +177,12 @@ fn create_main_window(app: &mut tauri::App) -> tauri::Result<()> {
         .cloned()
         .expect("tauri.conf.json 里缺少 main 窗口配置");
 
-    tauri::WebviewWindowBuilder::from_config(app.handle(), &config)?
+    let builder = tauri::WebviewWindowBuilder::from_config(app.handle(), &config)?;
+    // Windows 上隐藏系统标题栏，改由前端画标题栏和最小化/最大化/关闭按钮；
+    // macOS 继续用 Overlay 的原生红绿灯，Linux 也保留系统边框。
+    #[cfg(target_os = "windows")]
+    let builder = builder.decorations(false);
+    builder
         .data_directory(webview_data_dir(app))
         .on_navigation(|url| {
             // 只拦本地文件导航；dev 的 http://localhost 和打包后的 tauri:// 都放行

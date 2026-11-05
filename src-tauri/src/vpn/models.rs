@@ -127,6 +127,9 @@ pub struct VpnProfile {
     /// 指定连接器；现在只有 openconnect 一条通道，auto 与 openconnect 等价
     #[serde(default)]
     pub connector: ConnectorKind,
+    /// 代理模式：rule / global / direct。老配置没有这个字段时按规则模式处理。
+    #[serde(default = "default_proxy_mode")]
+    pub proxy_mode: String,
     /// 绑定的规则集 id
     #[serde(default)]
     pub rule_set_id: String,
@@ -156,6 +159,10 @@ pub struct VpnProfile {
 
 fn default_protocol() -> String {
     "anyconnect".to_string()
+}
+
+fn default_proxy_mode() -> String {
+    "rule".to_string()
 }
 
 fn default_fake_ip_range() -> String {
@@ -540,6 +547,8 @@ mod tests {
         let profile: VpnProfile = serde_json::from_str(raw).expect("老档案必须还能读");
         assert_eq!(profile.server, "vpn.example.com:443");
         assert_eq!(profile.fake_ip_range, "198.18.0.0/16");
+        // 老配置没有 proxy_mode，必须默认落在规则模式，不能变成全局或直连
+        assert_eq!(profile.proxy_mode, "rule");
     }
 
     #[test]

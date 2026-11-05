@@ -10,9 +10,11 @@ import type {
   ElevationInfo,
   InstallGuide,
   LearnReport,
+  NewVpnProfileInput,
   SessionDirInfo,
   VpnPolicy,
   VpnProfile,
+  VpnProxyMode,
   VpnRule,
   VpnRuleKind,
   VpnRuleSet,
@@ -94,6 +96,10 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
     if (!profile?.rule_set_id) return null
     return ruleSets.value.find((r) => r.id === profile.rule_set_id) ?? null
   })
+
+  const proxyMode = computed<VpnProxyMode>(
+    () => selectedProfile.value?.proxy_mode ?? 'rule',
+  )
 
   const activeConnectors = computed(() => connectors.value.filter((c) => c.available))
   const bestConnector = computed<ConnectorInfo | null>(
@@ -210,11 +216,24 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
 
     connecting.value = true
     try {
-      const rules = selectedRuleSet.value?.rules ?? []
+      const mode = target.proxy_mode ?? 'rule'
+      const ruleSet = ruleSets.value.find((r) => r.id === target.rule_set_id) ?? null
+      if (mode === 'rule' && !ruleSet) {
+        throw new Error('规则模式需要先选择一个规则列表')
+      }
+      // 全局/直连模式不把规则交给后端；后端还会按 profile.proxy_mode 再兜一次，
+      // 防止界面切换后仍按旧规则连接。
+      const rules = mode === 'rule' ? (ruleSet?.rules ?? []) : []
+      const defaultPolicy =
+        mode === 'global'
+          ? 'VPN'
+          : mode === 'direct'
+            ? 'DIRECT'
+            : (ruleSet?.default_policy ?? 'DIRECT')
       const result = await invoke<ConnectResult>('vpn_connect', {
         profile: target,
         rules,
-        defaultPolicy: selectedRuleSet.value?.default_policy ?? 'DIRECT',
+        defaultPolicy,
         customOpenconnect: target.connector_path || null,
       })
       pushLog(
@@ -269,7 +288,9 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
     return { id: crypto.randomUUID(), kind, value, policy, no_resolve: false, remark: '', enabled: true }
   }
 
-  async function addProfile(name = '新建 VPN 配置', server = '') {
+  async function addProfile(input: NewVpnProfileInput) {
+    const name = input.name.trim() || '新建 VPN 配置'
+    const server = input.server.trim()
     // 新配置默认带一条 corp 规则：域名里含 corp 的请求走 VPN，其余直连。
     // 用户仍可在规则表里改顺序、加网段或删掉这条。
     const corp = newRule('DOMAIN-KEYWORD', 'corp', 'VPN')
@@ -282,17 +303,18 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
       id: crypto.randomUUID(),
       name,
       server,
-      username: '',
-      password: '',
+      username: input.username?.trim() ?? '',
+      password: input.password ?? '',
       password_encrypted: false,
-      protocol: 'anyconnect',
+      protocol: input.protocol?.trim() || 'anyconnect',
       connector: 'auto',
+      proxy_mode: 'rule',
       rule_set_id: ruleSet.id,
       fake_ip_range: '198.18.0.0/16',
       fake_ip_filter: [],
       use_vpn_dns: true,
       learn: false,
-      extra_args: [],
+      extra_args: input.extra_args ?? [],
       connector_path: '',
       created_at: now,
       updated_at: now,
@@ -311,25 +333,11 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
     await saveConfig()
   }
 
-  /** 保存密码：明文直接进入配置，整块配置落盘时由后端统一加密 */
-  async function savePassword(id: string, plain: string) {
-    if (!plain) return
-    await updateProfile(id, { password: plain, password_encrypted: false })
-  }
-
   async function deleteProfile(id: string) {
     const profile = profiles.value.find((p) => p.id === id)
     if (!profile) return
     config.value.vpn_profiles = profiles.value.filter((p) => p.id !== id)
-    // 规则集如果没有别的配置在用，就一起删掉，避免留下孤儿数据
-    const stillUsed = config.value.vpn_profiles.some(
-      (p) => p.rule_set_id === profile.rule_set_id,
-    )
-    if (!stillUsed && profile.rule_set_id) {
-      config.value.vpn_rule_sets = ruleSets.value.filter(
-        (r) => r.id !== profile.rule_set_id,
-      )
-    }
+    // 规则列表是独立可复用的集合，删配置时不跟着删；需要时在规则列表里单独删除
     if (config.value.vpn_active_profile_id === id) {
       config.value.vpn_active_profile_id = config.value.vpn_profiles[0]?.id ?? ''
     }
@@ -344,6 +352,49 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
     if (!ruleSet) return
     Object.assign(ruleSet, patch)
     await saveConfig()
+  }
+
+  /** 生成不重复的默认列表名，避免页面上出现两行同名列表 */
+  function nextRuleSetName(): string {
+    let index = ruleSets.value.length + 1
+    while (ruleSets.value.some((set) => set.name === `规则列表 ${index}`)) index += 1
+    return `规则列表 ${index}`
+  }
+
+  /** 新列表创建后直接设为当前配置的生效列表；规则内容在弹窗里填 */
+  async function createRuleSet(name = ''): Promise<VpnRuleSet> {
+    const ruleSet = newRuleSet(name.trim() || nextRuleSetName())
+    config.value.vpn_rule_sets.push(ruleSet)
+    const profile = selectedProfile.value
+    if (profile) profile.rule_set_id = ruleSet.id
+    await saveConfig()
+    return ruleSet
+  }
+
+  /** 页面上虽然可以有多份列表，但同一时刻只允许一份生效 */
+  async function selectRuleSet(id: string) {
+    const profile = selectedProfile.value
+    if (!profile || !ruleSets.value.some((set) => set.id === id)) return
+    if (profile.rule_set_id === id) return
+    await updateProfile(profile.id, { rule_set_id: id })
+  }
+
+  async function deleteRuleSet(id: string) {
+    if (!ruleSets.value.some((set) => set.id === id)) return
+    config.value.vpn_rule_sets = ruleSets.value.filter((set) => set.id !== id)
+    const fallback = config.value.vpn_rule_sets[0]?.id ?? ''
+    // 所有引用它的配置都要改指向，否则会留下悬空的 rule_set_id
+    config.value.vpn_profiles.forEach((profile) => {
+      if (profile.rule_set_id === id) profile.rule_set_id = fallback
+    })
+    await saveConfig()
+  }
+
+  async function setProxyMode(mode: VpnProxyMode) {
+    const profile = selectedProfile.value
+    if (!profile || profile.proxy_mode === mode) return
+    await updateProfile(profile.id, { proxy_mode: mode })
+    pushLog('info', `代理模式已切换为${mode === 'rule' ? '规则' : mode === 'global' ? '全局' : '直连'}，下次连接生效`)
   }
 
   async function addRule(
@@ -564,6 +615,7 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
     selectedProfileId,
     selectedProfile,
     selectedRuleSet,
+    proxyMode,
     profiles,
     ruleSets,
     // 行为
@@ -583,8 +635,11 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
     addProfile,
     updateProfile,
     deleteProfile,
-    savePassword,
     updateRuleSet,
+    createRuleSet,
+    selectRuleSet,
+    deleteRuleSet,
+    setProxyMode,
     addRule,
     updateRule,
     deleteRule,

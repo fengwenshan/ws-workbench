@@ -32,6 +32,8 @@ export function useWorkbenchLayout() {
   const treeCollapsed = ref(false)
   const logHeight = ref(LOG_HEIGHT_DEFAULT)
   const logOpen = ref(false)
+  /** 代理页左侧 VPN 配置列表是否收起（再次点击「代理」切换） */
+  const vpnMenuCollapsed = ref(false)
 
   type DragState =
     | { kind: 'tree'; startX: number; startWidth: number }
@@ -66,8 +68,13 @@ export function useWorkbenchLayout() {
       setTreeCollapsed(!treeCollapsed.value)
       return
     }
+    if (tool === 'proxy' && view.value === 'proxy') {
+      vpnMenuCollapsed.value = !vpnMenuCollapsed.value
+      return
+    }
     view.value = tool
     if (tool === 'home' && treeCollapsed.value) setTreeCollapsed(false)
+    if (tool === 'proxy') vpnMenuCollapsed.value = false
   }
 
   function shortcutTitle(label: string, key: string) {
@@ -230,7 +237,7 @@ export function useWorkbenchLayout() {
     selectTool,
     treeWidth,
     treeCollapsed,
-    setTreeCollapsed,
+    vpnMenuCollapsed,
     toggleTree,
     logHeight,
     logOpen,

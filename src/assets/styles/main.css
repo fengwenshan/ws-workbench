@@ -20,6 +20,9 @@
   --text-tag: #374151;
 
   --border-color: #e5e7eb;
+
+  /* 左右两栏顶部标题区共用高度，保证下边线对齐 */
+  --panel-header-height: 40px;
 }
 
 * {
@@ -73,6 +76,15 @@ body {
 }
 .btn-danger:hover:not(:disabled) {
   background: #dc2626;
+}
+.btn-danger-ghost {
+  background: transparent;
+  border: 1px solid var(--border-color);
+  color: var(--danger);
+}
+.btn-danger-ghost:hover:not(:disabled) {
+  border-color: var(--danger);
+  background: #fef2f2;
 }
 .btn-pick {
   padding: 6px 12px;

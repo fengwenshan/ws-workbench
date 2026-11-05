@@ -12,6 +12,9 @@ export type VpnPhase =
   | 'disconnecting'
   | 'failed'
 
+/** 代理模式，语义与 Clash 的 mode 一致 */
+export type VpnProxyMode = 'rule' | 'global' | 'direct'
+
 /** 规则匹配类型，取值与后端 rule_engine::RuleKind 一致 */
 export type VpnRuleKind =
   | 'DOMAIN'
@@ -58,6 +61,9 @@ export interface VpnProfile {
   /** openconnect 协议名 */
   protocol: string
   connector: ConnectorKind
+  /** rule：按规则列表分流；global：全部走 VPN；direct：全部直连 */
+  proxy_mode: VpnProxyMode
+  /** 当前生效的规则列表；只有规则模式下会参与分流 */
   rule_set_id: string
   /** fake-ip 地址池，用于按域名分流时反查真实目标 */
   fake_ip_range: string
@@ -72,6 +78,16 @@ export interface VpnProfile {
   connector_path: string
   created_at: string
   updated_at: string
+}
+
+/** 新建 VPN 配置弹窗提交的基础信息 */
+export interface NewVpnProfileInput {
+  name: string
+  server: string
+  username?: string
+  password?: string
+  protocol?: string
+  extra_args?: string[]
 }
 
 /** 探测到的连接器 */
@@ -244,6 +260,16 @@ export const RULE_KIND_LABELS: Record<VpnRuleKind, string> = {
   'PROCESS-NAME': 'PROCESS-NAME',
   'DST-PORT': 'DST-PORT',
   'IP-CIDR': 'IP-CIDR',
+}
+
+/** 规则类型的中文含义，只用于下拉选项，不改动规则值本身 */
+export const RULE_KIND_HINTS: Record<VpnRuleKind, string> = {
+  DOMAIN: '域名',
+  'DOMAIN-SUFFIX': '域名后缀',
+  'DOMAIN-KEYWORD': '域名关键词',
+  'PROCESS-NAME': '进程名',
+  'DST-PORT': '目标端口',
+  'IP-CIDR': 'IP 网段',
 }
 
 export const POLICY_LABELS: Record<VpnPolicy, string> = {
