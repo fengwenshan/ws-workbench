@@ -784,8 +784,9 @@ impl Worker {
             Err(e) => return self.fail(&e),
         };
         self.log(&format!(
-            "[隧道] openconnect 已启动，pid {}，参数 {}",
+            "[隧道] openconnect 已启动，pid {}，程序 {}，参数 {}",
             child.id(),
+            self.request.connector_path,
             spawn_args.join(" ")
         ));
 
@@ -1057,6 +1058,22 @@ pub fn run(session_dir: &Path) -> i32 {
     // 半默认路由还挂在 VPN 网卡上。先还原再连，否则会把残留状态当成「用户自己配的」。
     crate::vpn::fulltunnel::restore_stale(&session);
     let mut worker = Worker::new(session, request);
+
+    // 权限问题排查的第一现场：日志里必须先能回答「这个 worker 到底提权了没有、
+    // 跑的是哪个 exe」。之前只有间接证据（Get-NetAdapter 报「拒绝访问」），
+    // 用户看到失败根本分不清是没提权、提权到了旧版本、还是别的原因。
+    worker.log(&format!(
+        "[worker] 提权状态：{}，程序 {}，会话目录 {}",
+        if crate::vpn::elevate::is_elevated() {
+            "管理员"
+        } else {
+            "非管理员（建隧道、改路由、写 DNS 都会失败）"
+        },
+        std::env::current_exe()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|_| "未知".to_string()),
+        worker.session.dir.display()
+    ));
 
     if worker.request.connector_path.is_empty() {
         return worker.fail("没有可用的连接器，请先在 VPN 页确认连接器状态");
