@@ -2,18 +2,15 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { safeGet, safeSet } from './safeStorage'
 import { platform } from '@/platform'
 
-/** 工具页标识：日志已改为工作区底部面板，不属于工具页 */
+/** 工具页标识：日志是右侧抽屉，不属于工具页 */
 export type AppView = 'home' | 'proxy' | 'settings'
 
 const TREE_WIDTH_KEY = 'ws-workbench:layout:tree-width'
 const TREE_COLLAPSED_KEY = 'ws-workbench:layout:tree-collapsed'
-const LOG_HEIGHT_KEY = 'ws-workbench:layout:log-height'
 const LOG_OPEN_KEY = 'ws-workbench:layout:log-open'
 const TREE_WIDTH_DEFAULT = 260
 const TREE_WIDTH_MIN = 200
 const TREE_WIDTH_MAX = 420
-const LOG_HEIGHT_DEFAULT = 220
-const LOG_HEIGHT_MIN = 120
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max)
@@ -30,14 +27,12 @@ export function useWorkbenchLayout() {
 
   const treeWidth = ref(TREE_WIDTH_DEFAULT)
   const treeCollapsed = ref(false)
-  const logHeight = ref(LOG_HEIGHT_DEFAULT)
+  /** 应用日志抽屉是否打开（持久化，不改尺寸） */
   const logOpen = ref(false)
   /** 代理页左侧 VPN 配置列表是否收起（再次点击「代理」切换） */
   const vpnMenuCollapsed = ref(false)
 
-  type DragState =
-    | { kind: 'tree'; startX: number; startWidth: number }
-    | { kind: 'log'; startY: number; startHeight: number }
+  type DragState = { kind: 'tree'; startX: number; startWidth: number }
   let drag: DragState | null = null
 
   function setTreeCollapsed(collapsed: boolean) {
@@ -87,37 +82,18 @@ export function useWorkbenchLayout() {
     ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
   }
 
-  function startLogResize(event: PointerEvent) {
-    event.preventDefault()
-    drag = { kind: 'log', startY: event.clientY, startHeight: logHeight.value }
-    ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
-  }
-
   function onResizeMove(event: PointerEvent) {
     if (!drag) return
-    if (drag.kind === 'tree') {
-      treeWidth.value = clamp(
-        drag.startWidth + event.clientX - drag.startX,
-        TREE_WIDTH_MIN,
-        TREE_WIDTH_MAX,
-      )
-    } else {
-      const maxHeight = Math.round(window.innerHeight * 0.5)
-      logHeight.value = clamp(
-        drag.startHeight + drag.startY - event.clientY,
-        LOG_HEIGHT_MIN,
-        maxHeight,
-      )
-    }
+    treeWidth.value = clamp(
+      drag.startWidth + event.clientX - drag.startX,
+      TREE_WIDTH_MIN,
+      TREE_WIDTH_MAX,
+    )
   }
 
   function onResizeEnd() {
     if (!drag) return
-    if (drag.kind === 'tree') {
-      void safeSet(TREE_WIDTH_KEY, String(treeWidth.value))
-    } else {
-      void safeSet(LOG_HEIGHT_KEY, String(logHeight.value))
-    }
+    void safeSet(TREE_WIDTH_KEY, String(treeWidth.value))
     drag = null
   }
 
@@ -125,11 +101,6 @@ export function useWorkbenchLayout() {
     setTreeCollapsed(false)
     treeWidth.value = TREE_WIDTH_DEFAULT
     void safeSet(TREE_WIDTH_KEY, String(TREE_WIDTH_DEFAULT))
-  }
-
-  function resetLogHeight() {
-    logHeight.value = LOG_HEIGHT_DEFAULT
-    void safeSet(LOG_HEIGHT_KEY, String(LOG_HEIGHT_DEFAULT))
   }
 
   function onTreeResizerKeydown(event: KeyboardEvent) {
@@ -142,18 +113,6 @@ export function useWorkbenchLayout() {
       TREE_WIDTH_MAX,
     )
     void safeSet(TREE_WIDTH_KEY, String(treeWidth.value))
-  }
-
-  function onLogResizerKeydown(event: KeyboardEvent) {
-    if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return
-    event.preventDefault()
-    const delta = event.key === 'ArrowUp' ? 16 : -16
-    logHeight.value = clamp(
-      logHeight.value + delta,
-      LOG_HEIGHT_MIN,
-      Math.round(window.innerHeight * 0.5),
-    )
-    void safeSet(LOG_HEIGHT_KEY, String(logHeight.value))
   }
 
   function isEditableTarget(target: EventTarget | null) {
@@ -204,14 +163,6 @@ export function useWorkbenchLayout() {
     if (collapsed === 'true' || collapsed === 'false') {
       treeCollapsed.value = collapsed === 'true'
     }
-    const height = Number(await safeGet(LOG_HEIGHT_KEY))
-    if (Number.isFinite(height) && height > 0) {
-      logHeight.value = clamp(
-        height,
-        LOG_HEIGHT_MIN,
-        Math.round(window.innerHeight * 0.5),
-      )
-    }
     const open = await safeGet(LOG_OPEN_KEY)
     if (open === 'true' || open === 'false') {
       logOpen.value = open === 'true'
@@ -239,15 +190,11 @@ export function useWorkbenchLayout() {
     treeCollapsed,
     vpnMenuCollapsed,
     toggleTree,
-    logHeight,
     logOpen,
     setLogOpen,
     toggleLogs,
     startTreeResize,
-    startLogResize,
     resetTreeWidth,
-    resetLogHeight,
     onTreeResizerKeydown,
-    onLogResizerKeydown,
   }
 }
