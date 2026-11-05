@@ -1,24 +1,25 @@
 //! 出口选择与双向字节搬运。
 //!
 //! 每条应用侧连接被 netstack 终结后，这里按规则决定出口：
-//! - DIRECT：出站 socket 钉物理网卡；
-//! - VPN：出站 socket 钉隧道网卡。
+//! - DIRECT：给目的 IP 装一条经物理网关的 /32 路由；
+//! - VPN：给目的 IP 装一条经隧道网卡的 /32 路由。
 //!
-//! 钉网卡的方式按平台分：macOS 用 `IP_BOUND_IF`，Windows 用 `IP_UNICAST_IF`。
-//! 两者都是 socket 级设置，不会像改路由表那样影响其它进程。
+//! 出口靠路由决定，不再用 `IP_BOUND_IF` / `IP_UNICAST_IF` 绑网卡：
+//! 绑定后 socket 的选路只看绑定网卡自己的路由，而捕获网卡抢了
+//! `0.0.0.0/1` + `128.0.0.0/1`，绑定物理网卡的 connect 会直接
+//! `Network is unreachable`（实测整机所有直连都失败）。改成按需装 /32，
+//! 不依赖各平台选路实现，行为也更接近其它分流工具。
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddrV4, TcpStream, UdpSocket};
 use std::time::{Duration, Instant};
 
-#[cfg(target_os = "macos")]
-use std::os::unix::io::{FromRawFd, RawFd};
-
 use super::dns_client;
 use super::fakedns::FakeIpPool;
 use super::netstack::{Netstack, NetstackConfig, TunPhy};
-use super::platform::{Egress, FlowKey, IfBinder, ProcLookup, RouteTable, TunDevice};
+use super::platform::{Egress, FlowKey, ProcLookup, RouteTable, TunDevice};
+use super::route;
 use super::rule_engine::{CompiledRuleSet, MatchInput, Policy};
 
 pub const CONNECT_TIMEOUT_SECS: u64 = 10;
@@ -71,54 +72,89 @@ struct UdpEgress {
 /// 出口资源持有者。物理网卡索引与隧道网卡索引在连接建立时确定。
 pub struct Router {
     route: Box<dyn RouteTable>,
-    binder: Box<dyn IfBinder>,
+    /// 物理网关，直连出口的下一跳
+    gateway: String,
+    /// 本机直连网段：落在其中的地址走 on-link，不能走网关
+    local_subnets: Vec<(u32, u8)>,
     physical_if: u32,
     vpn_if: u32,
     flows: HashMap<FlowKey, FlowEgress>,
     udp_flows: HashMap<FlowKey, UdpEgress>,
-    /// VPN 流路由的引用计数：同一真实 IP 的多条流共用一条 /32
-    vpn_routes: HashMap<Ipv4Addr, usize>,
+    /// 流路由的引用计数：同一真实 IP 的多条流共用一条 /32
+    installed_routes: HashMap<(Ipv4Addr, bool), usize>,
 }
 
 impl Router {
     pub fn new(
         route: Box<dyn RouteTable>,
-        binder: Box<dyn IfBinder>,
+        gateway: String,
+        local_subnets: Vec<String>,
         physical_if: u32,
         vpn_if: u32,
     ) -> Self {
         Router {
             route,
-            binder,
+            gateway,
+            local_subnets: local_subnets
+                .iter()
+                .filter_map(|cidr| route::parse_cidr(cidr).ok())
+                .collect(),
             physical_if,
             vpn_if,
             flows: HashMap::new(),
             udp_flows: HashMap::new(),
-            vpn_routes: HashMap::new(),
+            installed_routes: HashMap::new(),
         }
     }
 
-    /// 为一条 VPN 流保留（必要时新建）到真实 IP 的 /32 路由。
-    fn retain_vpn_route(&mut self, ip: Ipv4Addr) -> std::io::Result<()> {
-        let count = self.vpn_routes.entry(ip).or_insert(0);
+    /// 目的地址是否落在本机直连网段里
+    fn is_local(&self, ip: Ipv4Addr) -> bool {
+        let value = u32::from(ip);
+        self.local_subnets.iter().any(|(net, prefix)| {
+            let mask = if *prefix >= 32 { u32::MAX } else { u32::MAX << (32 - prefix) };
+            value & mask == *net
+        })
+    }
+
+    /// 为一条流保留（必要时新建）到真实 IP 的 /32 路由。
+    ///
+    /// 直连走物理网关，VPN 走隧道网卡；落在本机网段或没有网关时退回接口路由。
+    fn retain_flow_route(&mut self, ip: Ipv4Addr, egress: Egress) -> std::io::Result<()> {
+        let vpn = egress == Egress::Vpn;
+        // 先把要用的字段取出来：entry() 会可变借用 installed_routes，
+        // 那之后再调用 &self 的方法就冲突了。
+        let local = self.is_local(ip);
+        let gateway = self.gateway.clone();
+        let count = self.installed_routes.entry((ip, vpn)).or_insert(0);
         if *count == 0 {
-            self.route
-                .add_flow_route(ip, self.vpn_if)
-                .map_err(std::io::Error::other)?;
+            let result = if vpn {
+                self.route.add_flow_route(ip, self.vpn_if)
+            } else if local || gateway.is_empty() {
+                self.route.add_flow_route(ip, self.physical_if)
+            } else {
+                self.route.add_server_host_route(ip, &gateway)
+            };
+            if let Err(message) = result {
+                // 路由已存在不算失败（例如 VPN 服务器自己的防环主机路由）
+                if !message.contains("File exists") && !message.contains("already in table") {
+                    return Err(std::io::Error::other(message));
+                }
+            }
         }
         *count += 1;
         Ok(())
     }
 
     /// 释放一次引用；最后一条流关闭时才真正删路由。
-    fn release_vpn_route(&mut self, ip: Ipv4Addr) {
-        if let Some(count) = self.vpn_routes.get_mut(&ip) {
+    fn release_flow_route(&mut self, ip: Ipv4Addr, egress: Egress) {
+        let key = (ip, egress == Egress::Vpn);
+        if let Some(count) = self.installed_routes.get_mut(&key) {
             if *count > 1 {
                 *count -= 1;
                 return;
             }
         }
-        if self.vpn_routes.remove(&ip).is_some() {
+        if self.installed_routes.remove(&key).is_some() {
             let _ = self.route.del_flow_route(ip);
         }
     }
@@ -140,26 +176,17 @@ impl Router {
         if self.flows.contains_key(key) {
             return Ok(());
         }
-        let if_index = match egress {
-            Egress::Direct => self.physical_if,
-            Egress::Vpn => self.vpn_if,
-        };
 
-        // 先把流路由装好再 connect：VPN 场景下真实 IP 可能只有隧道网卡可达，
-        // 顺序反过来时 connect 会按旧路由走到物理网卡而失败。
-        let mut installed_route = None;
-        if egress == Egress::Vpn {
-            let remote_ip = *target.ip();
-            self.retain_vpn_route(remote_ip)?;
-            installed_route = Some(remote_ip);
-        }
+        // 先把流路由装好再 connect：出口完全由路由决定，
+        // 顺序反过来时 connect 会按捕获网卡的半默认路由走回自己。
+        let remote_ip = *target.ip();
+        self.retain_flow_route(remote_ip, egress)?;
+        let installed_route = Some(remote_ip);
 
-        let stream = match connect_bound(target, if_index, &*self.binder) {
+        let stream = match connect_plain(target) {
             Ok(s) => s,
             Err(e) => {
-                if let Some(ip) = installed_route {
-                    self.release_vpn_route(ip);
-                }
+                self.release_flow_route(remote_ip, egress);
                 return Err(e);
             }
         };
@@ -220,20 +247,18 @@ impl Router {
         if self.udp_flows.contains_key(key) {
             return Ok(());
         }
-        let if_index = match egress {
-            Egress::Direct => self.physical_if,
-            Egress::Vpn => self.vpn_if,
+        let remote_ip = *target.ip();
+        self.retain_flow_route(remote_ip, egress)?;
+        let socket = match udp_socket_plain() {
+            Ok(socket) => socket,
+            Err(e) => {
+                self.release_flow_route(remote_ip, egress);
+                return Err(e);
+            }
         };
-        let socket = bind_udp_socket(if_index, &*self.binder)?;
-        let mut installed_route = None;
-        if egress == Egress::Vpn {
-            let ip = *target.ip();
-            self.retain_vpn_route(ip)?;
-            installed_route = Some(ip);
-        }
         self.udp_flows.insert(
             key.to_owned(),
-            UdpEgress { socket, target, installed_route, egress, domain, process },
+            UdpEgress { socket, target, installed_route: Some(remote_ip), egress, domain, process },
         );
         Ok(())
     }
@@ -340,12 +365,12 @@ impl Router {
     pub fn close_flow(&mut self, key: &FlowKey) {
         if let Some(flow) = self.flows.remove(key) {
             if let Some(ip) = flow.installed_route {
-                self.release_vpn_route(ip);
+                self.release_flow_route(ip, flow.egress);
             }
         }
         if let Some(flow) = self.udp_flows.remove(key) {
             if let Some(ip) = flow.installed_route {
-                self.release_vpn_route(ip);
+                self.release_flow_route(ip, flow.egress);
             }
         }
     }
@@ -379,171 +404,24 @@ impl Router {
     }
 }
 
-/// macOS：手工建连，必须在 connect **之前** 用 `IP_BOUND_IF` 把 socket 钉到网卡，
-/// 标准库的 `TcpStream::connect_timeout` 无法满足，所以走 libc。
-#[cfg(target_os = "macos")]
-fn connect_bound(
-    remote: SocketAddrV4,
-    if_index: u32,
-    binder: &dyn IfBinder,
-) -> std::io::Result<TcpStream> {
-    let fd: RawFd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
-    if fd < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    let guard = FdGuard(fd);
-
-    binder.bind_fd_to_if(fd, if_index)?;
-    set_nonblocking(fd, true)?;
-
-    let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
-    addr.sin_family = libc::AF_INET as libc::sa_family_t;
-    addr.sin_port = remote.port().to_be();
-    addr.sin_addr.s_addr = u32::from(*remote.ip()).to_be();
-
-    let rc = unsafe {
-        libc::connect(
-            fd,
-            &addr as *const libc::sockaddr_in as *const libc::sockaddr,
-            std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
-        )
-    };
-    if rc < 0 {
-        let err = std::io::Error::last_os_error();
-        if err.raw_os_error() != Some(libc::EINPROGRESS) {
-            return Err(err);
-        }
-        wait_writable(fd, CONNECT_TIMEOUT_SECS)?;
-        let mut soerr: libc::c_int = 0;
-        let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
-        unsafe {
-            libc::getsockopt(
-                fd,
-                libc::SOL_SOCKET,
-                libc::SO_ERROR,
-                &mut soerr as *mut _ as *mut libc::c_void,
-                &mut len,
-            );
-        }
-        if soerr != 0 {
-            return Err(std::io::Error::from_raw_os_error(soerr));
-        }
-    }
-    set_nonblocking(fd, false)?;
-    let stream = unsafe { TcpStream::from_raw_fd(fd) };
-    stream.set_read_timeout(Some(Duration::from_millis(200)))?;
-    stream.set_write_timeout(Some(Duration::from_millis(200)))?;
-    stream.set_nodelay(true)?;
-    std::mem::forget(guard);
-    Ok(stream)
-}
-
-/// macOS：建一个已钉网卡的 UDP socket。
-#[cfg(target_os = "macos")]
-fn bind_udp_socket(if_index: u32, binder: &dyn IfBinder) -> std::io::Result<UdpSocket> {
-    let fd: RawFd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
-    if fd < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    if let Err(e) = binder.bind_fd_to_if(fd, if_index) {
-        unsafe { libc::close(fd) };
-        return Err(e);
-    }
-    let socket = unsafe { UdpSocket::from_raw_fd(fd) };
-    socket.set_read_timeout(Some(Duration::from_millis(200)))?;
-    Ok(socket)
-}
-
-/// Windows：socket2 建连，connect 之前用 `IP_UNICAST_IF` 钉网卡。
-#[cfg(windows)]
-fn connect_bound(
-    remote: SocketAddrV4,
-    if_index: u32,
-    _binder: &dyn IfBinder,
-) -> std::io::Result<TcpStream> {
-    use socket2::{Domain, Protocol, Socket, Type};
-    use std::os::windows::io::AsRawSocket;
-
-    let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
-    super::platform::bind_raw_socket_to_if(socket.as_raw_socket() as usize, if_index)?;
-    let addr = socket2::SockAddr::from(std::net::SocketAddr::V4(remote));
-    socket.connect_timeout(&addr, Duration::from_secs(CONNECT_TIMEOUT_SECS))?;
-    let stream: TcpStream = socket.into();
-    stream.set_read_timeout(Some(Duration::from_millis(200)))?;
-    stream.set_write_timeout(Some(Duration::from_millis(200)))?;
-    stream.set_nodelay(true)?;
-    Ok(stream)
-}
-
-#[cfg(windows)]
-fn bind_udp_socket(if_index: u32, _binder: &dyn IfBinder) -> std::io::Result<UdpSocket> {
-    use socket2::{Domain, Protocol, Socket, Type};
-    use std::os::windows::io::AsRawSocket;
-
-    let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
-    super::platform::bind_raw_socket_to_if(socket.as_raw_socket() as usize, if_index)?;
-    let socket: UdpSocket = socket.into();
-    socket.set_read_timeout(Some(Duration::from_millis(200)))?;
-    Ok(socket)
-}
-
-/// 其它平台：能编译，但没有可用的接口钉定。
-#[cfg(not(any(target_os = "macos", windows)))]
-fn connect_bound(
-    remote: SocketAddrV4,
-    _if_index: u32,
-    _binder: &dyn IfBinder,
-) -> std::io::Result<TcpStream> {
-    TcpStream::connect_timeout(
+/// 建一条出站 TCP。出口由 /32 路由决定（见 `retain_flow_route`），
+/// 这里不绑网卡 —— 绑了反而会被捕获网卡的半默认路由挡成 `ENETUNREACH`。
+fn connect_plain(remote: SocketAddrV4) -> std::io::Result<TcpStream> {
+    let stream = TcpStream::connect_timeout(
         &std::net::SocketAddr::V4(remote),
         Duration::from_secs(CONNECT_TIMEOUT_SECS),
-    )
+    )?;
+    stream.set_read_timeout(Some(Duration::from_millis(200)))?;
+    stream.set_write_timeout(Some(Duration::from_millis(200)))?;
+    stream.set_nodelay(true)?;
+    Ok(stream)
 }
 
-#[cfg(not(any(target_os = "macos", windows)))]
-fn bind_udp_socket(_if_index: u32, _binder: &dyn IfBinder) -> std::io::Result<UdpSocket> {
+/// 建一条出站 UDP socket。出口同样由 /32 路由决定，所以不需要绑网卡。
+fn udp_socket_plain() -> std::io::Result<UdpSocket> {
     let socket = UdpSocket::bind("0.0.0.0:0")?;
     socket.set_read_timeout(Some(Duration::from_millis(200)))?;
     Ok(socket)
-}
-
-#[cfg(target_os = "macos")]
-struct FdGuard(RawFd);
-#[cfg(target_os = "macos")]
-impl Drop for FdGuard {
-    fn drop(&mut self) {
-        unsafe { libc::close(self.0) };
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn set_nonblocking(fd: RawFd, on: bool) -> std::io::Result<()> {
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-    if flags < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    let new = if on {
-        flags | libc::O_NONBLOCK
-    } else {
-        flags & !libc::O_NONBLOCK
-    };
-    if unsafe { libc::fcntl(fd, libc::F_SETFL, new) } < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "macos")]
-fn wait_writable(fd: RawFd, timeout_secs: u64) -> std::io::Result<()> {
-    let mut pfd = libc::pollfd { fd, events: libc::POLLOUT, revents: 0 };
-    let rc = unsafe { libc::poll(&mut pfd, 1, (timeout_secs * 1000) as libc::c_int) };
-    if rc <= 0 {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            "connect timeout",
-        ));
-    }
-    Ok(())
 }
 
 /// 查询一条已终结连接应走的出口（按 IP/端口/进程匹配）。
@@ -653,6 +531,8 @@ pub struct Engine {
     vpn_dns: Vec<Ipv4Addr>,
     /// 域名 -> 已解析出的真实 IPv4，连接期间复用
     real_cache: HashMap<String, Ipv4Addr>,
+    /// 同一出站目标连续失败的次数：只记前两次和每第十次，避免重试刷屏
+    egress_error_counts: HashMap<(Ipv4Addr, u16), u32>,
     /// 待写进 worker.log 的诊断行：DNS 伪造、每条连接的分流结论、建连失败。
     /// 引擎跑在独立线程里，自己不开文件，由 worker 每轮取走后落盘。
     pending_logs: Vec<String>,
@@ -684,7 +564,8 @@ impl Engine {
         rules: Option<CompiledRuleSet>,
         mode: ProxyMode,
         route: Box<dyn RouteTable>,
-        binder: Box<dyn IfBinder>,
+        gateway: &str,
+        local_subnets: &[String],
         physical_if: u32,
         vpn_if: u32,
         proc: Box<dyn ProcLookup>,
@@ -693,7 +574,13 @@ impl Engine {
         let mtu = if netstack_cfg.mtu == 0 { 1500 } else { netstack_cfg.mtu };
         let phy = TunPhy::new(capture, mtu);
         let ns = Netstack::new(phy, netstack_cfg.local_ip, [0x02, 0, 0, 0, 0, 1]);
-        let router = Router::new(route, binder, physical_if, vpn_if);
+        let router = Router::new(
+            route,
+            gateway.to_string(),
+            local_subnets.to_vec(),
+            physical_if,
+            vpn_if,
+        );
         Ok(Engine {
             router,
             netstack: ns,
@@ -706,6 +593,7 @@ impl Engine {
             dns_servers: HashMap::new(),
             vpn_dns: Vec::new(),
             real_cache: HashMap::new(),
+            egress_error_counts: HashMap::new(),
             pending_logs: Vec::new(),
             dns_answered: 0,
             flows_opened: 0,
@@ -912,7 +800,18 @@ impl Engine {
                 }
                 Err(err) => {
                     self.egress_failures += 1;
-                    self.note(format!("{}，建连失败：{}", line, err));
+                    if self.egress_error_counts.len() > 256 {
+                        self.egress_error_counts.clear();
+                    }
+                    let seen = self
+                        .egress_error_counts
+                        .entry((*target.ip(), target.port()))
+                        .or_insert(0);
+                    *seen += 1;
+                    let seen = *seen;
+                    if seen <= 2 || seen % 10 == 0 {
+                        self.note(format!("{}，建连失败（第 {} 次）：{}", line, seen, err));
+                    }
                     self.netstack.abort_tcp(&flow.key);
                 }
             }
@@ -1145,6 +1044,7 @@ fn next_dns_id() -> u16 {
 mod tests {
     use super::*;
     use crate::vpn::platform::Transport;
+    use std::sync::{Arc, Mutex};
     use crate::vpn::rule_engine::{compile, Policy, Rule, RuleKind};
     use std::collections::HashMap;
 
@@ -1250,5 +1150,94 @@ mod tests {
         assert!(decision_changed(Egress::Vpn, Egress::Direct));
         assert!(!decision_changed(Egress::Vpn, Egress::Vpn));
         assert!(!decision_changed(Egress::Direct, Egress::Direct));
+    }
+
+    /// 记录路由调用顺序的假路由表，用来验证出口怎么选。
+    struct FakeRouteTable {
+        calls: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl RouteTable for FakeRouteTable {
+        fn add_flow_route(&self, ip: Ipv4Addr, if_index: u32) -> Result<(), String> {
+            self.calls.lock().unwrap().push(format!("add-flow {} if#{}", ip, if_index));
+            Ok(())
+        }
+        fn del_flow_route(&self, ip: Ipv4Addr) -> Result<(), String> {
+            self.calls.lock().unwrap().push(format!("del-flow {}", ip));
+            Ok(())
+        }
+        fn add_capture_routes(&self, _if_index: u32) -> Result<(), String> {
+            Ok(())
+        }
+        fn del_capture_routes(&self, _if_index: u32) -> Result<(), String> {
+            Ok(())
+        }
+        fn add_server_host_route(&self, ip: Ipv4Addr, gateway: &str) -> Result<(), String> {
+            self.calls.lock().unwrap().push(format!("add-host {} via {}", ip, gateway));
+            Ok(())
+        }
+        fn del_server_host_route(&self, ip: Ipv4Addr) -> Result<(), String> {
+            self.calls.lock().unwrap().push(format!("del-host {}", ip));
+            Ok(())
+        }
+    }
+
+    fn fake_router() -> (Router, Arc<Mutex<Vec<String>>>) {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let router = Router::new(
+            Box::new(FakeRouteTable { calls: calls.clone() }),
+            "192.168.1.1".to_string(),
+            vec!["192.168.1.0/24".to_string()],
+            14,
+            9,
+        );
+        (router, calls)
+    }
+
+    #[test]
+    fn direct_flow_route_goes_via_physical_gateway() {
+        let (mut router, calls) = fake_router();
+        router
+            .retain_flow_route("101.36.166.16".parse().unwrap(), Egress::Direct)
+            .unwrap();
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            ["add-host 101.36.166.16 via 192.168.1.1"],
+            "直连出口要给目的 IP 装一条经物理网关的 /32 路由"
+        );
+    }
+
+    #[test]
+    fn vpn_flow_route_uses_tunnel_interface() {
+        let (mut router, calls) = fake_router();
+        router.retain_flow_route("192.0.2.41".parse().unwrap(), Egress::Vpn).unwrap();
+        assert_eq!(calls.lock().unwrap().as_slice(), ["add-flow 192.0.2.41 if#9"]);
+    }
+
+    #[test]
+    fn local_subnet_flow_route_stays_on_link() {
+        let (mut router, calls) = fake_router();
+        router.retain_flow_route("192.168.1.50".parse().unwrap(), Egress::Direct).unwrap();
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            ["add-flow 192.168.1.50 if#14"],
+            "本机网段的地址要用接口路由，不能经网关绕一圈"
+        );
+    }
+
+    #[test]
+    fn route_is_released_only_after_last_flow_closes() {
+        let (mut router, calls) = fake_router();
+        let ip: Ipv4Addr = "101.36.166.16".parse().unwrap();
+        router.retain_flow_route(ip, Egress::Direct).unwrap();
+        router.retain_flow_route(ip, Egress::Direct).unwrap();
+        assert_eq!(calls.lock().unwrap().len(), 1, "同一 IP 的多条流共用一条 /32");
+
+        router.release_flow_route(ip, Egress::Direct);
+        assert_eq!(calls.lock().unwrap().len(), 1, "还有一条流没关，路由不能删");
+
+        router.release_flow_route(ip, Egress::Direct);
+        // 两种出口删的都只是那条 /32 主机路由，所以统一走 del_flow_route
+        assert_eq!(calls.lock().unwrap().as_slice()[1], "del-flow 101.36.166.16");
     }
 }
