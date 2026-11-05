@@ -328,11 +328,46 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
     const profile = selectedProfile.value
     if (!profile || profile.proxy_mode === mode) return
     await updateProfile(profile.id, { proxy_mode: mode })
-    pushLog('info', `代理模式已切换为${mode === 'rule' ? '规则' : mode === 'global' ? '全局' : '直连'}，下次连接生效`)
+    const label = mode === 'rule' ? '规则' : mode === 'global' ? '全局' : '直连'
+    if (isConnected.value) {
+      try {
+        await invoke('vpn_set_proxy_mode', { mode })
+        pushLog(
+          'info',
+          `代理模式已切换为${label}：新连接按新模式，已建立的连接保持原路径`,
+        )
+      } catch (err: any) {
+        pushLog('error', `切换代理模式失败: ${err}`)
+      }
+      return
+    }
+    pushLog('info', `代理模式已切换为${label}，下次连接生效`)
   }
 
-  /** 规则只在连接中的配置上热生效；其它情况只存盘（M2 补实现） */
-  async function pushRulesIfConnected() {}
+  /**
+   * 规则变更后推给正在运行的 worker（防抖 300ms）。
+   *
+   * 只推「当前连接中的那个配置」的规则：运行时只有一份规则表，
+   * 连着 A 却在编辑 B 时推送，会把 A 的运行期规则覆盖成 B 的。
+   */
+  let rulesPushTimer: number | undefined
+  async function pushRulesIfConnected() {
+    const profile = selectedProfile.value
+    if (!profile) return
+    if (!isConnected.value || status.value.profile_id !== profile.id) return
+    window.clearTimeout(rulesPushTimer)
+    rulesPushTimer = window.setTimeout(async () => {
+      try {
+        await invoke('vpn_push_rules', {
+          rules: profile.rules ?? [],
+          defaultPolicy: profile.rules_default_policy ?? 'DIRECT',
+        })
+        pushLog('info', '规则已热更新，只重置受影响的连接')
+      } catch (err: any) {
+        pushLog('error', `规则未生效: ${err}`)
+      }
+    }, 300)
+  }
 
   async function addRule(kind: VpnRuleKind, value: string, policy: VpnPolicy, remark = '') {
     const profile = selectedProfile.value

@@ -465,6 +465,63 @@ fn resolve_proxy_plan(
     })
 }
 
+/// 编译校验一份规则集；任何一条不合法都返回错误。
+/// 连接与运行期热更新共用，保证「能存进配置的规则」和「能连上的规则」一致。
+fn validate_rule_set(rules: &[VpnRule], default_policy: &str) -> Result<(), String> {
+    use crate::vpn::rule_engine::{compile, Policy, Rule, RuleKind};
+    let mut compiled = Vec::new();
+    for r in rules.iter().filter(|r| r.enabled) {
+        let kind = RuleKind::parse(&r.kind)?;
+        let policy = Policy::parse(&r.policy)?;
+        compiled.push(Rule::new(kind, &r.value, policy).with_no_resolve(r.no_resolve));
+    }
+    let default = Policy::parse(default_policy)?;
+    compile(&compiled, &std::collections::HashMap::new(), default)
+        .map(|_| ())
+        .map_err(|e| format!("规则编译失败：{}", e))
+}
+
+/// 会话是否处于「有活动连接」状态
+fn session_is_active(session: &VpnSession) -> bool {
+    let status = session.read_status().unwrap_or_default();
+    !matches!(status.phase, VpnPhase::Disconnected | VpnPhase::Failed)
+}
+
+/// 运行期切换代理模式。
+///
+/// 连接中写 `mode` 文件，worker 200ms 内读到并只改判定开关；
+/// 未连接时直接返回 Ok，模式本身由前端持久化在配置里。
+#[tauri::command]
+pub fn vpn_set_proxy_mode(state: State<'_, VpnState>, mode: String) -> Result<(), String> {
+    let mode = ProxyMode::parse(&mode)?;
+    let runtime = state.0.lock().map_err(|_| "内部状态锁定失败".to_string())?;
+    if !session_is_active(&runtime.session) {
+        return Ok(());
+    }
+    runtime.session.write_mode(mode.as_str())
+}
+
+/// 运行期推送规则。
+///
+/// 先编译校验再落盘：校验失败时返回错误，正在运行的旧规则继续生效。
+#[tauri::command]
+pub fn vpn_push_rules(
+    state: State<'_, VpnState>,
+    rules: Vec<VpnRule>,
+    default_policy: Option<String>,
+) -> Result<(), String> {
+    let default_policy = default_policy
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "DIRECT".to_string());
+    let enabled: Vec<VpnRule> = rules.into_iter().filter(|r| r.enabled).collect();
+    validate_rule_set(&enabled, &default_policy)?;
+    let runtime = state.0.lock().map_err(|_| "内部状态锁定失败".to_string())?;
+    if !session_is_active(&runtime.session) {
+        return Ok(());
+    }
+    runtime.session.write_rules(&enabled, &default_policy)
+}
+
 /// 必须是 async：非 async 的 Tauri 命令跑在主线程上，而下面的提权步骤要等用户
 /// 在系统授权框上点确认（最长 120s + 10s 轮询），同步执行会把整个界面卡死。
 #[tauri::command]
@@ -507,16 +564,7 @@ pub async fn vpn_connect(
     // 规则只在规则模式下编译校验：全局/直连用不到规则，不该因为它们不合法连不上。
     // 规则模式下这是 fail-closed —— 宁可连接失败，也不放行一份语义错误的规则集。
     if plan.mode == ProxyMode::Rule {
-        use crate::vpn::rule_engine::{compile, Policy, Rule, RuleKind};
-        let mut compiled = Vec::new();
-        for r in rules.iter().filter(|r| r.enabled) {
-            let kind = RuleKind::parse(&r.kind)?;
-            let policy = Policy::parse(&r.policy)?;
-            compiled.push(Rule::new(kind, &r.value, policy).with_no_resolve(r.no_resolve));
-        }
-        let default = Policy::parse(&default_policy)?;
-        compile(&compiled, &std::collections::HashMap::new(), default)
-            .map_err(|e| format!("规则编译失败：{}", e))?;
+        validate_rule_set(&rules, &default_policy)?;
     }
 
     // 先落盘连接请求。持锁的部分只做文件操作，绝不跨过提权那一步。
