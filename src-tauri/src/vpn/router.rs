@@ -137,7 +137,7 @@ impl Router {
             if let Err(message) = result {
                 // 路由已存在不算失败（例如 VPN 服务器自己的防环主机路由）
                 if !message.contains("File exists") && !message.contains("already in table") {
-                    return Err(std::io::Error::other(message));
+                    return Err(std::io::Error::other(format!("装出口路由失败：{}", message)));
                 }
             }
         }

@@ -587,8 +587,8 @@ impl Worker {
             return Err("找不到物理默认网卡，无法确定直连出口（已中止以免回环）".to_string());
         };
         self.log(&format!(
-            "[引擎] 直连出口 if#{}（{}）",
-            physical_if, self.snapshot.default_if_alias
+            "[引擎] 直连出口 if#{}（{}），网关 {}",
+            physical_if, self.snapshot.default_if_alias, self.snapshot.default_gateway
         ));
 
         let mut engine = router::Engine::assemble(
