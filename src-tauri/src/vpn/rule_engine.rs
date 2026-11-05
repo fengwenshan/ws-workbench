@@ -270,12 +270,20 @@ impl CompiledRuleSet {
 
     /// 自上而下首个命中生效；全不命中则用 `default_policy`。
     pub fn evaluate(&self, input: &MatchInput) -> Policy {
+        self.evaluate_hit(input).0
+    }
+
+    /// 与 `evaluate` 相同，但同时给出命中的那条规则。
+    ///
+    /// 日志要能说清「这条连接为什么走了这个出口」，只给最终出口不够；
+    /// 返回的引用直接指向规则表里的规则，调用方只读。
+    pub fn evaluate_hit<'a>(&'a self, input: &MatchInput) -> (Policy, Option<&'a Rule>) {
         for rule in &self.rules {
             if rule_matches(rule, input) {
-                return rule.policy;
+                return (rule.policy, Some(rule));
             }
         }
-        self.default_policy
+        (self.default_policy, None)
     }
 }
 
@@ -322,6 +330,30 @@ pub fn compile(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keyword_rule_matches_anywhere_in_host() {
+        let set = compile(
+            &[Rule::new(RuleKind::DomainKeyword, "corp", Policy::Vpn)],
+            &HashMap::new(),
+            Policy::Direct,
+        )
+        .unwrap();
+        for host in ["oa.example.com", "example.com", "vpn.example.com", "my-corp-tool.io"] {
+            assert_eq!(
+                set.evaluate(&MatchInput { domain: Some(host), ..Default::default() }),
+                Policy::Vpn,
+                "{host} 应该命中关键词 corp"
+            );
+            assert_eq!(set.evaluate_hit(&MatchInput { domain: Some(host), ..Default::default() }).1.map(|r| r.kind), Some(RuleKind::DomainKeyword));
+        }
+        assert_eq!(
+            set.evaluate(&MatchInput { domain: Some("example.com"), ..Default::default() }),
+            Policy::Direct
+        );
+        // 拿不到域名时（例如应用自己缓存了 IP、没走本机 DNS），域名类规则一律不命中
+        assert_eq!(set.evaluate(&MatchInput::default()), Policy::Direct);
+    }
 
     #[test]
     fn parses_rule_line_with_explicit_policy() {

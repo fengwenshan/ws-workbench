@@ -89,3 +89,26 @@
 **根因**：规则从「全局规则集 + rule_set_id 引用」改成「内嵌在配置里」时，只改了前端模型和迁移脚本，后端持久化的 `VpnProfile` 结构没有 `rules` / `rules_default_policy` 字段。`save_config` 按后端结构序列化整份配置，规则在落盘时被静默丢掉，重启读回来自然就是空的（旧模型的 `rule_set_id` 也一起丢了，所以迁移逻辑再也看不到老数据）。
 
 **改法**：`VpnProfile` 补回 `rules` 与 `rules_default_policy`（带 serde 默认值，兼容老配置），`rule_set_id` 也保留为可选字段，让前端迁移逻辑仍能读到；新增「规则写入配置文件再读回来不能丢」的回归测试。连接时的兜底走向统一为：规则模式没命中→直连，全局模式→VPN，直连模式→直连。
+
+## 诊断：为什么「域名含 corp」没命中
+
+`DOMAIN-KEYWORD` 的语义就是「host 里包含这段子串」（大小写不敏感），`oa.example.com` 含 `corp`，按规则本身必然命中，`rule_engine` 测试 `keyword_rule_matches_anywhere_in_host` 覆盖了这一点。
+
+真正会让人误以为「匹配不到」的是**引擎拿不到域名**：域名类规则只有在引擎看到应用发的 DNS 查询（被 fake-ip 接管）时才有 host 可比。以下情况连接到达引擎时只有真实 IP、没有 host，域名规则一律不参与匹配，直接落到兜底直连：
+
+- 应用/浏览器在连接 VPN 之前就缓存了这条域名的 IP，或用长连接复用；
+- 应用自己走 DoH / 私有 DNS，查询没经过系统 DNS；
+- 访问时直接填了 IP；
+- 域名命中 `fake-ip` 过滤名单（`fake_ip_filter`），引擎按真实地址应答。
+
+为了能一眼看出是哪一种，引擎现在会把诊断写进「日志」抽屉（`worker.log`）：
+
+```
+[DNS] oa.example.com -> 198.18.0.7（假地址，连接时会按域名匹配规则）
+[分流] oa.example.com:443 -> VPN（命中 DOMAIN-KEYWORD corp）
+[分流] 192.0.2.41:443（无域名） -> 直连（兜底，域名类规则不参与匹配）
+[分流] 10.0.0.5:443 -> VPN（命中 IP-CIDR 10.0.0.0/8），建连失败：路由不可达
+```
+
+`CompiledRuleSet::evaluate_hit` 负责把命中的那条规则一起带出来（`evaluate` 保持原语义不变）。
+
