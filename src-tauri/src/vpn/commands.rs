@@ -23,6 +23,8 @@ pub const EVENT_LOG: &str = "vpn-log";
 /// 运行期状态
 pub struct VpnRuntime {
     pub session: VpnSession,
+    /// 运行期「当前生效配置」：同通道共享隧道时，它是切过去的那份配置的 id
+    pub policy_profile_id: Option<String>,
     /// 已经推给前端的日志游标
     pub log_cursor: LogCursor,
     /// 上一次推送的状态，避免重复 emit
@@ -37,6 +39,7 @@ impl VpnState {
     pub fn new(session: VpnSession) -> Self {
         VpnState(Mutex::new(VpnRuntime {
             session,
+            policy_profile_id: None,
             log_cursor: LogCursor::default(),
             last_status: None,
             elevation: String::new(),
@@ -522,6 +525,70 @@ pub fn vpn_push_rules(
     runtime.session.write_rules(&enabled, &default_policy)
 }
 
+/// 同通道切换的三种结论
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SwitchDecision {
+    /// 已连接且通道身份相同：只换运行期策略，隧道不动
+    Shared,
+    /// 已连接但通道身份不同：必须先断开重连
+    NeedsReconnect,
+    /// 当前没有活动连接
+    NoSession,
+}
+
+fn decide_switch(active: Option<&str>, target: Option<&str>) -> SwitchDecision {
+    match (active, target) {
+        (None, _) => SwitchDecision::NoSession,
+        // 空身份说明状态文件来自旧版本，不能当成同通道
+        (Some(current), Some(next)) if !current.is_empty() && current == next => {
+            SwitchDecision::Shared
+        }
+        _ => SwitchDecision::NeedsReconnect,
+    }
+}
+
+/// 批量计算配置的通道身份，前端据此渲染「共用通道」状态
+#[tauri::command]
+pub fn vpn_conn_identities(profiles: Vec<VpnProfile>) -> Vec<String> {
+    profiles.iter().map(conn_identity).collect()
+}
+
+/// 同通道切换：把运行期策略换成这份配置的规则与模式，隧道、网卡、路由一律不动。
+///
+/// 返回 true 表示已切换；false 表示通道参数不同，需要前端确认后断开重连。
+#[tauri::command]
+pub fn vpn_switch_profile(
+    state: State<'_, VpnState>,
+    profile: VpnProfile,
+    rules: Vec<VpnRule>,
+    default_policy: Option<String>,
+) -> Result<bool, String> {
+    let mut runtime = state.0.lock().map_err(|_| "内部状态锁定失败".to_string())?;
+    let session = runtime.session.clone();
+    if !session_is_active(&session) {
+        return Err("当前未连接".to_string());
+    }
+    let status = session.read_status().unwrap_or_default();
+    let target = conn_identity(&profile);
+    match decide_switch(Some(status.conn_identity.as_str()), Some(target.as_str())) {
+        SwitchDecision::NoSession => Err("当前未连接".to_string()),
+        SwitchDecision::NeedsReconnect => Ok(false),
+        SwitchDecision::Shared => {
+            let default_policy = default_policy
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| "DIRECT".to_string());
+            let enabled: Vec<VpnRule> =
+                rules.into_iter().filter(|rule| rule.enabled).collect();
+            // 校验失败就直接返回错误，正在跑的隧道与旧规则都不受影响
+            validate_rule_set(&enabled, &default_policy)?;
+            session.write_rules(&enabled, &default_policy)?;
+            session.write_mode(&profile.proxy_mode)?;
+            runtime.policy_profile_id = Some(profile.id.clone());
+            Ok(true)
+        }
+    }
+}
+
 /// 必须是 async：非 async 的 Tauri 命令跑在主线程上，而下面的提权步骤要等用户
 /// 在系统授权框上点确认（最长 120s + 10s 轮询），同步执行会把整个界面卡死。
 #[tauri::command]
@@ -533,6 +600,13 @@ pub async fn vpn_connect(
     default_policy: Option<String>,
     custom_openconnect: Option<String>,
 ) -> Result<ConnectResult, String> {
+    // 已有活动连接时拒绝再次连接：多个 worker 会抢同一套路由。
+    // 同通道切换走 vpn_switch_profile，不需要重建隧道。
+    if let Ok(runtime) = state.0.lock() {
+        if session_is_active(&runtime.session) {
+            return Err("已有活动连接，请先断开当前连接".to_string());
+        }
+    }
     // 兜底策略由前端从所选规则集透传，缺省或空白时退回直连
     let default_policy = default_policy
         .filter(|s| !s.trim().is_empty())
@@ -574,6 +648,7 @@ pub async fn vpn_connect(
         session.prepare()?;
         runtime.log_cursor = LogCursor::default();
         runtime.last_status = None;
+        runtime.policy_profile_id = Some(profile.id.clone());
         session
     };
 
@@ -588,6 +663,7 @@ pub async fn vpn_connect(
         connector: profile.connector,
         connector_path: connector.path.clone(),
         proxy_mode: plan.mode.as_str().to_string(),
+        conn_identity: conn_identity(&profile),
         rules: rules.clone(),
         default_policy: default_policy.clone(),
         fake_ip_range: profile.fake_ip_range.clone(),
@@ -670,9 +746,11 @@ fn spawn_worker_directly(exe: &std::path::Path, session: &VpnSession) -> Result<
 /// 同样必须是 async：这里要等 worker 收尾（最长 20s），同步执行会卡住界面。
 #[tauri::command]
 pub async fn vpn_disconnect(app: AppHandle, state: State<'_, VpnState>) -> Result<String, String> {
-    let runtime = state.0.lock().map_err(|_| "内部状态锁定失败".to_string())?;
-    let session = runtime.session.clone();
-    drop(runtime);
+    let (session, _) = {
+        let mut runtime = state.0.lock().map_err(|_| "内部状态锁定失败".to_string())?;
+        runtime.policy_profile_id = None;
+        (runtime.session.clone(), ())
+    };
 
     let status = session.read_status().unwrap_or_default();
     if status.phase == VpnPhase::Disconnected {
@@ -750,6 +828,8 @@ fn is_process_alive(pid: u32) -> bool {
 pub struct VpnSnapshotPayload {
     pub status: VpnStatus,
     pub elevation: String,
+    /// 运行期「当前生效配置」；为空时以 status.profile_id 为准
+    pub policy_profile_id: String,
 }
 
 #[tauri::command]
@@ -760,12 +840,19 @@ pub fn vpn_get_snapshot(state: State<'_, VpnState>) -> VpnSnapshotPayload {
             return VpnSnapshotPayload {
                 status: VpnStatus::default(),
                 elevation: String::new(),
+                policy_profile_id: String::new(),
             }
         }
     };
+    let status = runtime.session.read_status().unwrap_or_default();
+    let policy_profile_id = runtime
+        .policy_profile_id
+        .clone()
+        .unwrap_or_else(|| status.profile_id.clone());
     VpnSnapshotPayload {
-        status: runtime.session.read_status().unwrap_or_default(),
+        status,
         elevation: runtime.elevation.clone(),
+        policy_profile_id,
     }
 }
 
@@ -856,7 +943,7 @@ pub fn start_status_poller(app: AppHandle) {
                 None => return,
             };
 
-            let (status, elevation, lines) = {
+            let (status, elevation, lines, policy_owner) = {
                 let runtime = match state.0.lock() {
                     Ok(runtime) => runtime,
                     Err(_) => continue,
@@ -867,10 +954,13 @@ pub fn start_status_poller(app: AppHandle) {
                     runtime.session.read_status(),
                     runtime.elevation.clone(),
                     lines,
+                    runtime.policy_profile_id.clone(),
                 )
             };
 
             if let Some(status) = status {
+                let policy_profile_id =
+                    policy_owner.unwrap_or_else(|| status.profile_id.clone());
                 let json = serde_json::to_string(&status).unwrap_or_default();
                 if json != last_status_json {
                     last_status_json = json;
@@ -879,6 +969,7 @@ pub fn start_status_poller(app: AppHandle) {
                         VpnSnapshotPayload {
                             status: status.clone(),
                             elevation: elevation.clone(),
+                            policy_profile_id: policy_profile_id.clone(),
                         },
                     );
                 }
@@ -1076,5 +1167,20 @@ mod tests {
     #[test]
     fn unknown_proxy_mode_is_rejected() {
         assert!(resolve_proxy_plan("bogus", Vec::new(), "DIRECT".to_string()).is_err());
+    }
+
+    #[test]
+    fn switch_decision_matches_channel_identity() {
+        assert_eq!(decide_switch(Some("abc"), Some("abc")), SwitchDecision::Shared);
+        assert_eq!(
+            decide_switch(Some("abc"), Some("def")),
+            SwitchDecision::NeedsReconnect
+        );
+        assert_eq!(decide_switch(None, Some("abc")), SwitchDecision::NoSession);
+        // 旧状态文件里没有身份时按「需要重连」处理，不能当成同通道
+        assert_eq!(
+            decide_switch(Some(""), Some("abc")),
+            SwitchDecision::NeedsReconnect
+        );
     }
 }

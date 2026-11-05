@@ -352,6 +352,9 @@ pub struct VpnStatus {
     pub profile_id: String,
     #[serde(default)]
     pub profile_name: String,
+    /// 通道身份哈希：连接参数相同的配置共享这条隧道
+    #[serde(default)]
+    pub conn_identity: String,
     /// 实际使用的连接器 kind
     #[serde(default)]
     pub connector: String,
@@ -402,6 +405,7 @@ impl Default for VpnStatus {
             message: String::new(),
             profile_id: String::new(),
             profile_name: String::new(),
+            conn_identity: String::new(),
             connector: String::new(),
             connector_name: String::new(),
             tun_dev: String::new(),
@@ -427,6 +431,9 @@ pub struct VpnRequest {
     /// 代理模式：rule / global / direct
     #[serde(default = "default_proxy_mode")]
     pub proxy_mode: String,
+    /// 通道身份哈希：判断两个配置能否共享同一条隧道
+    #[serde(default)]
+    pub conn_identity: String,
     pub profile_id: String,
     pub profile_name: String,
     pub server: String,

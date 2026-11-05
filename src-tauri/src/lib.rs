@@ -252,6 +252,8 @@ pub fn run() {
             vpn::commands::vpn_connect,
             vpn::commands::vpn_set_proxy_mode,
             vpn::commands::vpn_push_rules,
+            vpn::commands::vpn_conn_identities,
+            vpn::commands::vpn_switch_profile,
             vpn::commands::vpn_disconnect,
             vpn::commands::vpn_get_snapshot,
             vpn::commands::vpn_read_logs,
