@@ -59,6 +59,14 @@ static SESSION_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 /// 用户在界面上看到的会话目录来源，用于解释「为什么日志不在预期位置」
 static SESSION_DIR_ORIGIN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
+/// 启动时没能探测到可写会话目录的原因（成功时为空）。
+///
+/// 这种情况会退到临时目录，然后**一直用到重启**。以前失败原因只打在 stderr 上，
+/// GUI 用户看不到，最后只在点「连接」时看到一句
+/// 「创建会话目录失败 C:\...\Temp\ws-workbench-vpn: 拒绝访问」——
+/// 指向的临时目录只是受害者，真正的原因（用户目录当时不可写）被藏起来了。
+static SESSION_DIR_ERROR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
 pub fn session_dir(app: &AppHandle) -> Result<PathBuf, String> {
     if let Some(dir) = SESSION_DIR.get() {
         return Ok(dir.clone());
@@ -75,6 +83,24 @@ pub fn session_dir_origin() -> String {
         .get()
         .cloned()
         .unwrap_or_else(|| "应用数据目录".to_string())
+}
+
+/// 把「启动时探测会话目录失败」的上下文拼到错误信息后面（没失败过就返回空串）。
+fn session_dir_diagnosis() -> String {
+    let reason = SESSION_DIR_ERROR
+        .lock()
+        .ok()
+        .and_then(|slot| slot.clone())
+        .unwrap_or_default();
+    if reason.trim().is_empty() {
+        return String::new();
+    }
+    format!(
+        "\n应用启动时没能找到可写的会话目录，只能退到临时目录：{}。\
+         重启应用会重新探测；如果重启后仍然失败，\
+         请检查杀毒软件的「受控文件夹访问」或企业策略是否禁止本程序写入用户目录。",
+        reason
+    )
 }
 
 fn resolve_session_dir(app: &AppHandle) -> Result<(PathBuf, String), String> {
@@ -104,30 +130,52 @@ fn resolve_session_dir(app: &AppHandle) -> Result<(PathBuf, String), String> {
 
     let mut tried: Vec<String> = Vec::new();
     for (label, base) in candidates {
-        if let Some(dir) = probe_writable(&base) {
-            return Ok((dir, label));
+        match probe_writable(&base) {
+            Some(dir) => {
+                if let Ok(mut slot) = SESSION_DIR_ERROR.lock() {
+                    *slot = None;
+                }
+                return Ok((dir, label));
+            }
+            None => tried.push(base.display().to_string()),
         }
-        tried.push(base.display().to_string());
     }
 
-    Err(format!(
+    let reason = format!(
         "找不到可写的会话目录，已依次尝试：{}。\
          请检查杀毒软件的受控文件夹访问或企业策略是否禁止本程序写入用户目录。",
         tried.join("、")
-    ))
+    );
+    if let Ok(mut slot) = SESSION_DIR_ERROR.lock() {
+        *slot = Some(format!("已依次尝试：{}", tried.join("、")));
+    }
+    Err(reason)
 }
 
 /// 目录能建出来不代表能写进去。
 ///
 /// `create_dir_all` 在目录已存在时会直接返回成功，把一个只读目录也伪装成可用，
 /// 所以必须真写一个探针文件才算数 —— 否则问题会推迟到连接时才爆发。
+///
+/// 探测失败会重试几次：杀毒软件/索引器短暂持有刚建的目录、或沙箱在切换策略的
+/// 一瞬间收紧权限，都会让一次探测假失败，进而把整个会话退到临时目录直到重启。
 fn probe_writable(base: &std::path::Path) -> Option<PathBuf> {
     let dir = base.join("vpn");
-    std::fs::create_dir_all(&dir).ok()?;
-    let probe = dir.join(".write-probe");
-    std::fs::write(&probe, b"ok").ok()?;
-    let _ = std::fs::remove_file(&probe);
-    Some(dir)
+    for attempt in 0..3 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(120));
+        }
+        if std::fs::create_dir_all(&dir).is_err() {
+            continue;
+        }
+        let probe = dir.join(".write-probe");
+        if std::fs::write(&probe, b"ok").is_err() {
+            continue;
+        }
+        let _ = std::fs::remove_file(&probe);
+        return Some(dir);
+    }
+    None
 }
 
 fn session_of(app: &AppHandle) -> Result<VpnSession, String> {
@@ -351,7 +399,9 @@ pub fn vpn_elevation_info(app: AppHandle) -> ElevationInfo {
 pub fn vpn_setup_elevation(app: AppHandle) -> Result<String, String> {
     let session = session_of(&app)?;
     let exe = std::env::current_exe().map_err(|e| format!("取当前程序路径失败: {}", e))?;
-    session.ensure()?;
+    session
+        .ensure()
+        .map_err(|err| format!("{}{}", err, session_dir_diagnosis()))?;
     elevate::ensure_worker_task(&exe, &session)?;
     if elevate::worker_task_exists() {
         // 任务命令行里带着会话目录，记下来，下次连接就知道它还有没有效
@@ -575,8 +625,17 @@ pub async fn vpn_connect(
     // 先落盘连接请求。持锁的部分只做文件操作，绝不跨过提权那一步。
     let session = {
         let mut runtime = state.0.lock().map_err(|_| "内部状态锁定失败".to_string())?;
+        // 启动时如果退到了临时目录，这里再探一次：用户目录当时可能只是被
+        // 杀毒/沙箱临时锁住，现在又好了。能探到就切回去，不必让用户重启。
+        if let Ok(dir) = session_dir(&app) {
+            if dir != runtime.session.dir {
+                runtime.session = VpnSession::new(dir);
+            }
+        }
         let session = runtime.session.clone();
-        session.prepare()?;
+        session
+            .prepare()
+            .map_err(|err| format!("{}{}", err, session_dir_diagnosis()))?;
         runtime.log_cursor = LogCursor::default();
         runtime.last_status = None;
         runtime.policy_profile_id = Some(profile.id.clone());
