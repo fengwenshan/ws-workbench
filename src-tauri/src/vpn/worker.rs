@@ -8,6 +8,7 @@
 //! 所以一切状态通过会话目录里的文件回传。
 
 use std::io::{BufRead, BufReader, Read};
+use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -18,7 +19,7 @@ use crate::vpn::connector;
 use crate::vpn::models::{
     NetworkSnapshot, VpnPhase, VpnRequest, VpnRule, VpnStatus,
 };
-use crate::vpn::router::ProxyMode;
+use crate::vpn::router::{EngineStats, ProxyMode};
 use crate::vpn::rule_engine::CompiledRuleSet;
 use crate::vpn::route::{self, RouteOutcome, RouteTarget};
 use crate::vpn::script;
@@ -28,6 +29,8 @@ use crate::vpn::session::VpnSession;
 const GUARD_INTERVAL: Duration = Duration::from_secs(15);
 /// 等待隧道就绪的最长时间
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(120);
+/// 引擎接管后观察捕获链路的时间窗口：窗口内一个包都没收到就撤掉捕获路由
+const CAPTURE_PROBE_WINDOW: Duration = Duration::from_secs(12);
 
 /// worker 退出码
 pub const EXIT_OK: i32 = 0;
@@ -625,7 +628,69 @@ impl Worker {
         // 过渡期按 CIDR 下发的路由清掉，改由引擎按流注入
         self.applied.clear();
         self.status.routes.clear();
+        // 装配完成后立刻按应用真实路径自检一次
+        self.spawn_self_check();
         Ok(())
+    }
+
+    /// 连接后自检：按应用真实走的路径跑一次，把结果写进 worker.log。
+    ///
+    /// 「连上就没网」这种反馈，光看「引擎已接管」分不清是捕获网卡没收到包、
+    /// DNS 没应答，还是直连出口建不起来。这里用一条真实连接把
+    /// 「应用 -> 捕获网卡 -> 引擎 -> 直连出口 -> 回包」整条链路串起来，
+    /// 日志里直接能看出断在哪一段。跑在独立线程里，不阻塞引擎收发。
+    fn spawn_self_check(&self) {
+        let session = self.session.clone();
+        // 判定 fake-ip 用配置里的地址池，而不是写死 198.18.0.0/16
+        let fake_range = route::parse_cidr(&self.request.fake_ip_range)
+            .ok()
+            .map(|(net, prefix)| (net, route::prefix_to_mask(prefix)));
+        thread::spawn(move || {
+            let log = |line: &str| session.append_log(line);
+            let in_fake_range = |ip: std::net::IpAddr| match (ip, fake_range) {
+                (std::net::IpAddr::V4(v4), Some((net, mask))) => {
+                    (u32::from(v4) & mask) == net
+                }
+                _ => false,
+            };
+            log("[自检] 开始：系统 DNS -> 捕获网卡 -> 引擎 -> 直连出口");
+            let addrs = match ("www.baidu.com", 443u16).to_socket_addrs() {
+                Ok(addrs) => addrs.collect::<Vec<_>>(),
+                Err(e) => {
+                    log(&format!("[自检] 系统 DNS 解析失败：{}（后面几步跳过）", e));
+                    return;
+                }
+            };
+            let shown = addrs
+                .iter()
+                .take(3)
+                .map(|a| a.ip().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            match addrs.first() {
+                Some(addr) if in_fake_range(addr.ip()) => log(&format!(
+                    "[自检] 系统 DNS 返回 {shown}（fake-ip，DNS 接管生效）"
+                )),
+                Some(_) => log(&format!(
+                    "[自检] 系统 DNS 返回 {shown}（真实地址，说明这次的解析没经过捕获网卡）"
+                )),
+                None => {
+                    log("[自检] 系统 DNS 没有返回地址，后面几步跳过");
+                    return;
+                }
+            }
+            let Some(addr) = addrs.first().copied() else { return };
+            match TcpStream::connect_timeout(&addr, Duration::from_secs(8)) {
+                Ok(_) => log(&format!(
+                    "[自检] 建连 {} 成功：捕获网卡、引擎转发、直连出口都正常",
+                    addr
+                )),
+                Err(e) => log(&format!(
+                    "[自检] 建连 {} 失败：{}（这一段断了，应用侧就是「连上没网」）",
+                    addr, e
+                )),
+            }
+        });
     }
 
     /// 取隧道网卡的接口索引。
@@ -927,6 +992,10 @@ impl Worker {
 
         let mut routes_applied = false;
         let mut guard_at = Instant::now() + GUARD_INTERVAL;
+        // 引擎计数定期落盘：收发全为 0 就说明链路根本没通到引擎
+        let mut stats_at = Instant::now() + Duration::from_secs(5);
+        let mut last_stats: Option<EngineStats> = None;
+        let mut capture_checked = false;
 
         loop {
             self.drain_output(&rx);
@@ -951,6 +1020,68 @@ impl Worker {
             }
             for line in &engine_lines {
                 self.log(line);
+            }
+            if Instant::now() >= stats_at {
+                if let Some(stats) = self.engine.as_ref().map(|engine| engine.stats()) {
+                    if last_stats != Some(stats) {
+                        self.log(&format!(
+                            "[引擎] 收 {} 包 / 发 {} 包 / DNS 应答 {} / 新连接 {} / 建连失败 {}",
+                            stats.rx_packets,
+                            stats.tx_packets,
+                            stats.dns_answered,
+                            stats.flows_opened,
+                            stats.egress_failures
+                        ));
+                        last_stats = Some(stats);
+                    }
+                }
+                stats_at = Instant::now() + Duration::from_secs(5);
+            }
+
+            // 兜底：接管后整整一个窗口都没收到任何包，说明捕获这条路不通，
+            // 继续占着半默认路由只会让整台机器没网。撤掉捕获路由先把网还回去，
+            // 规则分流这一趟作废——总比用户面对「一连上就全网断」好。
+            if !capture_checked {
+                if let Some(ready_at) = self.engine_ready_at {
+                    if ready_at.elapsed() >= CAPTURE_PROBE_WINDOW {
+                        capture_checked = true;
+                        let rx = self
+                            .engine
+                            .as_ref()
+                            .map(|engine| engine.stats().rx_packets)
+                            .unwrap_or(0);
+                        if rx == 0 {
+                            use crate::vpn::platform::RouteTable;
+                            let capture_index = self.capture_index;
+                            if capture_index != 0 {
+                                let _ = crate::vpn::platform::SystemRouteTable::new()
+                                    .del_capture_routes(capture_index);
+                            }
+                            self.capture_index = 0;
+                            // 假地址还留在系统 DNS 缓存里，不刷新的话应用会继续去连
+                            // 198.18.x.x，看起来还是「没网」
+                            #[cfg(target_os = "macos")]
+                            {
+                                let _ = std::process::Command::new("/usr/sbin/dscacheutil")
+                                    .arg("-flushcache")
+                                    .output();
+                                let _ = std::process::Command::new("/usr/bin/killall")
+                                    .arg("-HUP")
+                                    .arg("mDNSResponder")
+                                    .output();
+                            }
+                            self.log(
+                                "[引擎] 捕获网卡 12 秒内没收到任何数据包，已撤掉捕获路由并刷新 DNS 缓存：\
+                                 本次规则分流不生效，网络恢复直连（请把这段日志反馈给开发者）",
+                            );
+                        } else {
+                            self.log(&format!(
+                                "[引擎] 捕获链路正常：12 秒内收到 {} 个包",
+                                rx
+                            ));
+                        }
+                    }
+                }
             }
 
             if self.parent_lost || self.session.is_stop_requested() {

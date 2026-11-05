@@ -656,6 +656,24 @@ pub struct Engine {
     /// 待写进 worker.log 的诊断行：DNS 伪造、每条连接的分流结论、建连失败。
     /// 引擎跑在独立线程里，自己不开文件，由 worker 每轮取走后落盘。
     pending_logs: Vec<String>,
+    dns_answered: u64,
+    flows_opened: u64,
+    egress_failures: u64,
+}
+
+/// 引擎运行期计数，worker 定期写进日志，用来判断链路断在哪一段。
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct EngineStats {
+    /// 捕获网卡收到的包
+    pub rx_packets: u64,
+    /// 写回捕获网卡的包
+    pub tx_packets: u64,
+    /// 本地伪造应答的 DNS 查询数
+    pub dns_answered: u64,
+    /// 成功建出站的应用侧 TCP 流数
+    pub flows_opened: u64,
+    /// 出站建连失败次数（代表出口这一段有问题）
+    pub egress_failures: u64,
 }
 
 impl Engine {
@@ -689,6 +707,9 @@ impl Engine {
             vpn_dns: Vec::new(),
             real_cache: HashMap::new(),
             pending_logs: Vec::new(),
+            dns_answered: 0,
+            flows_opened: 0,
+            egress_failures: 0,
         })
     }
 
@@ -705,6 +726,17 @@ impl Engine {
     /// 取走累积的诊断日志（worker 每轮 poll 后调用）。
     pub fn take_logs(&mut self) -> Vec<String> {
         std::mem::take(&mut self.pending_logs)
+    }
+
+    pub fn stats(&self) -> EngineStats {
+        let phy = self.netstack.phy.stats();
+        EngineStats {
+            rx_packets: phy.rx,
+            tx_packets: phy.tx,
+            dns_answered: self.dns_answered,
+            flows_opened: self.flows_opened,
+            egress_failures: self.egress_failures,
+        }
     }
 
     fn note(&mut self, line: String) {
@@ -874,8 +906,12 @@ impl Engine {
                 .router
                 .open_egress_to(&flow.key, target, egress, domain.clone(), process.clone())
             {
-                Ok(()) => self.note(line),
+                Ok(()) => {
+                    self.flows_opened += 1;
+                    self.note(line);
+                }
                 Err(err) => {
+                    self.egress_failures += 1;
                     self.note(format!("{}，建连失败：{}", line, err));
                     self.netstack.abort_tcp(&flow.key);
                 }
@@ -991,6 +1027,7 @@ impl Engine {
         };
         self.fake_domains.insert(ip, name.clone());
         self.dns_servers.insert(name.clone(), *server.ip());
+        self.dns_answered += 1;
         self.note(format!(
             "[DNS] {} -> {}（假地址，连接时会按域名匹配规则）",
             name,
