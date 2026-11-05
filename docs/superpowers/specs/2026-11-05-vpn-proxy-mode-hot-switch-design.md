@@ -123,6 +123,7 @@ pub fn apply_mode(mode: ProxyMode, egress: Egress) -> Egress  // 纯函数
 - 移除：规则列表单选、当前生效 badge、新建/编辑/删除列表按钮、`VpnRuleSetDialog` 组件（删除文件）。
 - `VpnRuleTable` props 由 `ruleSet` 改为 `rules` + `defaultPolicy`，事件不变。
 - 非规则模式时表格保持可编辑（规则先攒着，切到规则模式即生效），顶部提示「当前是 X 模式，规则不参与分流」。
+- 当前选中的配置不是连接中的那个时，表格照常可编辑，顶部提示「该配置未连接，改动将在下次连接生效」（不推送运行期）。
 - 代理模式：`modeLocked` 只在 `connecting || phaseBusy` 时锁；文案「切换立即生效：新连接按新模式，已建立的连接保持原路径」。
 - 规则表格里的校验仍走 `vpn_validate_rule`。
 
