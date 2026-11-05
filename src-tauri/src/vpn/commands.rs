@@ -542,7 +542,6 @@ pub async fn vpn_connect(
         default_policy: default_policy.clone(),
         fake_ip_range: profile.fake_ip_range.clone(),
         fake_ip_filter: profile.fake_ip_filter.clone(),
-        use_vpn_dns: profile.use_vpn_dns,
         learn: profile.learn,
         extra_args: profile.extra_args.clone(),
         script_path: String::new(), // worker 生成脚本后回填

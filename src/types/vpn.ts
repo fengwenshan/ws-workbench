@@ -69,8 +69,6 @@ export interface VpnProfile {
   fake_ip_range: string
   /** 不进入 fake-ip 池的地址段（*.后缀 或 关键字） */
   fake_ip_filter: string[]
-  /** 是否把服务端下发的 DNS 写入 VPN 网卡 */
-  use_vpn_dns: boolean
   /** 连接期间是否开启学习模式：采集实际连通的远端地址，反推候选分流网段 */
   learn: boolean
   extra_args: string[]
@@ -88,6 +86,10 @@ export interface NewVpnProfileInput {
   password?: string
   protocol?: string
   extra_args?: string[]
+  /** fake-ip 地址池；不填用后端默认值 */
+  fake_ip_range?: string
+  /** 不走 fake-ip 的域名（*.后缀 / .后缀 / 关键字） */
+  fake_ip_filter?: string[]
 }
 
 /** 探测到的连接器 */

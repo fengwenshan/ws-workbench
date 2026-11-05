@@ -419,11 +419,17 @@ impl Worker {
         // 最后才抢半默认路由：此时服务器流量已经钉在物理网关上。
         route_table.add_capture_routes(capture_index)?;
 
-        let pool = crate::vpn::fakedns::FakeIpPool::new(
+        let (pool, pool_warning) = crate::vpn::fakedns::FakeIpPool::from_profile(
             &self.request.fake_ip_range,
             &self.request.fake_ip_filter,
-        )
-        .map_err(|e| format!("fake-ip 池初始化失败: {}", e))?;
+        );
+        if let Some(warning) = pool_warning {
+            self.log(&format!(
+                "[fake-ip] {}，已退回默认地址池 {}",
+                warning,
+                crate::vpn::fakedns::DEFAULT_RANGE
+            ));
+        }
         self.fake_pool = Some(pool.clone());
 
         let rules = self.compiled_rules()?;
@@ -462,17 +468,17 @@ impl Worker {
         )?;
         // 把假地址池交给引擎：DNS 本地应答与假 IP 反查域名都靠它
         engine.set_fake_pool(pool);
-        // 服务端下发的 DNS 作为内网域名的兜底解析器（用户关掉该选项就不注入）
-        if self.request.use_vpn_dns {
-            let vpn_dns: Vec<std::net::Ipv4Addr> = self
-                .status
-                .dns
-                .iter()
-                .flat_map(|s| s.split_whitespace())
-                .filter_map(|s| s.parse().ok())
-                .collect();
-            engine.set_vpn_dns(vpn_dns);
-        }
+        // 服务端下发的 DNS 固定注入，作为内网域名的兜底解析器。
+        // 它排在「应用自己的 DNS」和「换出口重试」之后，只在内网域名解析不出来时才用到，
+        // 所以没有关掉的必要 —— 这个选项已经内置，不再暴露给用户。
+        let vpn_dns: Vec<std::net::Ipv4Addr> = self
+            .status
+            .dns
+            .iter()
+            .flat_map(|s| s.split_whitespace())
+            .filter_map(|s| s.parse().ok())
+            .collect();
+        engine.set_vpn_dns(vpn_dns);
         self.engine = Some(engine);
         self.log(&format!(
             "[引擎] 已接管：捕获 {} ({}) -> 隧道 {}",
@@ -1301,7 +1307,6 @@ mod tests {
             default_policy: "DIRECT".into(),
             fake_ip_range: "198.18.0.0/16".into(),
             fake_ip_filter: vec![],
-            use_vpn_dns: false,
             learn: false,
             extra_args: vec![],
             script_path: "s".into(),
@@ -1338,7 +1343,6 @@ mod tests {
             default_policy: "DIRECT".into(),
             fake_ip_range: "198.18.0.0/16".into(),
             fake_ip_filter: vec![],
-            use_vpn_dns: false,
             learn: false,
             extra_args: vec![],
             script_path: "s".into(),
@@ -1368,7 +1372,6 @@ mod tests {
             default_policy: "DIRECT".into(),
             fake_ip_range: "198.18.0.0/16".into(),
             fake_ip_filter: vec![],
-            use_vpn_dns: false,
             learn: false,
             extra_args: vec![],
             script_path: "s".into(),
@@ -1399,7 +1402,6 @@ mod tests {
             default_policy: "DIRECT".into(),
             fake_ip_range: "198.18.0.0/16".into(),
             fake_ip_filter: vec![],
-            use_vpn_dns: false,
             learn: false,
             extra_args: vec![],
             script_path: "s".into(),

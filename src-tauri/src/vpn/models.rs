@@ -139,9 +139,6 @@ pub struct VpnProfile {
     /// 不进入 fake-ip 池的地址段
     #[serde(default)]
     pub fake_ip_filter: Vec<String>,
-    /// 是否把服务端下发的 DNS 写入 VPN 网卡
-    #[serde(default = "default_true")]
-    pub use_vpn_dns: bool,
     /// 连接期间是否开启学习模式。开着才采集远端连接，关掉不影响正常连接。
     #[serde(default)]
     pub learn: bool,
@@ -166,7 +163,7 @@ fn default_proxy_mode() -> String {
 }
 
 fn default_fake_ip_range() -> String {
-    "198.18.0.0/16".to_string()
+    crate::vpn::fakedns::DEFAULT_RANGE.to_string()
 }
 
 /// 探测到的连接器
@@ -420,7 +417,6 @@ pub struct VpnRequest {
     /// 不进入 fake-ip 池的地址段
     #[serde(default)]
     pub fake_ip_filter: Vec<String>,
-    pub use_vpn_dns: bool,
     /// 连接期间是否开启学习模式：周期性采集实际连通的远端，反推候选分流网段
     #[serde(default)]
     pub learn: bool,
