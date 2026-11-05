@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import type { LogEntry } from '@/types'
 
 const props = defineProps<{
@@ -24,6 +24,16 @@ const LEVEL_LABELS: Record<string, string> = {
 const logBody = ref<HTMLElement | null>(null)
 const paused = ref(false)
 
+/** 复制按钮的短暂反馈：idle -> done/fail -> 1.5 秒后回 idle */
+const copyState = ref<'idle' | 'done' | 'fail'>('idle')
+let copyTimer: ReturnType<typeof setTimeout> | null = null
+
+const copyLabel = computed(() => {
+  if (copyState.value === 'done') return '已复制'
+  if (copyState.value === 'fail') return '复制失败'
+  return '复制'
+})
+
 /** 粘在底部时才自动跟随：用户往上翻看历史时不抢滚动条 */
 async function followBottom() {
   if (paused.value) return
@@ -41,12 +51,67 @@ function togglePause() {
   if (!paused.value) void followBottom()
 }
 
+/**
+ * 写剪贴板。
+ *
+ * 先试 Clipboard API：Tauri 的 WebView 在生产环境下不是普通 http(s) 页面，
+ * 有的平台会直接判成非安全上下文而拒掉；拒了就退回隐藏 textarea + execCommand，
+ * 这条老路在 WebView 里更稳。
+ */
+async function copyText(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text)
+    return true
+  } catch {
+    // 继续走兜底
+  }
+  try {
+    const textarea = document.createElement('textarea')
+    textarea.value = text
+    textarea.style.position = 'fixed'
+    textarea.style.opacity = '0'
+    document.body.appendChild(textarea)
+    textarea.select()
+    const ok = document.execCommand('copy')
+    document.body.removeChild(textarea)
+    return ok
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 复制当前抽屉里的日志。
+ *
+ * 只复制这个窗口里已经在显示的那一份（`props.logs`），不是磁盘上的完整日志文件；
+ * 格式与界面一致：一条一行「时间 级别 内容」，多行消息原样保留。
+ */
+async function copyLogs() {
+  if (props.logs.length === 0) return
+  const text = props.logs
+    .map((log) => `${log.timestamp} ${LEVEL_LABELS[log.level] || log.level} ${log.message}`)
+    .join('\n')
+  const ok = await copyText(text)
+  copyState.value = ok ? 'done' : 'fail'
+  if (copyTimer) clearTimeout(copyTimer)
+  copyTimer = setTimeout(() => {
+    copyState.value = 'idle'
+    copyTimer = null
+  }, 1500)
+}
+
 function onKeydown(event: KeyboardEvent) {
   if (event.key === 'Escape') emit('close')
 }
 
 onMounted(() => window.addEventListener('keydown', onKeydown))
-onUnmounted(() => window.removeEventListener('keydown', onKeydown))
+onUnmounted(() => {
+  window.removeEventListener('keydown', onKeydown)
+  if (copyTimer) {
+    clearTimeout(copyTimer)
+    copyTimer = null
+  }
+})
 </script>
 
 <template>
@@ -59,6 +124,15 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
         </div>
         <div class="head-actions">
           <slot name="actions" />
+          <button
+            class="btn btn-secondary btn-xs"
+            type="button"
+            :disabled="logs.length === 0"
+            :title="logs.length === 0 ? '当前窗口里没有日志可复制' : '复制当前窗口内的全部日志'"
+            @click="copyLogs"
+          >
+            {{ copyLabel }}
+          </button>
           <button class="btn btn-secondary btn-xs" @click="togglePause">
             {{ paused ? '继续跟随' : '暂停跟随' }}
           </button>
