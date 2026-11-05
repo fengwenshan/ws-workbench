@@ -714,6 +714,34 @@ pub async fn vpn_connect(
         runtime.elevation = elevation.clone();
     }
 
+    // 心跳线程：worker 靠这个文件判断主进程是否还活着。
+    // 主进程被强杀时没人来请求停止，worker 会在心跳过期后自己走正常收尾流程。
+    {
+        let heartbeat = session.clone();
+        std::thread::spawn(move || {
+            let started = Instant::now();
+            loop {
+                if heartbeat.touch_alive().is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_secs(2));
+                match heartbeat.read_status() {
+                    Some(status)
+                        if matches!(
+                            status.phase,
+                            VpnPhase::Disconnected | VpnPhase::Failed
+                        ) =>
+                    {
+                        break;
+                    }
+                    // 启动阶段可能还读不到状态；超过两分钟仍读不到就放弃
+                    None if started.elapsed() > Duration::from_secs(120) => break,
+                    _ => {}
+                }
+            }
+        });
+    }
+
     Ok(ConnectResult {
         connector_name: connector.name,
         connector_path: connector.path,

@@ -82,6 +82,8 @@ struct Worker {
     last_alive_check: Instant,
     /// 引擎装配时刻；父进程心跳宽限期从这里算
     engine_ready_at: Option<Instant>,
+    /// 心跳过期：主进程已经不在了，循环里看到就把隧道收掉
+    parent_lost: bool,
 }
 
 impl Worker {
@@ -133,6 +135,7 @@ impl Worker {
             last_rules_check: Instant::now(),
             last_alive_check: Instant::now(),
             engine_ready_at: None,
+            parent_lost: false,
         }
     }
 
@@ -361,8 +364,28 @@ impl Worker {
         compile(&compiled, &std::collections::HashMap::new(), default)
     }
 
-    fn compiled_rules(&mut self) -> Result<CompiledRuleSet, String> {
-        Self::compile_rules(&self.request.rules, &self.request.default_policy)
+    /// 心跳守卫：主进程被强杀时没人来收尾，心跳停了就自己走正常停止流程
+    fn check_parent_alive(&mut self) {
+        if self.last_alive_check.elapsed() < Duration::from_secs(1) {
+            return;
+        }
+        self.last_alive_check = Instant::now();
+        match self.session.alive_age() {
+            // 心跳文件还没出现：给启动留 10s 宽限期
+            None => {
+                if elapsed_since(&self.status.started_at) > Duration::from_secs(10) {
+                    self.parent_lost = true;
+                }
+            }
+            Some(age) => {
+                if age > Duration::from_secs(8) {
+                    self.parent_lost = true;
+                }
+            }
+        }
+        if self.parent_lost {
+            self.log("[worker] 主进程心跳已停止，自动收尾并退出");
+        }
     }
 
     /// 轮询 mode 文件：变化时只改判定开关，已建立的连接不受影响
@@ -1018,6 +1041,7 @@ impl Worker {
             // 运行期开关：模式与规则都可能在任何时刻被主进程改写
             self.poll_mode_change();
             self.poll_rules_change();
+            self.check_parent_alive();
 
             // 引擎的收发循环必须每轮推进：塞进 15s 巡检那一跳会把吞吐卡死。
             // 引擎尚未装配（隧道未就绪）时是 None，这一跳自然空转。
@@ -1027,8 +1051,10 @@ impl Worker {
                 }
             }
 
-            if self.session.is_stop_requested() {
-                self.log("[worker] 收到停止请求");
+            if self.parent_lost || self.session.is_stop_requested() {
+                if !self.parent_lost {
+                    self.log("[worker] 收到停止请求");
+                }
                 break;
             }
 
@@ -1484,8 +1510,8 @@ mod tests {
             hook_exe: "h".into(),
             created_at: String::new(),
         };
-        let mut worker = Worker::new(session, request);
-        let set = worker.compiled_rules().expect("规则集应可编译");
+        let set = Worker::compile_rules(&request.rules, &request.default_policy)
+            .expect("规则集应可编译");
         assert_eq!(set.rules().len(), 1);
         assert_eq!(set.rules()[0].kind, crate::vpn::rule_engine::RuleKind::IpCidr);
         assert_eq!(set.rules()[0].policy, crate::vpn::rule_engine::Policy::Vpn);
