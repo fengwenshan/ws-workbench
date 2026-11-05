@@ -25,7 +25,7 @@ import ProjectList from "@/components/ProjectList.vue";
 import GroupDetail from "@/components/GroupDetail.vue";
 import ProjectDetail from "@/components/ProjectDetail.vue";
 import PackProgress from "@/components/PackProgress.vue";
-import LogPanel from "@/components/LogPanel.vue";
+import LogDrawer from "@/components/LogDrawer.vue";
 import VpnPanel from "@/components/vpn/VpnPanel.vue";
 import VpnStatusDot from "@/components/vpn/VpnStatusDot.vue";
 import SettingsPanel from "@/components/settings/SettingsPanel.vue";
@@ -96,16 +96,12 @@ const {
   treeWidth,
   treeCollapsed,
   vpnMenuCollapsed,
-  logHeight,
   logOpen,
   setLogOpen,
   toggleLogs,
   startTreeResize,
-  startLogResize,
   resetTreeWidth,
-  resetLogHeight,
   onTreeResizerKeydown,
-  onLogResizerKeydown,
 } = useWorkbenchLayout();
 
 // Windows 使用自绘标题栏；macOS 仍用系统红绿灯，Linux 保留系统边框
@@ -296,15 +292,8 @@ const {
   addLog,
 });
 
-// 日志面板：应用日志与 VPN 日志共用底部面板
-const logSource = ref<"app" | "vpn">("app");
-const activeLogs = computed(() =>
-  logSource.value === "app" ? logs.value : vpn.logs,
-);
-function clearActiveLogs() {
-  if (logSource.value === "app") clearLogs();
-  else vpn.clearLogs();
-}
+/** 应用日志抽屉的副标题：只报条数，不做别的判断 */
+const appLogStatus = computed(() => `${logs.value.length} 条记录`);
 
 // 托盘菜单只负责转发动作，具体行为在这里决定
 let trayUnlisten: UnlistenFn | null = null;
@@ -826,60 +815,18 @@ async function handlePack(project: any, asZip: boolean = false) {
           />
         </div>
 
-        <!-- 日志面板 -->
-        <div
-          v-show="logOpen"
-          class="resizer resizer-log"
-          role="separator"
-          aria-orientation="horizontal"
-          aria-label="调整日志面板高度"
-          tabindex="0"
-          title="拖动调整日志高度，双击恢复默认"
-          @pointerdown="startLogResize"
-          @keydown="onLogResizerKeydown"
-          @dblclick="resetLogHeight"
-        ></div>
-        <section
-          v-show="logOpen"
-          class="log-dock"
-          :style="{ height: logHeight + 'px' }"
-        >
-          <div class="log-dock-header">
-            <div class="log-dock-tabs">
-              <button
-                class="log-dock-tab"
-                :class="{ active: logSource === 'app' }"
-                @click="logSource = 'app'"
-              >
-                应用
-              </button>
-              <button
-                class="log-dock-tab"
-                :class="{ active: logSource === 'vpn' }"
-                @click="logSource = 'vpn'"
-              >
-                VPN
-              </button>
-            </div>
-            <div class="log-dock-actions">
-              <button class="log-dock-action" @click="clearActiveLogs">
-                清空
-              </button>
-              <button
-                class="log-dock-action log-dock-close"
-                :title="shortcutTitle('关闭日志', 'J')"
-                aria-label="关闭日志"
-                @click="setLogOpen(false)"
-              >
-                ×
-              </button>
-            </div>
-          </div>
-          <div class="log-dock-body">
-            <LogPanel :logs="activeLogs" @clear="clearActiveLogs" />
-          </div>
-        </section>
       </main>
+
+      <!-- 应用日志：和 VPN 日志一样走右侧抽屉 -->
+      <LogDrawer
+        v-if="logOpen"
+        title="应用日志"
+        :status="appLogStatus"
+        :logs="logs"
+        empty-text="暂无日志。解密、打包、设置这些操作会记录在这里。"
+        @clear="clearLogs"
+        @close="setLogOpen(false)"
+      />
     </div>
 
       <!-- 新建分组弹窗：分组只需要名称 -->
@@ -1258,11 +1205,6 @@ async function handlePack(project: any, asZip: boolean = false) {
   width: 5px;
   cursor: col-resize;
 }
-.resizer-log {
-  height: 5px;
-  cursor: row-resize;
-  border-bottom: 1px solid var(--border-color);
-}
 .resizer:hover {
   background: var(--primary);
   opacity: 0.45;
@@ -1288,83 +1230,6 @@ async function handlePack(project: any, asZip: boolean = false) {
   overflow: hidden;
 }
 
-/* 日志面板（外层容器，与 LogPanel 组件自身的 .log-panel 区分） */
-.log-dock {
-  flex-shrink: 0;
-  display: flex;
-  flex-direction: column;
-  border-top: 1px solid var(--border-color);
-  background: var(--bg-primary);
-  overflow: hidden;
-}
-.log-dock-header {
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  height: 40px;
-  padding: 0 8px 0 12px;
-  border-bottom: 1px solid var(--border-color);
-}
-.log-dock-tabs {
-  display: flex;
-  gap: 4px;
-}
-.log-dock-tab {
-  padding: 4px 12px;
-  border: 1px solid transparent;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--text-secondary);
-  font-size: 12px;
-  cursor: pointer;
-  transition: all 0.15s;
-}
-.log-dock-tab:hover {
-  background: var(--bg-hover);
-  color: var(--text-primary);
-}
-.log-dock-tab.active {
-  border-color: var(--primary);
-  color: var(--primary);
-  font-weight: 500;
-}
-.log-dock-actions {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-.log-dock-action {
-  padding: 4px 10px;
-  border: 1px solid var(--border-color);
-  border-radius: 6px;
-  background: var(--bg-input);
-  color: var(--text-secondary);
-  font-size: 12px;
-  cursor: pointer;
-  transition: all 0.15s;
-}
-.log-dock-action:hover {
-  border-color: var(--primary);
-  color: var(--primary);
-}
-.log-dock-close {
-  width: 28px;
-  padding: 4px 0;
-  font-size: 16px;
-  line-height: 1;
-  text-align: center;
-}
-.log-dock-body {
-  flex: 1;
-  min-height: 0;
-  overflow: hidden;
-}
-/* 日志内容自带「日志 / 清空」表头，与外层标签栏重复，这里只保留内容区 */
-.log-dock-body :deep(.log-header) {
-  display: none;
-}
-
 /* 窄窗口：先收起项目树，再让日志面板覆盖工作区 */
 @media (max-width: 900px) {
   .tree-panel,
@@ -1372,21 +1237,6 @@ async function handlePack(project: any, asZip: boolean = false) {
     display: none !important;
   }
 }
-@media (max-width: 720px) {
-  .log-dock {
-    position: absolute;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    max-height: 50vh;
-    box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.12);
-    z-index: 5;
-  }
-  .resizer-log {
-    display: none;
-  }
-}
-
 /* 软件更新按钮（标题栏内） */
 .update-btn {
   padding: 4px 10px;
