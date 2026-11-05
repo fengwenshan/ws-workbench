@@ -71,8 +71,6 @@ export interface VpnProfile {
   fake_ip_range: string
   /** 不进入 fake-ip 池的地址段（*.后缀 或 关键字） */
   fake_ip_filter: string[]
-  /** 连接期间是否开启学习模式：采集实际连通的远端地址，反推候选分流网段 */
-  learn: boolean
   extra_args: string[]
   /** 手动指定的连接器路径 */
   connector_path: string
@@ -124,56 +122,6 @@ export interface NetworkSnapshot {
   local_subnets: string[]
 }
 
-/** 学习模式采集到的一台远端主机 */
-export interface LearnedHost {
-  ip: string
-  ports: number[]
-  /** 在多少轮采样里被看到过 */
-  hits: number
-  /** 至少有一条连接确实走了隧道 */
-  via_vpn: boolean
-  processes: string[]
-  first_seen: string
-  last_seen: string
-}
-
-/** 由观察结果反推出来的候选分流网段 */
-export interface LearnedSubnet {
-  cidr: string
-  hosts: number
-  hits: number
-  /** 是向上汇聚出来的大网段（/16、/8），采纳前要多想一下 */
-  broad: boolean
-  /** 现有规则表里已有一条能把它整个包住 */
-  covered: boolean
-  /** 现有规则表里正好有这一条 */
-  adopted: boolean
-  /** 采样到的地址，作为线索 */
-  samples: string[]
-}
-
-/** 学习报告明细（来自会话目录的 learn.json，按需拉取） */
-export interface LearnReport {
-  enabled: boolean
-  scans: number
-  updated_at: string
-  hosts: LearnedHost[]
-  candidates: LearnedSubnet[]
-}
-
-/** 状态文件里的学习模式摘要 */
-export interface LearnSummary {
-  enabled: boolean
-  scans: number
-  hosts: number
-  candidates: number
-  /** 还没进规则表的候选数量 */
-  uncovered: number
-  /** 采样失败的说明；连续失败会自动停用 */
-  error: string
-  updated_at: string
-}
-
 /** 连接状态 */
 export interface VpnStatus {
   phase: VpnPhase
@@ -192,8 +140,6 @@ export interface VpnStatus {
   mtu: number
   routes: AppliedRoute[]
   snapshot: NetworkSnapshot | null
-  /** 学习模式摘要；没开启学习模式时为 null。明细要走 vpn_read_learn_report */
-  learn: LearnSummary | null
   error: string
   pid: number
   started_at: string

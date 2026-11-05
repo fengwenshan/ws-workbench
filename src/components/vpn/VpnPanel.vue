@@ -12,7 +12,6 @@ import type {
 } from '@/types/vpn'
 import { platform } from '@/platform'
 import VpnInstallGuide from './VpnInstallGuide.vue'
-import VpnLearnCard from './VpnLearnCard.vue'
 import VpnProfileDialog from './VpnProfileDialog.vue'
 import VpnRoutePreview from './VpnRoutePreview.vue'
 import VpnRuleTable from './VpnRuleTable.vue'
@@ -494,8 +493,6 @@ watch(
           <div v-else class="mode-off-note">
             当前是{{ currentMode.label }}模式，规则不参与分流；切到「规则」模式后生效。
           </div>
-
-          <VpnLearnCard :vpn="vpn" />
 
           <VpnRoutePreview :status="vpn.status" />
         </template>
