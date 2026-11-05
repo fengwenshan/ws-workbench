@@ -16,6 +16,17 @@
 
 ---
 
+## 执行状态（2026-11-05）
+
+- M1 配置模型改造：已完成（`cacef11`、`2495fc0`、`8d694a6`）
+- M2 运行期通道：已完成（`aa928cc`、`be786f8`、`6cc4585`）
+- M3 通道共享：已完成（`96b3586`、`487655a`、`269bfb6`）
+- M4 退出清理：已完成（`853bd7e`、`549dd05`）
+- 自动验证：`cargo test --lib` 307 passed / 1 failed（既有 macOS 环境失败 `vpn::detect::tests::bundled_openconnect_is_probed_not_skipped`）；`vue-tsc --noEmit` 与 `pnpm build` 通过
+- Task 17 的手动验收项需要在真机上连一次 VPN 才能完成，尚未执行
+
+---
+
 ## Phase M1 — 配置模型改造（规则内嵌进配置）
 
 ### Task 1: 前端类型改造

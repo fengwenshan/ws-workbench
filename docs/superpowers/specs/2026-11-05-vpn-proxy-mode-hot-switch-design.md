@@ -1,7 +1,7 @@
 # VPN 配置模型改造 + 通道共享 + 运行期热切换 + 退出清理 设计
 
 - 日期：2026-11-05
-- 状态：待评审（第 4 版：新增"同通道配置共享隧道"）
+- 状态：已实现（第 4 版；M1–M4 代码完成，手动验收待真机执行）
 - 范围：`src-tauri/src/vpn/*`、`src-tauri/src/lib.rs`、`src/components/vpn/*`、`src/composables/useVpn.ts`、`src/types/*`
 
 ## 1. 背景
