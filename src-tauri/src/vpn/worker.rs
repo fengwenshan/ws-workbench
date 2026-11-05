@@ -586,9 +586,16 @@ impl Worker {
         } else {
             return Err("找不到物理默认网卡，无法确定直连出口（已中止以免回环）".to_string());
         };
+
+        // 出站 socket 显式绑源地址：捕获网卡占着半默认路由时，内核选源会失败。
+        let physical_ip = platform::interface_ipv4(&self.snapshot.default_if_alias);
+        let tunnel_ip: Option<std::net::Ipv4Addr> = self.status.vpn_ip.parse().ok();
         self.log(&format!(
-            "[引擎] 直连出口 if#{}（{}），网关 {}",
-            physical_if, self.snapshot.default_if_alias, self.snapshot.default_gateway
+            "[引擎] 直连出口 if#{}（{}），源地址 {}，网关 {}",
+            physical_if,
+            self.snapshot.default_if_alias,
+            physical_ip.map(|ip| ip.to_string()).unwrap_or_else(|| "自动".to_string()),
+            self.snapshot.default_gateway
         ));
 
         let mut engine = router::Engine::assemble(
@@ -605,6 +612,8 @@ impl Worker {
             &self.snapshot.local_subnets,
             physical_if,
             vpn_index,
+            physical_ip,
+            tunnel_ip,
             proc,
             &self.request.default_policy,
         )?;

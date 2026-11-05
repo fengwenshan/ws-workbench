@@ -84,6 +84,34 @@ pub trait RouteTable: Send + Sync {
     fn del_server_host_route(&self, ip: Ipv4Addr) -> Result<(), String>;
 }
 
+/// 取某块网卡的 IPv4 地址（出站 socket 显式绑定源地址用）。
+///
+/// 绑网卡索引（`IP_BOUND_IF`）在捕获路由存在时选路会失败；改成显式绑定源地址后，
+/// 源地址选择不再依赖路由表，配合按流装的 /32 路由即可稳定出门。
+#[cfg(unix)]
+pub fn interface_ipv4(name: &str) -> Option<Ipv4Addr> {
+    use nix::ifaddrs::getifaddrs;
+
+    let addrs = getifaddrs().ok()?;
+    for ifaddr in addrs {
+        if ifaddr.interface_name != name {
+            continue;
+        }
+        let Some(address) = ifaddr.address else { continue };
+        let Some(sockaddr) = address.as_sockaddr_in() else { continue };
+        let ip = sockaddr.ip();
+        if !ip.is_loopback() && !ip.is_unspecified() {
+            return Some(ip);
+        }
+    }
+    None
+}
+
+#[cfg(not(unix))]
+pub fn interface_ipv4(_name: &str) -> Option<Ipv4Addr> {
+    None
+}
+
 /// 把某个 fd 的出口钉到指定网卡。
 pub trait IfBinder: Send + Sync {
     fn bind_fd_to_if(&self, fd: i32, if_index: u32) -> std::io::Result<()>;

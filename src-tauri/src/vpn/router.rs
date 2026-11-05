@@ -76,6 +76,10 @@ pub struct Router {
     gateway: String,
     /// 本机直连网段：落在其中的地址走 on-link，不能走网关
     local_subnets: Vec<(u32, u8)>,
+    /// 直连出站 socket 绑定的源地址（物理网卡 IP）
+    direct_bind: Option<Ipv4Addr>,
+    /// VPN 出站 socket 绑定的源地址（隧道 IP）
+    vpn_bind: Option<Ipv4Addr>,
     physical_if: u32,
     vpn_if: u32,
     flows: HashMap<FlowKey, FlowEgress>,
@@ -91,6 +95,8 @@ impl Router {
         local_subnets: Vec<String>,
         physical_if: u32,
         vpn_if: u32,
+        direct_bind: Option<Ipv4Addr>,
+        vpn_bind: Option<Ipv4Addr>,
     ) -> Self {
         Router {
             route,
@@ -101,10 +107,45 @@ impl Router {
                 .collect(),
             physical_if,
             vpn_if,
+            direct_bind,
+            vpn_bind,
             flows: HashMap::new(),
             udp_flows: HashMap::new(),
             installed_routes: HashMap::new(),
         }
+    }
+
+    /// 该出口的出站源地址
+    fn bind_for(&self, egress: Egress) -> Option<Ipv4Addr> {
+        match egress {
+            Egress::Direct => self.direct_bind,
+            Egress::Vpn => self.vpn_bind,
+        }
+    }
+
+    /// 内核实际给这个目的地址选的路由，用来解释「为什么连不上」。
+    #[cfg(target_os = "macos")]
+    pub fn describe_route(&self, ip: Ipv4Addr) -> Option<String> {
+        let output = std::process::Command::new("/sbin/route")
+            .args(["-n", "get", &ip.to_string()])
+            .output()
+            .ok()?;
+        let text = String::from_utf8_lossy(&output.stdout);
+        let picked: Vec<&str> = text
+            .lines()
+            .filter(|line| {
+                line.contains("destination:") || line.contains("gateway:") || line.contains("interface:")
+            })
+            .collect();
+        if picked.is_empty() {
+            return None;
+        }
+        Some(picked.join("；").replace("  ", " "))
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn describe_route(&self, _ip: Ipv4Addr) -> Option<String> {
+        None
     }
 
     /// 目的地址是否落在本机直连网段里
@@ -183,7 +224,7 @@ impl Router {
         self.retain_flow_route(remote_ip, egress)?;
         let installed_route = Some(remote_ip);
 
-        let stream = match connect_plain(target) {
+        let stream = match connect_plain(target, self.bind_for(egress)) {
             Ok(s) => s,
             Err(e) => {
                 self.release_flow_route(remote_ip, egress);
@@ -249,7 +290,7 @@ impl Router {
         }
         let remote_ip = *target.ip();
         self.retain_flow_route(remote_ip, egress)?;
-        let socket = match udp_socket_plain() {
+        let socket = match udp_socket_plain(self.bind_for(egress)) {
             Ok(socket) => socket,
             Err(e) => {
                 self.release_flow_route(remote_ip, egress);
@@ -405,22 +446,39 @@ impl Router {
 }
 
 /// 建一条出站 TCP。出口由 /32 路由决定（见 `retain_flow_route`），
-/// 这里不绑网卡 —— 绑了反而会被捕获网卡的半默认路由挡成 `ENETUNREACH`。
-fn connect_plain(remote: SocketAddrV4) -> std::io::Result<TcpStream> {
-    let stream = TcpStream::connect_timeout(
-        &std::net::SocketAddr::V4(remote),
+/// 源地址显式绑到对应网卡的 IP：捕获网卡抢了半默认路由，交给内核选源会失败
+/// （`EADDRNOTAVAIL`），显式绑定后不再依赖选路实现。
+fn connect_plain(remote: SocketAddrV4, bind: Option<Ipv4Addr>) -> std::io::Result<TcpStream> {
+    use socket2::{Domain, Protocol, SockAddr, Socket, Type};
+
+    let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
+    if let Some(ip) = bind {
+        socket.bind(&SockAddr::from(std::net::SocketAddr::V4(
+            SocketAddrV4::new(ip, 0),
+        )))?;
+    }
+    socket.connect_timeout(
+        &SockAddr::from(std::net::SocketAddr::V4(remote)),
         Duration::from_secs(CONNECT_TIMEOUT_SECS),
     )?;
+    socket.set_tcp_nodelay(true)?;
+    let stream: TcpStream = socket.into();
     stream.set_read_timeout(Some(Duration::from_millis(200)))?;
     stream.set_write_timeout(Some(Duration::from_millis(200)))?;
-    stream.set_nodelay(true)?;
     Ok(stream)
 }
 
-/// 建一条出站 UDP socket。出口同样由 /32 路由决定，所以不需要绑网卡。
-fn udp_socket_plain() -> std::io::Result<UdpSocket> {
-    let socket = UdpSocket::bind("0.0.0.0:0")?;
+/// 建一条出站 UDP socket，同样显式绑定源地址。
+fn udp_socket_plain(bind: Option<Ipv4Addr>) -> std::io::Result<UdpSocket> {
+    use socket2::{Domain, Protocol, SockAddr, Socket, Type};
+
+    let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+    socket.bind(&SockAddr::from(std::net::SocketAddr::V4(SocketAddrV4::new(
+        bind.unwrap_or(Ipv4Addr::UNSPECIFIED),
+        0,
+    ))))?;
     socket.set_read_timeout(Some(Duration::from_millis(200)))?;
+    let socket: UdpSocket = socket.into();
     Ok(socket)
 }
 
@@ -568,6 +626,8 @@ impl Engine {
         local_subnets: &[String],
         physical_if: u32,
         vpn_if: u32,
+        direct_bind: Option<Ipv4Addr>,
+        vpn_bind: Option<Ipv4Addr>,
         proc: Box<dyn ProcLookup>,
         default_policy: &str,
     ) -> Result<Self, String> {
@@ -580,6 +640,8 @@ impl Engine {
             local_subnets.to_vec(),
             physical_if,
             vpn_if,
+            direct_bind,
+            vpn_bind,
         );
         Ok(Engine {
             router,
@@ -811,6 +873,13 @@ impl Engine {
                     let seen = *seen;
                     if seen <= 2 || seen % 10 == 0 {
                         self.note(format!("{}，建连失败（第 {} 次）：{}", line, seen, err));
+                        // 头两次失败顺手记下内核给这个目的地址选的路由，
+                        // 「连不上」的原因基本就写在 interface/gateway 这两行里。
+                        if seen <= 2 {
+                            if let Some(desc) = self.router.describe_route(*target.ip()) {
+                                self.note(format!("[诊断] 内核选路 {} -> {}", target.ip(), desc));
+                            }
+                        }
                     }
                     self.netstack.abort_tcp(&flow.key);
                 }
@@ -1190,6 +1259,8 @@ mod tests {
             vec!["192.168.1.0/24".to_string()],
             14,
             9,
+            Some("192.168.1.23".parse().unwrap()),
+            Some("198.51.100.39".parse().unwrap()),
         );
         (router, calls)
     }
