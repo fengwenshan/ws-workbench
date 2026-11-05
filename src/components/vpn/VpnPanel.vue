@@ -4,17 +4,15 @@ import { Modal } from 'ant-design-vue'
 import type { VpnApi } from '@/composables/useVpn'
 import type {
   NewVpnProfileInput,
-  VpnPolicy,
   VpnProfile,
   VpnProxyMode,
-  VpnRule,
-  VpnRuleKind,
 } from '@/types/vpn'
 import { platform } from '@/platform'
 import VpnInstallGuide from './VpnInstallGuide.vue'
+import VpnLogDrawer from './VpnLogDrawer.vue'
 import VpnProfileDialog from './VpnProfileDialog.vue'
 import VpnRoutePreview from './VpnRoutePreview.vue'
-import VpnRuleTable from './VpnRuleTable.vue'
+import VpnRuleDialog from './VpnRuleDialog.vue'
 import VpnStatusDot from './VpnStatusDot.vue'
 
 const props = defineProps<{
@@ -28,6 +26,10 @@ const props = defineProps<{
 const vpn = props.vpn
 
 const confirmDelete = ref<VpnProfile | null>(null)
+/** 规则编辑弹窗：入口在动作栏「规则」按钮 */
+const ruleDialogOpen = ref(false)
+/** 实时日志抽屉 */
+const logDrawerOpen = ref(false)
 /** 需要断开重连的切换目标（等用户在弹窗里确认） */
 const reconnectTarget = ref<VpnProfile | null>(null)
 const profileDialogOpen = ref(false)
@@ -61,8 +63,8 @@ const MODE_OPTIONS: Array<{
 
 const connectLabel = computed(() => {
   if (vpn.phaseBusy) return '处理中…'
-  if (!vpn.isConnected) return '连接 VPN'
-  if (isPolicyOwner.value) return '断开 VPN'
+  if (!vpn.isConnected) return '连接'
+  if (isPolicyOwner.value) return '断开'
   return vpn.sharesTunnel(vpn.selectedProfile?.id) ? '切换到该配置' : '切换（需断开重连）'
 })
 
@@ -125,33 +127,6 @@ async function handleModeChange(mode: VpnProxyMode) {
   } catch (err: any) {
     vpn.pushLog('error', `切换代理模式失败: ${err}`)
   }
-}
-
-// ============================ 分流规则 ============================
-
-const enabledRuleCount = computed(
-  () => (vpn.selectedProfile?.rules ?? []).filter((rule) => rule.enabled).length,
-)
-
-async function handleAddRule(
-  kind: VpnRuleKind,
-  value: string,
-  policy: VpnPolicy,
-  remark: string,
-) {
-  await vpn.addRule(kind, value, policy, remark)
-}
-
-async function handleUpdateRule(ruleId: string, patch: Partial<VpnRule>) {
-  await vpn.updateRule(ruleId, patch)
-}
-
-async function handleRemoveRule(ruleId: string) {
-  await vpn.deleteRule(ruleId)
-}
-
-async function handleRulesDefaultPolicy(policy: VpnPolicy) {
-  await vpn.updateRulesDefaultPolicy(policy)
 }
 
 // ============================ 交互 ============================
@@ -383,20 +358,27 @@ watch(
                 {{ connectLabel }}
               </button>
               <button
-                class="btn btn-danger-ghost"
-                :disabled="vpn.isConnected || vpn.phaseBusy"
-                @click="askDelete(vpn.selectedProfile!)"
+                class="btn btn-secondary"
+                :disabled="!vpn.selectedProfile"
+                @click="ruleDialogOpen = true"
               >
-                删除
+                规则
               </button>
               <button
                 class="btn btn-secondary"
                 :disabled="vpn.detecting"
                 @click="vpn.refreshConnectors()"
               >
-                {{ vpn.detecting ? '检测中…' : '重新检测连接器' }}
+                {{ vpn.detecting ? '检测中…' : '检测' }}
               </button>
-              <button class="btn btn-secondary" @click="vpn.openSessionDir()">打开日志目录</button>
+              <button class="btn btn-secondary" @click="logDrawerOpen = true">日志</button>
+              <button
+                class="btn btn-danger-ghost"
+                :disabled="vpn.isConnected || vpn.phaseBusy"
+                @click="askDelete(vpn.selectedProfile!)"
+              >
+                删除
+              </button>
             </div>
           </div>
 
@@ -465,32 +447,7 @@ watch(
             </p>
           </section>
 
-          <!-- 规则模式：规则属于当前配置，直接在面板里编辑 -->
-          <section v-if="proxyMode === 'rule'" class="card">
-            <div class="rules-head">
-              <div>
-                <h4>分流规则</h4>
-                <p>
-                  从上到下匹配，命中第一条即停止；都不命中时走 MATCH 走向。这些规则只属于当前配置。
-                </p>
-              </div>
-              <span class="rules-count">
-                {{ enabledRuleCount }} / {{ (vpn.selectedProfile?.rules ?? []).length }} 条启用
-              </span>
-            </div>
-            <VpnRuleTable
-              embedded
-              :rules="vpn.selectedProfile?.rules ?? []"
-              :default-policy="vpn.selectedProfile?.rules_default_policy ?? 'DIRECT'"
-              :validate-rule="vpn.validateRule"
-              @add="handleAddRule"
-              @update="handleUpdateRule"
-              @remove="handleRemoveRule"
-              @update-default-policy="handleRulesDefaultPolicy"
-            />
-          </section>
-
-          <div v-else class="mode-off-note">
+          <div v-if="proxyMode !== 'rule'" class="mode-off-note">
             当前是{{ currentMode.label }}模式，规则不参与分流；切到「规则」模式后生效。
           </div>
 
@@ -507,6 +464,12 @@ watch(
         </div>
       </section>
     </div>
+
+    <!-- 规则编辑：三个输入项 + 现有列表，和 Clash 一个思路 -->
+    <VpnRuleDialog v-if="ruleDialogOpen" :vpn="vpn" @close="ruleDialogOpen = false" />
+
+    <!-- 实时日志抽屉：入口在动作栏「日志」 -->
+    <VpnLogDrawer v-if="logDrawerOpen" :vpn="vpn" @close="logDrawerOpen = false" />
 
     <!-- 不同通道：确认后才断开重连，避免用户没意识到会断开 -->
     <Modal
@@ -988,125 +951,6 @@ watch(
   color: var(--text-muted);
 }
 
-/* 分流规则：规则属于当前配置，面板内直接编辑 */
-.rules-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 10px;
-}
-.rules-head h4 {
-  margin: 0 0 3px;
-  font-size: 14px;
-  color: var(--text-primary);
-}
-.rules-head p {
-  margin: 0;
-  font-size: 12px;
-  line-height: 1.6;
-  color: var(--text-muted);
-}
-.rules-head .btn {
-  flex-shrink: 0;
-  white-space: nowrap;
-}
-.rules-count {
-  flex-shrink: 0;
-  font-size: 12px;
-  color: var(--text-muted);
-  white-space: nowrap;
-}
-.mono {
-  color: var(--text-secondary);
-}
-.rule-chip-value {
-  max-width: 150px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--text-secondary);
-}
-.rule-chip em {
-  font-style: normal;
-}
-.policy-vpn {
-  color: var(--primary);
-}
-.policy-direct {
-  color: var(--success);
-}
-.rule-more,
-.rule-set-none {
-  font-size: 11px;
-  color: var(--text-muted);
-}
-.rule-set-actions {
-  display: flex;
-  flex-shrink: 0;
-  gap: 6px;
-}
-.rule-set-actions button {
-  border: none;
-  background: transparent;
-  color: var(--text-muted);
-  font-size: 12px;
-  padding: 3px 4px;
-  cursor: pointer;
-}
-.rule-set-actions button:hover {
-  color: var(--primary);
-}
-.rule-set-actions button.danger:hover {
-  color: var(--danger);
-}
-.rule-set-empty {
-  padding: 16px 10px;
-  border: 1px dashed var(--border-color);
-  border-radius: 7px;
-  text-align: center;
-  font-size: 12px;
-  color: var(--text-muted);
-}
-.link-btn {
-  margin-left: 4px;
-  border: none;
-  background: transparent;
-  color: var(--primary);
-  font-size: 12px;
-  cursor: pointer;
-}
-.rule-fallback {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 10px;
-  padding-top: 10px;
-  border-top: 1px solid var(--border-color);
-  font-size: 12px;
-  color: var(--text-muted);
-}
-.rule-fallback-select {
-  height: 26px;
-  padding: 0 6px;
-  border: 1px solid var(--border-color);
-  border-radius: 5px;
-  background: var(--bg-secondary);
-  color: var(--text-primary);
-  font-size: 12px;
-}
-.rule-fallback-hint {
-  color: var(--text-muted);
-}
-.mode-off-note {
-  padding: 10px 14px;
-  border: 1px dashed var(--border-color);
-  border-radius: 8px;
-  background: var(--bg-secondary);
-  color: var(--text-muted);
-  font-size: 12px;
-  line-height: 1.6;
-}
 .mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
