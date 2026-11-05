@@ -314,7 +314,7 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
     value = '',
     policy: VpnPolicy = 'DIRECT',
   ): VpnRule {
-    return { id: crypto.randomUUID(), kind, value, policy, no_resolve: false, remark: '', enabled: true }
+    return { id: crypto.randomUUID(), kind, value, policy, no_resolve: true, remark: '', enabled: true }
   }
 
   async function addProfile(input: NewVpnProfileInput) {
@@ -435,6 +435,27 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
     profile.rules = (profile.rules ?? []).map((rule) =>
       rule.id === ruleId ? { ...rule, ...patch } : rule,
     )
+    await saveConfig()
+    await pushRulesIfConnected()
+  }
+
+  /**
+   * 上下移动一条规则。
+   *
+   * 规则是从上往下第一条命中，所以顺序本身就是语义的一部分；
+   * 越界时什么都不做，避免把规则推丢。
+   */
+  async function moveRule(ruleId: string, delta: number) {
+    const profile = selectedProfile.value
+    if (!profile) return
+    const rules = [...(profile.rules ?? [])]
+    const index = rules.findIndex((rule) => rule.id === ruleId)
+    if (index < 0) return
+    const target = index + delta
+    if (target < 0 || target >= rules.length) return
+    const [moved] = rules.splice(index, 1)
+    rules.splice(target, 0, moved)
+    profile.rules = rules
     await saveConfig()
     await pushRulesIfConnected()
   }
@@ -607,6 +628,7 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
     addRule,
     updateRule,
     deleteRule,
+    moveRule,
     updateRulesDefaultPolicy,
     selectProfile,
     validateRule,
