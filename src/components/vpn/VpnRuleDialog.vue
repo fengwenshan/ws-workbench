@@ -2,7 +2,7 @@
 import { computed, nextTick, ref } from 'vue'
 import { Input, Modal, Select, SelectOption, Switch } from 'ant-design-vue'
 import type { VpnApi } from '@/composables/useVpn'
-import type { VpnPolicy, VpnRuleKind } from '@/types/vpn'
+import type { VpnPolicy, VpnRule, VpnRuleKind } from '@/types/vpn'
 import { POLICY_LABELS } from '@/types/vpn'
 
 const props = defineProps<{
@@ -27,24 +27,38 @@ const KIND_OPTIONS: { value: VpnRuleKind; label: string; placeholder: string }[]
 
 const POLICIES: VpnPolicy[] = ['DIRECT', 'VPN']
 
+const profile = vpn.selectedProfile
+/** 编辑期只改草稿；关闭弹窗时有改动才一次性落盘并热推送 */
+const draftRules = ref<VpnRule[]>((profile?.rules ?? []).map((rule) => ({ ...rule })))
+const draftDefaultPolicy = ref<VpnPolicy>(profile?.rules_default_policy ?? 'DIRECT')
+
+const originalRules = JSON.stringify(profile?.rules ?? [])
+const originalDefaultPolicy = profile?.rules_default_policy ?? 'DIRECT'
+
 const kind = ref<VpnRuleKind>('DOMAIN-SUFFIX')
 const value = ref('')
 const policy = ref<VpnPolicy>('VPN')
 const error = ref('')
 const adding = ref(false)
+const saving = ref(false)
 
-const rules = computed(() => vpn.selectedProfile?.rules ?? [])
-const defaultPolicy = computed<VpnPolicy>(
-  () => vpn.selectedProfile?.rules_default_policy ?? 'DIRECT',
-)
+const rules = computed(() => draftRules.value)
+const defaultPolicy = computed(() => draftDefaultPolicy.value)
 
 const placeholder = computed(
   () => KIND_OPTIONS.find((option) => option.value === kind.value)?.placeholder ?? '',
 )
 
+/** 有改动才写盘：只是打开看一眼再关掉，不应该产生任何写入 */
+const dirty = computed(
+  () =>
+    JSON.stringify(draftRules.value) !== originalRules ||
+    draftDefaultPolicy.value !== originalDefaultPolicy,
+)
+
 const valueInput = ref<{ focus: () => void } | null>(null)
 
-/** 添加：先本地挡重复，再让后端校验格式，最后追加到末尾 */
+/** 添加：先本地挡重复，再让后端校验格式（IP-CIDR 会顺手归一化），最后追加到末尾 */
 async function addRule() {
   if (adding.value) return
   const text = value.value.trim()
@@ -52,30 +66,43 @@ async function addRule() {
     error.value = '规则内容不能为空'
     return
   }
-  const duplicate = rules.value.some(
-    (rule) => rule.kind === kind.value && rule.value === text && rule.policy === policy.value,
-  )
-  if (duplicate) {
+  if (hasDuplicate(text)) {
     error.value = '已有相同规则'
     return
   }
   adding.value = true
   try {
-    const reason = await vpn.validateRule(kind.value, text)
-    if (reason) {
-      error.value = reason
+    // 后端返回的是归一化后的写法（非 IP-CIDR 原样返回），校验失败会抛错
+    const normalized = await vpn.validateRule(kind.value, text)
+    const finalValue = (normalized || text).trim()
+    if (hasDuplicate(finalValue)) {
+      error.value = '已有相同规则'
       return
     }
     error.value = ''
-    await vpn.addRule(kind.value, text, policy.value)
+    draftRules.value.push({
+      id: crypto.randomUUID(),
+      kind: kind.value,
+      value: finalValue,
+      policy: policy.value,
+      no_resolve: true,
+      remark: '',
+      enabled: true,
+    })
     value.value = ''
     await nextTick()
     valueInput.value?.focus()
   } catch (err: any) {
-    error.value = `添加失败: ${err}`
+    error.value = String(err ?? '规则格式不正确')
   } finally {
     adding.value = false
   }
+}
+
+function hasDuplicate(text: string): boolean {
+  return rules.value.some(
+    (rule) => rule.kind === kind.value && rule.value === text && rule.policy === policy.value,
+  )
 }
 
 function onKindChange(next: VpnRuleKind) {
@@ -87,20 +114,43 @@ function onValueInput() {
   error.value = ''
 }
 
-async function toggleRule(ruleId: string, enabled: boolean) {
-  await vpn.updateRule(ruleId, { enabled })
+function toggleRule(ruleId: string, enabled: boolean) {
+  const target = draftRules.value.find((rule) => rule.id === ruleId)
+  if (target) target.enabled = enabled
 }
 
-async function removeRule(ruleId: string) {
-  await vpn.deleteRule(ruleId)
+function removeRule(ruleId: string) {
+  draftRules.value = draftRules.value.filter((rule) => rule.id !== ruleId)
 }
 
-async function moveRule(ruleId: string, delta: number) {
-  await vpn.moveRule(ruleId, delta)
+function setDefaultPolicy(next: VpnPolicy) {
+  draftDefaultPolicy.value = next
 }
 
-async function setDefaultPolicy(next: VpnPolicy) {
-  await vpn.updateRulesDefaultPolicy(next)
+function moveRule(ruleId: string, delta: number) {
+  const list = [...draftRules.value]
+  const index = list.findIndex((rule) => rule.id === ruleId)
+  const target = index + delta
+  if (index < 0 || target < 0 || target >= list.length) return
+  const [moved] = list.splice(index, 1)
+  list.splice(target, 0, moved)
+  draftRules.value = list
+}
+
+/** 关闭（完成 / × / 点遮罩都走这里）：有改动才保存并热推送一次 */
+async function closeDialog() {
+  if (saving.value) return
+  if (dirty.value) {
+    saving.value = true
+    try {
+      await vpn.saveRules(draftRules.value, draftDefaultPolicy.value)
+    } catch (err: any) {
+      vpn.pushLog('error', `保存规则失败: ${err}`)
+    } finally {
+      saving.value = false
+    }
+  }
+  emit('close')
 }
 </script>
 
@@ -114,7 +164,7 @@ async function setDefaultPolicy(next: VpnPolicy) {
     :mask-closable="true"
     centered
     wrap-class-name="vpn-rule-modal"
-    @cancel="emit('close')"
+    @cancel="closeDialog"
   >
     <div class="rule-editor">
       <!-- 左：三个输入项 + 添加 -->
@@ -170,7 +220,7 @@ async function setDefaultPolicy(next: VpnPolicy) {
 
         <div class="rule-list">
           <div v-if="rules.length === 0" class="rule-list-empty">
-            还没有规则。左边填好类型、内容和策略，点「添加规则」。
+            还没有规则。没有规则时所有流量都直连；在左边填好类型、内容和策略，点「添加规则」。
           </div>
 
           <div
@@ -228,8 +278,8 @@ async function setDefaultPolicy(next: VpnPolicy) {
             />
           </div>
 
-          <!-- 兜底：规则全不命中时的走向，固定不可删 -->
-          <div class="rule-row rule-row-match">
+          <!-- 兜底：有规则时才有意义（没规则本来就全直连），固定不可删 -->
+          <div v-if="rules.length > 0" class="rule-row rule-row-match">
             <span class="row-index">—</span>
             <div class="row-main">
               <span class="row-value mono">MATCH</span>
@@ -256,8 +306,9 @@ async function setDefaultPolicy(next: VpnPolicy) {
     </div>
 
     <div class="rule-editor-footer">
-      <span class="footer-hint">改动即时保存，已连接时自动生效</span>
-      <button class="btn btn-primary" @click="emit('close')">完成</button>
+      <button class="btn btn-primary" :disabled="saving" @click="closeDialog">
+        {{ saving ? '保存中…' : '完成' }}
+      </button>
     </div>
   </Modal>
 </template>
@@ -337,7 +388,7 @@ async function setDefaultPolicy(next: VpnPolicy) {
   font-size: 12px;
   color: var(--text-muted);
   text-align: center;
-  line-height: 1.6;
+  line-height: 1.7;
 }
 .rule-row {
   display: flex;
@@ -461,13 +512,9 @@ async function setDefaultPolicy(next: VpnPolicy) {
 .rule-editor-footer {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   margin-top: 16px;
   padding-top: 12px;
   border-top: 1px solid var(--border-color);
-}
-.footer-hint {
-  font-size: 12px;
-  color: var(--text-muted);
 }
 </style>
