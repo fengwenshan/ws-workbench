@@ -122,6 +122,14 @@ fn resolve_session_dir(app: &AppHandle) -> Result<(PathBuf, String), String> {
             ));
         }
     }
+    // 便携版、以及用户目录整个不可写的机器：可执行文件旁边一定是我们自己的目录，
+    // 不需要任何额外的用户目录权限。放在临时目录**之前**——临时目录会随时间被清理，
+    // 而且它自己也可能不可写（本机就遇到过 TEMP 的权限被改过、整个目录写不了的情况）。
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            candidates.push(("程序目录（可执行文件旁）".to_string(), parent.to_path_buf()));
+        }
+    }
     // 兜底：临时目录在当前用户 profile 下，权限最宽松
     candidates.push((
         "临时目录".to_string(),
