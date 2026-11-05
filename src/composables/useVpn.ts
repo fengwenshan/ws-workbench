@@ -237,14 +237,10 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
       const mode = target.proxy_mode ?? 'rule'
       // 规则来自配置自身；全局/直连模式不把规则交给后端参与判定
       const rules = mode === 'rule' ? (target.rules ?? []) : []
-      const defaultPolicy =
-        mode === 'global'
-          ? 'VPN'
-          : mode === 'direct'
-            ? 'DIRECT'
-            : (target.rules_default_policy ?? 'DIRECT')
-      if (mode === 'rule' && rules.length === 0) {
-        pushLog('warn', '这个配置还没有启用的规则，所有流量都会走兜底走向')
+      // 规则模式没命中就走直连；全局模式全部走隧道，直连模式全部直连
+      const defaultPolicy = mode === 'global' ? 'VPN' : 'DIRECT'
+      if (mode === 'rule' && !rules.some((rule) => rule.enabled)) {
+        pushLog('warn', '这个配置还没有启用的规则，所有流量都会直连')
       }
       const result = await invoke<ConnectResult>('vpn_connect', {
         profile: target,

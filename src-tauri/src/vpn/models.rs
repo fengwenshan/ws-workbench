@@ -130,6 +130,18 @@ pub struct VpnProfile {
     /// 代理模式：rule / global / direct。老配置没有这个字段时按规则模式处理。
     #[serde(default = "default_proxy_mode")]
     pub proxy_mode: String,
+    /// 这份配置自带的分流规则。
+    ///
+    /// 规则以前放在全局 `vpn_rule_sets` 里用 `rule_set_id` 引用，现在改成内嵌；
+    /// 这里必须真的能读写，否则每次落盘都会把用户的规则整段丢掉。
+    #[serde(default)]
+    pub rules: Vec<VpnRule>,
+    /// 所有规则都不命中时的兜底走向（现在界面固定直连，保留字段兼容老配置）
+    #[serde(default = "default_policy_str")]
+    pub rules_default_policy: String,
+    /// 老模型里绑定的规则集 id；只为让前端迁移逻辑还能读到它，迁移完会被删掉
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub rule_set_id: String,
     /// fake-ip 地址池，用于按域名分流时反查真实目标
     #[serde(default = "default_fake_ip_range")]
     pub fake_ip_range: String,
@@ -482,6 +494,23 @@ mod tests {
         assert_eq!(profile.fake_ip_range, "198.18.0.0/16");
         // 老配置没有 proxy_mode，必须默认落在规则模式，不能变成全局或直连
         assert_eq!(profile.proxy_mode, "rule");
+    }
+
+    #[test]
+    fn profile_rules_survive_save_and_load() {
+        let raw = r#"{"id":"p1","name":"A","server":"vpn.example.com:443","username":"alice",
+            "rules":[{"id":"r1","kind":"DOMAIN-SUFFIX","value":"corp.example.com","policy":"VPN","remark":"","enabled":true}],
+            "rules_default_policy":"DIRECT"}"#;
+        let profile: VpnProfile = serde_json::from_str(raw).expect("带规则的配置必须能读出来");
+        assert_eq!(profile.rules.len(), 1);
+        assert_eq!(profile.rules[0].value, "corp.example.com");
+        assert_eq!(profile.rules[0].policy, "VPN");
+        // 落盘再读回来不能丢
+        let text = serde_json::to_string(&profile).unwrap();
+        assert!(text.contains("corp.example.com"));
+        let again: VpnProfile = serde_json::from_str(&text).unwrap();
+        assert_eq!(again.rules.len(), 1);
+        assert_eq!(again.rules_default_policy, "DIRECT");
     }
 
     #[test]
