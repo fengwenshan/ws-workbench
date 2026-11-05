@@ -786,12 +786,17 @@ pub async fn vpn_disconnect(app: AppHandle, state: State<'_, VpnState>) -> Resul
     }
 
     elevate::stop_worker(&session);
+    // 事件统一发快照形状：前端监听器按 VpnSnapshotPayload 解析
     app.emit(
         EVENT_STATUS,
-        VpnStatus {
-            phase: VpnPhase::Disconnecting,
-            message: "正在断开并还原路由".to_string(),
-            ..status
+        VpnSnapshotPayload {
+            status: VpnStatus {
+                phase: VpnPhase::Disconnecting,
+                message: "正在断开并还原路由".to_string(),
+                ..status
+            },
+            elevation: String::new(),
+            policy_profile_id: String::new(),
         },
     )
     .ok();
