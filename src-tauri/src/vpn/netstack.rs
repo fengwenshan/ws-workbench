@@ -299,7 +299,15 @@ impl<D: TunDevice> Netstack<D> {
                 32,
             ));
         });
-        // 目的 IP 是真实远端而非本机地址，必须开 any_ip 才会被接收
+        // 目的 IP 是真实远端而非本机地址，必须开 any_ip 才会被接收。
+        //
+        // 但光开 any_ip 不够：smoltcp 0.11 的判定是「any_ip && 目的地址单播 &&
+        // 路由表里能查到一条前缀、且该路由的网关是本接口自己的地址」，
+        // 三者缺一就当成「不是发给我的」**静默丢弃**。捕获网卡没有默认路由，
+        // 于是所有包都在这里被丢掉——表现为「收包数一直在涨、发包数恒为 0、
+        // DNS 不应答、整机没网」。加一条网关指向自身的默认路由即可。
+        let local_addr = Ipv4Address::from_bytes(&local_ip.octets());
+        let _ = iface.routes_mut().add_default_ipv4_route(local_addr);
         iface.set_any_ip(true);
         // Netstack 与 phy 共用同一个 pending：先建好再注入 phy
         let pending = Arc::new(Mutex::new(PendingPorts::default()));
@@ -566,6 +574,9 @@ mod tests {
     }
 
     /// 造一个最小的 IPv4 包：20 字节头 + `payload`。
+    ///
+    /// 头部校验和必须是对的：smoltcp 收包时会校验，校验不和的包在进入
+    /// any-ip 判定之前就被丢了，会让测试误以为是 any-ip 的问题。
     fn ipv4_packet(protocol: u8, payload: &[u8]) -> Vec<u8> {
         let total = 20 + payload.len();
         let mut p = vec![0u8; 20];
@@ -576,6 +587,15 @@ mod tests {
         p[12..16].copy_from_slice(&Ipv4Addr::new(10, 9, 0, 2).octets());
         p[16..20].copy_from_slice(&Ipv4Addr::new(93, 184, 216, 34).octets());
         p.extend_from_slice(payload);
+
+        let mut sum = 0u32;
+        for chunk in p[..20].chunks_exact(2) {
+            sum += u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
+        }
+        while sum >> 16 != 0 {
+            sum = (sum & 0xffff) + (sum >> 16);
+        }
+        p[10..12].copy_from_slice(&(!(sum as u16)).to_be_bytes());
         p
     }
 
@@ -669,6 +689,30 @@ mod tests {
         fn write_packet(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
             Ok(0)
         }
+    }
+
+    #[test]
+    fn packets_for_arbitrary_destinations_are_accepted() {
+        // 目的是 93.184.216.34，不在接口地址上，只能靠 any-ip 接收。
+        // 回归点：smoltcp 0.11 还要求路由表里有「网关 = 本接口地址」的前缀，
+        // 缺这条默认路由时整包会被静默丢掉（整机没网的根因）。
+        let mut udp = vec![0u8; 8 + 4];
+        udp[0..2].copy_from_slice(&5000u16.to_be_bytes());
+        udp[2..4].copy_from_slice(&53u16.to_be_bytes());
+        udp[4..6].copy_from_slice(&12u16.to_be_bytes());
+        udp[8..].copy_from_slice(b"dns!");
+        let pkt = ipv4_packet(17, &udp);
+
+        let phy = TunPhy::new(MockDev::new(vec![pkt]), 1500);
+        let mut ns = Netstack::new(phy, Ipv4Addr::new(10, 9, 0, 1), [0x02, 0, 0, 0, 0, 1]);
+        // 第一轮学到端口并压回重投，第二轮交付
+        ns.poll(Instant::now());
+        ns.poll(Instant::now());
+
+        let got = ns.take_udp_datagrams();
+        assert_eq!(got.len(), 1, "AnyIP 下发往任意目的地址的包必须被接受");
+        assert_eq!(got[0].key.remote, "93.184.216.34:53".parse().unwrap());
+        assert_eq!(got[0].payload, b"dns!");
     }
 
     #[test]

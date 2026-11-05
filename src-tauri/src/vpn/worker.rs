@@ -1025,7 +1025,7 @@ impl Worker {
                 if let Some(stats) = self.engine.as_ref().map(|engine| engine.stats()) {
                     if last_stats != Some(stats) {
                         self.log(&format!(
-                            "[引擎] 收 {} 包 / 发 {} 包 / DNS 应答 {} / 新连接 {} / 建连失败 {}",
+                            "[引擎] 收 {} 包 / 发 {} 包 / DNS 应答 {} / 新连接 {} / 出站异常 {}",
                             stats.rx_packets,
                             stats.tx_packets,
                             stats.dns_answered,
