@@ -20,7 +20,7 @@ use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-use crate::vpn::models::{LearnReport, VpnRequest, VpnRule, VpnStatus};
+use crate::vpn::models::{VpnRequest, VpnRule, VpnStatus};
 
 pub const REQUEST_FILE: &str = "request.json";
 pub const STATUS_FILE: &str = "status.json";
@@ -28,9 +28,7 @@ pub const LOG_FILE: &str = "worker.log";
 pub const SCRIPT_LOG_FILE: &str = "script.log";
 pub const STOP_FILE: &str = "stop.flag";
 /// 学习模式报告，由 worker 每轮采样后覆盖写入
-pub const LEARN_FILE: &str = "learn.json";
 /// 主进程写入即请求清空学习报告（worker 在守护循环里轮询到后自己清并复位）
-pub const LEARN_CLEAR_FILE: &str = "learn.clear";
 pub const SCRIPT_DIR: &str = "script";
 /// 每次会话的运行标识，用来判断日志文件是不是被换过
 pub const RUN_ID_FILE: &str = "run.id";
@@ -97,14 +95,6 @@ impl VpnSession {
         self.dir.join(SCRIPT_DIR)
     }
 
-    pub fn learn_path(&self) -> PathBuf {
-        self.dir.join(LEARN_FILE)
-    }
-
-    pub fn learn_clear_path(&self) -> PathBuf {
-        self.dir.join(LEARN_CLEAR_FILE)
-    }
-
     pub fn mode_path(&self) -> PathBuf {
         self.dir.join(MODE_FILE)
     }
@@ -128,7 +118,6 @@ impl VpnSession {
     pub fn prepare(&self) -> Result<(), String> {
         self.ensure()?;
         self.clear_stop();
-        self.clear_learn_clear_flag();
         let _ = fs::write(
             self.dir.join(RUN_ID_FILE),
             uuid::Uuid::new_v4().to_string(),
@@ -137,7 +126,6 @@ impl VpnSession {
             self.status_path(),
             self.log_path(),
             self.script_log_path(),
-            self.learn_path(),
             self.mode_path(),
             self.rules_path(),
             self.alive_path(),
@@ -347,43 +335,6 @@ impl VpnSession {
         let _ = fs::remove_file(self.stop_path());
     }
 
-    // ======================= 学习模式 =======================
-
-    pub fn write_learn(&self, report: &LearnReport) -> Result<(), String> {
-        let json = serde_json::to_string_pretty(report)
-            .map_err(|e| format!("序列化学习报告失败: {}", e))?;
-        Self::write_atomic(&self.learn_path(), &json)
-    }
-
-    pub fn read_learn(&self) -> Option<LearnReport> {
-        let content = fs::read_to_string(self.learn_path()).ok()?;
-        serde_json::from_str(&content).ok()
-    }
-
-    /// 清空报告：主进程自己不删文件，只插一面旗。
-    ///
-    /// worker 的报告是攒在内存里的，直接把 learn.json 删掉，15 秒后下一轮采样
-    /// 又会把全量写回来，界面上看起来就是「点了清空没反应」。所以这里只留标记，
-    /// 由 worker 自己复位内存并删文件。
-    pub fn request_learn_clear(&self) {
-        let _ = self.ensure();
-        let _ = fs::write(self.learn_clear_path(), b"clear");
-    }
-
-    pub fn is_learn_clear_requested(&self) -> bool {
-        self.learn_clear_path().exists()
-    }
-
-    pub fn clear_learn_clear_flag(&self) {
-        let _ = fs::remove_file(self.learn_clear_path());
-    }
-
-    /// worker 复位报告时使用：清标记并删掉落盘的报告
-    pub fn reset_learn(&self) {
-        let _ = fs::remove_file(self.learn_path());
-        self.clear_learn_clear_flag();
-    }
-
     /// 连接结束后清掉明文密码
     pub fn scrub_request(&self) {
         self.delete_request();
@@ -431,7 +382,6 @@ mod tests {
             default_policy: "DIRECT".into(),
             fake_ip_range: "198.18.0.0/16".into(),
             fake_ip_filter: vec![],
-            learn: false,
             extra_args: vec![],
             script_path: r"C:\session\script\vpnc-script-win.js".into(),
             hook_exe: r"C:\app\ws-workbench.exe".into(),
@@ -583,40 +533,6 @@ mod tests {
         assert!(session.read_status().is_none());
         assert!(!session.is_stop_requested());
         assert!(session.script_dir().exists());
-        let _ = fs::remove_dir_all(&session.dir);
-    }
-
-    #[test]
-    fn learn_report_roundtrip_and_clear_flag() {
-        let session = temp_session("learn");
-        let mut report = LearnReport::default();
-        report.enabled = true;
-        report.scans = 3;
-        session.write_learn(&report).unwrap();
-        let back = session.read_learn().unwrap();
-        assert!(back.enabled);
-        assert_eq!(back.scans, 3);
-        // 原子替换不能在目录里留下 .tmp
-        assert!(!session.learn_path().with_extension("tmp").exists());
-
-        // 清空请求走旗标文件：主进程不直接删报告，避免 worker 下一轮又写回来
-        session.request_learn_clear();
-        assert!(session.is_learn_clear_requested());
-        assert!(session.read_learn().is_some());
-        session.reset_learn();
-        assert!(!session.is_learn_clear_requested());
-        assert!(session.read_learn().is_none());
-        let _ = fs::remove_dir_all(&session.dir);
-    }
-
-    #[test]
-    fn prepare_clears_previous_learn_report() {
-        let session = temp_session("learn-prepare");
-        session.write_learn(&LearnReport::default()).unwrap();
-        session.request_learn_clear();
-        session.prepare().unwrap();
-        assert!(session.read_learn().is_none());
-        assert!(!session.is_learn_clear_requested());
         let _ = fs::remove_dir_all(&session.dir);
     }
 

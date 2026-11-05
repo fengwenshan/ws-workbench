@@ -136,9 +136,6 @@ pub struct VpnProfile {
     /// 不进入 fake-ip 池的地址段
     #[serde(default)]
     pub fake_ip_filter: Vec<String>,
-    /// 连接期间是否开启学习模式。开着才采集远端连接，关掉不影响正常连接。
-    #[serde(default)]
-    pub learn: bool,
     /// 额外的 openconnect 参数，每行一条
     #[serde(default)]
     pub extra_args: Vec<String>,
@@ -164,7 +161,6 @@ pub fn conn_identity(profile: &VpnProfile) -> String {
         format!("{:?}", profile.connector),
         profile.connector_path.clone(),
         profile.fake_ip_range.clone(),
-        profile.learn.to_string(),
     ];
     let mut extra = profile.extra_args.clone();
     extra.sort();
@@ -250,97 +246,6 @@ pub struct NetworkSnapshot {
     pub local_subnets: Vec<String>,
 }
 
-/// 学习模式采集到的一台远端主机
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LearnedHost {
-    /// 远端 IPv4
-    pub ip: String,
-    /// 观察到的远端端口
-    #[serde(default)]
-    pub ports: Vec<u16>,
-    /// 累计命中次数
-    #[serde(default)]
-    pub hits: u32,
-    /// 该连接是否确实走了隧道（连接的本地地址就是隧道地址）
-    #[serde(default)]
-    pub via_vpn: bool,
-    /// 发起连接的进程名
-    #[serde(default)]
-    pub processes: Vec<String>,
-    #[serde(default)]
-    pub first_seen: String,
-    #[serde(default)]
-    pub last_seen: String,
-}
-
-/// 由观察结果反推出来的候选分流网段
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LearnedSubnet {
-    pub cidr: String,
-    /// 覆盖到的远端主机数
-    #[serde(default)]
-    pub hosts: u32,
-    /// 累计连接次数
-    #[serde(default)]
-    pub hits: u32,
-    /// 是否为「放大后的网段」：跨度大于 /24，是同一个上层里出现多个 /24 时汇聚出来的
-    #[serde(default)]
-    pub broad: bool,
-    /// 现有规则表里是否已有条目能把它整个包含进去（也就是「已经照顾到」）
-    #[serde(default)]
-    pub covered: bool,
-    /// 现有规则表里是否已有完全相同的网段
-    #[serde(default)]
-    pub adopted: bool,
-    /// 采样到的远端地址，只留几条供人工判断归属
-    #[serde(default)]
-    pub samples: Vec<String>,
-}
-
-/// 学习报告：worker 每轮采样后落盘到会话目录 learn.json
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct LearnReport {
-    /// 本次会话是否开着学习模式
-    pub enabled: bool,
-    /// 已完成的采样轮次
-    #[serde(default)]
-    pub scans: u32,
-    #[serde(default)]
-    pub updated_at: String,
-    /// 观察到的主机明细
-    #[serde(default)]
-    pub hosts: Vec<LearnedHost>,
-    /// 反推出来的候选网段
-    #[serde(default)]
-    pub candidates: Vec<LearnedSubnet>,
-}
-
-/// 状态文件里的学习模式摘要。
-///
-/// 明细走 learn.json：观察到的远端主机可能有几百条，塞进 status.json 会让
-/// 每轮状态推送都背上几十 KB 的负载，而状态是每 600ms 比对一次的。
-/// 这里只放几个计数，界面据此决定要不要去拉明细。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct LearnSummary {
-    pub enabled: bool,
-    #[serde(default)]
-    pub scans: u32,
-    /// 观察到的远端主机数
-    #[serde(default)]
-    pub hosts: u32,
-    /// 反推出的候选网段数
-    #[serde(default)]
-    pub candidates: u32,
-    /// 其中尚未被规则表覆盖的数量 —— 值得用户看的正是这些
-    #[serde(default)]
-    pub uncovered: u32,
-    /// 采样失败的说明；反复失败后学习模式会自动停用，这里给出原因
-    #[serde(default)]
-    pub error: String,
-    #[serde(default)]
-    pub updated_at: String,
-}
-
 /// 会话状态：worker 写入 status.json，主进程轮询后推给前端
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VpnStatus {
@@ -383,9 +288,6 @@ pub struct VpnStatus {
     /// 连接前的网络快照
     #[serde(default)]
     pub snapshot: Option<NetworkSnapshot>,
-    /// 学习模式摘要；没开学习模式时为 None
-    #[serde(default)]
-    pub learn: Option<LearnSummary>,
     /// 失败原因
     #[serde(default)]
     pub error: String,
@@ -416,7 +318,6 @@ impl Default for VpnStatus {
             mtu: 0,
             routes: Vec::new(),
             snapshot: None,
-            learn: None,
             error: String::new(),
             pid: 0,
             started_at: String::new(),
@@ -456,9 +357,6 @@ pub struct VpnRequest {
     /// 不进入 fake-ip 池的地址段
     #[serde(default)]
     pub fake_ip_filter: Vec<String>,
-    /// 连接期间是否开启学习模式：周期性采集实际连通的远端，反推候选分流网段
-    #[serde(default)]
-    pub learn: bool,
     #[serde(default)]
     pub extra_args: Vec<String>,
     /// 生成的 vpnc-script 绝对路径
@@ -637,9 +535,6 @@ mod tests {
         cases.push(p);
         let mut p = base.clone();
         p.fake_ip_filter = vec!["*.local".to_string()];
-        cases.push(p);
-        let mut p = base.clone();
-        p.learn = true;
         cases.push(p);
         let mut p = base.clone();
         p.extra_args = vec!["--no-dtls".to_string()];

@@ -258,8 +258,6 @@ pub fn run() {
             vpn::commands::vpn_get_snapshot,
             vpn::commands::vpn_read_logs,
             vpn::commands::vpn_clear_logs,
-            vpn::commands::vpn_read_learn_report,
-            vpn::commands::vpn_clear_learn_report,
             vpn::commands::vpn_open_session_dir,
             vpn::commands::vpn_session_dir_info,
         ])
