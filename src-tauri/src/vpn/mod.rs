@@ -20,7 +20,6 @@
 //! - `script`      生成自定义 vpnc-script，抢占「默认路由是否走 VPN」这个开关
 //! - `connector`   真正拉起隧道（openconnect）
 //! - `session`     会话目录 IPC（提权进程拿不到父进程管道，只能靠文件）
-//! - `learn`       学习模式：采样实际连通的远端 IP，反推候选分流网段
 //! - `rule_engine` Clash 式有序列规则：解析、匹配与 RULE-SET 内存展开（纯逻辑）
 //! - `fakedns`     fake-ip 假地址池：分配 / 反查 / 过滤 / 回收（纯逻辑）
 //! - `netstack`    smoltcp 用户态栈：把 TUN 上的 IP 包适配成 smoltcp Device 并终结连接
@@ -42,7 +41,6 @@ pub mod dns_srv;
 pub mod elevate;
 pub mod fakedns;
 pub mod guide;
-pub mod learn;
 pub mod models;
 pub mod netstack;
 pub mod platform;

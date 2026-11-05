@@ -15,9 +15,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::vpn::connector;
-use crate::vpn::learn;
 use crate::vpn::models::{
-    LearnReport, LearnSummary, NetworkSnapshot, VpnPhase, VpnRequest, VpnRule, VpnStatus,
+    NetworkSnapshot, VpnPhase, VpnRequest, VpnRule, VpnStatus,
 };
 use crate::vpn::router::ProxyMode;
 use crate::vpn::rule_engine::CompiledRuleSet;
@@ -60,10 +59,6 @@ struct Worker {
     tail: Vec<String>,
     /// script.log 已经读过的行数（脚本的 stdout 接不到管道，只能靠这个文件回传）
     script_log_lines: usize,
-    /// 学习模式累积下来的观察报告，落盘在会话目录的 learn.json
-    learn_report: LearnReport,
-    /// 采样连续失败次数，超过阈值自动停用学习模式
-    learn_failures: u32,
     /// 规则分流引擎；Windows 与 macOS 都用它接管流量
     engine: Option<crate::vpn::router::Engine>,
     /// 捕获 TUN 的接口索引，断开时按它回收半默认路由
@@ -95,17 +90,6 @@ impl Worker {
         status.pid = std::process::id();
         status.started_at = now();
         status.updated_at = now();
-        // 开了学习模式就先在状态里挂一个空摘要，界面上能立刻显示「学习中」
-        if request.learn {
-            status.learn = Some(LearnSummary {
-                enabled: true,
-                ..Default::default()
-            });
-        }
-        let learn_report = LearnReport {
-            enabled: request.learn,
-            ..Default::default()
-        };
         let applied_mode = ProxyMode::parse(&request.proxy_mode).unwrap_or(ProxyMode::Rule);
         let current_rules: Vec<VpnRule> =
             request.rules.iter().filter(|r| r.enabled).cloned().collect();
@@ -122,8 +106,6 @@ impl Worker {
             vpn_server_ips: Vec::new(),
             tail: Vec::new(),
             script_log_lines: 0,
-            learn_report,
-            learn_failures: 0,
             engine: None,
             capture_index: 0,
             fake_pool: None,
@@ -753,102 +735,6 @@ impl Worker {
         let _ = self.session.write_status(&self.status);
     }
 
-    // ======================= 学习模式 =======================
-
-    /// 隧道本身和本程序发起的连接都不是分流目标，采样时直接排除
-    fn self_process_names() -> Vec<String> {
-        ["openconnect.exe", "openconnect", "ws-workbench.exe", "ws-workbench"]
-            .iter()
-            .map(|name| name.to_string())
-            .collect()
-    }
-
-    /// 当前生效的规则表
-    fn known_rules(&self) -> Vec<String> {
-        self.request.rules.iter().filter(|r| r.enabled).map(|r| r.value.clone()).collect()
-    }
-
-    /// 主进程请求清空采集结果时，重置内存里的报告并删掉文件。
-    ///
-    /// 主进程不能直接删 `learn.json`：报告本体在 worker 内存里，
-    /// 下一轮采样会把它整份写回去，用户看到的就是「清空了又自己回来」。
-    fn poll_learn_clear(&mut self) {
-        if !self.session.is_learn_clear_requested() {
-            return;
-        }
-        self.learn_report = LearnReport {
-            enabled: self.request.learn,
-            ..Default::default()
-        };
-        self.learn_failures = 0;
-        self.session.reset_learn();
-        self.publish_learn(None);
-        self.log("[学习] 已按要求清空采集结果");
-    }
-
-    /// 采样一轮已建立的连接，并入报告，再把摘要写进状态文件
-    fn learn_tick(&mut self) {
-        if !self.request.learn {
-            return;
-        }
-        let vpn_ips = if self.status.vpn_ip.is_empty() {
-            Vec::new()
-        } else {
-            vec![self.status.vpn_ip.clone()]
-        };
-        let exclude = self.snapshot.local_subnets.clone();
-
-        match learn::sample(&vpn_ips, &exclude, &Self::self_process_names()) {
-            Ok(observations) => {
-                self.learn_failures = 0;
-                let rules = self.known_rules();
-                learn::merge(&mut self.learn_report, &observations, &rules, &now());
-                if let Err(e) = self.session.write_learn(&self.learn_report) {
-                    self.log(&format!("[学习] 写学习报告失败: {}", e));
-                }
-                self.publish_learn(None);
-            }
-            Err(e) => {
-                self.learn_failures = self.learn_failures.saturating_add(1);
-                self.log(&format!(
-                    "[学习] 采样失败（第 {} 次）: {}",
-                    self.learn_failures, e
-                ));
-                // 连着几次都不行说明这台机器上取不到数，继续每 15 秒刷一条
-                // 失败日志毫无意义，直接停用，把原因留在状态里给用户看。
-                if self.learn_failures >= learn::MAX_CONSECUTIVE_FAILURES {
-                    self.request.learn = false;
-                    self.learn_report.enabled = false;
-                    // 已经采到的结果不删，用户可能还想看一眼
-                    let _ = self.session.write_learn(&self.learn_report);
-                    self.log("[学习] 连续采样失败，已自动停用学习模式");
-                }
-                self.publish_learn(Some(e));
-            }
-        }
-    }
-
-    /// 把摘要写进 `status.json`。
-    ///
-    /// 明细（每台主机、每个候选网段）只走 `learn.json`：`status.json` 每 600ms
-    /// 被主进程 diff 一次，塞几十 KB 进去会让状态轮询变成负担。
-    fn publish_learn(&mut self, error: Option<String>) {
-        if !self.request.learn && self.learn_report.scans == 0 {
-            self.status.learn = None;
-        } else {
-            let mut summary = learn::summarize(&self.learn_report);
-            summary.enabled = self.request.learn;
-            if let Some(e) = error {
-                summary.error = e;
-            }
-            self.status.learn = Some(summary);
-        }
-        self.status.updated_at = now();
-        if let Err(e) = self.session.write_status(&self.status) {
-            self.log(&format!("[worker] 写状态失败: {}", e));
-        }
-    }
-
     /// 回收本程序添加的路由，并把默认路由交还给连接前的物理网关
     fn cleanup_routes(&mut self) {
         // 引擎接管后：关闭所有流并回收流路由，再拆掉捕获 TUN 抢的那两条半默认路由
@@ -1035,9 +921,6 @@ impl Worker {
 
         loop {
             self.drain_output(&rx);
-            // 清空请求可能在任何时候到达（连接中/已连接/仅连着没建隧道），
-            // 所以放在循环顶部判一次，而不是塞进 15 秒那一跳
-            self.poll_learn_clear();
             // 运行期开关：模式与规则都可能在任何时刻被主进程改写
             self.poll_mode_change();
             self.poll_rules_change();
@@ -1098,11 +981,6 @@ impl Worker {
                 self.last_mode_check = Instant::now();
                 self.last_rules_check = Instant::now();
                 routes_applied = true;
-                // 隧道刚起来就先采一轮，别让用户干等 15 秒
-                if self.request.learn {
-                    self.log("[学习] 学习模式已开启：每 15 秒采集一次实际连通的远端地址");
-                    self.learn_tick();
-                }
                 guard_at = Instant::now() + GUARD_INTERVAL;
             }
 
@@ -1156,7 +1034,6 @@ impl Worker {
                 } else {
                     self.guard_routes();
                 }
-                self.learn_tick();
                 guard_at = Instant::now() + GUARD_INTERVAL;
             }
 
@@ -1466,7 +1343,6 @@ mod tests {
             default_policy: "DIRECT".into(),
             fake_ip_range: "198.18.0.0/16".into(),
             fake_ip_filter: vec![],
-            learn: false,
             extra_args: vec![],
             script_path: "s".into(),
             hook_exe: "h".into(),
@@ -1504,7 +1380,6 @@ mod tests {
             default_policy: "DIRECT".into(),
             fake_ip_range: "198.18.0.0/16".into(),
             fake_ip_filter: vec![],
-            learn: false,
             extra_args: vec![],
             script_path: "s".into(),
             hook_exe: "h".into(),
@@ -1535,7 +1410,6 @@ mod tests {
             default_policy: "DIRECT".into(),
             fake_ip_range: "198.18.0.0/16".into(),
             fake_ip_filter: vec![],
-            learn: false,
             extra_args: vec![],
             script_path: "s".into(),
             hook_exe: "h".into(),
@@ -1567,7 +1441,6 @@ mod tests {
             default_policy: "DIRECT".into(),
             fake_ip_range: "198.18.0.0/16".into(),
             fake_ip_filter: vec![],
-            learn: false,
             extra_args: vec![],
             script_path: "s".into(),
             hook_exe: "h".into(),

@@ -95,7 +95,6 @@ mod tests {
             default_policy: "DIRECT".into(),
             fake_ip_range: "198.18.0.0/16".into(),
             fake_ip_filter: vec![],
-            learn: false,
             extra_args: vec![],
             script_path: r"C:\session\script\vpnc-script-win.js".into(),
             hook_exe: r"C:\app\ws-workbench.exe".into(),

@@ -668,7 +668,6 @@ pub async fn vpn_connect(
         default_policy: default_policy.clone(),
         fake_ip_range: profile.fake_ip_range.clone(),
         fake_ip_filter: profile.fake_ip_filter.clone(),
-        learn: profile.learn,
         extra_args: profile.extra_args.clone(),
         script_path: String::new(), // worker 生成脚本后回填
         hook_exe: exe.to_string_lossy().to_string(),
@@ -896,32 +895,6 @@ pub fn vpn_read_logs(state: State<'_, VpnState>, max_lines: Option<usize>) -> Ve
         Ok(runtime) => runtime.session.read_log_tail(max_lines.unwrap_or(500)),
         Err(_) => Vec::new(),
     }
-}
-
-/// 拉取学习模式的完整明细。
-///
-/// 明细不跟着 `status.json` 走（那边 600ms 一次 diff，塞不动几十 KB），
-/// 只有用户主动展开面板时才读一次 `learn.json`。
-#[tauri::command]
-pub fn vpn_read_learn_report(state: State<'_, VpnState>) -> Option<LearnReport> {
-    match state.0.lock() {
-        Ok(runtime) => runtime.session.read_learn(),
-        Err(_) => None,
-    }
-}
-
-/// 清空学习结果。
-///
-/// 只放一个标志文件，由 worker 自己把内存里的报告重置掉：报告本体在 worker 手上，
-/// 主进程直接删 `learn.json` 的话，下一轮采样会立刻把它写回来。
-#[tauri::command]
-pub fn vpn_clear_learn_report(state: State<'_, VpnState>) -> Result<(), String> {
-    let session = {
-        let runtime = state.0.lock().map_err(|_| "内部状态锁定失败".to_string())?;
-        runtime.session.clone()
-    };
-    session.request_learn_clear();
-    Ok(())
 }
 
 #[tauri::command]
