@@ -86,19 +86,22 @@ const canPack = computed(() => projectType.value === 'layui')
 
 #### 规则分流
 
-分流的配置单位是**规则集**，每个 VPN 配置绑定其中一个。规则语义与 Clash 一致：
+分流的配置单位是**规则集**，每个 VPN 配置绑定其中一个。
 
-- 规则是**有序列表**，自上而下**首个命中生效**，全部不命中时由 `default_policy` 兜底（对应 Clash 的 `MATCH`）
-- 规则类型：`DOMAIN`、`DOMAIN-SUFFIX`、`DOMAIN-KEYWORD`、`PROCESS-NAME`、`DST-PORT`、`IP-CIDR`；出口只有 `DIRECT`（直连）与 `VPN` 两种
-- `IP-CIDR` 规则可勾 `no_resolve`，命中网段后不再为该连接做域名解析
-- 保存前会校验规则语法，可以预览一条规则对指定「域名 / 进程 / 端口」的判定结果，也能检查同一规则集里的网段重叠
+- 规则类型只保留真正有数据面的三类：`DOMAIN`、`DOMAIN-SUFFIX`、`IP-CIDR`；出口只有 `DIRECT`（直连）与 `VPN` 两种
+- 路由注入模式没有「按连接判定」这一步：`VPN` 规则只负责把命中的域名 / 网段送进隧道，未命中的一律直连（所以 `DIRECT` 规则天然满足，写不写都一样）
+- 服务端下发的默认域名（`CISCO_DEF_DOMAIN`）与 split-include 网段会被自动并入，不用手工抄一遍
+- 保存前校验规则语法，可以预览一条规则对指定「域名 / IP」的判定结果
 
-两个平台实现方式不同：
+三种代理模式，已连接时也能运行期切换（都是本地布线，点了就生效）：
 
-- **macOS：TUN 透明接管。** worker 另建一个捕获 utun，把 `0.0.0.0/1` 与 `128.0.0.0/1` 两条半默认路由指向它。抓到的 TCP/UDP 包交给 smoltcp 用户态协议栈完成握手与收发，连接被终结后再按规则选出口：`DIRECT` 用 `IP_BOUND_IF` 把出站 socket 钉在物理网卡，`VPN` 钉在隧道网卡并补一条 `/32` 流路由，随后双向搬运字节。DNS 由本地 fake-ip 服务应答：A 记录分配池内假 IP、AAAA 返回空答；连接到达后用假 IP 反查域名参与规则匹配，命中 `fake_ip_filter` 的域名不伪造、走真实解析。
-- **Windows：TUN 透明接管。** 用 Wintun 另建捕获网卡，同样把 `0.0.0.0/1` 与 `128.0.0.0/1` 两条半默认路由指向它，后续 TCP/UDP/DNS 处理与 macOS 共用同一套 smoltcp 引擎。出口用 `IP_UNICAST_IF` 在 socket 上钉物理网卡或隧道网卡；VPN 流另外补一条 `/32` 路由指向隧道（同一真实 IP 的多条流用引用计数共用，最后一条关闭时才删除），避免隧道网卡没有目标网段路由时连接失败。服务器的 `/32` 防环路由通过 `route.exe` 走物理网关，且必须先于两条半默认路由安装。DNS 同样是本地 fake-ip 应答，连接到达后反查域名再走规则。
+- **规则模式（默认）**：不抓包、不抢默认路由、不改系统 DNS。命中「走 VPN」的域名交给 VPN DNS 解析，解析出来的内网 IP 装 `/32` 路由指向隧道；`IP-CIDR` 与服务端 split-include 网段整段注入隧道。默认路由和系统 DNS 都不动，结构上不可能「一连上就全网断」。
+  - **macOS**：写 `/etc/resolver/<域名>` + 本机 DNS 转发器（`127.0.0.1:53`），转发器把应答回给应用**之前**就装好 `/32`，没有时间差。
+  - **Windows**：用 NRPT（`Add-DnsClientNrptRule`）把这些域名的解析交给 VPN DNS；后台线程每 15 秒按域名向 VPN DNS 查 A 记录并注入 `/32`。Windows 没有「应答前注入」的用户态时机，所以按域名解析出的地址是连接后 1~2 秒补齐的；服务端下发的 split-include 网段不受影响（一开始就整段注入）。NRPT 不可用时退回「只给隧道网卡配 DNS」并在日志里说明原因。
+- **全局模式**：`0.0.0.0/1` + `128.0.0.0/1` 两条半默认路由指向隧道，系统 DNS 改成 VPN DNS。装完立刻验证系统解析器还能解析，不通就整段回滚（路由与 DNS 一起还原）。本地直连网段比 `/1` 更具体，自动保持直连。
+- **直连模式**：只建隧道，不接管任何流量。
 
-规则改动不会热生效，需要断开重连。
+`DOMAIN-KEYWORD` / `PROCESS-NAME` / `DST-PORT` / `RULE-SET` 需要按连接抓包或按进程判定，路由注入模式没有落点，保存时直接报错并提示改法，不会再「显示已启用但从不生效」。
 
 #### 权限与进程拆分
 
@@ -116,22 +119,17 @@ const canPack = computed(() => projectType.value === 'layui')
 
 #### 路由与脚本
 
-下发路由不解析 `netsh` / `route print` 的文本输出，本地化后那套输出会解析失败。Windows 侧用 JScript（cscript）执行脚本配合 PowerShell 的 `Get-NetRoute` / `Get-NetIPAddress` / `Get-NetAdapter` 拿 JSON；macOS 侧用 `route` / `ifconfig` / `netstat`。
+下发路由不解析 `netsh` / `route print` 的文本输出，本地化后那套输出会解析失败。Windows 侧用 JScript（cscript）执行脚本，路由 / DNS / 网卡一律通过 PowerShell 的 `Get-NetRoute` / `New-NetRoute` / `Get-NetAdapter` / `Get-DnsClientNrptRule` 拿结构化结果；macOS 侧用 `route` / `ifconfig` / `netstat`。
 
-生成的 vpnc-script 必须是纯 ASCII：Windows 那份由 cscript 按 ANSI 代码页解码，混入非 ASCII 字节会直接编译失败。脚本里用 `WS-WORKBENCH` 作为标记行，清理时据此定位自己写入的条目。
+- 装隧道路由：Windows `New-NetRoute -NextHop 0.0.0.0 -PolicyStore ActiveStore`（on-link，不落持久化路由表），macOS `route -n add -interface <utun>`；先判存在再建，重复调用幂等
+- 删路由：Windows `Remove-NetRoute`，macOS `route -n delete`
+- 半默认路由崩溃清理：只删**同时满足**「前缀是 `0.0.0.0/1` / `128.0.0.0/1`」且「网卡驱动描述像 VPN（Wintun / OpenConnect / TAP / AnyConnect）」的条目，不误伤 WireGuard、OpenVPN 这类同样用 `/1` 的客户端
+- 按域名解析：macOS 写 `/etc/resolver`，Windows 写 NRPT。清理时都只删自己写的：macOS 靠清单文件 + 内容校验，Windows 只认 `DisplayName` 前缀 `ws-workbench:`
+- 全局模式的 DNS：macOS `scutil` + `networksetup`（两处都改，`OverridePrimary`），Windows 只改隧道网卡（`Set-DnsClientServerAddress`），断开时复位成自动获取
 
-Windows 上的虚拟网卡由 Wintun 驱动提供（`src-tauri/resources/apps/openconnect/wintun.dll`），macOS 用系统自带的 utun。
+生成的 vpnc-script 必须是纯 ASCII：Windows 那份由 cscript 按 ANSI 代码页解码，混入非 ASCII 字节会直接编译失败。脚本里用 `WS-WORKBENCH` 作为标记行，清理时据此定位自己写入的条目。脚本只负责配接口地址 / MTU、给 VPN 服务器加防环主机路由，并把 `TUNIDX`、`INTERNAL_IP4_*`、`CISCO_DEF_DOMAIN`、`CISCO_SPLIT_INC_*` 等参数回报给 worker —— 默认路由、DNS 与分流布线全部由 worker 按模式接管。
 
-#### 学习模式
-
-只拿到域名、拿不到网段时用它反推：worker 每 15 秒采样一次 `Get-NetTCPConnection -State Established`，记录实际连通的远端地址，再聚合成候选网段交给用户判断。
-
-- 仅 Windows 可用（macOS 侧采样直接返回空），采样连续失败 3 次后自动停用
-- 按 `/24` 聚合；同一个 `/16` 内观察到至少 4 个 `/24` 才升级为 `/16`，同一个 `/8` 内观察到至少 4 个 `/16` 才升级为 `/8`
-- 单次上限：2000 个主机、每主机 8 个端口、8 个时间样本、4 个进程
-- **只观察、只建议**：候选网段要点「采纳」才会写进规则表，程序不会自己改规则
-
-摘要字段写进 `status.json`（前端每 600 毫秒轮询，不能塞几十 KB 的明细），完整数据单独落 `learn.json`，只在展开明细时按需读取。清空走标志文件 `learn.clear`，worker 重置内存中的报告后删掉这个文件，否则下一轮 15 秒采样会把内容原样写回。
+Windows 上的虚拟网卡由 Wintun 驱动提供（`src-tauri/resources/apps/openconnect/wintun.dll`），macOS 用系统自带的 utun。DNS 分流用到的 NRPT 由 `Dnscache` 服务执行，服务没跑时自动退回「只给隧道网卡配 DNS」并记录日志。
 
 #### 凭据
 
@@ -167,17 +165,17 @@ macOS 的应用菜单做了汉化，点 Dock 图标会把窗口重新显示出�
 | 桌面框架 | Tauri 2（`tauri` 开启 `tray-icon`） |
 | 前端 | Vue 3.5 + TypeScript 5.6 + Vite 6；ant-design-vue 4 + md-editor-v3 7（组件与图标按需自动引入） |
 | 后端 | Rust edition 2021，库名 `ws_workbench_lib` |
-| 数据面 | smoltcp 0.11 用户态协议栈（macOS 透明代理） |
+| 数据面 | 路由注入（隧道 /32 / 网段路由 + 按域名 DNS），不抓包 |
 | 存储加密 | SM4-CBC + HMAC-SM3；主密钥由 macOS 钥匙串 / Windows DPAPI 托管 |
 | 插件 | dialog、shell、store、updater、process |
-| 关键 crate | `ignore`、`zip`、`chrono`、`uuid`、`tempfile`、`sm4`、`hmac`、`cbc`、`smoltcp`、`nix` |
+| 关键 crate | `ignore`、`zip`、`chrono`、`uuid`、`tempfile`、`sm4`、`hmac`、`cbc`、`nix` |
 
 ## 环境要求
 
 - Node 22 与 pnpm（CI 固定 pnpm 10；`pnpm-lock.yaml` 为 9.0 格式）
 - Rust stable 工具链
 - 仅在需要 VPN 时：可用的 openconnect。Windows 必须使用 `src-tauri/resources/apps/openconnect/` 里的内置副本（安装包会一起打进去），macOS 建议 `brew install openconnect`
-- VPN 连接需要管理员授权，见「权限与进程拆分」；两个平台都通过 TUN 透明接管做规则分流，macOS 用系统 utun，Windows 用内置 `wintun.dll`
+- VPN 连接需要管理员授权，见「权限与进程拆分」；两个平台都用路由注入做规则分流，不抓包，macOS 用系统 utun，Windows 用内置 `wintun.dll`
 
 ## 开发
 
@@ -279,11 +277,11 @@ VPN 会话目录同时被主进程和提权 worker 使用，因此不做路径�
 | 文件 | 用途 |
 | --- | --- |
 | `request.json` | 主进程下发的连接请求 |
-| `status.json` | worker 上报的状态与学习模式摘要 |
-| `learn.json` | 学习模式完整明细 |
-| `learn.clear` | 清空学习结果的标志文件 |
+| `status.json` | worker 上报的实时状态（阶段、隧道参数、生效模式与路由） |
 | `worker.log` / `script.log` | worker 与 vpnc-script 日志 |
 | `stop.flag` | 请求 worker 停止 |
+| `mode` / `rules.json` | 运行期代理模式与规则集（主进程写、worker 轮询后重新布线） |
+| `main.alive` | 父进程心跳，worker 靠它判断主进程是否还活着 |
 | `script/` | 生成的 vpnc-script |
 
 超时与轮询节奏：连接超时 120 秒，守护周期 15 秒，状态轮询 600 毫秒。worker 退出码 `0` 正常、`2` 无请求、`3` 失败。
@@ -294,19 +292,18 @@ VPN 会话目录同时被主进程和提权 worker 使用，因此不做路径�
 | --- | --- | --- |
 | VPN 提权 | 计划任务免 UAC，失败回退 UAC 弹窗 | 系统授权框 |
 | 虚拟网卡 | Wintun 驱动 | 系统 utun |
-| 分流实现 | TUN 透明接管；域名 / 网段 / 端口规则 + fake-ip DNS 生效 | TUN 透明接管；六类规则 + fake-ip DNS 生效 |
-| 学习模式 | 支持 | 不支持 |
-| 路由查询 | cscript + PowerShell JSON | `route` / `ifconfig` / `netstat` |
+| 分流实现 | 路由注入：NRPT 按域名解析 + 隧道路由（不抓包） | 路由注入：`/etc/resolver` + 本机转发器 + 隧道路由（不抓包） |
+| 按域名解析 | NRPT（`Add-DnsClientNrptRule`） | `/etc/resolver` + `127.0.0.1:53` 转发器 |
+| 路由查询 | PowerShell JSON（`Get-NetRoute` 等） | `route` / `ifconfig` / `netstat` |
 
 其余已知限制：
 
 - 打包只支持 Layui 项目
 - 相对路径含空格的文件会被跳过
-- Windows 的进程反查暂未接入 IP Helper，`PROCESS-NAME` 规则在 Windows 上不会命中；域名 / 网段 / 端口规则不受影响
-- fake-ip 只在应用重新发起 DNS 查询时生效：连接前已缓存的真实 IP（系统 DNS 缓存、浏览器缓存、DoH）不会命中域名规则，连上后请刷新 DNS 或重启对应应用
-- 捕获与分流只处理 IPv4 TCP/UDP；ICMP 和 IPv6 仍走系统默认路由，不参与域名规则
-- 规则改动需要断开重连才生效
-- 学习模式只给建议，采纳候选网段需要手动点击
+- 分流只处理 IPv4：域名解析可能返回 AAAA，IPv6 目标不进隧道、仍走系统默认路由
+- 域名分流只覆盖系统解析器（getaddrinfo）：自带 DoH/DoT 的应用不受控；它解析出的 IP 若命中 `IP-CIDR` 规则，照样能进隧道
+- Windows 上按域名解析出来的 `/32` 是后台轮询注入的，新地址最多晚约 15 秒生效；服务端下发的 split-include 网段不受影响（整段注入）
+- 规则与代理模式的改动都会热生效（worker 轮询 `rules.json` / `mode` 后重新布线），不需要断开重连
 
 ## 目录结构
 
@@ -331,21 +328,17 @@ src-tauri/src/
   apps/            外部应用定位（finder / registry）
   vpn/
     models.rs      规则、规则集、VPN 配置、状态
-    rule_engine.rs Clash 式有序列规则引擎（纯逻辑，可离线单测）
-    fakedns.rs     fake-ip 地址池：分配 / 反查 / 过滤 / 回收（纯逻辑）
-    dns_srv.rs     fake-ip DNS 应答（A 分配假地址、AAAA 空答）
-    dns_client.rs  最小 DNS 客户端：连接阶段把假地址解析成真实 IPv4
-    netstack.rs    smoltcp 用户态协议栈，终结 TUN 上抓到的连接
-    router.rs      出口选择、fake-ip 真实解析与双向字节搬运（双平台）
-    platform.rs    TUN / 路由 / 网卡绑定的平台抽象（macOS IP_BOUND_IF / Windows IP_UNICAST_IF）
-    tun_device.rs  捕获网卡创建与读写（macOS utun / Windows Wintun）
-    proc_lookup.rs 五元组反查进程名（macOS）
+    mod.rs         模块导出与数据目录名
+    rule_engine.rs 规则类型 / 走向解析（纯逻辑，可离线单测）
+    split.rs       规则模式：按域名分流解析 + 隧道路由注入（macOS 转发器 / Windows 主动解析）
+    win_dns.rs     Windows 专用：NRPT 规则与接口 DNS
+    fulltunnel.rs  全局模式：半默认路由 + 系统 DNS 接管（带验证与回滚）
+    dns_client.rs  最小 DNS 客户端：构造 A 查询、解析应答
     worker.rs      提权进程，连接生命周期主体
     commands.rs    主进程侧命令与状态轮询
     connector.rs   拉起 openconnect
-    route.rs       路由表读写
+    route.rs       路由表读写与崩溃清理
     script.rs      生成 vpnc-script
-    learn.rs       学习模式：采样与网段反推
     credential.rs  密码加密存储
     detect.rs      连接器可用性探测
     elevate.rs     提权启动
@@ -354,8 +347,8 @@ src-tauri/src/
 src/
   components/      ProjectList / GroupDetail / ProjectDetail / ProjectConfig /
                    NoteEditor / AttachmentPanel / PackProgress / ExcludeRules / LogPanel
-    vpn/           VpnPanel / VpnProfileForm / VpnRuleTable / VpnRoutePreview /
-                   VpnLearnCard / VpnInstallGuide
+    vpn/           VpnPanel / VpnProfileDialog / VpnRuleDialog / VpnRoutePreview /
+                   VpnStatusDot / VpnLogDrawer / VpnInstallGuide
     settings/      SettingsPanel
   composables/     useConfig / usePack / useVpn / useApps / useLog / useUpdater /
                    useWorkbenchLayout / useEntitySelection / useProjectForm /

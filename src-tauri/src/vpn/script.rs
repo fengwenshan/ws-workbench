@@ -1,15 +1,16 @@
 //! 生成自定义 vpnc-script
 //!
 //! openconnect 把路由/DNS 的配置完全交给 `--script` 指定的脚本。
-//! 本程序的新架构里 openconnect 只负责拉隧道，捕获 TUN（`0.0.0.0/1` + `128.0.0.0/1`）
-//! 与 DNS 拦截都由引擎负责，所以脚本退化为「只把网卡准备好」。
+//! 新架构里 openconnect 只负责拉隧道：默认路由、系统 DNS 与分流布线都由 worker
+//! 按代理模式接管（规则模式见 `split.rs`，全局模式见 `fulltunnel.rs`），
+//! 所以脚本退化为「只把网卡准备好 + 把服务端下发的范围回报给 worker」。
 //!
 //! 结论来自机器上那份验证可用的官方脚本：
 //! - 用 `TUNIDX`（网卡索引）而不是网卡名，避免中文系统下名字匹配不上；
 //! - 接口地址要带 `store=active`，不要落进持久化配置。
 //!
-//! 脚本只负责「接口地址 + MTU + 给 VPN 服务器本身加防环主机路由」并把关键参数
-//! 回报给 worker；默认路由、系统 DNS 与分流规则全部由本程序引擎接管。
+//! 脚本只负责「接口地址 + MTU + 给 VPN 服务器本身加防环主机路由」，并把关键参数
+//! 回报给 worker；默认路由、系统 DNS 与分流规则全部由 worker 接管。
 
 use std::path::Path;
 
@@ -98,12 +99,29 @@ if (reason == "connect") {
     report("dns", dns);
     report("vpngw", vpngw);
 
+    // Server-pushed split-tunnel scope: default domain + split-include subnets.
+    // openconnect exposes them as CISCO_* environment variables. The worker
+    // turns the domain into a per-name DNS split and the subnets into tunnel
+    // routes, exactly like the macOS script does.
+    report("defdomain", env("CISCO_DEF_DOMAIN") || "");
+    report("splitexc", env("CISCO_SPLIT_EXC") || "0");
+    var splitInc = parseInt(env("CISCO_SPLIT_INC") || "0", 10);
+    if (isNaN(splitInc) || splitInc < 0) { splitInc = 0; }
+    if (splitInc > 64) { splitInc = 64; }
+    for (var splitI = 0; splitI < splitInc; splitI++) {
+        var splitAddr = env("CISCO_SPLIT_INC_" + splitI + "_ADDR") || "";
+        var splitMask = env("CISCO_SPLIT_INC_" + splitI + "_MASKLEN") || "";
+        if (splitAddr !== "" && splitMask !== "") {
+            report("split", splitAddr + "/" + splitMask);
+        }
+    }
+
     if (mtu !== "") {
         run("netsh interface ipv4 set subinterface " + tunRef + " mtu=" + mtu + " store=active");
     }
 
     // Configure the interface address only. The default route and DNS are owned
-    // by the ws-workbench engine, so the script sets no gateway and touches no DNS.
+    // by the worker (routing injection / full-tunnel), not by this script.
     if (ip4 !== "") {
         run("netsh interface ip set address " + tunRef + " static " + ip4 + " " + mask4 + " store=active");
     }
@@ -318,7 +336,7 @@ mod tests {
     #[test]
     fn windows_script_never_touches_dns() {
         let script = windows_script(&ctx());
-        // DNS 拦截由引擎负责，脚本一个 DNS 命令都不许发
+        // DNS 由 worker 按模式接管（规则模式走 NRPT，全局模式配隧道网卡），脚本一个 DNS 命令都不许发
         assert!(!script.contains("set dns"));
         assert!(!script.contains("USE_VPN_DNS"));
     }
@@ -365,6 +383,17 @@ mod tests {
         assert!(script.contains(r#"report splitexc "${CISCO_SPLIT_EXC:-0}""#));
         assert!(script.contains("CISCO_SPLIT_INC"));
         assert!(script.contains(r#"report split "$split_addr/$split_mask""#));
+    }
+
+    #[test]
+    fn windows_script_reports_server_split_scope() {
+        // 和 macOS 脚本一致：服务端下发的默认域名 + split-include 网段必须回报，
+        // 否则 Windows 侧只能靠用户手写规则，漏写一条就少覆盖一片内网。
+        let script = windows_script(&ctx());
+        assert!(script.contains(r#"report("defdomain", env("CISCO_DEF_DOMAIN") || "");"#));
+        assert!(script.contains(r#"report("splitexc", env("CISCO_SPLIT_EXC") || "0");"#));
+        assert!(script.contains("CISCO_SPLIT_INC_"));
+        assert!(script.contains(r#"report("split", splitAddr + "/" + splitMask);"#));
     }
 
     #[test]
@@ -423,6 +452,62 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_script_reports_split_scope_through_cscript() {
+        // 真正用 cscript 跑一遍 connect 分支的「回报」部分：地址 / 网关 / MTU 全空，
+        // 所以脚本不会执行任何 netsh / route，只会把服务端下发的范围写进 script.log
+        // 和 stdout，动不到本机网络。
+        let dir = std::env::temp_dir().join("ws-workbench-script-split");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("vpnc-script-win.js");
+        let ctx = ScriptContext {
+            session_dir: &dir,
+            original_gateway: "192.168.1.1",
+        };
+        std::fs::write(&path, windows_script(&ctx)).unwrap();
+        let output = std::process::Command::new("cscript.exe")
+            .args(["//nologo", "//E:JScript"])
+            .arg(&path)
+            .env("reason", "connect")
+            .env("TUNDEV", "ws-tun")
+            .env("TUNIDX", "77")
+            .env("INTERNAL_IP4_ADDRESS", "")
+            .env("INTERNAL_IP4_MTU", "")
+            .env("INTERNAL_IP4_DNS", "192.0.2.12")
+            .env("VPNGATEWAY", "")
+            .env("CISCO_DEF_DOMAIN", "example.com")
+            .env("CISCO_SPLIT_INC", "2")
+            .env("CISCO_SPLIT_INC_0_ADDR", "198.51.100.0")
+            .env("CISCO_SPLIT_INC_0_MASKLEN", "22")
+            .env("CISCO_SPLIT_INC_1_ADDR", "10.10.0.0")
+            .env("CISCO_SPLIT_INC_1_MASKLEN", "16")
+            .output()
+            .expect("cscript.exe 是 Windows 自带组件，应当可用");
+        assert!(output.status.success(), "cscript 执行失败");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("WS-WORKBENCH defdomain=example.com"),
+            "默认域名没有回报给 worker：{}",
+            stdout
+        );
+        assert!(
+            stdout.contains("WS-WORKBENCH split=198.51.100.0/24"),
+            "split-include 网段没有回报给 worker：{}",
+            stdout
+        );
+        assert!(
+            stdout.contains("WS-WORKBENCH split=10.10.0.0/16"),
+            "第二条 split-include 网段没有回报给 worker：{}",
+            stdout
+        );
+        // 回报同时要落到 script.log（openconnect 的 stdout 接不到 worker 的管道）
+        let log = std::fs::read_to_string(dir.join("script.log")).unwrap_or_default();
+        assert!(log.contains("split=198.51.100.0/24"));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(dir.join("script.log"));
     }
 
     #[test]

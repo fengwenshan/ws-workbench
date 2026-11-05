@@ -427,7 +427,7 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
           rules: profile.rules ?? [],
           defaultPolicy: profile.rules_default_policy ?? 'DIRECT',
         })
-        pushLog('info', '规则已热更新，只重置受影响的连接')
+        pushLog('info', '规则已热更新，分流布线已按新规则重新下发')
       } catch (err: any) {
         pushLog('error', `规则未生效: ${err}`)
       }
