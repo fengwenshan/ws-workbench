@@ -280,7 +280,8 @@ mod tests {
         assert_eq!(quote_parameter(""), "\"\"");
     }
 
-    /// `shell_launch` 的 cwd 必须真的传给子进程：终端 / PowerShell 就靠它定位目录    #[cfg(target_os = "windows")]
+    /// `shell_launch` 的 cwd 必须真的传给子进程：终端 / PowerShell 就靠它定位目录
+    #[cfg(target_os = "windows")]
     #[test]
     fn shell_launch_runs_in_the_given_directory() {
         let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
