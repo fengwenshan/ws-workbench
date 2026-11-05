@@ -89,6 +89,7 @@ impl Worker {
         let mut status = VpnStatus::default();
         status.profile_id = request.profile_id.clone();
         status.profile_name = request.profile_name.clone();
+        status.conn_identity = request.conn_identity.clone();
         status.pid = std::process::id();
         status.started_at = now();
         status.updated_at = now();
@@ -1425,6 +1426,7 @@ mod tests {
     fn tail_summary_picks_error_lines() {
         let session = VpnSession::new(std::env::temp_dir().join("ws-worker-test"));
         let request = VpnRequest {
+            conn_identity: String::new(),
             proxy_mode: "rule".to_string(),
             profile_id: "p".into(),
             profile_name: "n".into(),
@@ -1454,6 +1456,7 @@ mod tests {
     fn compiled_rules_parses_canonical_kind_and_policy() {
         let session = VpnSession::new(std::env::temp_dir().join("ws-worker-test-compiled"));
         let request = VpnRequest {
+            conn_identity: String::new(),
             proxy_mode: "rule".to_string(),
             profile_id: "p".into(),
             profile_name: "n".into(),
@@ -1492,6 +1495,7 @@ mod tests {
     fn tunnel_ready_requires_ip_and_interface() {
         let session = VpnSession::new(std::env::temp_dir().join("ws-worker-test2"));
         let request = VpnRequest {
+            conn_identity: String::new(),
             proxy_mode: "rule".to_string(),
             profile_id: "p".into(),
             profile_name: "n".into(),
@@ -1523,6 +1527,7 @@ mod tests {
     fn tun_setup_failure_gets_actionable_hint() {
         let session = VpnSession::new(std::env::temp_dir().join("ws-worker-test3"));
         let request = VpnRequest {
+            conn_identity: String::new(),
             proxy_mode: "rule".to_string(),
             profile_id: "p".into(),
             profile_name: "n".into(),

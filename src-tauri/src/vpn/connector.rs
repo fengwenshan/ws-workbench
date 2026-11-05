@@ -81,6 +81,7 @@ mod tests {
 
     fn request() -> VpnRequest {
         VpnRequest {
+            conn_identity: String::new(),
             proxy_mode: "rule".to_string(),
             profile_id: "p1".into(),
             profile_name: "公司 VPN".into(),
