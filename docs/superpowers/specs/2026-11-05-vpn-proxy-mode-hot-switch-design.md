@@ -29,7 +29,7 @@
 - 同时维持两条隧道（两个不同服务器同时连接）。
 - 把已建立的直连连接迁移进隧道（物理约束，见 4.2）。
 - 规则语法/匹配能力调整。
-- `fake_ip_range` / `fake_ip_filter` / `learn` 的运行期热切换（它们算通道身份，改了要求重连）。
+- `fake_ip_range` / `fake_ip_filter` 的运行期热切换（它们算通道身份，改了要求重连）。
 
 ## 4. 关键事实与约束
 
@@ -87,7 +87,7 @@ if (config.vpn_rule_sets?.length) {
 
 | 通道身份（变了必须重连） | 运行期策略（可热切换） |
 |---|---|
-| `server`、`username`、`password`、`protocol`、`connector`、`connector_path`、`extra_args`、`fake_ip_range`、`fake_ip_filter`、`learn` | `name`、`rules`、`rules_default_policy`、`proxy_mode` |
+| `server`、`username`、`password`、`protocol`、`connector`、`connector_path`、`extra_args`、`fake_ip_range`、`fake_ip_filter` | `name`、`rules`、`rules_default_policy`、`proxy_mode` |
 
 ### 6.2 计算
 
@@ -173,7 +173,7 @@ pub fn apply_mode(mode: ProxyMode, egress: Egress) -> Egress   // 纯函数
 
 | 时机 | 动作 |
 |---|---|
-| 连接准备 | `prepare()` 删除 `mode`、`rules.json`、`main.alive`、status/log/learn |
+| 连接准备 | `prepare()` 删除 `mode`、`rules.json`、`main.alive`、status/log |
 | 切模式 / 改规则 / 共享切换 | 原子覆盖对应控制文件 |
 | 断开 | worker 正常收尾：关闭流 → 还原路由 → 删控制文件与 `request`（含明文密码）→ 写 disconnected |
 | 托盘退出 | 现有 `shutdown()` 请求 worker 收尾 |
@@ -237,3 +237,7 @@ pub fn apply_mode(mode: ProxyMode, egress: Egress) -> Egress   // 纯函数
   - 共享切换需要在主进程侧维护 `policy_profile_id`；应用重启后无法恢复该值，退回"通道拥有者即当前生效"，属可接受的降级。
   - 定向重置依赖建立时记录的判定输入，输入不可复现时按"判定不变"处理。
   - 面板内嵌规则表格需限高 + 内部滚动，避免页面过长。
+
+## 后续变更
+
+- **学习模式整块移除**：面板卡片、`vpn/learn.rs`（632 行）、`vpn_read_learn_report` / `vpn_clear_learn_report` 命令、`learn.json` / `learn.clear` 会话文件、配置里的 `learn` 字段全部删除。理由是规则按域名写，采集回来的 IP/CIDR 对用户没有可操作性；顺带把 `learn` 从通道身份里去掉，两个配置仅因学习开关不同就不能共享隧道的问题一并消失。
