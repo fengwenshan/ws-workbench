@@ -614,6 +614,10 @@ impl Worker {
             vpn_index,
             physical_ip,
             tunnel_ip,
+            resolve_server_ips(&self.request.server)
+                .iter()
+                .filter_map(|ip| ip.parse().ok())
+                .collect(),
             proc,
             &self.request.default_policy,
         )?;
@@ -1035,10 +1039,11 @@ impl Worker {
                 if let Some(stats) = self.engine.as_ref().map(|engine| engine.stats()) {
                     if last_stats != Some(stats) {
                         self.log(&format!(
-                            "[引擎] 收 {} 包 / 发 {} 包 / DNS 应答 {} / 新连接 {} / 出站异常 {}",
+                            "[引擎] 收 {} 包 / 发 {} 包 / DNS 应答 {} / 连接尝试 {} / 新连接 {} / 出站异常 {}",
                             stats.rx_packets,
                             stats.tx_packets,
                             stats.dns_answered,
+                            stats.flows_attempted,
                             stats.flows_opened,
                             stats.egress_failures
                         ));
