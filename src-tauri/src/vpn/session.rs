@@ -27,8 +27,7 @@ pub const STATUS_FILE: &str = "status.json";
 pub const LOG_FILE: &str = "worker.log";
 pub const SCRIPT_LOG_FILE: &str = "script.log";
 pub const STOP_FILE: &str = "stop.flag";
-/// 学习模式报告，由 worker 每轮采样后覆盖写入
-/// 主进程写入即请求清空学习报告（worker 在守护循环里轮询到后自己清并复位）
+/// 生成的 vpnc-script 与脚本日志目录
 pub const SCRIPT_DIR: &str = "script";
 /// 每次会话的运行标识，用来判断日志文件是不是被换过
 pub const RUN_ID_FILE: &str = "run.id";

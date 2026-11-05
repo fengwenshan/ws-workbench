@@ -636,6 +636,98 @@ pub fn delete_host_route(ip: &str) -> Result<(), String> {
     }
 }
 
+// ======================= Windows：隧道 on-link 路由 =======================
+//
+// 隧道路由一律用 `-NextHop 0.0.0.0`（on-link）而不是脚本算出来的「网络地址 + 1」：
+// Wintun 是点到点/虚拟网卡，Windows 只要知道「从哪块网卡出去」就够，写上隧道对端的
+// 假网关反而会多一次下一跳解析，隧道地址是 /32 时那个假网关根本不存在。
+//
+// 装路由用 CIM 而不是 `route.exe`：中文 Windows 上 `route.exe` 的报错是本地化的
+// （「对象已存在。」），按文本容错必然在别的语言版本上失效。这里先用 Get-NetRoute
+// 判断存在性，再决定要不要 New-NetRoute，整批路由只起一次 PowerShell。
+
+/// 生成「缺哪条补哪条」的 PowerShell 脚本（纯函数，方便在任意平台做单测）。
+#[cfg(any(target_os = "windows", test))]
+pub fn windows_ensure_onlink_script(
+    cidrs: &[String],
+    if_index: u32,
+    metric: u32,
+) -> Result<String, String> {
+    let mut script = String::new();
+    for cidr in cidrs {
+        let cidr = normalize_cidr(cidr)?;
+        script.push_str(&format!(
+            "if (-not (Get-NetRoute -DestinationPrefix '{cidr}' -InterfaceIndex {idx} \
+             -PolicyStore ActiveStore -ErrorAction SilentlyContinue)) {{ \
+               New-NetRoute -DestinationPrefix '{cidr}' -InterfaceIndex {idx} \
+               -NextHop '0.0.0.0' -RouteMetric {metric} -PolicyStore ActiveStore \
+               -ErrorAction Stop | Out-Null }}; ",
+            cidr = cidr,
+            idx = if_index,
+            metric = metric
+        ));
+    }
+    Ok(script)
+}
+
+/// Windows：把一批网段装成指向隧道网卡的 on-link 路由（重复调用幂等）。
+#[cfg(target_os = "windows")]
+pub fn ensure_onlink_routes(
+    cidrs: &[String],
+    if_index: u32,
+    metric: u32,
+) -> Result<(), String> {
+    if cidrs.is_empty() {
+        return Ok(());
+    }
+    if if_index == 0 {
+        return Err("隧道接口索引为 0，无法下发路由".to_string());
+    }
+    let script = windows_ensure_onlink_script(cidrs, if_index, metric)?;
+    powershell(&script).map(|_| ())
+}
+
+/// 生成「只删挂在 VPN 虚拟网卡上的这些前缀」的 PowerShell 脚本。
+///
+/// 崩溃恢复用：worker 被强杀时半默认路由（`0.0.0.0/1` + `128.0.0.0/1`）会留在
+/// 隧道网卡上，下次连接前必须收掉，否则整机流量仍然指向一条没人管的隧道。
+///
+/// 必须同时用「前缀 + 网卡身份」两个条件：只按前缀删会误伤别的 VPN 客户端
+/// （WireGuard / OpenVPN 全隧道也常用 /1），只按网卡删又会把别人正常的分流路由删掉。
+#[cfg(any(target_os = "windows", test))]
+pub fn windows_remove_vpn_prefix_script(cidrs: &[String]) -> String {
+    let mut prefixes = String::new();
+    for cidr in cidrs {
+        if !prefixes.is_empty() {
+            prefixes.push(',');
+        }
+        prefixes.push_str(&format!("'{}'", cidr.trim()));
+    }
+    format!(
+        "$removed=0; foreach ($p in @({prefixes})) {{ \
+           Get-NetRoute -DestinationPrefix $p -PolicyStore ActiveStore -ErrorAction SilentlyContinue | \
+           ForEach-Object {{ \
+             $a = Get-NetAdapter -InterfaceIndex $_.InterfaceIndex -ErrorAction SilentlyContinue; \
+             if ($a -and (($a.InterfaceDescription + ' ' + $a.Name) -match \
+                 '(?i)wintun|openconnect|tap-windows|tap adapter|anyconnect|vpn')) {{ \
+               Remove-NetRoute -DestinationPrefix $_.DestinationPrefix -InterfaceIndex $_.InterfaceIndex \
+                 -Confirm:$false -PolicyStore ActiveStore -ErrorAction SilentlyContinue; \
+               $removed++ }} }} }}; $removed",
+        prefixes = prefixes
+    )
+}
+
+/// Windows：清掉崩溃后残留、且挂在 VPN 虚拟网卡上的半默认路由，返回删掉几条。
+#[cfg(target_os = "windows")]
+pub fn remove_vpn_half_default_routes() -> Result<u32, String> {
+    let script = windows_remove_vpn_prefix_script(&[
+        "0.0.0.0/1".to_string(),
+        "128.0.0.0/1".to_string(),
+    ]);
+    let text = powershell(&script)?;
+    Ok(text.trim().parse::<u32>().unwrap_or(0))
+}
+
 /// `ensure_route` 的结果：区分「新建」与「只是调了跃点数」，
 /// 断开时前者要删掉，后者只需把跃点数还原，避免误删系统自动生成的直连路由。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1215,6 +1307,46 @@ mod tests {
         assert_eq!(physical.alias, "en0");
     }
 
+    #[test]
+    fn windows_onlink_script_is_idempotent_and_lands_on_the_tunnel() {
+        // 隧道侧一律 on-link（0.0.0.0）：Wintun 网卡上没有真实的下一跳可用，
+        // 写脚本算出来的「网络地址 + 1」在 /32 隧道地址上根本不存在。
+        let script = windows_ensure_onlink_script(
+            &["192.168.136.0/22".to_string(), "10.8.0.12/32".to_string()],
+            21,
+            1,
+        )
+        .unwrap();
+        assert!(script.contains("-DestinationPrefix '192.168.136.0/22'"));
+        assert!(script.contains("-DestinationPrefix '10.8.0.12/32'"));
+        assert!(script.contains("-InterfaceIndex 21"));
+        assert!(script.contains("-NextHop '0.0.0.0'"));
+        assert!(script.contains("-PolicyStore ActiveStore"));
+        // 先判存在再建：重复调用不能变成「对象已存在」的报错
+        assert_eq!(script.matches("Get-NetRoute").count(), 2);
+        assert_eq!(script.matches("New-NetRoute").count(), 2);
+        // 非临时路由表一律不能碰
+        assert!(!script.contains("PersistentStore"));
+        assert!(windows_ensure_onlink_script(&[], 21, 1).unwrap().is_empty());
+        assert!(windows_ensure_onlink_script(&["bad".to_string()], 21, 1).is_err());
+    }
+
+    #[test]
+    fn windows_stale_cleanup_only_touches_vpn_adapters() {
+        // 只按前缀删会误伤别的 VPN 客户端，必须同时要求网卡身份像 VPN
+        let script = windows_remove_vpn_prefix_script(&[
+            "0.0.0.0/1".to_string(),
+            "128.0.0.0/1".to_string(),
+        ]);
+        assert!(script.contains("'0.0.0.0/1','128.0.0.0/1'"));
+        assert!(script.contains("Get-NetAdapter"));
+        assert!(script.contains("wintun|openconnect|tap-windows|tap adapter|anyconnect|vpn"));
+        assert!(script.contains("Remove-NetRoute"));
+        assert!(script.contains("$removed"));
+    }
+
+    // 上一个提交在它前面插了新用例，把原来的 cfg 挤走了，Windows 上直接编译不过。
+    #[cfg(target_os = "macos")]
     #[test]
     fn macos_route_binary_path_exists_and_query_works() {
         assert!(

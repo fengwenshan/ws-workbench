@@ -552,8 +552,9 @@ watch(
       @cancel="reconnectTarget = null"
     >
       <p class="dialog-message">
-        「{{ reconnectTarget.name }}」与当前通道的连接参数不同（服务器、账号、连接器或 fake-ip
-        设置有变化），需要先断开当前连接，再重新建立隧道。
+        「{{ reconnectTarget.name }}」与当前通道的连接参数不同（服务器、账号、密码、协议、
+        连接器或额外参数有变化），需要先断开当前连接，再重新建立隧道。只是规则或代理模式
+        不同的话可以直接切，不用断开。
       </p>
     </Modal>
 
