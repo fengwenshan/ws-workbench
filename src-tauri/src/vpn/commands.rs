@@ -10,6 +10,7 @@ use crate::platform::{Os, Platform};
 use crate::vpn::guide;
 use crate::vpn::models::*;
 use crate::vpn::session::{LogCursor, VpnSession};
+use crate::vpn::router::ProxyMode;
 use crate::vpn::{detect, elevate, route};
 
 /// 状态轮询间隔：既能让界面反应够快，也不会把磁盘打满
@@ -440,28 +441,28 @@ pub struct ConnectResult {
     pub elevation: String,
 }
 
-/// 把代理模式翻译成 worker 真正需要的「规则 + 兜底走向」。
+/// 一次连接运行期要用的全部策略。
+struct ProxyPlan {
+    mode: ProxyMode,
+    /// 启用中的规则；全局/直连模式下只是随请求带着，不编译也不参与判定
+    rules: Vec<VpnRule>,
+    default_policy: String,
+}
+
+/// 解析代理模式并整理规则。
 ///
-/// 全局/直连模式必须在这里把规则清空，而不是只依赖界面隐藏规则列表：
-/// 否则用户切到全局后，旧的规则集仍可能参与分流。直连/全局的兜底走向
-/// 分别对应 Clash 的 DIRECT / PROXY。
+/// 规则始终全量下发：worker 在全局/直连模式下会忽略它们，但用户切回规则模式时
+/// 需要立刻能用，不必重连。是否编译校验由调用方按模式决定。
 fn resolve_proxy_plan(
     mode: &str,
     rules: Vec<VpnRule>,
     default_policy: String,
-) -> Result<(Vec<VpnRule>, String), String> {
-    match mode.trim().to_ascii_lowercase().as_str() {
-        "rule" => Ok((
-            rules.into_iter().filter(|rule| rule.enabled).collect(),
-            default_policy,
-        )),
-        "global" => Ok((Vec::new(), "VPN".to_string())),
-        "direct" => Ok((Vec::new(), "DIRECT".to_string())),
-        other => Err(format!(
-            "未知的代理模式：{}（仅支持 rule / global / direct）",
-            other
-        )),
-    }
+) -> Result<ProxyPlan, String> {
+    Ok(ProxyPlan {
+        mode: ProxyMode::parse(mode)?,
+        rules: rules.into_iter().filter(|rule| rule.enabled).collect(),
+        default_policy,
+    })
 }
 
 /// 必须是 async：非 async 的 Tauri 命令跑在主线程上，而下面的提权步骤要等用户
@@ -481,8 +482,8 @@ pub async fn vpn_connect(
         .unwrap_or_else(|| "DIRECT".to_string());
     // 代理模式是连接行为的唯一来源：全局/直连模式会忽略前端传来的规则，
     // 避免界面已经切模式、实际仍按旧规则分流。
-    let (rules, default_policy) =
-        resolve_proxy_plan(&profile.proxy_mode, rules, default_policy)?;
+    let plan = resolve_proxy_plan(&profile.proxy_mode, rules, default_policy)?;
+    let (rules, default_policy) = (plan.rules.clone(), plan.default_policy.clone());
     // 1. 选连接器
     let candidates = vpn_detect_connectors(app.clone(), custom_openconnect.clone());
     let picked = detect::pick_connector(&candidates, profile.connector).ok_or_else(|| {
@@ -503,9 +504,9 @@ pub async fn vpn_connect(
     // 3. 规则已经在 resolve_proxy_plan 里按模式处理：规则模式过滤停用项，
     // 全局/直连模式清空规则并覆盖兜底走向。
 
-    // 规则先编译一次：任何一条规则不合法都在这里拦下，避免带着坏规则去连。
-    // 这是 fail-closed —— 宁可连接失败，也不放行一份语义错误的规则集。
-    {
+    // 规则只在规则模式下编译校验：全局/直连用不到规则，不该因为它们不合法连不上。
+    // 规则模式下这是 fail-closed —— 宁可连接失败，也不放行一份语义错误的规则集。
+    if plan.mode == ProxyMode::Rule {
         use crate::vpn::rule_engine::{compile, Policy, Rule, RuleKind};
         let mut compiled = Vec::new();
         for r in rules.iter().filter(|r| r.enabled) {
@@ -538,7 +539,7 @@ pub async fn vpn_connect(
         protocol: profile.protocol.clone(),
         connector: profile.connector,
         connector_path: connector.path.clone(),
-        proxy_mode: profile.proxy_mode.clone(),
+        proxy_mode: plan.mode.as_str().to_string(),
         rules: rules.clone(),
         default_policy: default_policy.clone(),
         fake_ip_range: profile.fake_ip_range.clone(),
@@ -989,38 +990,39 @@ mod tests {
 
     #[test]
     fn rule_mode_keeps_enabled_rules_and_default() {
-        let (rules, default) = resolve_proxy_plan(
+        let plan = resolve_proxy_plan(
             "rule",
             vec![sample_rule(true), sample_rule(false)],
             "DIRECT".to_string(),
         )
         .unwrap();
-        assert_eq!(rules.len(), 1);
-        assert_eq!(default, "DIRECT");
+        assert_eq!(plan.mode, ProxyMode::Rule);
+        assert_eq!(plan.rules.len(), 1);
+        assert_eq!(plan.default_policy, "DIRECT");
     }
 
     #[test]
-    fn global_mode_discards_rules_and_forces_vpn() {
-        let (rules, default) = resolve_proxy_plan(
+    fn global_mode_keeps_rules_but_switches_mode() {
+        let plan = resolve_proxy_plan(
             "global",
             vec![sample_rule(true)],
             "DIRECT".to_string(),
         )
         .unwrap();
-        assert!(rules.is_empty());
-        assert_eq!(default, "VPN");
+        assert_eq!(plan.mode, ProxyMode::Global);
+        assert_eq!(plan.rules.len(), 1);
     }
 
     #[test]
-    fn direct_mode_discards_rules_and_forces_direct() {
-        let (rules, default) = resolve_proxy_plan(
+    fn direct_mode_keeps_rules_but_switches_mode() {
+        let plan = resolve_proxy_plan(
             "direct",
             vec![sample_rule(true)],
-            "VPN".to_string(),
+            "DIRECT".to_string(),
         )
         .unwrap();
-        assert!(rules.is_empty());
-        assert_eq!(default, "DIRECT");
+        assert_eq!(plan.mode, ProxyMode::Direct);
+        assert_eq!(plan.rules.len(), 1);
     }
 
     #[test]

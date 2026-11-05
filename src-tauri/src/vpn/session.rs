@@ -20,7 +20,7 @@ use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-use crate::vpn::models::{LearnReport, VpnRequest, VpnStatus};
+use crate::vpn::models::{LearnReport, VpnRequest, VpnRule, VpnStatus};
 
 pub const REQUEST_FILE: &str = "request.json";
 pub const STATUS_FILE: &str = "status.json";
@@ -34,6 +34,12 @@ pub const LEARN_CLEAR_FILE: &str = "learn.clear";
 pub const SCRIPT_DIR: &str = "script";
 /// 每次会话的运行标识，用来判断日志文件是不是被换过
 pub const RUN_ID_FILE: &str = "run.id";
+/// 运行期代理模式（rule / global / direct），主进程写、worker 轮询
+pub const MODE_FILE: &str = "mode";
+/// 运行期规则集，主进程写、worker 轮询；内容没变就不重新编译
+pub const RULES_FILE: &str = "rules.json";
+/// 父进程心跳：主进程连接期间定时刷新 mtime，worker 靠它判断主进程是否还活着
+pub const ALIVE_FILE: &str = "main.alive";
 
 /// 日志读取游标。
 ///
@@ -99,6 +105,18 @@ impl VpnSession {
         self.dir.join(LEARN_CLEAR_FILE)
     }
 
+    pub fn mode_path(&self) -> PathBuf {
+        self.dir.join(MODE_FILE)
+    }
+
+    pub fn rules_path(&self) -> PathBuf {
+        self.dir.join(RULES_FILE)
+    }
+
+    pub fn alive_path(&self) -> PathBuf {
+        self.dir.join(ALIVE_FILE)
+    }
+
     /// 读取当前的运行标识
     pub fn run_id(&self) -> String {
         fs::read_to_string(self.dir.join(RUN_ID_FILE))
@@ -120,6 +138,9 @@ impl VpnSession {
             self.log_path(),
             self.script_log_path(),
             self.learn_path(),
+            self.mode_path(),
+            self.rules_path(),
+            self.alive_path(),
         ] {
             if path.exists() {
                 let _ = fs::remove_file(path);
@@ -172,6 +193,73 @@ impl VpnSession {
     pub fn read_status(&self) -> Option<VpnStatus> {
         let content = fs::read_to_string(self.status_path()).ok()?;
         serde_json::from_str(&content).ok()
+    }
+
+    /// 写运行期模式；worker 在 200ms 内就会读到
+    pub fn write_mode(&self, mode: &str) -> Result<(), String> {
+        self.ensure()?;
+        Self::write_atomic(&self.mode_path(), &format!("{}\n", mode))
+    }
+
+    pub fn read_mode(&self) -> Option<String> {
+        let content = fs::read_to_string(self.mode_path()).ok()?;
+        let trimmed = content.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    }
+
+    /// 写运行期规则集；worker 先比对原始文本，没变就不重新编译
+    pub fn write_rules(&self, rules: &[VpnRule], default_policy: &str) -> Result<(), String> {
+        self.ensure()?;
+        let payload = serde_json::json!({
+            "rules": rules,
+            "default_policy": default_policy,
+        });
+        let content = serde_json::to_string_pretty(&payload)
+            .map_err(|e| format!("序列化规则失败: {}", e))?;
+        Self::write_atomic(&self.rules_path(), &content)
+    }
+
+    /// 读运行期规则集原始文本（用于判断是否有变化）
+    pub fn read_rules_raw(&self) -> Option<String> {
+        fs::read_to_string(self.rules_path()).ok()
+    }
+
+    /// 解析运行期规则集
+    pub fn read_rules(&self) -> Option<(Vec<VpnRule>, String)> {
+        let content = self.read_rules_raw()?;
+        let value: serde_json::Value = serde_json::from_str(&content).ok()?;
+        let rules: Vec<VpnRule> = serde_json::from_value(value.get("rules")?.clone()).ok()?;
+        let default_policy = value
+            .get("default_policy")
+            .and_then(|v| v.as_str())
+            .unwrap_or("DIRECT")
+            .to_string();
+        Some((rules, default_policy))
+    }
+
+    /// 刷新父进程心跳
+    pub fn touch_alive(&self) -> Result<(), String> {
+        self.ensure()?;
+        fs::write(self.alive_path(), b"")
+            .map_err(|e| format!("刷新心跳失败: {}", e))
+    }
+
+    /// 心跳文件的年龄；文件不存在时返回 None
+    pub fn alive_age(&self) -> Option<std::time::Duration> {
+        let meta = fs::metadata(self.alive_path()).ok()?;
+        let modified = meta.modified().ok()?;
+        modified.elapsed().ok()
+    }
+
+    /// 删掉运行期控制文件（断开 / 退出时调用）
+    pub fn remove_control_files(&self) {
+        for path in [self.mode_path(), self.rules_path(), self.alive_path()] {
+            let _ = fs::remove_file(path);
+        }
     }
 
     pub fn append_log(&self, line: &str) {
@@ -529,5 +617,51 @@ mod tests {
         assert!(session.read_learn().is_none());
         assert!(!session.is_learn_clear_requested());
         let _ = fs::remove_dir_all(&session.dir);
+    }
+
+    #[test]
+    fn mode_file_roundtrip_and_prepare_clears_it() {
+        let session = temp_session("mode-file");
+        session.prepare().unwrap();
+        session.write_mode("global").unwrap();
+        assert_eq!(session.read_mode().as_deref(), Some("global"));
+        session.prepare().unwrap();
+        assert!(session.read_mode().is_none());
+    }
+
+    #[test]
+    fn rules_file_roundtrip_and_prepare_clears_it() {
+        let session = temp_session("rules-file");
+        session.prepare().unwrap();
+        let rules = vec![VpnRule {
+            id: "r1".to_string(),
+            kind: "DOMAIN".to_string(),
+            value: "example.com".to_string(),
+            policy: "VPN".to_string(),
+            no_resolve: false,
+            remark: String::new(),
+            enabled: true,
+        }];
+        session.write_rules(&rules, "VPN").unwrap();
+        let raw = session.read_rules_raw().expect("应当读到规则原文");
+        assert!(raw.contains("example.com"));
+        let (parsed, policy) = session.read_rules().expect("应当能解析规则");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(policy, "VPN");
+        assert_eq!(session.read_rules_raw().unwrap(), raw);
+        session.prepare().unwrap();
+        assert!(session.read_rules_raw().is_none());
+    }
+
+    #[test]
+    fn alive_file_touched_and_cleared_by_prepare() {
+        let session = temp_session("alive-file");
+        session.prepare().unwrap();
+        assert!(session.alive_age().is_none());
+        session.touch_alive().unwrap();
+        let age = session.alive_age().expect("心跳文件应当存在");
+        assert!(age.as_secs() < 5);
+        session.remove_control_files();
+        assert!(session.alive_age().is_none());
     }
 }
