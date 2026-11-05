@@ -484,28 +484,44 @@ impl<D: TunDevice> Netstack<D> {
                 Some(k) => *k,
                 None => continue,
             };
-            // 应用 -> 出站
+            // 应用 -> 出站。只在出站缓冲有空间时才从应用侧读：
+            // 读出来的字节必须全部被接收（可能先进缓冲），否则就是丢字节。
             let mut buf = vec![0u8; 16 * 1024];
             loop {
-                let s = self.sockets.get_mut::<tcp::Socket>(h);
-                if !s.can_recv() {
+                if !router.can_accept_from_app(&key) {
                     break;
                 }
-                match s.recv_slice(&mut buf) {
-                    Ok(n) if n > 0 => {
-                        let _ = router.egress_write(&key, &buf[..n]);
+                let taken = {
+                    let s = self.sockets.get_mut::<tcp::Socket>(h);
+                    if !s.can_recv() {
+                        break;
                     }
-                    _ => break,
+                    match s.recv_slice(&mut buf) {
+                        Ok(n) if n > 0 => n,
+                        _ => break,
+                    }
+                };
+                if !router.push_from_app(&key, &buf[..taken]) {
+                    break;
                 }
             }
-            // 出站 -> 应用
-            let mut out = vec![0u8; 16 * 1024];
-            if let Ok(n) = router.egress_read(&key, &mut out) {
-                if n > 0 {
+            // 出站 -> 应用。应用侧窗口不够时把剩下的退回缓冲，下一轮再发。
+            loop {
+                let can_send = self.sockets.get::<tcp::Socket>(h).can_send();
+                if !can_send {
+                    break;
+                }
+                let chunk = router.read_from_egress(&key, 16 * 1024);
+                if chunk.is_empty() {
+                    break;
+                }
+                let sent = {
                     let s = self.sockets.get_mut::<tcp::Socket>(h);
-                    if s.can_send() {
-                        let _ = s.send_slice(&out[..n]);
-                    }
+                    s.send_slice(&chunk).unwrap_or(0)
+                };
+                if sent < chunk.len() {
+                    router.restore_to_app(&key, &chunk[sent..]);
+                    break;
                 }
             }
             // 应用侧已关闭则回收出站资源与 socket 本体

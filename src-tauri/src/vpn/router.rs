@@ -10,7 +10,7 @@
 //! `Network is unreachable`（实测整机所有直连都失败）。改成按需装 /32，
 //! 不依赖各平台选路实现，行为也更接近其它分流工具。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddrV4, TcpStream, UdpSocket};
 use std::time::{Duration, Instant};
@@ -49,6 +49,13 @@ struct FlowEgress {
     stream: Option<TcpStream>,
     /// VPN 出口为这条流加的 /32 路由（断开时需要回收）
     installed_route: Option<Ipv4Addr>,
+    /// 这条 /32 是不是我们自己加的（已存在的路由不能删）
+    route_created: bool,
+    /// 应用 -> 出站 的待写数据。出站 socket 非阻塞，可能只写进一部分，
+    /// 剩下的必须留在缓冲里下轮再写，丢字节会把 TLS 字节流写坏。
+    pending_in: VecDeque<u8>,
+    /// 出站 -> 应用 的待写数据（应用侧窗口满时先存着）
+    pending_out: VecDeque<u8>,
     /// 建立时的真实目标与判定输入；规则变更后用它重判
     target: SocketAddrV4,
     egress: Egress,
@@ -63,6 +70,9 @@ struct UdpEgress {
     target: SocketAddrV4,
     /// VPN 出口为这条流加的 /32 路由（断开时需要回收）
     installed_route: Option<Ipv4Addr>,
+    /// 这条 /32 是不是我们自己加的。已经存在的路由（例如 VPN 服务器防环路由）
+    /// 绝不能删，否则会把隧道自己弄断。
+    route_created: bool,
     /// 建立时的判定结果与输入；规则变更后用它重判
     egress: Egress,
     domain: Option<String>,
@@ -80,12 +90,15 @@ pub struct Router {
     direct_bind: Option<Ipv4Addr>,
     /// VPN 出站 socket 绑定的源地址（隧道 IP）
     vpn_bind: Option<Ipv4Addr>,
+    /// VPN 服务器自身地址：它们的路由由 vpnc 脚本管，引擎不能碰
+    server_ips: Vec<Ipv4Addr>,
     physical_if: u32,
     vpn_if: u32,
     flows: HashMap<FlowKey, FlowEgress>,
     udp_flows: HashMap<FlowKey, UdpEgress>,
     /// 流路由的引用计数：同一真实 IP 的多条流共用一条 /32
     installed_routes: HashMap<(Ipv4Addr, bool), usize>,
+
 }
 
 impl Router {
@@ -97,6 +110,7 @@ impl Router {
         vpn_if: u32,
         direct_bind: Option<Ipv4Addr>,
         vpn_bind: Option<Ipv4Addr>,
+        server_ips: Vec<Ipv4Addr>,
     ) -> Self {
         Router {
             route,
@@ -109,6 +123,7 @@ impl Router {
             vpn_if,
             direct_bind,
             vpn_bind,
+            server_ips,
             flows: HashMap::new(),
             udp_flows: HashMap::new(),
             installed_routes: HashMap::new(),
@@ -159,35 +174,55 @@ impl Router {
 
     /// 为一条流保留（必要时新建）到真实 IP 的 /32 路由。
     ///
-    /// 直连走物理网关，VPN 走隧道网卡；落在本机网段或没有网关时退回接口路由。
-    fn retain_flow_route(&mut self, ip: Ipv4Addr, egress: Egress) -> std::io::Result<()> {
+    /// 返回「这条路由是不是我们新建的」和「socket 该绑哪个源地址」。
+    /// 路由已经存在时（例如 VPN 服务器的防环主机路由、上一条流刚装好的 /32）
+    /// 不但不能再删，也不能硬绑本出口的源地址 —— 那个地址不属于那条现成路由的网卡，
+    /// 否则 connect 会报 `No route to host`。
+    fn retain_flow_route(
+        &mut self,
+        ip: Ipv4Addr,
+        egress: Egress,
+    ) -> std::io::Result<(bool, Option<Ipv4Addr>)> {
+        // VPN 服务器自身地址：路由由 vpnc 脚本管，引擎不碰
+        if self.server_ips.contains(&ip) {
+            return Ok((false, None));
+        }
         let vpn = egress == Egress::Vpn;
         // 先把要用的字段取出来：entry() 会可变借用 installed_routes，
         // 那之后再调用 &self 的方法就冲突了。
         let local = self.is_local(ip);
         let gateway = self.gateway.clone();
         let count = self.installed_routes.entry((ip, vpn)).or_insert(0);
-        if *count == 0 {
-            let result = if vpn {
-                self.route.add_flow_route(ip, self.vpn_if)
-            } else if local || gateway.is_empty() {
-                self.route.add_flow_route(ip, self.physical_if)
-            } else {
-                self.route.add_server_host_route(ip, &gateway)
-            };
-            if let Err(message) = result {
-                // 路由已存在不算失败（例如 VPN 服务器自己的防环主机路由）
-                if !message.contains("File exists") && !message.contains("already in table") {
-                    return Err(std::io::Error::other(format!("装出口路由失败：{}", message)));
-                }
-            }
+        if *count > 0 {
+            // 同 IP 已有流，路由就是现成那条
+            *count += 1;
+            return Ok((false, None));
         }
-        *count += 1;
-        Ok(())
+        let result = if vpn {
+            self.route.add_flow_route(ip, self.vpn_if)
+        } else if local || gateway.is_empty() {
+            self.route.add_flow_route(ip, self.physical_if)
+        } else {
+            self.route.add_server_host_route(ip, &gateway)
+        };
+        match result {
+            Ok(()) => {
+                *count = 1;
+                Ok((true, self.bind_for(egress)))
+            }
+            Err(message)
+                if message.contains("File exists") || message.contains("already in table") =>
+            {
+                // 现成路由：不动它，源地址交给内核按那条路由选
+                *count = 1;
+                Ok((false, None))
+            }
+            Err(message) => Err(std::io::Error::other(format!("装出口路由失败：{}", message))),
+        }
     }
 
-    /// 释放一次引用；最后一条流关闭时才真正删路由。
-    fn release_flow_route(&mut self, ip: Ipv4Addr, egress: Egress) {
+    /// 释放一次引用；只有我们新建的路由、且最后一条流关闭时才真正删。
+    fn release_flow_route(&mut self, ip: Ipv4Addr, egress: Egress, created: bool) {
         let key = (ip, egress == Egress::Vpn);
         if let Some(count) = self.installed_routes.get_mut(&key) {
             if *count > 1 {
@@ -195,9 +230,23 @@ impl Router {
                 return;
             }
         }
-        if self.installed_routes.remove(&key).is_some() {
+        if self.installed_routes.remove(&key).is_some() && created {
             let _ = self.route.del_flow_route(ip);
         }
+    }
+
+    /// 这条流连不上时，把「预期走哪、内核实际选了哪」拼进错误信息。
+    fn failure_context(&self, ip: Ipv4Addr, egress: Egress) -> String {
+        let (name, expected_if) = match egress {
+            Egress::Direct => ("直连", self.physical_if),
+            Egress::Vpn => ("VPN", self.vpn_if),
+        };
+        let bind = self
+            .bind_for(egress)
+            .map(|ip| ip.to_string())
+            .unwrap_or_else(|| "自动".to_string());
+        let route = self.describe_route(ip).unwrap_or_else(|| "读不到选路".to_string());
+        format!("预期{} if#{} 源 {}；内核选路 {}", name, expected_if, bind, route)
     }
 
     /// 为一条终结后的应用连接建立出站 TCP。
@@ -221,19 +270,31 @@ impl Router {
         // 先把流路由装好再 connect：出口完全由路由决定，
         // 顺序反过来时 connect 会按捕获网卡的半默认路由走回自己。
         let remote_ip = *target.ip();
-        self.retain_flow_route(remote_ip, egress)?;
+        let (route_created, bind) = self.retain_flow_route(remote_ip, egress)?;
         let installed_route = Some(remote_ip);
 
-        let stream = match connect_plain(target, self.bind_for(egress)) {
+        let stream = match connect_plain(target, bind) {
             Ok(s) => s,
             Err(e) => {
-                self.release_flow_route(remote_ip, egress);
-                return Err(e);
+                // 先读选路再释放路由，否则诊断到的是释放后的状态
+                let context = self.failure_context(remote_ip, egress);
+                self.release_flow_route(remote_ip, egress, route_created);
+                return Err(std::io::Error::new(e.kind(), format!("{}（{}）", e, context)));
             }
         };
         self.flows.insert(
             key.to_owned(),
-            FlowEgress { stream: Some(stream), installed_route, target, egress, domain, process },
+            FlowEgress {
+                stream: Some(stream),
+                installed_route,
+                route_created,
+                pending_in: VecDeque::new(),
+                pending_out: VecDeque::new(),
+                target,
+                egress,
+                domain,
+                process,
+            },
         );
         Ok(())
     }
@@ -243,33 +304,76 @@ impl Router {
         self.flows.contains_key(key)
     }
 
-    /// 把应用侧数据写进出站流（非阻塞语义：写不进去就返回已写字节数）。
-    pub fn egress_write(&mut self, key: &FlowKey, data: &[u8]) -> std::io::Result<usize> {
-        if let Some(f) = self.flows.get_mut(key) {
-            if let Some(s) = f.stream.as_mut() {
-                return s.write(data);
-            }
-        }
-        Ok(0)
+    /// 应用 -> 出站 的缓冲上限。到顶就先不再从应用侧读，靠 TCP 窗口反压。
+    const PENDING_IN_CAP: usize = 1 << 20;
+
+    /// 出站缓冲还有空间吗（没空间就先别读应用侧 socket，免得丢字节）
+    pub fn can_accept_from_app(&self, key: &FlowKey) -> bool {
+        self.flows
+            .get(key)
+            .map(|flow| flow.pending_in.len() < Self::PENDING_IN_CAP)
+            .unwrap_or(false)
     }
 
-    /// 从出站流读数据交给应用侧（超时按「暂无数据」处理，返回 0）。
-    pub fn egress_read(&mut self, key: &FlowKey, buf: &mut [u8]) -> std::io::Result<usize> {
-        if let Some(f) = self.flows.get_mut(key) {
-            if let Some(s) = f.stream.as_mut() {
-                match s.read(buf) {
-                    Ok(n) => return Ok(n),
+    /// 收下应用侧数据：先缓存再尽量写进出站流。返回是否全部收下。
+    pub fn push_from_app(&mut self, key: &FlowKey, data: &[u8]) -> bool {
+        let Some(flow) = self.flows.get_mut(key) else {
+            return false;
+        };
+        if flow.pending_in.len() + data.len() > Self::PENDING_IN_CAP {
+            return false;
+        }
+        flow.pending_in.extend(data);
+        flush_pending_in(flow);
+        true
+    }
+
+    /// 把所有流里积压的应用侧数据尽量写进出站流。
+    pub fn flush_flows(&mut self) {
+        for flow in self.flows.values_mut() {
+            flush_pending_in(flow);
+        }
+    }
+
+    /// 取出发给应用侧的数据：先给积压的，再从出站流读。
+    pub fn read_from_egress(&mut self, key: &FlowKey, max: usize) -> Vec<u8> {
+        let Some(flow) = self.flows.get_mut(key) else {
+            return Vec::new();
+        };
+        let mut out: Vec<u8> = Vec::with_capacity(max);
+        while out.len() < max {
+            match flow.pending_out.pop_front() {
+                Some(byte) => out.push(byte),
+                None => break,
+            }
+        }
+        if out.len() < max {
+            let mut buf = vec![0u8; max - out.len()];
+            if let Some(stream) = flow.stream.as_mut() {
+                match stream.read(&mut buf) {
+                    Ok(n) if n > 0 => out.extend_from_slice(&buf[..n]),
+                    Ok(_) => {}
                     Err(e)
                         if e.kind() == std::io::ErrorKind::WouldBlock
-                            || e.kind() == std::io::ErrorKind::TimedOut =>
-                    {
-                        return Ok(0)
+                            || e.kind() == std::io::ErrorKind::TimedOut => {}
+                    Err(_) => {
+                        // 出站已断：应用侧 socket 会在下一轮被回收
+                        flow.stream = None;
                     }
-                    Err(e) => return Err(e),
                 }
             }
         }
-        Ok(0)
+        out
+    }
+
+    /// 应用侧窗口不够时，把没发出去的数据退回来，下轮再发。
+    pub fn restore_to_app(&mut self, key: &FlowKey, data: &[u8]) {
+        if let Some(flow) = self.flows.get_mut(key) {
+            // 倒序 push_front，退回来的字节仍然是原来的顺序
+            for byte in data.iter().rev() {
+                flow.pending_out.push_front(*byte);
+            }
+        }
     }
 
     /// 为一条 UDP 流建立出站 socket：钉网卡，必要时装流路由。
@@ -289,17 +393,25 @@ impl Router {
             return Ok(());
         }
         let remote_ip = *target.ip();
-        self.retain_flow_route(remote_ip, egress)?;
-        let socket = match udp_socket_plain(self.bind_for(egress)) {
+        let (route_created, bind) = self.retain_flow_route(remote_ip, egress)?;
+        let socket = match udp_socket_plain(bind) {
             Ok(socket) => socket,
             Err(e) => {
-                self.release_flow_route(remote_ip, egress);
+                self.release_flow_route(remote_ip, egress, route_created);
                 return Err(e);
             }
         };
         self.udp_flows.insert(
             key.to_owned(),
-            UdpEgress { socket, target, installed_route: Some(remote_ip), egress, domain, process },
+            UdpEgress {
+                socket,
+                target,
+                installed_route: Some(remote_ip),
+                route_created,
+                egress,
+                domain,
+                process,
+            },
         );
         Ok(())
     }
@@ -371,47 +483,16 @@ impl Router {
         self.udp_flows.keys().copied().collect()
     }
 
-    /// 把出站侧可读到的数据搬进应用侧（非阻塞语义，超时返回 0）。
-    pub fn pump_out_to_app(
-        &mut self,
-        key: &FlowKey,
-        app_tx: &mut dyn std::io::Write,
-    ) -> std::io::Result<usize> {
-        let flow = match self.flows.get_mut(key) {
-            Some(f) => f,
-            None => return Ok(0),
-        };
-        let stream = match flow.stream.as_mut() {
-            Some(s) => s,
-            None => return Ok(0),
-        };
-        let mut buf = [0u8; 16 * 1024];
-        match stream.read(&mut buf) {
-            Ok(0) => Ok(0),
-            Ok(n) => {
-                app_tx.write_all(&buf[..n])?;
-                Ok(n)
-            }
-            Err(e)
-                if e.kind() == std::io::ErrorKind::WouldBlock
-                    || e.kind() == std::io::ErrorKind::TimedOut =>
-            {
-                Ok(0)
-            }
-            Err(e) => Err(e),
-        }
-    }
-
     /// 关闭一条流并回收其 VPN 流路由（TCP 与 UDP 都覆盖）。
     pub fn close_flow(&mut self, key: &FlowKey) {
         if let Some(flow) = self.flows.remove(key) {
             if let Some(ip) = flow.installed_route {
-                self.release_flow_route(ip, flow.egress);
+                self.release_flow_route(ip, flow.egress, flow.route_created);
             }
         }
         if let Some(flow) = self.udp_flows.remove(key) {
             if let Some(ip) = flow.installed_route {
-                self.release_flow_route(ip, flow.egress);
+                self.release_flow_route(ip, flow.egress, flow.route_created);
             }
         }
     }
@@ -442,6 +523,40 @@ impl Router {
                 (key.to_owned(), flow.target, flow.egress, flow.domain.clone(), flow.process.clone())
             })
             .collect()
+    }
+}
+
+/// 把一条流里积压的应用侧数据尽量写进出站流。
+///
+/// 出站 socket 带 200ms 写超时，非阻塞下可能只写进一部分、甚至一个字节都写不进
+/// （`WouldBlock`/`TimedOut`）。没写进去的必须留在缓冲里，丢了会破坏字节流
+/// —— 表现就是 TLS 握手失败、网页提示「不支持安全连接」。
+fn flush_pending_in(flow: &mut FlowEgress) {
+    if flow.stream.is_none() {
+        flow.pending_in.clear();
+        return;
+    }
+    let mut stop = false;
+    while !stop && !flow.pending_in.is_empty() {
+        let chunk = flow.pending_in.make_contiguous();
+        let outcome = flow.stream.as_mut().unwrap().write(chunk);
+        match outcome {
+            Ok(0) => stop = true,
+            Ok(n) => {
+                flow.pending_in.drain(..n);
+            }
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                stop = true
+            }
+            Err(_) => {
+                flow.pending_in.clear();
+                flow.stream = None;
+                stop = true;
+            }
+        }
     }
 }
 
@@ -595,6 +710,8 @@ pub struct Engine {
     /// 引擎跑在独立线程里，自己不开文件，由 worker 每轮取走后落盘。
     pending_logs: Vec<String>,
     dns_answered: u64,
+    /// 引擎看到的应用侧 TCP 建连请求（尝试），含解析失败/建连失败的
+    flows_attempted: u64,
     flows_opened: u64,
     egress_failures: u64,
 }
@@ -608,6 +725,8 @@ pub struct EngineStats {
     pub tx_packets: u64,
     /// 本地伪造应答的 DNS 查询数
     pub dns_answered: u64,
+    /// 引擎看到的应用侧建连请求数（无论成败）
+    pub flows_attempted: u64,
     /// 成功建出站的应用侧 TCP 流数
     pub flows_opened: u64,
     /// 出站建连失败次数（代表出口这一段有问题）
@@ -628,6 +747,7 @@ impl Engine {
         vpn_if: u32,
         direct_bind: Option<Ipv4Addr>,
         vpn_bind: Option<Ipv4Addr>,
+        server_ips: Vec<Ipv4Addr>,
         proc: Box<dyn ProcLookup>,
         default_policy: &str,
     ) -> Result<Self, String> {
@@ -642,6 +762,7 @@ impl Engine {
             vpn_if,
             direct_bind,
             vpn_bind,
+            server_ips,
         );
         Ok(Engine {
             router,
@@ -658,6 +779,7 @@ impl Engine {
             egress_error_counts: HashMap::new(),
             pending_logs: Vec::new(),
             dns_answered: 0,
+            flows_attempted: 0,
             flows_opened: 0,
             egress_failures: 0,
         })
@@ -684,6 +806,7 @@ impl Engine {
             rx_packets: phy.rx,
             tx_packets: phy.tx,
             dns_answered: self.dns_answered,
+            flows_attempted: self.flows_attempted,
             flows_opened: self.flows_opened,
             egress_failures: self.egress_failures,
         }
@@ -830,6 +953,7 @@ impl Engine {
                 .and_then(|pid| self.proc.name_for_pid(pid));
             // 先按域名（必要时再按真实 IP）定出口。fake-ip 刚到达时只有假地址，
             // 先用域名做一次临时判定去解析真实 IP，再拿真实 IP 重判一次。
+            self.flows_attempted += 1;
             let provisional = self.egress_for(domain.as_deref(), &flow.key, process.as_deref());
             let (target, egress, resolve_failed) = match domain.as_deref() {
                 Some(d) => match self.resolve_name(d, provisional) {
@@ -873,13 +997,6 @@ impl Engine {
                     let seen = *seen;
                     if seen <= 2 || seen % 10 == 0 {
                         self.note(format!("{}，建连失败（第 {} 次）：{}", line, seen, err));
-                        // 头两次失败顺手记下内核给这个目的地址选的路由，
-                        // 「连不上」的原因基本就写在 interface/gateway 这两行里。
-                        if seen <= 2 {
-                            if let Some(desc) = self.router.describe_route(*target.ip()) {
-                                self.note(format!("[诊断] 内核选路 {} -> {}", target.ip(), desc));
-                            }
-                        }
                     }
                     self.netstack.abort_tcp(&flow.key);
                 }
@@ -887,6 +1004,7 @@ impl Engine {
         }
         // 2) TCP 双向搬运
         self.netstack.pump_tcp(&mut self.router);
+        self.router.flush_flows();
 
         // 3) UDP：DNS 本地应答，其余按规则转发
         for dg in self.netstack.take_udp_datagrams() {
@@ -1224,12 +1342,23 @@ mod tests {
     /// 记录路由调用顺序的假路由表，用来验证出口怎么选。
     struct FakeRouteTable {
         calls: Arc<Mutex<Vec<String>>>,
+        /// 这些地址的路由「已经存在」，add 会返回 File exists
+        existing: Vec<Ipv4Addr>,
+    }
+
+    impl FakeRouteTable {
+        fn add(&self, ip: Ipv4Addr, line: String) -> Result<(), String> {
+            if self.existing.contains(&ip) {
+                return Err(format!("route add 失败: add net {}: File exists", ip));
+            }
+            self.calls.lock().unwrap().push(line);
+            Ok(())
+        }
     }
 
     impl RouteTable for FakeRouteTable {
         fn add_flow_route(&self, ip: Ipv4Addr, if_index: u32) -> Result<(), String> {
-            self.calls.lock().unwrap().push(format!("add-flow {} if#{}", ip, if_index));
-            Ok(())
+            self.add(ip, format!("add-flow {} if#{}", ip, if_index))
         }
         fn del_flow_route(&self, ip: Ipv4Addr) -> Result<(), String> {
             self.calls.lock().unwrap().push(format!("del-flow {}", ip));
@@ -1242,8 +1371,7 @@ mod tests {
             Ok(())
         }
         fn add_server_host_route(&self, ip: Ipv4Addr, gateway: &str) -> Result<(), String> {
-            self.calls.lock().unwrap().push(format!("add-host {} via {}", ip, gateway));
-            Ok(())
+            self.add(ip, format!("add-host {} via {}", ip, gateway))
         }
         fn del_server_host_route(&self, ip: Ipv4Addr) -> Result<(), String> {
             self.calls.lock().unwrap().push(format!("del-host {}", ip));
@@ -1252,15 +1380,23 @@ mod tests {
     }
 
     fn fake_router() -> (Router, Arc<Mutex<Vec<String>>>) {
+        fake_router_with(vec![], vec![])
+    }
+
+    fn fake_router_with(
+        existing: Vec<Ipv4Addr>,
+        server_ips: Vec<Ipv4Addr>,
+    ) -> (Router, Arc<Mutex<Vec<String>>>) {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let router = Router::new(
-            Box::new(FakeRouteTable { calls: calls.clone() }),
+            Box::new(FakeRouteTable { calls: calls.clone(), existing }),
             "192.168.1.1".to_string(),
             vec!["192.168.1.0/24".to_string()],
             14,
             9,
             Some("192.168.1.23".parse().unwrap()),
             Some("192.168.137.39".parse().unwrap()),
+            server_ips,
         );
         (router, calls)
     }
@@ -1304,11 +1440,50 @@ mod tests {
         router.retain_flow_route(ip, Egress::Direct).unwrap();
         assert_eq!(calls.lock().unwrap().len(), 1, "同一 IP 的多条流共用一条 /32");
 
-        router.release_flow_route(ip, Egress::Direct);
+        router.release_flow_route(ip, Egress::Direct, true);
         assert_eq!(calls.lock().unwrap().len(), 1, "还有一条流没关，路由不能删");
 
-        router.release_flow_route(ip, Egress::Direct);
+        router.release_flow_route(ip, Egress::Direct, true);
         // 两种出口删的都只是那条 /32 主机路由，所以统一走 del_flow_route
         assert_eq!(calls.lock().unwrap().as_slice()[1], "del-flow 101.36.166.16");
+    }
+
+    #[test]
+    fn bind_source_follows_egress() {
+        let (mut router, _calls) = fake_router();
+        let (_, direct_bind) =
+            router.retain_flow_route("101.36.166.16".parse().unwrap(), Egress::Direct).unwrap();
+        assert_eq!(direct_bind, Some("192.168.1.23".parse().unwrap()));
+
+        let (_, vpn_bind) =
+            router.retain_flow_route("192.168.18.41".parse().unwrap(), Egress::Vpn).unwrap();
+        assert_eq!(vpn_bind, Some("192.168.137.39".parse().unwrap()));
+    }
+
+    #[test]
+    fn existing_route_is_neither_replaced_nor_deleted() {
+        let ip: Ipv4Addr = "39.170.52.238".parse().unwrap();
+        let (mut router, calls) = fake_router_with(vec![ip], vec![]);
+        let (created, bind) = router.retain_flow_route(ip, Egress::Vpn).unwrap();
+        assert!(!created, "路由已经存在时不算我们新建的");
+        assert_eq!(bind, None, "现成路由的源地址交给内核选，硬绑隧道地址会 No route to host");
+        assert!(calls.lock().unwrap().is_empty(), "现成路由不该被重装");
+
+        router.release_flow_route(ip, Egress::Vpn, created);
+        assert!(calls.lock().unwrap().is_empty(), "不是我们加的路由，流关了也不能删");
+    }
+
+    #[test]
+    fn vpn_server_ips_are_left_to_the_vpnc_script() {
+        let ip: Ipv4Addr = "39.170.52.238".parse().unwrap();
+        let (mut router, calls) = fake_router_with(vec![], vec![ip]);
+        let (created, bind) = router.retain_flow_route(ip, Egress::Direct).unwrap();
+        assert!(!created);
+        assert_eq!(bind, None);
+        router.release_flow_route(ip, Egress::Direct, created);
+        assert!(
+            calls.lock().unwrap().is_empty(),
+            "VPN 服务器地址的防环路由归 vpnc 脚本，引擎一删隧道就断"
+        );
     }
 }
