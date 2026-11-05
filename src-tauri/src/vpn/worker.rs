@@ -17,8 +17,10 @@ use std::time::{Duration, Instant};
 use crate::vpn::connector;
 use crate::vpn::learn;
 use crate::vpn::models::{
-    LearnReport, LearnSummary, NetworkSnapshot, VpnPhase, VpnRequest, VpnStatus,
+    LearnReport, LearnSummary, NetworkSnapshot, VpnPhase, VpnRequest, VpnRule, VpnStatus,
 };
+use crate::vpn::router::ProxyMode;
+use crate::vpn::rule_engine::CompiledRuleSet;
 use crate::vpn::route::{self, RouteOutcome, RouteTarget};
 use crate::vpn::script;
 use crate::vpn::session::VpnSession;
@@ -68,6 +70,18 @@ struct Worker {
     capture_index: u32,
     /// fake-ip 假地址池（由引擎消费）
     fake_pool: Option<crate::vpn::fakedns::FakeIpPool>,
+    /// 当前生效的代理模式（可由主进程通过 mode 文件改）
+    applied_mode: ProxyMode,
+    /// 当前生效的规则与兜底走向（可由主进程通过 rules.json 改）
+    current_rules: Vec<VpnRule>,
+    current_default_policy: String,
+    /// 上次读到的规则原文，内容没变就不重新编译
+    last_rules_raw: Option<String>,
+    last_mode_check: Instant,
+    last_rules_check: Instant,
+    last_alive_check: Instant,
+    /// 引擎装配时刻；父进程心跳宽限期从这里算
+    engine_ready_at: Option<Instant>,
 }
 
 impl Worker {
@@ -89,6 +103,10 @@ impl Worker {
             enabled: request.learn,
             ..Default::default()
         };
+        let applied_mode = ProxyMode::parse(&request.proxy_mode).unwrap_or(ProxyMode::Rule);
+        let current_rules: Vec<VpnRule> =
+            request.rules.iter().filter(|r| r.enabled).cloned().collect();
+        let current_default_policy = request.default_policy.clone();
         Worker {
             session,
             request,
@@ -106,6 +124,14 @@ impl Worker {
             engine: None,
             capture_index: 0,
             fake_pool: None,
+            applied_mode,
+            current_rules,
+            current_default_policy,
+            last_rules_raw: None,
+            last_mode_check: Instant::now(),
+            last_rules_check: Instant::now(),
+            last_alive_check: Instant::now(),
+            engine_ready_at: None,
         }
     }
 
@@ -313,26 +339,117 @@ impl Worker {
         }
     }
 
-    fn compiled_rules(&mut self) -> Result<crate::vpn::rule_engine::CompiledRuleSet, String> {
+    /// 把规则编译成规则集；连接与运行期热更新共用同一套校验
+    fn compile_rules(rules: &[VpnRule], default_policy: &str) -> Result<CompiledRuleSet, String> {
         use crate::vpn::rule_engine::{compile, Policy, Rule, RuleKind};
-        let enabled: Vec<(String, String, String, bool)> = self
-            .request
-            .rules
+        let enabled: Vec<(String, String, String, bool)> = rules
             .iter()
             .filter(|r| r.enabled)
             .map(|r| (r.kind.clone(), r.value.clone(), r.policy.clone(), r.no_resolve))
             .collect();
-        let mut rules = Vec::new();
+        let mut compiled = Vec::new();
         for (kind_s, value, policy_s, no_resolve) in enabled {
             let kind = RuleKind::parse(&kind_s)
                 .map_err(|e| format!("规则类型非法 {}: {}", kind_s, e))?;
             let policy = Policy::parse(&policy_s)
                 .map_err(|e| format!("规则出口非法 {}: {}", policy_s, e))?;
-            rules.push(Rule::new(kind, &value, policy).with_no_resolve(no_resolve));
+            compiled.push(Rule::new(kind, &value, policy).with_no_resolve(no_resolve));
         }
-        let default = Policy::parse(&self.request.default_policy)
-            .map_err(|e| format!("兜底策略非法 {}: {}", self.request.default_policy, e))?;
-        compile(&rules, &std::collections::HashMap::new(), default)
+        let default = Policy::parse(default_policy)
+            .map_err(|e| format!("兜底策略非法 {}: {}", default_policy, e))?;
+        compile(&compiled, &std::collections::HashMap::new(), default)
+    }
+
+    fn compiled_rules(&mut self) -> Result<CompiledRuleSet, String> {
+        Self::compile_rules(&self.request.rules, &self.request.default_policy)
+    }
+
+    /// 轮询 mode 文件：变化时只改判定开关，已建立的连接不受影响
+    fn poll_mode_change(&mut self) {
+        if self.last_mode_check.elapsed() < Duration::from_millis(200) {
+            return;
+        }
+        self.last_mode_check = Instant::now();
+        let Some(raw) = self.session.read_mode() else {
+            return;
+        };
+        let Ok(target) = ProxyMode::parse(&raw) else {
+            return;
+        };
+        if target == self.applied_mode {
+            return;
+        }
+        // 切到规则模式时需要一份编译好的规则集；全局/直连时引擎里是 None
+        let needs_rules = target == ProxyMode::Rule
+            && self.engine.as_ref().map(|e| e.rules.is_none()).unwrap_or(false);
+        if needs_rules {
+            match Self::compile_rules(&self.current_rules, &self.current_default_policy) {
+                Ok(set) => {
+                    if let Some(engine) = self.engine.as_mut() {
+                        engine.set_rules(set);
+                    }
+                }
+                Err(e) => {
+                    let keep = self.applied_mode;
+                    self.log(&format!(
+                        "[模式] 规则编译失败，保持 {}：{}",
+                        keep.as_str(),
+                        e
+                    ));
+                    let _ = self.session.write_mode(keep.as_str());
+                    return;
+                }
+            }
+        }
+        if let Some(engine) = self.engine.as_mut() {
+            engine.set_mode(target);
+        }
+        self.applied_mode = target;
+        self.log(&format!("[模式] 已切换为 {}", target.as_str()));
+    }
+
+    /// 轮询 rules.json：内容变了才重新编译；规则模式下只重置受影响的连接
+    fn poll_rules_change(&mut self) {
+        if self.last_rules_check.elapsed() < Duration::from_millis(200) {
+            return;
+        }
+        self.last_rules_check = Instant::now();
+        let Some(raw) = self.session.read_rules_raw() else {
+            return;
+        };
+        if self.last_rules_raw.as_deref() == Some(raw.as_str()) {
+            return;
+        }
+        let Some((rules, default_policy)) = self.session.read_rules() else {
+            return;
+        };
+        let enabled: Vec<VpnRule> = rules.into_iter().filter(|r| r.enabled).collect();
+        match Self::compile_rules(&enabled, &default_policy) {
+            Ok(set) => {
+                self.last_rules_raw = Some(raw);
+                self.current_rules = enabled;
+                self.current_default_policy = default_policy;
+                if self.engine.is_some() {
+                    if self.applied_mode == ProxyMode::Rule {
+                        if let Some(engine) = self.engine.as_mut() {
+                            engine.set_rules(set);
+                            engine.reset_changed_flows();
+                        }
+                        self.log(&format!(
+                            "[规则] 已更新 {} 条规则，只重置受影响的连接",
+                            self.current_rules.len()
+                        ));
+                    } else {
+                        self.log(&format!(
+                            "[规则] 已更新 {} 条规则，当前是{}模式，切回规则模式后生效",
+                            self.current_rules.len(),
+                            self.applied_mode.as_str()
+                        ));
+                    }
+                }
+            }
+            Err(e) => self.log(&format!("[规则] 新规则编译失败，继续用旧规则：{}", e)),
+        }
     }
 
     /// 路由守护：VPN 客户端或系统可能在后台把我们的路由改掉，这里定期补回来
@@ -432,9 +549,9 @@ impl Worker {
         }
         self.fake_pool = Some(pool.clone());
 
-        let mode = router::ProxyMode::parse(&self.request.proxy_mode)?;
-        let rules = if mode == router::ProxyMode::Rule {
-            Some(self.compiled_rules()?)
+        let mode = self.applied_mode;
+        let rules = if mode == ProxyMode::Rule {
+            Some(Self::compile_rules(&self.current_rules, &self.current_default_policy)?)
         } else {
             None
         };
@@ -897,6 +1014,9 @@ impl Worker {
             // 清空请求可能在任何时候到达（连接中/已连接/仅连着没建隧道），
             // 所以放在循环顶部判一次，而不是塞进 15 秒那一跳
             self.poll_learn_clear();
+            // 运行期开关：模式与规则都可能在任何时刻被主进程改写
+            self.poll_mode_change();
+            self.poll_rules_change();
 
             // 引擎的收发循环必须每轮推进：塞进 15s 巡检那一跳会把吞吐卡死。
             // 引擎尚未装配（隧道未就绪）时是 None，这一跳自然空转。
@@ -947,6 +1067,9 @@ impl Worker {
                     return self.fail(&e);
                 }
                 self.set_phase(VpnPhase::Connected, "隧道已建立，引擎已接管");
+                self.engine_ready_at = Some(Instant::now());
+                self.last_mode_check = Instant::now();
+                self.last_rules_check = Instant::now();
                 routes_applied = true;
                 // 隧道刚起来就先采一轮，别让用户干等 15 秒
                 if self.request.learn {
@@ -1021,6 +1144,7 @@ impl Worker {
         let _ = child.wait();
         self.drain_output(&rx);
         self.cleanup_routes();
+        self.session.remove_control_files();
         self.session.scrub_request();
         self.set_phase(VpnPhase::Disconnected, "已断开");
         EXIT_OK
