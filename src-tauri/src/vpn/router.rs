@@ -374,6 +374,11 @@ impl Router {
         out
     }
 
+    /// 某条流还有多少字节压在「应用 -> 出站」缓冲里没写出去
+    pub fn pending_in_len(&self, key: &FlowKey) -> usize {
+        self.flows.get(key).map(|flow| flow.pending_in.len()).unwrap_or(0)
+    }
+
     /// 累计搬运字节数（上行, 回程），给 worker 的统计行用
     pub fn byte_stats(&self) -> (u64, u64) {
         (self.bytes_to_egress, self.bytes_to_app)
@@ -382,9 +387,9 @@ impl Router {
     /// 应用侧窗口不够时，把没发出去的数据退回来，下轮再发。
     pub fn restore_to_app(&mut self, key: &FlowKey, data: &[u8]) {
         if let Some(flow) = self.flows.get_mut(key) {
-            // 倒序 push_front，退回来的字节仍然是原来的顺序
-            for byte in data.iter().rev() {
-                flow.pending_out.push_front(*byte);
+            // 接在积压数据后面：积压的是更早读到的，这批是刚读到的
+            for byte in data {
+                flow.pending_out.push_back(*byte);
             }
         }
     }
@@ -1254,6 +1259,7 @@ fn next_dns_id() -> u16 {
 mod tests {
     use super::*;
     use crate::vpn::platform::Transport;
+    use std::io::{Read, Write};
     use std::sync::{Arc, Mutex};
     use crate::vpn::rule_engine::{compile, Policy, Rule, RuleKind};
     use std::collections::HashMap;
@@ -1508,5 +1514,134 @@ mod tests {
             calls.lock().unwrap().is_empty(),
             "VPN 服务器地址的防环路由归 vpnc 脚本，引擎一删隧道就断"
         );
+    }
+
+    fn test_key(port: u16) -> FlowKey {
+        FlowKey {
+            transport: Transport::Tcp,
+            local: SocketAddrV4::new(Ipv4Addr::new(10, 9, 0, 2), 50000),
+            remote: SocketAddrV4::new(Ipv4Addr::LOCALHOST, port),
+        }
+    }
+
+    fn flow_with(stream: Option<TcpStream>) -> FlowEgress {
+        FlowEgress {
+            stream,
+            installed_route: None,
+            route_created: false,
+            pending_in: VecDeque::new(),
+            pending_out: VecDeque::new(),
+            target: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0),
+            egress: Egress::Direct,
+            domain: None,
+            process: None,
+        }
+    }
+
+    /// 上行（应用 -> 出站）以前会丢字节：出站 socket 非阻塞，写不进去的尾巴被丢掉，
+    /// TLS 流就坏了。这里灌 512KB 进去，要求一个字节都不能少。
+    #[test]
+    fn buffered_uplink_never_loses_bytes() {
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let expected = 512 * 1024;
+        let reader = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            conn.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+            let mut buf = vec![0u8; 64 * 1024];
+            let mut seen = 0usize;
+            while seen < expected {
+                match conn.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => seen += n,
+                    // 读超时说明确实没数据了，别把测试挂死
+                    Err(_) => break,
+                }
+            }
+            seen
+        });
+
+        let (mut router, _calls) = fake_router();
+        let stream = TcpStream::connect(addr).unwrap();
+        stream.set_nonblocking(true).unwrap();
+        let key = test_key(addr.port());
+        router.flows.insert(key, flow_with(Some(stream)));
+
+        let chunk = vec![7u8; 16 * 1024];
+        let mut pushed = 0usize;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while pushed < expected && Instant::now() < deadline {
+            if !router.can_accept_from_app(&key) {
+                router.flush_flows();
+                std::thread::sleep(Duration::from_millis(1));
+                continue;
+            }
+            assert!(router.push_from_app(&key, &chunk));
+            pushed += chunk.len();
+            router.flush_flows();
+        }
+        // 把压在缓冲里的字节冲干净再关连接（生产里是每轮 poll 都冲）
+        let flush_deadline = Instant::now() + Duration::from_secs(10);
+        while router.pending_in_len(&key) > 0 && Instant::now() < flush_deadline {
+            router.flush_flows();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(router.pending_in_len(&key), 0, "缓冲应当写空");
+        std::thread::sleep(Duration::from_millis(100));
+        router.close_flow(&key);
+
+        assert_eq!(reader.join().unwrap(), expected, "上行字节一个都不能丢");
+        assert_eq!(router.byte_stats().0, expected as u64);
+    }
+
+    /// 回程（出站 -> 应用）同样不能丢，而且顺序不能乱。
+    #[test]
+    fn buffered_downlink_never_loses_bytes() {
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let payload: Vec<u8> = (0..512 * 1024).map(|i| (i % 251) as u8).collect();
+        let to_send = payload.clone();
+        let writer = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            conn.write_all(&to_send).unwrap();
+            std::thread::sleep(Duration::from_millis(200));
+        });
+
+        let (mut router, _calls) = fake_router();
+        let stream = TcpStream::connect(addr).unwrap();
+        stream.set_nonblocking(true).unwrap();
+        let key = test_key(addr.port());
+        router.flows.insert(key, flow_with(Some(stream)));
+
+        let mut got: Vec<u8> = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while got.len() < payload.len() && Instant::now() < deadline {
+            let chunk = router.read_from_egress(&key, 16 * 1024);
+            if chunk.is_empty() {
+                std::thread::sleep(Duration::from_millis(1));
+                continue;
+            }
+            got.extend_from_slice(&chunk);
+        }
+        writer.join().unwrap();
+
+        assert_eq!(got, payload, "回程字节不能丢，顺序也不能乱");
+        assert_eq!(router.byte_stats().1, payload.len() as u64);
+    }
+
+    /// 应用侧窗口满时会把字节退回缓冲，退回的顺序必须是原来的顺序。
+    #[test]
+    fn restored_downlink_keeps_byte_order() {
+        let (mut router, _calls) = fake_router();
+        let key = test_key(9000);
+        router.flows.insert(key, flow_with(None));
+
+        router.restore_to_app(&key, &[1, 2, 3]);
+        router.restore_to_app(&key, &[4, 5]);
+        assert_eq!(router.read_from_egress(&key, 10), vec![1u8, 2, 3, 4, 5]);
     }
 }

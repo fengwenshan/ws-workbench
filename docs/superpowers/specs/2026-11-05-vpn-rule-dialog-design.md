@@ -233,3 +233,33 @@ let _ = router.egress_write(&key, &buf[..n]);   // 忽略返回值
 - 统计行多了「连接尝试」：`收 / 发 / DNS 应答 / 连接尝试 / 新连接 / 出站异常`。
   内网域名如果连尝试都没有，说明 SYN 没进引擎；有尝试没新连接，说明解析或出口有问题。
 
+## 根因五：引擎循环被读写超时卡住
+
+出站 socket 之前带 200ms 读写超时。引擎是单线程轮询，`read` 没数据时**阻塞 200ms**，
+N 条流就是 N×200ms：6 条流一轮就要 1.2 秒，TLS 握手要几个来回，网页自然一直 pending。
+
+修法：建连完成后统一 `set_nonblocking(true)`，读写拿 `WouldBlock` 当"这轮没有"，
+攒下来的数据进缓冲、下一轮继续。`dns_exchange` 也改成非阻塞 + 2ms 让出 CPU 的轮询。
+
+## 回归测试：双向 512KB 不能丢、不能乱序
+
+`router` 里用真实 loopback socket 对打：
+
+- `buffered_uplink_never_loses_bytes`：灌 512KB 进上行，期望对端一个字节不少收到
+- `buffered_downlink_never_loses_bytes`：对端写 512KB，期望按原顺序收全
+- `restored_downlink_keeps_byte_order`：应用窗口满时退回缓冲的字节顺序不变
+
+写这些测试时还抓到一个真实 bug：窗口满退回的字节用 `push_front` 是错的（会插到积压数据
+前面并整体倒序），必须 `push_back`。
+
+## 统计行
+
+```
+[引擎] 收 N 包 / 发 M 包 / DNS 应答 K / 连接尝试 A / 新连接 S / 出站异常 F / 上行 X KB / 回程 Y KB
+```
+
+判读：
+- `上行 > 0，回程 = 0`：出站连上但对方不回（多半是 IP 被墙/服务端没响应），跟代理无关
+- `回程 > 0` 但页面还是 pending：问题在应用侧投递，继续查
+- `连接尝试` 不涨：SYN 根本没进引擎
+
