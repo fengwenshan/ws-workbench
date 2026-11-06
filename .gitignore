@@ -53,3 +53,5 @@ src/components.d.ts
 
 # Swift 编译缓存（design/icons/tools 本地生成，体积很大）
 **/.modulecache/
+# local scratch dirs (build/verify temp, not part of the app)
+.tmp/

@@ -213,7 +213,7 @@ async function submit() {
   padding-bottom: 2px;
 }
 .field-title {
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 500;
   line-height: 1.4;
   color: var(--text-primary);

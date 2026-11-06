@@ -325,10 +325,10 @@ async function run(action: () => Promise<unknown>, failureLabel: string) {
 }
 .rule-tip code {
   padding: 1px 4px;
-  border-radius: 3px;
+  border-radius: 4px;
   background: var(--bg-tag);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-tag);
 }
 .card {
@@ -351,7 +351,7 @@ async function run(action: () => Promise<unknown>, failureLabel: string) {
   display: flex;
   gap: 8px;
   font-size: 12px;
-  padding: 3px 0;
+  padding: 4px 0;
 }
 .info-label {
   color: var(--text-muted);
@@ -363,8 +363,8 @@ async function run(action: () => Promise<unknown>, failureLabel: string) {
   word-break: break-all;
 }
 .tag {
-  font-size: 11px;
-  border-radius: 9px;
+  font-size: 12px;
+  border-radius: 10px;
   padding: 1px 8px;
   white-space: nowrap;
 }
@@ -408,7 +408,7 @@ async function run(action: () => Promise<unknown>, failureLabel: string) {
   flex-shrink: 0;
 }
 .net-sub {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-muted);
 }
 .net-list {
@@ -421,7 +421,7 @@ async function run(action: () => Promise<unknown>, failureLabel: string) {
   align-items: center;
   flex-wrap: wrap;
   gap: 6px 12px;
-  padding: 5px 8px;
+  padding: 6px 8px;
   border-radius: 6px;
   background: var(--bg-secondary);
   font-size: 12px;
@@ -463,7 +463,7 @@ async function run(action: () => Promise<unknown>, failureLabel: string) {
   word-break: break-all;
 }
 .upload-dir-source {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-muted);
 }
 .upload-dir-actions {

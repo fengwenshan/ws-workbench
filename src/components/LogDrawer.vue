@@ -252,7 +252,7 @@ onUnmounted(() => {
 .log-time {
   flex-shrink: 0;
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 12px;
   font-variant-numeric: tabular-nums;
 }
 .log-level {

@@ -158,7 +158,7 @@ function onKeydown(event: KeyboardEvent) {
 }
 .quickopen-name {
   min-width: 0;
-  font-size: 13px;
+  font-size: 14px;
   color: var(--text-primary);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -176,7 +176,7 @@ function onKeydown(event: KeyboardEvent) {
 }
 .quickopen-empty {
   padding: 18px 16px;
-  font-size: 13px;
+  font-size: 14px;
   color: var(--text-muted);
 }
 </style>

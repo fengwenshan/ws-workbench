@@ -535,7 +535,7 @@ onUnmounted(() => {
   justify-content: center;
   gap: 8px;
   margin-top: 6px;
-  font-size: 13px;
+  font-size: 14px;
   color: var(--text-secondary);
 }
 .attachment-empty-hint {
