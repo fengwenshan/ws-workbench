@@ -629,7 +629,7 @@ vpn::worker::tests::tunnel_ready_requires_ip_and_interface ... ok
 vpn::worker::tests::ingest_script_log_reads_utf16_and_recovers_after_rotation ... ok
 vpn::elevate::tests::waiting_for_worker_requires_the_worker_start_line ... ok
 vpn::elevate::tests::task_xml_decoder_handles_utf16le_with_bom ... ok
-cargo test --lib vpn::  → 156 passed, 0 failed（管理员权限）
+cargo test --lib vpn::  → 158 passed, 0 failed（管理员权限）
 ```
 
 此前非管理员 shell 下 `interfaces_and_routes_carry_driver_description_on_this_machine` 与
@@ -842,7 +842,7 @@ non-empty write:   nonempty_changed=true
 已改成每次写入当前毫秒时间戳，保证 mtime 一定刷新；并加了回归测试
 `vpn::session::tests::touch_alive_refreshes_mtime_even_on_windows`，把 mtime 拨回一分钟前再 `touch_alive`，必须重新变新。
 
-`cargo test --lib vpn::` → **156 passed, 0 failed**。
+`cargo test --lib vpn::` → **158 passed, 0 failed**。
 
 ### 14.10 托盘退出再加 12 秒看门狗
 
@@ -881,7 +881,7 @@ non-empty write:   nonempty_changed=true
 
 - 删除生产代码里的 `example.com` 默认规则；
 - 新配置默认规则类型改为 `DOMAIN`，提示用户写完整主机名；
-- `DOMAIN-SUFFIX` 的 placeholder 明确写“只解析该域名本身，子域请用完整域名或全局模式”；
+- `DOMAIN-SUFFIX` 的 placeholder 当时写明“只解析该域名本身，子域请用完整域名或全局模式”；14.14 已改为“连同所有子域”；
 - 中文 Windows 的“不知道这样的主机”现在按“没有 A 记录”提示，不再误报成 DNS 链路故障。
 
 当前配置的规则不会自动删除；要访问 `oa` / `cas`，选一种：
@@ -889,6 +889,9 @@ non-empty write:   nonempty_changed=true
 - 加两条 `DOMAIN`：`oa.example.com`、`cas.example.com`，走 VPN；
 - 或加 `IP-CIDR 192.0.2.0/24` 走 VPN（如果整个内网都在这个网段）；
 - 或直接用**全局模式**。
+
+> 14.14 已把 Windows 首选路径改为「NRPT → 127.0.0.1:53 本机转发器 → 回包前注入」；
+> 14.11 里“只能逐条写完整域名”的描述只适用于转发器不可用时的回退路径。
 
 ### 14.12 12:51 UI：注册按钮“日志成功、状态不变”
 
@@ -916,7 +919,7 @@ non-empty write:   nonempty_changed=true
 - 任务存在但不可用时也显示“移除任务”，用户不会卡在“只能注册、不能删旧任务”的死路；
 - `decode_task_xml()` 增加无 BOM 的 UTF-16LE/BE 识别，避免任务定义读成乱码导致 `task_ready` 永远 false。
 
-`cargo test --lib vpn::` → **156 passed, 0 failed**。
+`cargo test --lib vpn::` → **158 passed, 0 failed**。
 
 ### 14.13 13:23 模式切换：为什么标签会“跳回去再跳回来”
 
@@ -936,6 +939,37 @@ non-empty write:   nonempty_changed=true
 Find-NetRoute -RemoteIPAddress 192.0.2.41
 Find-NetRoute -RemoteIPAddress 8.8.8.8
 ```
+
+### 14.14 13:40 Windows 对齐 macOS：DOMAIN-SUFFIX 覆盖任意子域
+
+目标是让 Windows 上的：
+
+```text
+DOMAIN-SUFFIX example.com
+```
+
+和 macOS 一样，`oa.example.com`、`cas.example.com` 以及以后新增的子域都自动走 VPN，不需要逐个写完整域名。
+
+做法：
+
+```text
+应用 -> 系统解析器 -> NRPT -> 127.0.0.1:53 本机转发器
+     -> VPN DNS -> 解析 A 记录 -> 先装 /32 隧道路由 -> 回包给应用
+```
+
+- 本机转发器由 worker 以管理员身份绑定；Windows 上 53 不要求特权端口，但可能被别的 DNS 服务占用。
+- NRPT 的 `NameServers` 从 VPN DNS 改为 `127.0.0.1`，只对命中域名的查询生效，不改系统 DNS。
+- `forward_loop()` 从 macOS 专用改为 macOS/Windows 共用；Windows 注入路由时传入真实的 `tun_index`。
+- 用一条随机子域探针确认 NRPT 真的把查询送进 loopback；1.5 秒没有查询就回退到旧路径，不假装成功。
+- 回退路径仍是「NRPT 直连 VPN DNS + 每 15 秒主动解析字面域名」；worker.log 会写明是 53 被占用、NRPT 失败还是 loopback 没有查询。
+
+已知边界：
+
+- 仍只覆盖系统解析器（`GetAddrInfo`）；浏览器自带 DoH/DoT 时不受 NRPT 控制。
+- 本机转发器先装 `/32` 再回包，因此 `DOMAIN-SUFFIX` 不再有「15 秒窗口」；回退路径仍有。
+- 如果现场 53 被占用或系统不接受 loopback DNS，日志会明确写出回退，不会静默变成旧行为。
+
+`cargo test --lib vpn::` → **158 passed, 0 failed**。
 
 ---
 

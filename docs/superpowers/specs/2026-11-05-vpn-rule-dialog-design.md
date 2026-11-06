@@ -52,7 +52,7 @@
   能删不生效）。
 - 规则内容输入框，placeholder 跟着类型变：
   - DOMAIN → `oa.example.com`（推荐，按这个主机精确注入）
-  - DOMAIN-SUFFIX → `example.com`（只解析该域名本身；子域请用完整域名或全局模式）
+  - DOMAIN-SUFFIX → `example.com`（连同所有子域一起走 VPN；macOS 与 Windows 均支持）
   - IP-CIDR → `10.0.0.0/8`
 - 新建配置**不再预置任何规则**。`example.com` 是开发环境数据，不能写进生产包；
   默认规则属于用户配置，必须由用户显式添加。

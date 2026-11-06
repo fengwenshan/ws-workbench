@@ -126,6 +126,16 @@ Save-Command 'routes' { Get-NetRoute -AddressFamily IPv4 | Format-Table Destinat
 Save-Command 'nrpt' { Get-DnsClientNrptRule | Format-List DisplayName,Namespace,NameServers,Comment }
 Save-Command 'dns-servers' { Get-DnsClientServerAddress | Format-Table InterfaceIndex,InterfaceAlias,AddressFamily,ServerAddresses -AutoSize }
 Save-Command 'dnscache' { Get-Service -Name Dnscache | Format-List Status,StartType }
+Save-Command 'dns-listeners' {
+    $udp = @(Get-NetUDPEndpoint -LocalPort 53 -ErrorAction SilentlyContinue |
+        Select-Object LocalAddress, LocalPort, OwningProcess)
+    $tcp = @(Get-NetTCPConnection -LocalPort 53 -State Listen -ErrorAction SilentlyContinue |
+        Select-Object LocalAddress, LocalPort, OwningProcess)
+    '--- UDP/53 ---'
+    if ($udp.Count -eq 0) { '(none)' } else { $udp | Format-Table -AutoSize }
+    '--- TCP/53 listen ---'
+    if ($tcp.Count -eq 0) { '(none)' } else { $tcp | Format-Table -AutoSize }
+}
 Save-Command 'openconnect-process' { Get-Process -Name openconnect -ErrorAction SilentlyContinue | Format-List Id,Path,StartTime }
 Save-Command 'ws-workbench-process' { Get-Process -Name 'ws-workbench' -ErrorAction SilentlyContinue | Format-List Id,Path,StartTime }
 Save-Command 'processes' { Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Select-Object ProcessId,Name,ExecutablePath | Sort-Object Name | Format-Table -AutoSize }

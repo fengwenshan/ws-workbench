@@ -239,6 +239,14 @@ mod tests {
     }
 
     #[test]
+    fn apply_script_can_point_at_the_local_forwarder() {
+        let script =
+            build_apply_script(&["example.com".to_string()], &[Ipv4Addr::new(127, 0, 0, 1)]);
+        assert!(script.contains("-Namespace 'example.com'"));
+        assert!(script.contains("-NameServers '127.0.0.1'"));
+    }
+
+    #[test]
     fn apply_script_without_dns_is_a_noop_cleanup() {
         let script = build_apply_script(&["example.com".to_string()], &[]);
         assert!(script.contains("Remove-DnsClientNrptRule"));

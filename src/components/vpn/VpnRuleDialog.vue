@@ -17,13 +17,13 @@ const vpn = props.vpn
 
 /**
  * 只保留路由注入模式（规则模式的实际实现）能生效的类型：
- * 域名类靠 `/etc/resolver` + 隧道路由，网段类直接注入隧道。
+ * 域名类靠系统按域名解析 + 本地转发器注入隧道路由，网段类直接注入隧道。
  * `DOMAIN-KEYWORD` / `PROCESS-NAME` / `DST-PORT` 没有数据面可用，做了也不生效，
  * 已从下拉里下架；历史配置里若还留着这种规则，列表里会打「不生效」标记。
  */
 const KIND_OPTIONS: { value: VpnRuleKind; label: string; placeholder: string }[] = [
   { value: 'DOMAIN', label: '完整域名 (DOMAIN)', placeholder: 'oa.example.com（推荐，按这个主机精确注入）' },
-  { value: 'DOMAIN-SUFFIX', label: '域名后缀 (DOMAIN-SUFFIX)', placeholder: 'example.com（只解析该域名本身；子域请用完整域名或全局模式）' },
+  { value: 'DOMAIN-SUFFIX', label: '域名后缀 (DOMAIN-SUFFIX)', placeholder: 'example.com（连同所有子域一起走 VPN）' },
   { value: 'IP-CIDR', label: 'IP 网段 (IP-CIDR)', placeholder: '10.0.0.0/8' },
 ]
 
