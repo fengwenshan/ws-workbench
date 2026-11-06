@@ -44,6 +44,12 @@ rand = "0.8"
 sm3 = "0.4"
 sm4 = "0.5"
 rusqlite = { version = "0.41.1", features = ["bundled"] }
+# 系统清理：内存/进程采样（只开 system，不拉磁盘/网络等用不到的重型特性）
+sysinfo = { version = "0.40", default-features = false, features = ["system"] }
+# 删除统一进废纸篓（设计 4.4：不做永久删除）
+trash = "5.3"
+# 读 macOS 应用的 Info.plist
+plist = "1"
 
 [features]
 default = ["custom-protocol"]
@@ -52,5 +58,23 @@ custom-protocol = ["tauri/custom-protocol"]
 # macOS：dev 下是裸二进制（不在 .app 里），Dock 图标只能运行时手动设
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSImage"] }
-objc2-foundation = { version = "0.3", features = ["NSData"] }
+# NSRunningApplication 用来优雅退出应用（设计 5.4）；它的按 pid 查应用方法
+# 在 objc2-app-kit 里由 `libc` 特性控制，必须一起打开
+objc2-app-kit = { version = "0.3", features = [
+    "NSApplication",
+    "NSImage",
+    "NSRunningApplication",
+    "libc",
+] }
+objc2-foundation = { version = "0.3", features = ["NSData", "NSString"] }
+
+# Windows：注册表枚举卸载项 + 少量 Win32 调用（设计 4.1 / 5.5）
+[target.'cfg(target_os = "windows")'.dependencies]
+winreg = "0.55"
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Memory",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+] }

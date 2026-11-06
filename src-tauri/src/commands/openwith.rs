@@ -279,7 +279,7 @@ fn mac_bundle_icon_path(bundle: &Path) -> Option<PathBuf> {
 
 /// 把一个 `.app` 的图标转成 64px PNG 的 data URL
 #[cfg(target_os = "macos")]
-fn mac_icon(bundle: &Path) -> Option<String> {
+pub(crate) fn mac_icon(bundle: &Path) -> Option<String> {
     let icns = mac_bundle_icon_path(bundle)?;
 
     let png = std::env::temp_dir().join(format!("ws-workbench-ow-{}.png", uuid::Uuid::new_v4()));
@@ -568,7 +568,7 @@ fn real_executable(path: &Path) -> PathBuf {
 /// 指定尺寸的图标（比 `ExtractAssociatedIcon` 的 32px 清楚），取不到再退回
 /// `ExtractAssociatedIcon`。结果由 [`CACHE`] 缓存，每次启动只算一次。
 #[cfg(target_os = "windows")]
-fn windows_icons(paths: &[&Path]) -> std::collections::HashMap<PathBuf, String> {
+pub(crate) fn windows_icons(paths: &[&Path]) -> std::collections::HashMap<PathBuf, String> {
     use std::collections::HashMap;
 
     let mut icons: HashMap<PathBuf, String> = HashMap::new();

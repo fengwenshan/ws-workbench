@@ -9,6 +9,7 @@ mod crypto;
 mod filecrypto;
 mod util;
 mod commands;
+mod cleaner;
 mod packer;
 pub mod apps;
 mod platform;
@@ -256,6 +257,14 @@ pub fn run() {
             vpn::commands::vpn_clear_logs,
             vpn::commands::vpn_open_session_dir,
             vpn::commands::vpn_session_dir_info,
+            // 系统清理（设计 3.2）：列表/卸载/残留/内存 七个命令
+            commands::cleaner_list_apps,
+            commands::cleaner_uninstall_app,
+            commands::cleaner_scan_leftovers,
+            commands::cleaner_delete_leftovers,
+            commands::cleaner_memory_snapshot,
+            commands::cleaner_quit_apps,
+            commands::cleaner_deep_release,
         ])
         .setup(|app| {
             // 先建主窗口：窗口配置在 tauri.conf.json 里，但 create: false 交给这里
@@ -287,6 +296,9 @@ pub fn run() {
                 eprintln!("VPN 会话目录初始化失败: {}", err);
             }
             app.manage(vpn::commands::VpnState::new(session));
+
+            // 系统清理的列表缓存与扫描标记（设计 3.3）：只有进程内状态，无需落盘
+            app.manage(cleaner::CleanerState::new());
 
             // 轮询会话目录里的状态文件，把 VPN 状态与日志推给前端
             vpn::commands::start_status_poller(app.handle().clone());

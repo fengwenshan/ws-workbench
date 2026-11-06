@@ -4,12 +4,15 @@
 //! 访问，因此保持扁平重导出。
 
 mod attachments;
+mod cleaner;
 mod config;
-mod openwith;
+// `pub(crate)`：cleaner 模块要复用 openwith 里的图标提取（mac_icon / windows_icons）
+pub(crate) mod openwith;
 mod project;
 mod system;
 
 pub use attachments::*;
+pub use cleaner::*;
 pub use config::*;
 pub use openwith::*;
 pub use project::*;

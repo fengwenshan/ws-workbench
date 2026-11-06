@@ -1,0 +1,190 @@
+//! 「系统清理」后端模块：已安装应用列表 / 卸载 / 残留扫描与删除 / 内存占用。
+//!
+//! 文件划分（设计 7）：
+//! - `models`：对前端的数据契约；
+//! - `installer`：列表、卸载、残留的统一入口与缓存；
+//! - `installer_windows` / `installer_macos`：平台实现（`cfg` 拆文件）；
+//! - `memory` + `memory_windows` / `memory_macos`：内存采样、聚合、结束进程、深度释放；
+//! - `trash_guard`：删除白名单与废纸篓/提权删除。
+//!
+//! 这里只放平台无关的公共小工具与 `CleanerState`，避免平台文件互相引用。
+
+pub mod installer;
+pub mod memory;
+pub mod trash_guard;
+
+// 纯逻辑（过滤/去重/UninstallString 解析）在 test cfg 下也会编进 macOS 测试，
+// 此时 Windows 专用部分用不到，单独允许 dead_code 避免噪音警告
+#[cfg(any(target_os = "windows", test))]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub mod installer_windows;
+#[cfg(target_os = "windows")]
+pub mod memory_windows;
+#[cfg(target_os = "macos")]
+pub mod installer_macos;
+#[cfg(target_os = "macos")]
+pub mod memory_macos;
+
+// 实机冒烟：默认 #[ignore]，只在人工联调时跑（会真实写 ~/Applications 与废纸篓）
+#[cfg(all(test, target_os = "macos"))]
+mod macos_smoke;
+
+pub mod models;
+pub use models::*;
+
+use std::sync::Mutex;
+
+/// 安装列表缓存。
+///
+/// 枚举一次要 1~3 秒（Windows 要读注册表 + 算目录大小，macOS 要遍历 bundle），
+/// 切页签不该重扫，所以缓存放在后端；`scanning` 用来拒绝重复触发的并发扫描
+/// （前端连点两下「重新扫描」时第二次直接报「正在扫描」）。
+#[derive(Default)]
+pub struct CleanerState {
+    pub apps: Mutex<Option<Vec<InstalledApp>>>,
+    pub scanning: Mutex<bool>,
+}
+
+impl CleanerState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+// ============================== 公共小工具 ==============================
+
+/// 用户主目录；取不到时返回 None（测试环境与极端受限环境要能退化）。
+pub(crate) fn home_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(std::path::PathBuf::from)
+}
+
+/// 目录大小（字节）。
+///
+/// 递归统计，但带三重上限，避免碰到巨型目录（或符号链接环）时把扫描卡死：
+/// - 不跟随符号链接（bundle 里常有指向 /Applications 的软链）；
+/// - 深度上限 `max_depth`；
+/// - 条目数上限 `max_entries`，到顶就停并返回已统计的量。
+pub(crate) fn dir_size_limited(root: &std::path::Path, max_depth: usize, max_entries: u64) -> u64 {
+    let walker = walkdir::WalkDir::new(root)
+        .follow_links(false)
+        .max_depth(max_depth)
+        .into_iter()
+        .filter_map(|entry| entry.ok());
+
+    let mut total: u64 = 0;
+    let mut count: u64 = 0;
+    for entry in walker {
+        count += 1;
+        if count > max_entries {
+            break;
+        }
+        // 只累加普通文件；目录本身在 macOS 上的 st_size 是目录项大小，
+        // 加进去会和「文件总和」口径不一致。
+        match entry.metadata() {
+            Ok(meta) if meta.is_file() => total = total.saturating_add(meta.len()),
+            _ => {}
+        }
+    }
+    total
+}
+
+/// 文件/目录的大小；文件取字节数，目录递归统计。
+#[cfg(target_os = "macos")]
+pub(crate) fn path_size(path: &std::path::Path) -> u64 {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_file() => meta.len(),
+        Ok(meta) if meta.is_dir() => dir_size_limited(path, 64, 200_000),
+        _ => 0,
+    }
+}
+
+/// 系统时间转「YYYY-MM-DD」；拿不到就空串（前端会隐藏该列）。
+#[cfg(target_os = "macos")]
+pub(crate) fn format_date(time: std::time::SystemTime) -> String {
+    let datetime: chrono::DateTime<chrono::Utc> = time.into();
+    datetime.format("%Y-%m-%d").to_string()
+}
+
+/// 在多个 worker 上并行处理 `items`，返回顺序与输入一致。
+///
+/// 为什么自己写：设计 4.1 要求「最多 8 个 worker」并发取图标/算大小，
+/// 而项目里没有 rayon 依赖，为这一处引一个并行库不值得；`std::thread::scope`
+/// 足够（闭包里借用的 `emit` 回调在 scope 结束前一直有效）。
+pub(crate) fn parallel_map<T, R, F>(items: &[T], workers: usize, f: F) -> Vec<R>
+where
+    T: Sync,
+    R: Send,
+    F: Fn(usize, &T) -> R + Sync,
+{
+    if items.is_empty() {
+        return Vec::new();
+    }
+    let workers = workers.clamp(1, 8).min(items.len());
+    let chunk = items.len().div_ceil(workers);
+    std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for (chunk_index, chunk_items) in items.chunks(chunk).enumerate() {
+            let f = &f;
+            let start = chunk_index * chunk;
+            handles.push(scope.spawn(move || {
+                chunk_items
+                    .iter()
+                    .enumerate()
+                    .map(|(offset, item)| f(start + offset, item))
+                    .collect::<Vec<R>>()
+            }));
+        }
+        let mut out = Vec::with_capacity(items.len());
+        for handle in handles {
+            match handle.join() {
+                Ok(chunk) => out.extend(chunk),
+                // 单个 worker panic 不该让整个扫描失败：丢掉那一段即可，
+                // 调用方本来就要对「某项算不出来」做兜底。
+                Err(_) => {}
+            }
+        }
+        out
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parallel_map_keeps_input_order() {
+        let items: Vec<u32> = (0..20).collect();
+        let out = parallel_map(&items, 8, |index, value| (index, *value));
+        assert_eq!(out.len(), 20);
+        for (i, (index, value)) in out.iter().enumerate() {
+            assert_eq!(*index, i);
+            assert_eq!(*value, i as u32);
+        }
+    }
+
+    #[test]
+    fn dir_size_counts_nested_files() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-tmp")
+            .join("cleaner-dir-size");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("a/b")).unwrap();
+        std::fs::write(dir.join("a/one.bin"), b"12345").unwrap();
+        std::fs::write(dir.join("a/b/two.bin"), b"1234567890").unwrap();
+        assert_eq!(dir_size_limited(&dir, 64, 1000), 15);
+        // 深度限制：根深度为 0，`a/one.bin` 在深度 2，所以 max_depth=2 只统计到它
+        assert_eq!(dir_size_limited(&dir, 2, 1000), 5);
+        // 连第一层都到不了时是 0（防御性上限生效，不会无限递归）
+        assert_eq!(dir_size_limited(&dir, 1, 1000), 0);
+    }
+
+    #[test]
+    fn formats_date_or_empty() {
+        // 2001-09-09T01:46:40Z
+        let time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        assert_eq!(format_date(time), "2001-09-09");
+    }
+}
