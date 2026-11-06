@@ -74,6 +74,7 @@ function toggleSourceMode(_event: Event, inner: IVditor) {
     'aria-label',
     inner.currentMode === 'sv' ? '返回即时渲染' : '查看源代码',
   )
+  syncTableOps()
 }
 
 const TOOLBAR: Array<string | IMenuItem> = [
@@ -141,6 +142,9 @@ onMounted(() => {
       onReady()
     },
   })
+  document.addEventListener('selectionchange', syncTableOps)
+  document.addEventListener('scroll', syncTableOps, true)
+  window.addEventListener('resize', syncTableOps)
 })
 
 function onReady() {
@@ -162,6 +166,10 @@ function onReady() {
 
 onBeforeUnmount(() => {
   destroyed = true
+  document.removeEventListener('selectionchange', syncTableOps)
+  document.removeEventListener('scroll', syncTableOps, true)
+  window.removeEventListener('resize', syncTableOps)
+  tableOps.value = null
   if (emitTimer) {
     window.clearTimeout(emitTimer)
     emitTimer = undefined
@@ -277,6 +285,7 @@ function setMarkdown(md: string) {
   if (!ready) return
   const editor = vditor.value
   if (editor && editor.getValue() !== next) editor.setValue(next, true)
+  syncTableOps()
 }
 
 function focus() {
@@ -325,6 +334,138 @@ function scrollToHeading(index: number) {
   textarea.focus()
   textarea.setSelectionRange(position, Math.min(position + (lines[line]?.length ?? 0), textarea.value.length))
   textarea.scrollTop = Math.max(0, (line / Math.max(1, lines.length)) * textarea.scrollHeight - textarea.clientHeight / 3)
+}
+
+// ========== 表格：光标在表格里时提供加行 / 加列 ==========
+const tableOps = ref<{ left: number; top: number; transform: string } | null>(null)
+
+function editableRoot(): { host: HTMLElement; root: HTMLElement } | null {
+  const host = hostRef.value
+  const editor = vditor.value
+  if (!host || !editor || !ready) return null
+  if (editor.getCurrentMode() !== 'ir') return null
+  const root = contentRoot(host, editor)
+  if (!root) return null
+  return { host, root }
+}
+
+function selectedTableCell(root: HTMLElement): HTMLTableCellElement | null {
+  const selection = window.getSelection()
+  if (!selection || selection.rangeCount === 0) return null
+  const node = selection.getRangeAt(0).startContainer
+  const element = node instanceof Element ? node : node.parentElement
+  const cell = element?.closest<HTMLTableCellElement>('td, th')
+  if (!cell || !root.contains(cell) || !cell.closest('table')) return null
+  return cell
+}
+
+/** 根据当前光标所在的表格刷新浮动工具条的位置；不在表格里就隐藏 */
+function syncTableOps() {
+  const ctx = editableRoot()
+  const cell = ctx ? selectedTableCell(ctx.root) : null
+  if (!ctx || !cell) {
+    tableOps.value = null
+    return
+  }
+  const table = cell.closest('table') as HTMLTableElement
+  const hostRect = ctx.host.getBoundingClientRect()
+  const rect = table.getBoundingClientRect()
+  // table 元素可能被撑满整列，实际网格只占左侧一部分，用行内最后一个单元格对齐
+  const row = cell.parentElement as HTMLTableRowElement | null
+  const lastCell = row?.cells[row.cells.length - 1]
+  const visualRight = lastCell?.getBoundingClientRect().right ?? rect.right
+  const rowRect = row?.getBoundingClientRect() ?? rect
+
+  // 优先贴在表格右侧空白处，与当前行垂直居中，不遮挡表格和上方正文
+  const panelWidth = 176
+  const sideLeft = visualRight - hostRect.left + 10
+  if (sideLeft + panelWidth <= hostRect.width - 8) {
+    tableOps.value = {
+      left: sideLeft,
+      top: rowRect.top + rowRect.height / 2 - hostRect.top,
+      transform: 'translate(0, -50%)',
+    }
+    return
+  }
+
+  const left = Math.min(visualRight - hostRect.left - 2, hostRect.width - 8)
+  const above = rect.top - hostRect.top - 6
+  // 表格太宽没地方贴，就放表格上方；贴近顶部时改放下方
+  tableOps.value =
+    above >= 92
+      ? { left, top: above, transform: 'translate(-100%, -100%)' }
+      : { left, top: rect.bottom - hostRect.top + 6, transform: 'translate(-100%, 0)' }
+}
+
+function activeTableContext(): {
+  root: HTMLElement
+  cell: HTMLTableCellElement
+  table: HTMLTableElement
+} | null {
+  const ctx = editableRoot()
+  if (!ctx) return null
+  const cell = selectedTableCell(ctx.root)
+  const table = cell?.closest('table')
+  if (!cell || !table) return null
+  return { root: ctx.root, cell, table: table as HTMLTableElement }
+}
+
+/** 表格是直接改 DOM 的，改完让 Vditor 从 DOM 重新生成 markdown，保持光标与滚动位置 */
+function commitTableChange(root: HTMLElement, focusCell: HTMLTableCellElement | null) {
+  const editor = vditor.value
+  if (!editor) return
+  applyLocalValue(editor.getValue())
+  const editable = root.querySelector<HTMLElement>('pre.vditor-reset') ?? root
+  editable.focus()
+  if (focusCell) {
+    try {
+      const range = document.createRange()
+      range.selectNodeContents(focusCell)
+      range.collapse(false)
+      const selection = window.getSelection()
+      selection?.removeAllRanges()
+      selection?.addRange(range)
+    } catch {
+      // 光标恢复失败不影响表格内容
+    }
+  }
+  syncTableOps()
+}
+
+function addTableRow(position: 'above' | 'below') {
+  const ctx = activeTableContext()
+  const row = ctx?.cell.parentElement as HTMLTableRowElement | null
+  if (!ctx || !row) return
+  const columnCount = ctx.table.rows[0]?.cells.length ?? 1
+  const newRow = document.createElement('tr')
+  for (let i = 0; i < columnCount; i += 1) newRow.appendChild(document.createElement('td'))
+  const tbody = ctx.table.tBodies[0] ?? ctx.table.appendChild(document.createElement('tbody'))
+  const isHeader = row.parentElement?.tagName === 'THEAD'
+  if (isHeader) {
+    // markdown 表格只有一行表头，表头里的「上/下」统一插到表体开头
+    tbody.insertBefore(newRow, tbody.firstChild)
+  } else if (position === 'above') {
+    row.before(newRow)
+  } else {
+    row.after(newRow)
+  }
+  commitTableChange(ctx.root, newRow.cells[0] ?? null)
+}
+
+function addTableColumn(position: 'left' | 'right') {
+  const ctx = activeTableContext()
+  if (!ctx) return
+  const currentRow = ctx.cell.parentElement as HTMLTableRowElement | null
+  if (!currentRow) return
+  const targetIndex = position === 'right' ? ctx.cell.cellIndex + 1 : ctx.cell.cellIndex
+  for (const row of Array.from(ctx.table.rows)) {
+    const inHead = row.parentElement?.tagName === 'THEAD'
+    const newCell = document.createElement(inHead ? 'th' : 'td')
+    const reference = row.cells[targetIndex] ?? null
+    if (reference) row.insertBefore(newCell, reference)
+    else row.appendChild(newCell)
+  }
+  commitTableChange(ctx.root, currentRow.cells[targetIndex] ?? null)
 }
 
 defineExpose({ insertMarkdown, setMarkdown, focus, scrollToHeading })
@@ -506,6 +647,17 @@ function onPasteCapture(event: ClipboardEvent) {
 <template>
   <div class="note-editor" @paste.capture="onPasteCapture" @input="onEditorDomInput">
     <div ref="hostRef" class="note-editor-vditor"></div>
+    <div
+      v-if="tableOps"
+      class="note-table-ops"
+      :style="{ left: `${tableOps.left}px`, top: `${tableOps.top}px`, transform: tableOps.transform }"
+      @mousedown.prevent
+    >
+      <button type="button" title="在上方插入一行" @click="addTableRow('above')">↑ 行</button>
+      <button type="button" title="在下方插入一行" @click="addTableRow('below')">↓ 行</button>
+      <button type="button" title="在左侧插入一列" @click="addTableColumn('left')">← 列</button>
+      <button type="button" title="在右侧插入一列" @click="addTableColumn('right')">→ 列</button>
+    </div>
     <div class="note-editor-statusbar">
       <span class="note-editor-words">{{ wordCount }} 字</span>
       <span class="note-editor-state" :class="{ 'is-editing': editing }">
@@ -526,6 +678,7 @@ function onPasteCapture(event: ClipboardEvent) {
   --note-text-muted: var(--text-muted);
   --note-primary: var(--primary);
 
+  position: relative;
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -900,6 +1053,35 @@ function onPasteCapture(event: ClipboardEvent) {
   display: none !important;
 }
 
+/* ========== 表格浮动工具条：加行 / 加列 ========== */
+.note-table-ops {
+  position: absolute;
+  z-index: 20;
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--note-border-color);
+  border-radius: 8px;
+  background: var(--note-bg);
+  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.12);
+}
+.note-table-ops button {
+  height: 22px;
+  padding: 0 7px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--note-text-muted);
+  font-size: 11px;
+  line-height: 22px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.note-table-ops button:hover {
+  background: var(--note-bg-soft);
+  color: var(--note-text);
+}
+
 /* ========== 源码模式：只显示可编辑的 Markdown ========== */
 .note-editor :deep(.vditor-toolbar__item.is-source > button) {
   color: var(--note-primary);
@@ -920,17 +1102,23 @@ function onPasteCapture(event: ClipboardEvent) {
   resize: none;
 }
 
-/* ========== 任务列表：自定义圆形复选框（更大、可点击） ========== */
-.note-editor :deep(.vditor-task input[type='checkbox']) {
+/* ========== 任务列表：自定义方形复选框（更大、可点击） ========== */
+.note-editor :deep(.vditor-task) {
+  position: relative;
+}
+.note-editor :deep(.vditor-task > input[type='checkbox']) {
   appearance: none;
   -webkit-appearance: none;
+  position: absolute;
+  left: -1.6em;
+  top: calc((1.75em - 16px) / 2);
   width: 16px;
   height: 16px;
-  margin: 0 0.35em 0.2em -1.45em;
+  margin: 0;
+  font-size: inherit;
   border: 1.5px solid var(--note-border-color);
-  border-radius: 50%;
+  border-radius: 4px;
   background: var(--note-bg) center / 10px 10px no-repeat;
-  vertical-align: -3px;
   cursor: pointer;
   transition: background-color 0.15s ease, border-color 0.15s ease;
 }
