@@ -292,10 +292,20 @@ pub fn delete_elevated(files: &[PathBuf], registry_keys: &[(String, String)]) ->
     outcome
 }
 
-/// shell 单引号转义：`it's` → `'it'\''s'`
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+/// shell 单引号转义（POSIX）：`it's` → `'it'\''s'`。只给 macOS 提权脚本用。
+#[cfg(target_os = "macos")]
 fn shell_quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', "'\\''"))
+}
+
+/// PowerShell 单引号字符串转义：`'` → `''`。
+///
+/// 注意与 POSIX 的 `'\''` 完全不同：在 PowerShell 里往单引号字符串中塞
+/// `'\''` 会把字符串提前闭合，路径里的单引号于是能变成命令分隔符。
+/// Windows 提权脚本里所有路径、注册表键、临时文件路径都必须过这个函数。
+#[cfg(any(target_os = "windows", test))]
+fn powershell_quote(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "''"))
 }
 
 #[cfg(target_os = "macos")]
@@ -407,7 +417,7 @@ fn delete_files_elevated_windows(
 
     let mut list = String::new();
     for path in paths {
-        list.push_str(&format!("{},", shell_quote(&path.to_string_lossy())));
+        list.push_str(&format!("{},", powershell_quote(&path.to_string_lossy())));
     }
     let _ = list.pop();
 
@@ -417,7 +427,7 @@ fn delete_files_elevated_windows(
         let Some(reg_path) = registry_ps_path(hive, key_path) else {
             continue;
         };
-        registry_list.push_str(&format!("{},", shell_quote(&reg_path)));
+        registry_list.push_str(&format!("{},", powershell_quote(&reg_path)));
     }
     let _ = registry_list.pop();
 
@@ -434,7 +444,7 @@ fn delete_files_elevated_windows(
            catch {{ $lines += \"FAIL`t$key`t$($_.Exception.Message)\" }}\n\
          }}\n\
          Set-Content -LiteralPath {} -Value $lines -Encoding UTF8\n",
-        shell_quote(&result_path.to_string_lossy())
+        powershell_quote(&result_path.to_string_lossy())
     );
     if let Err(err) = std::fs::write(&inner_path, inner) {
         for path in paths {
@@ -452,8 +462,8 @@ fn delete_files_elevated_windows(
     let launcher = format!(
         "$p = Start-Process -FilePath {} -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',{}) -Verb RunAs -Wait -PassThru; \
          if ($null -ne $p) {{ $p.ExitCode }} else {{ 0 }}",
-        shell_quote(&powershell),
-        shell_quote(&inner_path.to_string_lossy()),
+        powershell_quote(&powershell),
+        powershell_quote(&inner_path.to_string_lossy()),
     );
     let (text, ok) = match crate::winps::run_with_timeout_ms(
         &launcher,
@@ -625,5 +635,31 @@ mod tests {
     fn trash_rejects_paths_outside_whitelist() {
         let err = trash_path(Path::new("/System/Library/CoreServices/Finder.app")).unwrap_err();
         assert!(err.contains("白名单"), "实际错误: {}", err);
+    }
+
+    /// PowerShell 的转义是「单引号翻倍」，不是 POSIX 的 `'\''`。
+    /// 这条测试防回归：写错会直接影响 Windows 提权删除（含命令注入）。
+    #[test]
+    fn powershell_quote_doubles_single_quotes() {
+        assert_eq!(powershell_quote("plain"), "'plain'");
+        assert_eq!(
+            powershell_quote(r"C:\Bob's Tool\a.exe"),
+            r"'C:\Bob''s Tool\a.exe'"
+        );
+        // 注入尝试：整段必须留在单引号字符串内部
+        assert_eq!(
+            powershell_quote("x'; Remove-Item C:\\ -Recurse; '"),
+            "'x''; Remove-Item C:\\ -Recurse; '''"
+        );
+        // 不变量：原串里每个单引号都变成一对，不会留下能闭合字符串的单个引号
+        let quoted = powershell_quote("a'b'c");
+        assert!(quoted.starts_with('\'') && quoted.ends_with('\''));
+        assert_eq!(quoted.matches("''").count(), 2);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn posix_shell_quote_keeps_apostrophe_literal() {
+        assert_eq!(shell_quote("it's"), r"'it'\''s'");
     }
 }
