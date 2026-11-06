@@ -47,7 +47,36 @@ let emitTimer: number | undefined
 /** 编辑器就绪前收到的插入请求 */
 let pendingInsert: string | null = null
 
-const TOOLBAR = [
+/**
+ * 工具栏最后一项是「源码 / 即时渲染」切换：
+ * - 保留 Vditor 自带的 edit-mode 项（但隐藏它），借它内部的三模式切换逻辑；
+ * - 自定义一项，图标仍是铅笔，点击后直接进 / 出源码模式，不再弹出模式菜单。
+ */
+function toggleSourceMode(_event: Event, inner: IVditor) {
+  const targetMode = inner.currentMode === 'sv' ? 'ir' : 'sv'
+  const builtin = inner.toolbar.elements['edit-mode']
+  const target = builtin?.querySelector<HTMLButtonElement>(`button[data-mode="${targetMode}"]`)
+  if (!target) return
+  target.click()
+
+  // 进源码模式时从文档开头看起，避免停在滚动容器底部
+  if (targetMode === 'sv') {
+    const svEl = inner.sv?.element
+    if (svEl) {
+      svEl.setSelectionRange(0, 0)
+      svEl.scrollTop = 0
+    }
+  }
+
+  const item = inner.toolbar.elements['source-mode']
+  item?.classList.toggle('is-source', inner.currentMode === 'sv')
+  item?.querySelector('button')?.setAttribute(
+    'aria-label',
+    inner.currentMode === 'sv' ? '返回即时渲染' : '查看源代码',
+  )
+}
+
+const TOOLBAR: Array<string | IMenuItem> = [
   'headings',
   'bold',
   'italic',
@@ -68,7 +97,15 @@ const TOOLBAR = [
   'undo',
   'redo',
   '|',
+  // 隐藏的内建项，只作为模式切换逻辑的入口
   'edit-mode',
+  {
+    name: 'source-mode',
+    tip: '查看源代码',
+    tipPosition: 'nw',
+    icon: '<svg><use xlink:href="#vditor-icon-edit"></use></svg>',
+    click: toggleSourceMode,
+  },
 ]
 
 // ========== 编辑器生命周期 ==========
@@ -87,6 +124,8 @@ onMounted(() => {
     cache: { enable: false },
     outline: { enable: false, position: 'left' },
     counter: { enable: false },
+    // 源码模式下只显示可编辑的 Markdown，不再出右侧预览
+    preview: { mode: 'editor' },
     placeholder: '记录一下…',
     toolbar: TOOLBAR,
     toolbarConfig: { pin: true },
@@ -108,6 +147,9 @@ function onReady() {
   ready = true
   const editor = vditor.value
   if (!editor) return
+  // 隐藏 Vditor 自带的「切换编辑模式」按钮，只保留工具栏末尾那支铅笔
+  const builtinEditMode = editor.vditor?.toolbar?.elements?.['edit-mode']
+  if (builtinEditMode) builtinEditMode.style.display = 'none'
   // 初始化期间外部又换了实体：把最新值补进去
   if (editor.getValue() !== lastKnown) editor.setValue(lastKnown, true)
   content.value = lastKnown
@@ -856,6 +898,26 @@ function onPasteCapture(event: ClipboardEvent) {
 /* IR 编辑时用不到代码块右上角的复制按钮 */
 .note-editor :deep(.vditor-ir .vditor-copy) {
   display: none !important;
+}
+
+/* ========== 源码模式：只显示可编辑的 Markdown ========== */
+.note-editor :deep(.vditor-toolbar__item.is-source > button) {
+  color: var(--note-primary);
+  background: var(--note-bg-soft);
+}
+.note-editor :deep(textarea.vditor-sv) {
+  max-width: 800px;
+  margin: 0 auto;
+  padding: 12px 0 32px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.9;
+  color: var(--note-text);
+  background: transparent;
+  caret-color: var(--note-text);
+  border: 0;
+  outline: none;
+  resize: none;
 }
 
 /* ========== 任务列表：自定义圆形复选框（更大、可点击） ========== */
