@@ -155,6 +155,13 @@ openconnect 探测失败时，代理页给出按平台区分的安装引导：ma
 
 已知限制：Windows 侧只做了交叉编译检查与验收清单，未实机跑卸载/UAC/深度释放；`purge` 只回收可缓存页，收益有限；残留按精确匹配，宁可漏报不误删。
 
+**托盘快捷面板**：左键点菜单栏/任务栏图标弹出柠檬式的无边框小面板（`quick.html`，360×560，失焦或 Esc 自动收起），两个页签：
+
+- **内存**：占用率环 + 已用/总量/swap + 占用排行前 7 个应用，「释放」直接走深度释放（需要时弹一次系统授权），底部可跳主窗口看全部应用与卸载。
+- **VPN**：当前状态与配置名、「连接/断开」、规则/全局/直连三种代理模式即切，以及跳转代理页的入口。
+
+面板只做快速查看与动作；卸载、残留清理、规则编辑仍在主窗口。窗口位置按托盘图标位置计算（上方/下方任务栏、多显示器负坐标都夹进屏幕范围），逻辑在 `lib.rs::panel_origin`，有 5 个位置单测。
+
 ### 设置
 
 显示运行环境（操作系统、架构、可执行文件后缀、是否需要提权、配置文件位置、各网卡的 MAC 与全部 IP —— 多 IP 逐条列出），以及附件实际落盘位置（可直接打开目录）。
@@ -167,7 +174,9 @@ openconnect 探测失败时，代理页给出按平台区分的安装引导：ma
 
 ### 托盘
 
-菜单项：显示主窗口 / 代理 / 设置 / 日志 / 连接 VPN / 断开 VPN / 退出。左键单击图标直接打开窗口，菜单只在右键时出现。点「退出」会先请求 worker 收尾再结束进程，否则可能留下没人回收的路由。关闭主窗口只是隐藏，应用继续在托盘里运行。
+右键菜单：显示主窗口 / 清理 / 代理 / 设置 / 日志 / 连接 VPN / 断开 VPN / 退出。左键单击图标弹出快捷面板（内存 / VPN 两个页签，见上），菜单只在右键时出现。点「退出」会先请求 worker 收尾再结束进程，否则可能留下没人回收的路由。关闭主窗口只是隐藏，应用继续在托盘里运行。
+
+快捷面板是独立的透明无边框窗口：点面板外部（失焦）或按 Esc 收起；「打开主窗口」会把主窗口唤到前台并切到对应页面。macOS 的透明窗口依赖 Tauri 的 `macos-private-api` feature（`Cargo.toml` + `tauri.conf.json` 的 `macOSPrivateApi`），**直装/DMG 渠道没问题，但用不了 Mac App Store**。
 
 macOS 的应用菜单做了汉化，点 Dock 图标会把窗口重新显示出来。
 
@@ -175,7 +184,7 @@ macOS 的应用菜单做了汉化，点 Dock 图标会把窗口重新显示出�
 
 | 层 | 选型 |
 | --- | --- |
-| 桌面框架 | Tauri 2（`tauri` 开启 `tray-icon`） |
+| 桌面框架 | Tauri 2（`tauri` 开启 `tray-icon`、`image-png`、`macos-private-api`） |
 | 前端 | Vue 3.5 + TypeScript 5.6 + Vite 6；ant-design-vue 4 + md-editor-v3 7（组件与图标按需自动引入） |
 | 后端 | Rust edition 2021，库名 `ws_workbench_lib` |
 | 数据面 | smoltcp 0.11 用户态协议栈（macOS 透明代理） |
@@ -321,6 +330,8 @@ VPN 会话目录同时被主进程和提权 worker 使用，因此不做路径�
 - 系统清理的 Windows 运行时行为（注册表枚举、UAC 卸载、工作集/待机列表）只做了交叉编译检查，需按设计文档第 9 节的 Windows 清单实机验收
 - macOS 深度释放的 `purge` 只回收可缓存页，收益有限；`~/.Trash` 内容受 TCC 保护，删除结果以「原路径消失 + trash API 成功」为准
 - 卸载残留只做精确匹配（bundle id / 注册表键 / 精确应用名），存在非标准目录的数据需要手动清理
+- 托盘快捷面板的原生弹出（真实点菜单栏图标）受 macOS 辅助功能/屏幕录制权限限制，自动化测试只覆盖了页面渲染、位置计算与 `cargo check`，首次使用请手动点一下确认弹窗位置与失焦收起
+- 快捷面板的透明圆角窗口在 macOS 上依赖 `macos-private-api`，因此不支持 Mac App Store 渠道
 
 ## 目录结构
 
@@ -331,6 +342,8 @@ src-tauri/src/
     project.rs     打包、校验、项目类型与 VCS 识别
     system.rs      打开目录/终端/编辑器、平台与网络信息
     attachments.rs 附件加解密、上传目录解析、笔记内联图片
+    cleaner.rs     系统清理命令（列表/卸载/残留/内存）
+    quick.rs       托盘快捷面板：隐藏、打开主窗口并切页
   util/            通用能力层
     fs.rs          目录创建、文本读写、可写性探测
     time.rs        本地 RFC3339 / UTC 毫秒时间戳
@@ -379,6 +392,7 @@ src/
   api/             后端命令的类型化封装（config / project / system / attachments / apps / cleaner）
   utils/           通用小工具（time / dialog / path / error）
   types/           前后端共享的数据结构（含 cleaner）
+  quick/           托盘快捷面板（独立入口：quick.html + main.ts + QuickPanel.vue）
 scripts/release.mjs  构建、上传、更新清单合并
 updates/latest.json  更新清单（由发布脚本生成并提交）
 ```

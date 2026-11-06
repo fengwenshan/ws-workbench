@@ -2,7 +2,7 @@
 
 - 日期：2026-11-06
 - 分支：feat/uninstaller
-- 状态：已实现（v1；macOS 已实机冒烟，Windows 仅交叉编译检查，待实机验收）
+- 状态：已实现（v1.1：卸载 + 内存 + 托盘快捷面板；macOS 已实机冒烟，Windows 仅交叉编译检查，待实机验收）
 - 关联：新增工具页；不改动现有项目/打包/代理逻辑
 
 ## 1. 背景与目标
@@ -39,7 +39,7 @@
 
 - `AppView` 增加 `'cleaner'`；图标栏在「代理」下加「清理」按钮（扫帚/闪光图标，与现有 24px 线性图标一致）
 - 快捷键：`⌘/Ctrl+4`；`selectTool('cleaner')` 语义和 settings 一致（重复点击不折叠任何面板）
-- 托盘菜单**不新增**入口（避免菜单膨胀；后续需要可加）
+- 托盘左键 → 快捷面板（内存 / VPN 两个页签，见 5.6）；托盘菜单新增「清理」入口
 - 标题栏显示的当前工具名由 `App.vue` 现有映射推导
 
 ### 2.2 页面结构
@@ -343,6 +343,18 @@ pub struct CleanerProgress {
 - 用户取消授权 → `ok=false` + `message="已取消授权"`，不报错弹窗
 - 深度释放按钮与「结束进程」分开，避免误触
 
+### 5.6 托盘快捷面板
+
+入口：左键单击菜单栏/任务栏图标；右键仍出原菜单（新增「清理」项）。交互参考腾讯柠檬的悬浮面板。
+
+- **窗口**：独立 WebviewWindow（label `quick-panel`，`quick.html`），360×560、无边框、透明圆角、置顶、不进任务栏，启动时创建并隐藏，第一次点击即可秒出
+- **定位**：按托盘图标的 `rect` 计算（`lib.rs::panel_origin`，纯函数 + 单测）：图标在屏幕上半部分（macOS 菜单栏/顶部任务栏）时面板朝下，否则朝上；结果夹进显示器范围（多显示器负坐标、屏幕比面板小都不越界/不 panic）
+- **收起**：失焦（`WindowEvent::Focused(false)`）、Esc、右上角 ×、底部「隐藏」；`quick_panel_hide` 命令统一处理，前端不直接碰窗口 API
+- **内存页签**：占用率环 + 已用/总量/swap + 应用排行前 7；「释放」走现有深度释放（授权/取消语义同主窗口）；「查看全部」经 `quick_panel_open_main('cleaner')` 打开主窗口清理页
+- **VPN 页签**：状态点 + 阶段文案 + 当前配置名 + 连接/断开；下方规则 / 全局 / 直连三选一，复用 `useVpn.setProxyMode`（已连接时立即生效，未连接时写进配置下次生效）；`quick_panel_open_main('proxy')` 跳代理页
+- **复用**：面板直接复用 `useConfig / useVpn / useCleaner`，轮询只在内存页签激活时开启，窗口隐藏时由 `document.hidden` 兜底暂停；不复制一套业务逻辑
+- **配置**：透明窗口在 macOS 需要 `macos-private-api`（Cargo feature + `app.macOSPrivateApi`）；直装渠道可用，Mac App Store 不可用
+
 ## 6. 权限与安全
 
 - 破坏性操作（卸载、删除残留、强制结束、深度释放）全部二次确认
@@ -385,6 +397,8 @@ src-tauri/src/commands/cleaner.rs   // 薄封装 + CleanerState
 | `windows` | 0.61 | Windows 端少量 Win32 调用（仅 Windows target；与 trash 依赖的 0.62 并存不冲突） |
 
 依赖可行性已用独立探针 crate 在 `aarch64-apple-darwin` 与 `x86_64-pc-windows-msvc`（cargo-xwin）两个 target 上 `cargo check` 通过。
+
+托盘快捷面板额外需要 Tauri 的 `macos-private-api` feature（macOS 透明窗口），配置见 `Cargo.toml` 与 `tauri.conf.json::app.macOSPrivateApi`；该 feature 会排除 Mac App Store 渠道。
 
 ## 9. 错误处理与测试
 
@@ -432,14 +446,17 @@ Windows 验收清单（用户在 Windows 机器执行）：
 
 | 检查 | 结果 |
 | --- | --- |
-| `cargo test --lib`（macOS） | 280 passed / 1 failed / 1 ignored。失败项为**未改动的既有** `vpn::detect::tests::bundled_openconnect_is_probed_not_skipped`：仓库内 `openconnect.exe` 是 Windows PE，macOS 上无法被探测（`git diff` 证明本分支未改 `src/vpn`、`src/apps`） |
+| `cargo test --lib`（macOS） | 287 passed / 1 failed / 1 ignored。失败项为**未改动的既有** `vpn::detect::tests::bundled_openconnect_is_probed_not_skipped`：仓库内 `openconnect.exe` 是 Windows PE，macOS 上无法被探测（`git diff` 证明本分支未改 `src/vpn`、`src/apps`） |
 | cleaner 单测 | 26 个全绿（Windows UninstallString/注册表过滤去重/EstimatedSize、macOS plist/残留规则/白名单、内存聚合、符号链接防环、并行 map 顺序） |
 | `cargo check`（macOS） | exit 0，无 warning |
 | `cargo xwin check --target x86_64-pc-windows-msvc` | exit 0，无 warning |
 | `pnpm build`（vue-tsc + vite） | exit 0（仅原有 chunk > 500kB 提示） |
 | 实机冒烟 `cleaner::macos_smoke`（`#[ignore]`，`CLEANER_SMOKE=1` 触发） | 通过：真实创建 `~/Applications/*.app` + 3 份 `~/Library` 残留 → 列表扫到（54 条）→ 残留扫描命中 3 条 high → 删除后原路径消失、`trash` 返回成功 → 卸载后 app 包移出 `~/Applications` → 内存采样 328 个应用、占用 78.6%、按内存降序。测试创建的文件在结束（含失败）时清理；`~/.Trash` 内容因 TCC 读不到，未做内容断言 |
+| `trash_guard` 转义回归 | PowerShell 提权脚本的单引号转义改为 `''` 并补 2 个单测（此前误用 POSIX `'\''`，路径含引号会提前闭合字符串且有注入面） |
+| 快捷面板位置单测 `quick_panel_tests` | 5 个全绿：菜单栏在上下方、左右边缘夹取、多显示器负坐标、屏幕小于面板不 panic |
+| 快捷面板页面渲染（Tabbit + mock IPC） | `quick.html` 内存页签（69%、7 个应用排行、释放按钮）与 VPN 页签（已连接、规则/全局/直连）渲染正常；主窗口清理页无副标题、`Input` 组件带搜索图标且与排序按钮对齐（截图留档） |
 
-未覆盖（需人工）：GUI 里的真实点击链路（前端已用 stub IPC 做过渲染/交互冒烟）、macOS 提权删除与 `purge` 的授权弹窗、Windows 上所有运行时行为。
+未覆盖（需人工）：托盘图标的真实点击弹出（macOS 辅助功能/屏幕录制权限挡住了脚本化点击与截图，已用页面渲染 + 位置单测替代）、GUI 里的真实点击链路（前端已用 stub IPC 做过渲染/交互冒烟）、macOS 提权删除与 `purge` 的授权弹窗、Windows 上所有运行时行为。
 
 ## 10. 实施顺序
 
@@ -452,3 +469,4 @@ Windows 验收清单（用户在 Windows 机器执行）：
 7. 前端：类型/API/composable/两个面板 + App.vue 入口 + 页签
 8. 联调：进度事件、轮询生命周期、错误提示
 9. 验证：`pnpm build`、`cargo test`、cargo-xwin check、macOS 手工验收；产出 Windows 验收清单
+10. v1.1：托盘快捷面板（独立透明小窗 + 内存/VPN 页签 + 位置单测），清理页去掉副标题、搜索框改用组件 Input
