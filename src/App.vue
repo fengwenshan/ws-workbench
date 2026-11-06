@@ -307,6 +307,7 @@ onMounted(async () => {
       return;
     }
     const map: Record<string, AppView> = {
+      "nav-cleaner": "cleaner",
       "nav-proxy": "proxy",
       "nav-settings": "settings",
     };
