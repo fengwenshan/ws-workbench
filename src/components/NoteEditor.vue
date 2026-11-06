@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import Vditor from 'vditor'
 import 'vditor/dist/index.css'
 import type { LogLevel } from '@/types'
@@ -75,6 +75,7 @@ function toggleSourceMode(_event: Event, inner: IVditor) {
     inner.currentMode === 'sv' ? '返回即时渲染' : '查看源代码',
   )
   syncTableOps()
+  refreshCodeLanguageHints()
 }
 
 const TOOLBAR: Array<string | IMenuItem> = [
@@ -147,6 +148,10 @@ onMounted(() => {
   window.addEventListener('resize', syncTableOps)
   host.addEventListener('mousedown', rememberCodeClick, true)
   host.addEventListener('click', restoreCodeCaret, false)
+  host.addEventListener('click', onCodeLanguageClick, false)
+  document.addEventListener('mousedown', closeLanguagePickerOnOutside, true)
+  document.addEventListener('keydown', closeLanguagePickerOnEscape, true)
+  document.addEventListener('scroll', closeLanguagePickerOnScroll, true)
 })
 
 function onReady() {
@@ -159,6 +164,7 @@ function onReady() {
   // 初始化期间外部又换了实体：把最新值补进去
   if (editor.getValue() !== lastKnown) editor.setValue(lastKnown, true)
   content.value = lastKnown
+  refreshCodeLanguageHints()
   if (pendingInsert) {
     const md = pendingInsert
     pendingInsert = null
@@ -173,8 +179,17 @@ onBeforeUnmount(() => {
   window.removeEventListener('resize', syncTableOps)
   hostRef.value?.removeEventListener('mousedown', rememberCodeClick, true)
   hostRef.value?.removeEventListener('click', restoreCodeCaret, false)
+  hostRef.value?.removeEventListener('click', onCodeLanguageClick, false)
+  document.removeEventListener('mousedown', closeLanguagePickerOnOutside, true)
+  document.removeEventListener('keydown', closeLanguagePickerOnEscape, true)
+  document.removeEventListener('scroll', closeLanguagePickerOnScroll, true)
   pendingCodeClick = null
+  languagePicker.value = null
   tableOps.value = null
+  if (languageHintRaf) {
+    window.cancelAnimationFrame(languageHintRaf)
+    languageHintRaf = 0
+  }
   if (emitTimer) {
     window.clearTimeout(emitTimer)
     emitTimer = undefined
@@ -225,6 +240,7 @@ function applyLocalValue(value: string) {
   // 立即通知父级：侧栏的附件/大纲解析要用最新正文（落盘仍走 500ms 防抖）
   emit('change', value)
   scheduleEmit(value)
+  scheduleLanguageHints()
 }
 
 function onInput(value: string) {
@@ -261,6 +277,7 @@ watch(
     }
     const editor = vditor.value
     if (ready && editor && editor.getValue() !== next) editor.setValue(next, true)
+    refreshCodeLanguageHints()
   },
 )
 
@@ -291,6 +308,7 @@ function setMarkdown(md: string) {
   const editor = vditor.value
   if (editor && editor.getValue() !== next) editor.setValue(next, true)
   syncTableOps()
+  refreshCodeLanguageHints()
 }
 
 function focus() {
@@ -359,6 +377,11 @@ function rememberCodeClick(event: MouseEvent) {
   const root = host.querySelector<HTMLElement>('.vditor-ir')
   if (!root || !root.contains(target)) return
   const element = target instanceof Element ? target : target.parentElement
+  if (element?.closest('[data-type="code-block-info"]')) {
+    // 语言标签自己处理点击（打开语言选择），不参与代码光标定位
+    event.preventDefault()
+    return
+  }
   const block = element?.closest<HTMLElement>('[data-type="code-block"]')
   if (!block) return
   pendingCodeClick = { block, x: event.clientX, y: event.clientY }
@@ -579,6 +602,272 @@ function addTableColumn(position: 'left' | 'right') {
   commitTableChange(ctx.root, currentRow.cells[targetIndex] ?? null)
 }
 
+// 空语言的代码块在标签上加 class，用来显示「代码语言」占位文案
+let languageHintRaf = 0
+
+function refreshCodeLanguageHints() {
+  const host = hostRef.value
+  const editor = vditor.value
+  if (!host || !editor || !ready || editor.getCurrentMode() !== 'ir') return
+  const root = host.querySelector<HTMLElement>('.vditor-ir')
+  if (!root) return
+  root.querySelectorAll<HTMLElement>('[data-type="code-block"]').forEach((block) => {
+    const marker = block.querySelector<HTMLElement>('[data-type="code-block-info"]')
+    if (!marker) return
+    marker.classList.toggle('is-empty-lang', !languageOf(block))
+  })
+}
+
+function scheduleLanguageHints() {
+  if (languageHintRaf) return
+  languageHintRaf = window.requestAnimationFrame(() => {
+    languageHintRaf = 0
+    refreshCodeLanguageHints()
+  })
+}
+
+// ========== 代码块语言选择 ==========
+interface CodeLanguageOption {
+  value: string
+  label: string
+}
+
+const CODE_LANGUAGE_PRESETS: CodeLanguageOption[] = [
+  { value: '', label: '纯文本' },
+  { value: 'javascript', label: 'JavaScript' },
+  { value: 'typescript', label: 'TypeScript' },
+  { value: 'html', label: 'HTML' },
+  { value: 'css', label: 'CSS' },
+  { value: 'scss', label: 'SCSS' },
+  { value: 'less', label: 'Less' },
+  { value: 'json', label: 'JSON' },
+  { value: 'yaml', label: 'YAML' },
+  { value: 'toml', label: 'TOML' },
+  { value: 'xml', label: 'XML' },
+  { value: 'markdown', label: 'Markdown' },
+  { value: 'sql', label: 'SQL' },
+  { value: 'java', label: 'Java' },
+  { value: 'kotlin', label: 'Kotlin' },
+  { value: 'python', label: 'Python' },
+  { value: 'go', label: 'Go' },
+  { value: 'rust', label: 'Rust' },
+  { value: 'c', label: 'C' },
+  { value: 'cpp', label: 'C++' },
+  { value: 'csharp', label: 'C#' },
+  { value: 'php', label: 'PHP' },
+  { value: 'ruby', label: 'Ruby' },
+  { value: 'swift', label: 'Swift' },
+  { value: 'objectivec', label: 'Objective-C' },
+  { value: 'scala', label: 'Scala' },
+  { value: 'bash', label: 'Shell' },
+  { value: 'powershell', label: 'PowerShell' },
+  { value: 'dockerfile', label: 'Dockerfile' },
+  { value: 'nginx', label: 'Nginx' },
+  { value: 'makefile', label: 'Makefile' },
+  { value: 'ini', label: 'INI' },
+]
+
+const languagePicker = ref<{
+  block: HTMLElement
+  left: number
+  top: number
+  transform: string
+  current: string
+  wasExpanded: boolean
+} | null>(null)
+const languageSearch = ref('')
+const languageSearchRef = ref<HTMLInputElement | null>(null)
+const languageListRef = ref<HTMLElement | null>(null)
+const languagePickerRef = ref<HTMLElement | null>(null)
+
+function hljsLanguageNames(): string[] {
+  const hljs = (window as unknown as { hljs?: { listLanguages?: () => string[] } }).hljs
+  return typeof hljs?.listLanguages === 'function' ? hljs.listLanguages() : []
+}
+
+function languageOf(block: HTMLElement): string {
+  const info = block.querySelector<HTMLElement>('[data-type="code-block-info"]')
+  return (info?.textContent ?? '').replace(/\u200b/g, '').trim()
+}
+
+const languageOptions = computed<CodeLanguageOption[]>(() => {
+  const query = languageSearch.value.trim().toLowerCase()
+  const current = languagePicker.value?.current ?? ''
+  const presets = CODE_LANGUAGE_PRESETS.slice()
+  if (current && !presets.some((item) => item.value === current)) {
+    presets.unshift({ value: current, label: current })
+  }
+  if (!query) return presets
+  const seen = new Set<string>()
+  const result: CodeLanguageOption[] = []
+  for (const item of presets) {
+    if (`${item.label} ${item.value}`.toLowerCase().includes(query)) {
+      result.push(item)
+      seen.add(item.value)
+    }
+  }
+  for (const name of hljsLanguageNames()) {
+    if (name.includes(query) && !seen.has(name)) {
+      result.push({ value: name, label: name })
+      seen.add(name)
+    }
+  }
+  return result
+})
+
+function openLanguagePicker(block: HTMLElement, marker: HTMLElement) {
+  const host = hostRef.value
+  const editor = vditor.value
+  if (!host || !editor || !ready || editor.getCurrentMode() !== 'ir') return
+  const hostRect = host.getBoundingClientRect()
+  const rect = marker.getBoundingClientRect()
+  const panelWidth = 248
+  let left = rect.right - hostRect.left
+  let transform = 'translateX(-100%)'
+  if (left - panelWidth < 8) {
+    left = Math.max(8, Math.min(rect.left - hostRect.left, hostRect.width - panelWidth - 8))
+    transform = 'translateX(0)'
+  }
+  const belowTop = rect.bottom - hostRect.top + 6
+  const fitsBelow = belowTop + 300 <= hostRect.height
+  const wasExpanded = block.classList.contains('vditor-ir__node--expand')
+  languagePicker.value = {
+    block,
+    left,
+    top: fitsBelow ? belowTop : rect.top - hostRect.top - 6,
+    transform: `${transform} ${fitsBelow ? 'translateY(0)' : 'translateY(-100%)'}`,
+    current: languageOf(block),
+    wasExpanded,
+  }
+  languageSearch.value = ''
+  nextTick(() => {
+    languageListRef.value?.querySelector('.is-current')?.scrollIntoView({ block: 'nearest' })
+    languageSearchRef.value?.focus()
+    // 搜索框拿到焦点会让编辑器失焦，Vditor 会顺手收起代码块，这里保持展开
+    if (wasExpanded) block.classList.add('vditor-ir__node--expand')
+  })
+}
+
+function closeLanguagePicker() {
+  languagePicker.value = null
+  languageSearch.value = ''
+}
+
+function closeLanguagePickerOnOutside(event: MouseEvent) {
+  if (!languagePicker.value) return
+  const target = event.target
+  if (!(target instanceof Node)) return
+  if (languagePickerRef.value?.contains(target)) return
+  const element = target instanceof Element ? target : target.parentElement
+  // 点在语言标签上是重新打开，不算外部点击
+  if (element?.closest('[data-type="code-block-info"]')) return
+  closeLanguagePicker()
+}
+
+function closeLanguagePickerOnEscape(event: KeyboardEvent) {
+  if (event.key === 'Escape') closeLanguagePicker()
+}
+
+function closeLanguagePickerOnScroll(event: Event) {
+  if (!languagePicker.value) return
+  const target = event.target
+  if (target instanceof Node && languagePickerRef.value?.contains(target)) return
+  closeLanguagePicker()
+}
+
+function onCodeLanguageClick(event: MouseEvent) {
+  const host = hostRef.value
+  const editor = vditor.value
+  if (!host || !editor || !ready || editor.getCurrentMode() !== 'ir') return
+  const target = event.target
+  if (!(target instanceof Node)) return
+  const element = target instanceof Element ? target : target.parentElement
+  const marker = element?.closest<HTMLElement>('[data-type="code-block-info"]')
+  if (!marker || !host.contains(marker)) return
+  const block = marker.closest<HTMLElement>('[data-type="code-block"]')
+  if (!block) return
+  event.preventDefault()
+  event.stopPropagation()
+  openLanguagePicker(block, marker)
+}
+
+function highlightPreviewCode(previewCode: HTMLElement, code: string, language: string) {
+  if (!language) {
+    previewCode.textContent = code
+    previewCode.className = ''
+    return
+  }
+  const hljs = (window as unknown as {
+    hljs?: {
+      highlight?: (code: string, options: { language: string; ignoreIllegals?: boolean }) => { value?: string }
+      getLanguage?: (language: string) => unknown
+    }
+  }).hljs
+  try {
+    if (typeof hljs?.highlight === 'function' && (!hljs.getLanguage || hljs.getLanguage(language))) {
+      const result = hljs.highlight(code, { language, ignoreIllegals: true })
+      if (result?.value) {
+        previewCode.innerHTML = result.value
+        previewCode.className = `language-${language} hljs`
+        return
+      }
+    }
+  } catch {
+    // 语言名 hljs 不认识时退回纯文本
+  }
+  previewCode.textContent = code
+  previewCode.className = `language-${language}`
+}
+
+function focusCodeStart(block: HTMLElement) {
+  const editable =
+    block.closest<HTMLElement>('pre.vditor-reset') ??
+    hostRef.value?.querySelector<HTMLElement>('pre.vditor-reset')
+  const rawCode = block.querySelector<HTMLElement>('pre.vditor-ir__marker--pre code')
+  if (!editable || !rawCode) return
+  editable.focus()
+  try {
+    const range = document.createRange()
+    range.selectNodeContents(rawCode)
+    range.collapse(true)
+    const selection = window.getSelection()
+    selection?.removeAllRanges()
+    selection?.addRange(range)
+  } catch {
+    // 光标恢复失败不影响语言切换
+  }
+}
+
+function applyCodeLanguage(language: string) {
+  const picker = languagePicker.value
+  const editor = vditor.value
+  if (!picker || !editor) return
+  const { block } = picker
+  const marker = block.querySelector<HTMLElement>('[data-type="code-block-info"]')
+  const rawCode = block.querySelector<HTMLElement>('pre.vditor-ir__marker--pre code')
+  if (!marker || !rawCode) {
+    closeLanguagePicker()
+    return
+  }
+  const rawText = rawCode.textContent ?? ''
+  marker.textContent = language
+  rawCode.className = language ? `language-${language}` : ''
+  const previewCode = block.querySelector<HTMLElement>('pre.vditor-ir__preview code')
+  if (previewCode) highlightPreviewCode(previewCode, rawText, language)
+  closeLanguagePicker()
+  applyLocalValue(editor.getValue())
+  refreshCodeLanguageHints()
+  if (picker.wasExpanded) {
+    block.classList.add('vditor-ir__node--expand')
+    focusCodeStart(block)
+  }
+}
+
+function pickFirstLanguage() {
+  const first = languageOptions.value[0]
+  if (first) applyCodeLanguage(first.value)
+}
+
 defineExpose({ insertMarkdown, setMarkdown, focus, scrollToHeading })
 
 // ========== 图片上传（加密链路） ==========
@@ -768,6 +1057,38 @@ function onPasteCapture(event: ClipboardEvent) {
       <button type="button" title="在下方插入一行" @click="addTableRow('below')">↓ 行</button>
       <button type="button" title="在左侧插入一列" @click="addTableColumn('left')">← 列</button>
       <button type="button" title="在右侧插入一列" @click="addTableColumn('right')">→ 列</button>
+    </div>
+    <div
+      v-if="languagePicker"
+      ref="languagePickerRef"
+      class="note-lang-picker"
+      :style="{ left: `${languagePicker.left}px`, top: `${languagePicker.top}px`, transform: languagePicker.transform }"
+    >
+      <input
+        ref="languageSearchRef"
+        v-model="languageSearch"
+        class="note-lang-search"
+        type="text"
+        placeholder="搜索代码语言"
+        spellcheck="false"
+        @keydown.esc.stop.prevent="closeLanguagePicker"
+        @keydown.enter.prevent="pickFirstLanguage"
+      />
+      <div ref="languageListRef" class="note-lang-list">
+        <button
+          v-for="item in languageOptions"
+          :key="item.value || 'plain'"
+          type="button"
+          class="note-lang-item"
+          :class="{ 'is-current': item.value === languagePicker.current }"
+          @click="applyCodeLanguage(item.value)"
+        >
+          <span class="note-lang-label">{{ item.label }}</span>
+          <span v-if="item.value && item.label !== item.value" class="note-lang-value">{{ item.value }}</span>
+          <span v-if="item.value === languagePicker.current" class="note-lang-check">✓</span>
+        </button>
+        <div v-if="languageOptions.length === 0" class="note-lang-empty">没有匹配的语言</div>
+      </div>
     </div>
     <div class="note-editor-statusbar">
       <span class="note-editor-words">{{ wordCount }} 字</span>
@@ -1042,6 +1363,10 @@ function onPasteCapture(event: ClipboardEvent) {
 .note-editor :deep(.vditor-ir div[data-type='code-block']:not(.vditor-ir__node--expand) > pre.vditor-ir__marker--pre) {
   display: none;
 }
+/* 收起的代码块悬停时也露出语言标签，方便不进入编辑直接改语言（参考 Typora） */
+.note-editor :deep(.vditor-ir div[data-type='code-block']:not(.vditor-ir__node--expand):hover .vditor-ir__marker--info) {
+  display: block;
+}
 
 /* 展开态不再用伪元素画出 ``` 围栏 */
 .note-editor :deep(.vditor-ir__node--expand[data-type='code-block']::before),
@@ -1050,20 +1375,36 @@ function onPasteCapture(event: ClipboardEvent) {
   display: none !important;
 }
 
-/* 语言标签绝对定位到右上角，不占文档流，避免把面板撑高 */
+/* 语言标签绝对定位到右上角，不占文档流，避免把面板撑高；点击可切换语言 */
 .note-editor :deep(.vditor-ir div[data-type='code-block'] .vditor-ir__marker--info) {
   position: absolute;
   top: 7px;
   right: 12px;
   z-index: 2;
   display: block;
-  padding: 0;
+  width: auto;
+  height: auto;
+  overflow: visible;
+  visibility: visible;
+  padding: 2px 6px;
+  border-radius: 4px;
   font-size: 11px;
-  line-height: 1;
+  line-height: 16px;
   text-align: right;
   color: var(--note-text-muted);
-  pointer-events: none;
+  cursor: pointer;
   user-select: none;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+.note-editor :deep(.vditor-ir div[data-type='code-block'] .vditor-ir__marker--info:hover) {
+  background: var(--note-bg-soft);
+  color: var(--note-primary);
+}
+/* 没写语言时给个可点击的占位文案，不影响正文 markdown（空标签序列化后仍是 ```）。
+   标记里通常有个零宽空格，:empty 选不中，所以由 refreshCodeLanguageHints 打 class。 */
+.note-editor :deep(.vditor-ir div[data-type='code-block'] .vditor-ir__marker--info.is-empty-lang::before) {
+  content: '代码语言';
+  color: var(--note-text-muted);
 }
 
 .note-editor :deep(.vditor-ir div[data-type='code-block'] pre),
@@ -1162,6 +1503,77 @@ function onPasteCapture(event: ClipboardEvent) {
 /* IR 编辑时用不到代码块右上角的复制按钮 */
 .note-editor :deep(.vditor-ir .vditor-copy) {
   display: none !important;
+}
+
+/* ========== 代码块语言选择面板 ========== */
+.note-lang-picker {
+  position: absolute;
+  z-index: 21;
+  display: flex;
+  flex-direction: column;
+  width: 248px;
+  padding: 4px;
+  border: 1px solid var(--note-border-color);
+  border-radius: 10px;
+  background: var(--note-bg);
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.14);
+}
+.note-lang-search {
+  width: 100%;
+  height: 30px;
+  padding: 0 8px;
+  border: 0;
+  background: transparent;
+  color: var(--note-text);
+  font-size: 12px;
+  outline: none;
+}
+.note-lang-list {
+  max-height: 240px;
+  padding-top: 2px;
+  border-top: 1px solid var(--note-border-color);
+  overflow-y: auto;
+}
+.note-lang-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 28px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--note-text-secondary);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.note-lang-item:hover {
+  background: var(--note-bg-soft);
+  color: var(--note-text);
+}
+.note-lang-item.is-current {
+  color: var(--note-primary);
+}
+.note-lang-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.note-lang-value {
+  color: var(--note-text-muted);
+  font-size: 11px;
+}
+.note-lang-check {
+  color: var(--note-primary);
+  font-size: 12px;
+}
+.note-lang-empty {
+  padding: 10px 8px;
+  color: var(--note-text-muted);
+  font-size: 12px;
 }
 
 /* ========== 表格浮动工具条：加行 / 加列 ========== */
