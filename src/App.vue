@@ -29,6 +29,7 @@ import LogDrawer from "@/components/LogDrawer.vue";
 import VpnPanel from "@/components/vpn/VpnPanel.vue";
 import VpnStatusDot from "@/components/vpn/VpnStatusDot.vue";
 import SettingsPanel from "@/components/settings/SettingsPanel.vue";
+import CleanerPanel from "@/components/cleaner/CleanerPanel.vue";
 import QuickOpenPalette from "@/components/QuickOpenPalette.vue";
 
 const {
@@ -674,6 +675,20 @@ async function handlePack(project: any, asZip: boolean = false) {
               <VpnStatusDot :state="vpnDotState" size="md" glow />
             </span>
           </button>
+          <!-- 清理工具：系统清理（软件卸载 + 内存占用） -->
+          <button
+            class="rail-btn"
+            :class="{ active: view === 'cleaner' }"
+            :aria-current="view === 'cleaner' ? 'page' : undefined"
+            :title="shortcutTitle('清理', '4')"
+            aria-label="清理"
+            @click="selectTool('cleaner')"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M12 3.5l1.8 4.4 4.4 1.8-4.4 1.8L12 15.9l-1.8-4.4L5.8 9.7l4.4-1.8z" />
+              <path d="M18.5 15l.8 1.9 1.9.8-1.9.8-.8 1.9-.8-1.9-1.9-.8 1.9-.8z" />
+            </svg>
+          </button>
         </div>
         <div class="rail-bottom">
           <button
@@ -805,6 +820,11 @@ async function handlePack(project: any, asZip: boolean = false) {
             :active="view === 'proxy'"
             :menu-collapsed="vpnMenuCollapsed"
           />
+        </div>
+
+        <!-- 清理工具 -->
+        <div v-show="view === 'cleaner'" class="workspace-body">
+          <CleanerPanel :active="view === 'cleaner'" />
         </div>
 
         <!-- 设置工具 -->

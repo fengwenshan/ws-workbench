@@ -3,7 +3,7 @@ import { safeGet, safeSet } from './safeStorage'
 import { platform } from '@/platform'
 
 /** 工具页标识：日志是右侧抽屉，不属于工具页 */
-export type AppView = 'home' | 'proxy' | 'settings'
+export type AppView = 'home' | 'proxy' | 'cleaner' | 'settings'
 
 const TREE_WIDTH_KEY = 'ws-workbench:layout:tree-width'
 const TREE_COLLAPSED_KEY = 'ws-workbench:layout:tree-collapsed'
@@ -142,6 +142,10 @@ export function useWorkbenchLayout() {
       case '3':
         event.preventDefault()
         selectTool('settings')
+        break
+      case '4':
+        event.preventDefault()
+        selectTool('cleaner')
         break
       case 'b':
         event.preventDefault()
