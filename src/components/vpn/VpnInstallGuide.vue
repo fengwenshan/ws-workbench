@@ -91,7 +91,7 @@ async function copyCommand(command: string) {
   margin-bottom: 4px;
 }
 .guide-head p {
-  font-size: 13px;
+  font-size: 14px;
   line-height: 1.6;
   color: var(--text-secondary);
 }
@@ -101,7 +101,7 @@ async function copyCommand(command: string) {
 }
 .guide-steps li {
   margin-bottom: 12px;
-  font-size: 13px;
+  font-size: 14px;
   color: var(--text-secondary);
 }
 .step-title {
@@ -122,7 +122,7 @@ async function copyCommand(command: string) {
   flex: 1;
   background: var(--bg-tag);
   border-radius: 4px;
-  padding: 5px 8px;
+  padding: 6px 8px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12px;
   color: var(--text-primary);
@@ -132,7 +132,7 @@ async function copyCommand(command: string) {
   border: 1px solid var(--border-color);
   background: var(--bg-input);
   border-radius: 4px;
-  padding: 3px 10px;
+  padding: 4px 10px;
   font-size: 12px;
   cursor: pointer;
   color: var(--text-secondary);
@@ -154,13 +154,13 @@ async function copyCommand(command: string) {
 .import-text {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 4px;
   font-size: 12px;
   color: var(--text-secondary);
   line-height: 1.55;
 }
 .import-text strong {
-  font-size: 13px;
+  font-size: 14px;
   color: var(--text-primary);
 }
 .guide-links {

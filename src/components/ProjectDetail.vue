@@ -168,7 +168,7 @@ const emit = defineEmits<{
 .type-badge,
 .btn-type {
   font-size: 12px;
-  padding: 3px 8px;
+  padding: 4px 8px;
   border-radius: 4px;
   border: 1px solid var(--border-color);
   color: var(--text-secondary);

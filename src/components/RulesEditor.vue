@@ -81,7 +81,7 @@ function onKeydown(e: KeyboardEvent) {
   padding: 2px 8px;
   background: var(--bg-tag);
   border-radius: 4px;
-  font-size: 13px;
+  font-size: 14px;
   color: var(--text-tag);
 }
 .tag-remove {
@@ -102,7 +102,7 @@ function onKeydown(e: KeyboardEvent) {
   border: none;
   outline: none;
   background: transparent;
-  font-size: 13px;
+  font-size: 14px;
   color: var(--text-primary);
 }
 </style>

@@ -207,7 +207,7 @@ function glyph(app: OpenWithApp | null) {
   width: 18px;
   height: 18px;
   object-fit: contain;
-  border-radius: 3px;
+  border-radius: 4px;
 }
 .ow-glyph {
   display: inline-flex;
@@ -218,7 +218,7 @@ function glyph(app: OpenWithApp | null) {
   border-radius: 4px;
   background: #e5e7eb;
   color: #4b5563;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   line-height: 1;
 }
@@ -241,13 +241,13 @@ function glyph(app: OpenWithApp | null) {
   align-items: center;
   gap: 8px;
   width: 100%;
-  padding: 7px 8px;
+  padding: 8px 8px;
   border: none;
   border-radius: 6px;
   background: transparent;
   color: var(--text-primary);
   cursor: pointer;
-  font-size: 13px;
+  font-size: 14px;
   text-align: left;
   white-space: nowrap;
 }

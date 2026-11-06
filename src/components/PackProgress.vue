@@ -71,7 +71,7 @@ watch(() => props.packing, (isPacking, wasPacking) => {
   align-items: center;
   justify-content: space-between;
   margin-bottom: 6px;
-  font-size: 13px;
+  font-size: 14px;
 }
 .phase-label {
   color: var(--text-primary);
