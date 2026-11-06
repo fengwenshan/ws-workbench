@@ -717,9 +717,10 @@ function onPasteCapture(event: ClipboardEvent) {
   font-size: 0.86em;
 }
 
-/* ========== 代码块：一个圆角面板，编辑态只保留可编辑的那一份 ========== */
+/* ========== 代码块：圆角面板，编辑时也保留语法高亮 ========== */
 .note-editor :deep(.vditor-ir div[data-type='code-block']),
 .note-editor :deep(.vditor-wysiwyg div[data-type='code-block']) {
+  position: relative;
   margin: 14px 0;
   border: 1px solid var(--note-border-color);
   border-radius: 8px;
@@ -736,11 +737,6 @@ function onPasteCapture(event: ClipboardEvent) {
   display: none;
 }
 
-/* 展开编辑时 Vditor 会同时显示「原始 pre + 渲染副本」，只保留可编辑的那份 */
-.note-editor :deep(.vditor-ir .vditor-ir__node--expand[data-type='code-block'] pre.vditor-ir__preview) {
-  display: none;
-}
-
 /* 展开态不再用伪元素画出 ``` 围栏 */
 .note-editor :deep(.vditor-ir__node--expand[data-type='code-block']::before),
 .note-editor :deep(.vditor-ir__node--expand[data-type='code-block']::after) {
@@ -748,14 +744,20 @@ function onPasteCapture(event: ClipboardEvent) {
   display: none !important;
 }
 
-/* 语言标签放到代码块右上角，像 Typora 那样低调 */
+/* 语言标签绝对定位到右上角，不占文档流，避免把面板撑高 */
 .note-editor :deep(.vditor-ir div[data-type='code-block'] .vditor-ir__marker--info) {
+  position: absolute;
+  top: 7px;
+  right: 12px;
+  z-index: 2;
   display: block;
-  padding: 7px 14px 0;
+  padding: 0;
   font-size: 11px;
   line-height: 1;
   text-align: right;
   color: var(--note-text-muted);
+  pointer-events: none;
+  user-select: none;
 }
 
 .note-editor :deep(.vditor-ir div[data-type='code-block'] pre),
@@ -778,9 +780,109 @@ function onPasteCapture(event: ClipboardEvent) {
   line-height: 1.7;
 }
 
+/* 展开态的可编辑 pre 必须是块级：Vditor 默认把它当 inline，
+   行内元素里放块级 code 会算出巨大的行高，表现就是点一下代码块突然变得很高。 */
+.note-editor :deep(.vditor-ir .vditor-ir__node--expand[data-type='code-block'] > pre.vditor-ir__marker--pre) {
+  display: block;
+  position: relative;
+  z-index: 1;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: transparent;
+  caret-color: var(--note-text);
+}
+.note-editor :deep(.vditor-ir .vditor-ir__node--expand[data-type='code-block'] > pre.vditor-ir__marker--pre code) {
+  color: transparent !important;
+}
+
+/* 把渲染好的高亮层垫在编辑层下面：编辑时既能看见语法颜色，尺寸也保持不变 */
+.note-editor :deep(.vditor-ir .vditor-ir__node--expand[data-type='code-block'] > pre.vditor-ir__preview) {
+  display: block;
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  margin: 0;
+  padding: 12px 16px;
+  overflow: hidden;
+  background: transparent;
+  pointer-events: none;
+  user-select: none;
+}
+.note-editor :deep(.vditor-ir .vditor-ir__node--expand[data-type='code-block'] > pre.vditor-ir__preview code) {
+  display: block;
+  padding: 0 !important;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow: hidden;
+  max-height: none !important;
+}
+
+/* 所见即所得模式下的代码块同样是「可编辑层 + 高亮层」叠放，
+   通过 :has() 判断 Vditor 何时把 __pre 切到 display:block。 */
+.note-editor :deep(.vditor-wysiwyg div[data-type='code-block']:has(> pre.vditor-wysiwyg__pre[style*='block'])) > pre.vditor-wysiwyg__pre {
+  position: relative;
+  z-index: 1;
+  margin: 0;
+  padding: 12px 16px;
+  color: transparent;
+  caret-color: var(--note-text);
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow: hidden;
+}
+.note-editor :deep(.vditor-wysiwyg div[data-type='code-block']:has(> pre.vditor-wysiwyg__pre[style*='block'])) > pre.vditor-wysiwyg__pre code {
+  color: transparent !important;
+}
+.note-editor :deep(.vditor-wysiwyg div[data-type='code-block']:has(> pre.vditor-wysiwyg__pre[style*='block'])) > pre.vditor-wysiwyg__preview {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  margin: 0;
+  padding: 12px 16px;
+  overflow: hidden;
+  background: transparent;
+  pointer-events: none;
+  user-select: none;
+}
+.note-editor :deep(.vditor-wysiwyg div[data-type='code-block']:has(> pre.vditor-wysiwyg__pre[style*='block'])) > pre.vditor-wysiwyg__preview code {
+  display: block;
+  padding: 0 !important;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: none !important;
+  overflow: hidden;
+}
+
 /* IR 编辑时用不到代码块右上角的复制按钮 */
 .note-editor :deep(.vditor-ir .vditor-copy) {
   display: none !important;
+}
+
+/* ========== 任务列表：自定义圆形复选框（更大、可点击） ========== */
+.note-editor :deep(.vditor-task input[type='checkbox']) {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  margin: 0 0.35em 0.2em -1.45em;
+  border: 1.5px solid var(--note-border-color);
+  border-radius: 50%;
+  background: var(--note-bg) center / 10px 10px no-repeat;
+  vertical-align: -3px;
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+.note-editor :deep(.vditor-task input[type='checkbox']:hover) {
+  border-color: var(--note-primary);
+}
+.note-editor :deep(.vditor-task input[type='checkbox']:checked) {
+  border-color: var(--note-primary);
+  background-color: var(--note-primary);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2.4 6.1 5 8.7l4.6-5.1' fill='none' stroke='%23fff' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+.note-editor :deep(.vditor-task input[type='checkbox']:focus-visible) {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.18);
 }
 
 /* ========== 表格 ========== */
