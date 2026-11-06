@@ -303,6 +303,32 @@ impl Worker {
         Some(hint)
     }
 
+    /// 把「认证失败」翻译成下一步能做的事。
+    ///
+    /// AnyConnect 服务端拒绝账号密码时只说一句 `Login failed`，而 worker 是往 stdin
+    /// 写一次密码就关掉的，所以第二次提示密码时直接读到 EOF——那行
+    /// `Password:fgetws (stdin): No error` 就是 EOF 的产物，不是「程序把密码弄丢了」。
+    /// 光看日志很容易往「密码没传进去」的方向排查，其实是要先确认账号本身。
+    fn auth_hint(&self) -> Option<String> {
+        let text = self.tail.join("\n").to_lowercase();
+        let rejected = text.contains("login failed")
+            || text.contains("failed to complete authentication")
+            || text.contains("authentication failed")
+            || text.contains("invalid password")
+            || text.contains("username or password");
+        if !rejected {
+            return None;
+        }
+        Some(String::from(
+            "服务端拒绝了这个账号或密码：openconnect 只尝试一次，第二次要密码时 stdin 已经结束，\
+             所以后面那句 `fgetws (stdin)` 不代表密码没送到。先确认这几件事：\
+             用官方 AnyConnect 客户端或网页登录同一个账号，确认密码没改、账号没被锁；\
+             账号属于非默认认证组时，在「额外参数」里加一行 `--authgroup=<组名>`；\
+             需要短信/令牌二次验证的账号要在密码后面追加一次动态码。\
+             想看服务端返回的原文，在「额外参数」里加一行 `-v` 再连一次。",
+        ))
+    }
+
     // ======================= 心跳与守护 =======================
 
     /// 心跳守卫：主进程被强杀时没人来收尾，心跳停了就自己走正常停止流程
@@ -768,6 +794,22 @@ impl Worker {
 
         let mut request = self.request.clone();
         request.script_path = script_path.to_string_lossy().to_string();
+        // 认证失败时最该先排除的是密码本身有没有问题，但密码又不能落进日志。
+        // 只打三个不泄密的特征：长度、是否全 ASCII、首尾有没有空白。
+        self.log(&format!(
+            "[诊断] 密码长度 {}，{}，{}",
+            request.password.chars().count(),
+            if request.password.is_ascii() {
+                "全 ASCII"
+            } else {
+                "含非 ASCII 字符（服务端与本地编码不一致时会被判错）"
+            },
+            if request.password.trim().len() == request.password.len() {
+                "首尾无空白"
+            } else {
+                "首尾有空白（会一并送进服务端）"
+            }
+        ));
         // 返回真正下发的那份参数：self.request.script_path 还是空的，
         // 拿它拼日志会打出一句 `--script= vpn.risencn.com:1218` 误导排查
         let args = connector::openconnect_args(&request);
@@ -901,6 +943,11 @@ impl Worker {
                         );
                         // 驱动没装这类问题，光看 openconnect 的原文没人知道该干嘛
                         if let Some(hint) = self.tun_setup_hint() {
+                            reason.push('。');
+                            reason.push_str(&hint);
+                        }
+                        // 认证被拒同理：日志里只有一句 Login failed，看不出该改什么
+                        if let Some(hint) = self.auth_hint() {
                             reason.push('。');
                             reason.push_str(&hint);
                         }
@@ -1263,6 +1310,53 @@ mod tests {
         worker.tail.push("CSTP connected".into());
         worker.tail.push("Login failed.".into());
         assert!(worker.tail_summary().contains("Login failed"));
+    }
+
+    #[test]
+    fn auth_failure_produces_actionable_hint() {
+        // 现场日志：Login failed → 再问一次密码 → fgetws(stdin) EOF。
+        // 提示必须说清「不是密码没送到」，否则下一个人还会往这个方向查。
+        let session = VpnSession::new(std::env::temp_dir().join("ws-worker-test-auth"));
+        let request = VpnRequest {
+            conn_identity: String::new(),
+            proxy_mode: "rule".to_string(),
+            profile_id: "p".into(),
+            profile_name: "n".into(),
+            server: "s".into(),
+            username: "u".into(),
+            password: "12345678".into(),
+            protocol: "anyconnect".into(),
+            connector: crate::vpn::models::ConnectorKind::Auto,
+            connector_path: "x".into(),
+            rules: vec![],
+            default_policy: "DIRECT".into(),
+            extra_args: vec![],
+            script_path: "s".into(),
+            hook_exe: "h".into(),
+            created_at: String::new(),
+        };
+        let mut worker = Worker::new(session, request);
+        worker.tail.push("Please enter your password.".into());
+        worker.tail.push("Login failed.".into());
+        worker
+            .tail
+            .push("Password:fgetws (stdin): No error".into());
+        let hint = worker.auth_hint().expect("认证失败必须给出提示");
+        assert!(hint.contains("fgetws"));
+        assert!(hint.contains("--authgroup"), "提示里要写出可以试的参数");
+        assert!(hint.contains("-v"), "提示里要写出看服务端原文的办法");
+
+        // 不是认证失败时不能误报成认证问题
+        let mut clean = Worker::new(
+            VpnSession::new(std::env::temp_dir().join("ws-worker-test-auth2")),
+            {
+                let mut request = worker.request.clone();
+                request.profile_id = "p2".into();
+                request
+            },
+        );
+        clean.tail.push("CSTP connected".into());
+        assert!(clean.auth_hint().is_none());
     }
 
     #[test]
