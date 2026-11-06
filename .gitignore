@@ -53,3 +53,6 @@ src/components.d.ts
 
 # Swift 编译缓存（design/icons/tools 本地生成，体积很大）
 **/.modulecache/
+
+# 本地临时文件（依赖探针、cargo home 等，勿提交）
+.tmp/
