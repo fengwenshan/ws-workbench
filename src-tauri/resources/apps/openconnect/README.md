@@ -46,13 +46,17 @@ openconnect 9.21 建虚拟网卡时的顺序是：先枚举现成的网卡 → �
 动态创建一个 Wintun 网卡** → 再失败才回退到 TAP-Windows。`wintun.dll` 就在本目录，
 所以开箱即用。注意两点：
 
-1. **Wintun 没有 `--wintun` 这个命令行选项**，它是自动启用的（9.21 对 Wintun 已不再标记为实验特性）。
+1. **Wintun 没有 `--wintun` 这个命令行选项**，它是自动启用的。但 9.21 的
+   `tun-win32.c` 仍会打印 `WARNING: Support for Wintun is experimental and may be
+   unstable`；遇到问题时官方建议改装 TAP-Windows 驱动。
 2. 创建 Wintun 网卡需要**管理员权限**，被拒绝时报的是
    `Access denied creating Wintun adapter. Are you running with Administrator privileges?`
    本程序通过计划任务以管理员身份拉起 worker，正常情况下不会踩到。
 
-Wintun 网卡在 `Get-NetAdapter` 里显示的驱动描述是 `Wintun Userspace Tunnel`，
-名字则来自主机名。`vpn/route.rs` 判断「这块网卡是不是 VPN 网卡」时看的是**驱动描述**而不是
+Wintun 网卡在 `Get-NetAdapter` 里显示的驱动描述是 `OpenConnect Tunnel`
+（Wintun 把 `WintunCreateAdapter` 的 TunnelType `"OpenConnect"` 拼成
+`"OpenConnect Tunnel"`，不是 `Wintun Userspace Tunnel`），名字则来自主机名。
+`vpn/route.rs` 判断「这块网卡是不是 VPN 网卡」时看的是**驱动描述**而不是
 名字，正是为了认得出它（中文系统上 Cisco 的隧道网卡叫「以太网 2」，光看名字永远认不出来）。
 
 ## macOS

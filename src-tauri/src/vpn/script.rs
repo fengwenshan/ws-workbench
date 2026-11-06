@@ -41,28 +41,51 @@ pub fn windows_script(ctx: &ScriptContext) -> String {
 var MODE = "__MODE__";
 var SESSION_DIR = "__SESSION_DIR__";
 var ORIGINAL_GW = "__ORIGINAL_GW__";
+var LOG_PATH = SESSION_DIR + "\\script.log";
+var PREV_LOG_PATH = SESSION_DIR + "\\script.prev.log";
 
 var accumulatedExitCode = 0;
+var lastExitCode = 0;
+var startedAt = new Date().getTime();
 var ws = WScript.CreateObject("WScript.Shell");
 var env = ws.Environment("Process");
 var comspec = ws.ExpandEnvironmentStrings("%comspec%");
+var fso = null;
+try { fso = WScript.CreateObject("Scripting.FileSystemObject"); } catch (e) {}
 
-function run(cmd) {
-    var fullCmd = comspec + " /C \"" + cmd + "\" 2>&1";
-    var oExec = ws.Exec(fullCmd);
-    oExec.StdIn.Close();
-    var s = oExec.StdOut.ReadAll();
-    accumulatedExitCode += oExec.ExitCode;
-    return s;
+function pad2(n) { return n < 10 ? "0" + n : "" + n; }
+function pad3(n) { return n < 10 ? "00" + n : (n < 100 ? "0" + n : "" + n); }
+function stamp() {
+    var d = new Date();
+    return pad2(d.getHours()) + ":" + pad2(d.getMinutes()) + ":" +
+        pad2(d.getSeconds()) + "." + pad3(d.getMilliseconds());
+}
+function clip(s, max) {
+    s = "" + s;
+    if (s.length <= max) { return s; }
+    return s.substring(0, max) + "...[truncated " + (s.length - max) + " chars]";
 }
 
+// script.log is UTF-16LE (FSO TristateTrue). The worker reads it with
+// script::read_log(), so Chinese interface names and localized netsh output
+// stay readable instead of being written as the system ANSI code page.
 function appendLog(text) {
+    if (!fso) { return; }
     try {
-        var fso = WScript.CreateObject("Scripting.FileSystemObject");
-        var f = fso.OpenTextFile(SESSION_DIR + "\\script.log", 8, true);
+        var f = fso.OpenTextFile(LOG_PATH, 8, true, -1);
         f.WriteLine(text);
         f.Close();
     } catch (e) {}
+}
+
+function diag(text) {
+    var s = (text === null || typeof text == "undefined") ? "" : ("" + text);
+    var lines = s.split(/\r\n|\r|\n/);
+    for (var i = 0; i < lines.length; i++) {
+        if (lines[i] !== "") {
+            appendLog("[script] " + stamp() + " " + lines[i]);
+        }
+    }
 }
 
 // openconnect starts us with bInheritHandles=FALSE, so our stdout is not wired
@@ -75,6 +98,80 @@ function report(key, value) {
     appendLog(line);
 }
 
+// Keep one previous run for post-mortem. The worker resets its read cursor when
+// the file becomes shorter, so replacing the file is safe.
+function prepareLog() {
+    if (!fso) { return; }
+    if (reason == "connect" && fso.FileExists(LOG_PATH)) {
+        try {
+            if (fso.FileExists(PREV_LOG_PATH)) { fso.DeleteFile(PREV_LOG_PATH, true); }
+            fso.MoveFile(LOG_PATH, PREV_LOG_PATH);
+        } catch (e) {
+            try { fso.DeleteFile(LOG_PATH, true); } catch (e2) {}
+        }
+    }
+}
+
+function run(cmd) {
+    var fullCmd = comspec + " /C \"" + cmd + "\" 2>&1";
+    var begin = new Date().getTime();
+    var out = "";
+    lastExitCode = -1;
+    diag("RUN " + cmd);
+    try {
+        var oExec = ws.Exec(fullCmd);
+        oExec.StdIn.Close();
+        out = oExec.StdOut.ReadAll();
+        lastExitCode = oExec.ExitCode;
+    } catch (e) {
+        diag("RUN-ERROR " + e.message);
+        lastExitCode = -1;
+        return "";
+    }
+    diag("EXIT " + lastExitCode + " (" + (new Date().getTime() - begin) + "ms)");
+    if (out !== "") { diag("OUT " + clip(out, 16000)); }
+    accumulatedExitCode += lastExitCode;
+    return out;
+}
+
+function mustRun(label, cmd) {
+    run(cmd);
+    if (lastExitCode !== 0) {
+        report("error", label + " exit " + lastExitCode);
+        diag("FATAL " + label + " failed, exit " + lastExitCode);
+        WScript.Quit(lastExitCode > 0 ? lastExitCode : 1);
+    }
+}
+
+function logEnv() {
+    diag("START reason=" + reason + " mode=" + MODE);
+    diag("SCRIPT=" + WScript.ScriptFullName);
+    diag("ENGINE=" + WScript.FullName + " version=" + WScript.Version);
+    diag("HOST=" + env("COMPUTERNAME") + " user=" + env("USERNAME") + " arch=" + env("PROCESSOR_ARCHITECTURE"));
+    diag("TUNIDX=" + tunidx + " TUNDEV=" + tundev);
+    diag("IP4=" + ip4 + " MASK=" + mask4 + " MTU=" + mtu);
+    diag("DNS=" + dns + " VPNGW=" + vpngw + " ORIGINAL_GW=" + ORIGINAL_GW);
+    diag("DEF_DOMAIN=" + (env("CISCO_DEF_DOMAIN") || "") +
+        " SPLIT_INC=" + (env("CISCO_SPLIT_INC") || "0") +
+        " SPLIT_EXC=" + (env("CISCO_SPLIT_EXC") || "0"));
+    var inc = parseInt(env("CISCO_SPLIT_INC") || "0", 10);
+    if (!isNaN(inc) && inc > 0) {
+        for (var i = 0; i < inc && i < 64; i++) {
+            diag("SPLIT_INC_" + i + "=" + (env("CISCO_SPLIT_INC_" + i + "_ADDR") || "") +
+                "/" + (env("CISCO_SPLIT_INC_" + i + "_MASKLEN") || ""));
+        }
+    }
+    var exc = parseInt(env("CISCO_SPLIT_EXC") || "0", 10);
+    if (!isNaN(exc) && exc > 0) {
+        for (var j = 0; j < exc && j < 64; j++) {
+            diag("SPLIT_EXC_" + j + "=" + (env("CISCO_SPLIT_EXC_" + j + "_ADDR") || "") +
+                "/" + (env("CISCO_SPLIT_EXC_" + j + "_MASKLEN") || ""));
+        }
+    }
+    var banner = env("CISCO_BANNER") || "";
+    if (banner !== "") { diag("BANNER=" + clip(banner, 4000)); }
+}
+
 var reason = env("reason") || "";
 var tundev = env("TUNDEV") || "";
 var tunidx = env("TUNIDX") || "";
@@ -84,11 +181,15 @@ var mtu = env("INTERNAL_IP4_MTU") || "";
 var dns = env("INTERNAL_IP4_DNS") || "";
 var vpngw = env("VPNGATEWAY") || "";
 
-// netsh interface argument: prefer the index, fall back to a quoted name.
-// Interface names on Chinese Windows are not safe to put on a command line.
-var tunRef = tunidx !== "" ? tunidx : ("\"" + tundev + "\"");
+// netsh interface argument: prefer the index. The name fallback must stay
+// unquoted: this string is embedded in `cmd /C "..."`, so a nested quote around
+// a Chinese interface name would terminate the command early. Windows host
+// names (the Wintun adapter name) cannot contain spaces, so unquoted is safe.
+var tunRef = tunidx !== "" ? tunidx : tundev;
 
 if (reason == "connect") {
+    prepareLog();
+    logEnv();
     report("reason", "connect");
     report("mode", MODE);
     report("tunidx", tunidx);
@@ -116,36 +217,53 @@ if (reason == "connect") {
         }
     }
 
-    if (mtu !== "") {
-        run("netsh interface ipv4 set subinterface " + tunRef + " mtu=" + mtu + " store=active");
-    }
-
     // Configure the interface address only. The default route and DNS are owned
     // by the worker (routing injection / full-tunnel), not by this script.
     if (ip4 !== "") {
-        run("netsh interface ip set address " + tunRef + " static " + ip4 + " " + mask4 + " store=active");
+        mustRun("set-address",
+            "netsh interface ip set address " + tunRef + " static " + ip4 + " " + mask4 + " store=active");
+    } else {
+        // The cscript smoke test runs connect with all addresses empty so it
+        // cannot touch the host network. A real openconnect run always has ip4.
+        diag("WARN INTERNAL_IP4_ADDRESS is empty; address configuration skipped");
+    }
+
+    if (mtu !== "") {
+        run("netsh interface ipv4 set subinterface " + tunRef + " mtu=" + mtu + " store=active");
+        if (lastExitCode !== 0) {
+            diag("WARN set MTU failed, exit " + lastExitCode + " (continuing)");
+        }
     }
 
     // Host route to the VPN server itself, reached via the physical gateway, so
-    // tunnel traffic is not swallowed by the tunnel and cannot loop.
+    // tunnel traffic is not swallowed by the tunnel and cannot loop. A stale
+    // route may make this fail with "already exists"; that is not fatal.
     if (vpngw !== "" && ORIGINAL_GW !== "") {
         if (vpngw.indexOf(":") >= 0) {
             run("netsh interface ipv6 add route " + vpngw + "/128 \"" + ORIGINAL_GW + "\" store=active");
         } else {
             run("route add " + vpngw + " mask 255.255.255.255 " + ORIGINAL_GW);
         }
+        if (lastExitCode !== 0) {
+            diag("WARN host route to VPN server failed, exit " + lastExitCode +
+                " (may already exist; continuing)");
+        }
     }
 
     report("done", "connect");
+    diag("DONE reason=connect total=" + (new Date().getTime() - startedAt) +
+        "ms accumulatedExitCode=" + accumulatedExitCode);
     WScript.Quit(0);
 }
 
 if (reason == "disconnect") {
+    logEnv();
     report("reason", "disconnect");
-
+    // The interface is already gone when openconnect tears down; these are
+    // best-effort and must not turn a normal disconnect into a script error.
     if (vpngw !== "") {
         if (vpngw.indexOf(":") >= 0) {
-            run("netsh interface ipv6 delete route " + vpngw + "/128\n");
+            run("netsh interface ipv6 delete route " + vpngw + "/128");
         } else {
             run("route delete " + vpngw + " mask 255.255.255.255");
         }
@@ -155,9 +273,12 @@ if (reason == "disconnect") {
     }
 
     report("done", "disconnect");
+    diag("DONE reason=disconnect total=" + (new Date().getTime() - startedAt) +
+        "ms accumulatedExitCode=" + accumulatedExitCode);
     WScript.Quit(0);
 }
 
+diag("SKIP unknown reason='" + reason + "'");
 WScript.Quit(0);
 "#;
 
@@ -275,10 +396,55 @@ pub fn generate(ctx: &ScriptContext) -> (&'static str, String) {
     }
 }
 
-
-/// JScript 字符串转义：反斜杠和双引号
+/// JScript 字符串转义：反斜杠、双引号和非 ASCII 字符
 fn escape_js_string(text: &str) -> String {
-    text.replace('\\', "\\\\").replace('"', "\\\"")
+    // cscript.exe decodes a BOM-less .js file with the system ANSI code page.
+    // The session path contains the Windows user name, which may be Chinese
+    // (C:\Users\张三\...), so every non-ASCII code unit has to become a JScript
+    // \uXXXX escape. The resulting file must stay pure ASCII.
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c if c.is_ascii() => out.push(c),
+            c => {
+                let mut buf = [0u16; 2];
+                for unit in c.encode_utf16(&mut buf).iter() {
+                    out.push_str(&format!("\\u{:04x}", unit));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// 读取脚本回报文件，兼容 UTF-16LE（FSO TristateTrue）与旧的 UTF-8/ANSI 文件。
+///
+/// Windows 的 `Scripting.FileSystemObject` 在中文系统上默认写 ANSI；之前
+/// `read_to_string` 遇到 GBK 字节会整份失败，连 ASCII 的 marker 都读不到。
+/// 新脚本改成 UTF-16LE，这里同时保留 lossy UTF-8 回退，旧日志也能解析。
+pub fn read_log(path: &Path) -> Result<String, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("读取 {} 失败: {}", path.display(), e))?;
+    if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE {
+        let units: Vec<u16> = bytes[2..]
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        return Ok(String::from_utf16_lossy(&units));
+    }
+    if bytes.len() >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF {
+        let units: Vec<u16> = bytes[2..]
+            .chunks_exact(2)
+            .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+            .collect();
+        return Ok(String::from_utf16_lossy(&units));
+    }
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// shell 双引号内的转义
@@ -424,6 +590,49 @@ mod tests {
         );
     }
 
+    #[test]
+    fn windows_script_escapes_non_ascii_session_path() {
+        // 现场常见：C:\Users\张三\AppData\...。路径直接拼进 JScript 会把
+        // 非 ASCII 字节带进 .js，cscript 按 GBK 解码后整份脚本编译失败。
+        let ctx = ScriptContext {
+            session_dir: Path::new(r"C:\Users\张三\AppData\Roaming\com.ws.workbench\vpn"),
+            original_gateway: "192.168.1.1",
+        };
+        let script = windows_script(&ctx);
+        assert!(
+            script.is_ascii(),
+            "中文用户目录也必须被转义成纯 ASCII 的 JScript"
+        );
+        assert!(script.contains(r"C:\\Users\\\u5f20\u4e09"));
+    }
+
+    #[test]
+    fn read_log_decodes_utf16le_with_bom() {
+        let dir = std::env::temp_dir().join("ws-script-log-utf16");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("script.log");
+        let mut bytes = vec![0xFF, 0xFE];
+        for unit in "A\n中文".encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        std::fs::write(&path, bytes).unwrap();
+        let text = read_log(&path).unwrap();
+        assert_eq!(text, "A\n中文");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn read_log_keeps_ascii_markers_in_legacy_ansi_file() {
+        let dir = std::env::temp_dir().join("ws-script-log-ansi");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("script.log");
+        // 旧版 FSO 写入的 GBK 字节 0xB2 0xE2（“测”），不能让整份文件读失败
+        std::fs::write(&path, b"WS-WORKBENCH ip4=1.2.3.4\n\xB2\xE2\n").unwrap();
+        let text = read_log(&path).unwrap();
+        assert!(text.contains("WS-WORKBENCH ip4=1.2.3.4"));
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[cfg(target_os = "windows")]
     #[test]
     fn windows_script_compiles_under_cscript() {
@@ -503,11 +712,62 @@ mod tests {
             "第二条 split-include 网段没有回报给 worker：{}",
             stdout
         );
-        // 回报同时要落到 script.log（openconnect 的 stdout 接不到 worker 的管道）
-        let log = std::fs::read_to_string(dir.join("script.log")).unwrap_or_default();
+        // 回报同时要落到 script.log（openconnect 的 stdout 接不到 worker 的管道）。
+        // 新脚本用 UTF-16LE 写，必须走 read_log 而不是 read_to_string。
+        let log = read_log(&dir.join("script.log")).unwrap_or_default();
         assert!(log.contains("split=198.51.100.0/24"));
+        assert!(log.contains("DONE reason=connect"));
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(dir.join("script.log"));
+        let _ = std::fs::remove_file(dir.join("script.prev.log"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_script_handles_chinese_session_dir_and_tundev() {
+        // 两个现场都可能出现：中文用户目录 + 中文计算机名（Wintun 适配器名）。
+        // 脚本本身必须仍是 ASCII，script.log 必须能被 read_log 完整读回。
+        let dir = std::env::temp_dir().join("ws-脚本-日志");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("vpnc-script-win.js");
+        let ctx = ScriptContext {
+            session_dir: &dir,
+            original_gateway: "192.168.1.1",
+        };
+        let script = windows_script(&ctx);
+        assert!(script.is_ascii(), "中文会话目录不能把 .js 变成非 ASCII");
+        std::fs::write(&path, script).unwrap();
+        let output = std::process::Command::new("cscript.exe")
+            .args(["//nologo", "//E:JScript"])
+            .arg(&path)
+            .env("reason", "connect")
+            .env("TUNDEV", "测试网卡")
+            .env("TUNIDX", "77")
+            .env("INTERNAL_IP4_ADDRESS", "")
+            .env("INTERNAL_IP4_MTU", "")
+            .env("INTERNAL_IP4_DNS", "")
+            .env("VPNGATEWAY", "")
+            .env("CISCO_SPLIT_INC", "0")
+            .output()
+            .expect("cscript.exe 是 Windows 自带组件，应当可用");
+        assert!(
+            output.status.success(),
+            "cscript 执行失败: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let log = read_log(&dir.join("script.log")).unwrap_or_default();
+        assert!(
+            log.contains("tundev=测试网卡"),
+            "中文 TUNDEV 没有完整写进 script.log：{}",
+            log
+        );
+        assert!(log.contains("TUNDEV=测试网卡"));
+        assert!(log.contains("DONE reason=connect"));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(dir.join("script.log"));
+        let _ = std::fs::remove_file(dir.join("script.prev.log"));
+        let _ = std::fs::remove_dir(&dir);
     }
 
     #[test]

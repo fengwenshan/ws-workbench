@@ -28,6 +28,65 @@ pub const EVENT_VPN_TRAY: &str = "vpn-tray";
 /// 托盘菜单里点击页面入口（代理 / 设置 / 日志）时推给前端的事件名
 pub const EVENT_NAV_TRAY: &str = "nav-tray";
 
+/// Windows 上只允许一个 GUI 实例。
+///
+/// 便携包很容易被重复双击：每个实例都会建自己的托盘图标和 worker，用户点
+/// 其中一个托盘的“退出”后，另一个实例仍然握着 exe/worker/openconnect，
+/// 解压目录就会报“文件已在另一程序打开”。用命名 mutex 做单实例，第二个
+/// 进程直接把已有窗口叫到前台后退出。worker 在 `main.rs` 里已经提前分流，
+/// 不会走到这里，所以不会误伤提权 worker。
+#[cfg(target_os = "windows")]
+fn ensure_single_instance() -> bool {
+    use std::ffi::c_void;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateMutexW(
+            attributes: *mut c_void,
+            initial_owner: i32,
+            name: *const u16,
+        ) -> *mut c_void;
+        fn FindWindowW(class_name: *const u16, window_name: *const u16) -> *mut c_void;
+        fn ShowWindow(window: *mut c_void, command: i32) -> i32;
+        fn SetForegroundWindow(window: *mut c_void) -> i32;
+    }
+
+    const ERROR_ALREADY_EXISTS: i32 = 183;
+    const SW_RESTORE: i32 = 9;
+
+    let name: Vec<u16> = "Local\\ws-workbench-single-instance\0"
+        .encode_utf16()
+        .collect();
+    let handle = unsafe { CreateMutexW(std::ptr::null_mut(), 0, name.as_ptr()) };
+    if handle.is_null() {
+        // 创建 mutex 都失败时不要阻止用户启动；单实例只是防重复，
+        // 不应该变成“应用打不开”的新问题。
+        return true;
+    }
+
+    if std::io::Error::last_os_error().raw_os_error() == Some(ERROR_ALREADY_EXISTS) {
+        // 已有实例：尽量把它从托盘/最小化状态叫出来，然后第二个进程退出。
+        let title: Vec<u16> = "ws-workbench\0".encode_utf16().collect();
+        let window = unsafe { FindWindowW(std::ptr::null(), title.as_ptr()) };
+        if !window.is_null() {
+            unsafe {
+                ShowWindow(window, SW_RESTORE);
+                SetForegroundWindow(window);
+            }
+        }
+        return false;
+    }
+
+    // 句柄故意不关闭：它要活到进程结束，命名 mutex 才会一直存在。
+    let _ = handle;
+    true
+}
+
+#[cfg(not(target_os = "windows"))]
+fn ensure_single_instance() -> bool {
+    true
+}
+
 // 把主窗口重新显示出来（从托盘左键、托盘菜单、Dock 图标进入）
 fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
     if let Some(window) = app.get_webview_window("main") {
@@ -38,12 +97,12 @@ fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
 }
 
 // 托盘图标：macOS 用模板图（黑 + 透明），系统会按菜单栏明暗自动反色；
-// Windows / Linux 用白色位图，深色任务栏上更清楚。
+// Windows 直接用应用图标（彩色），白色线条图在浅色任务栏上会看不清。
 fn tray_icon_image() -> Option<tauri::image::Image<'static>> {
     let bytes: &'static [u8] = if cfg!(target_os = "macos") {
         include_bytes!("../icons/tray/tray-template-36.png")
     } else if cfg!(target_os = "windows") {
-        include_bytes!("../icons/tray/tray-white-32.png")
+        include_bytes!("../icons/32x32.png")
     } else {
         include_bytes!("../icons/tray/tray-white-48.png")
     };
@@ -194,6 +253,11 @@ fn create_main_window(app: &mut tauri::App) -> tauri::Result<()> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(target_os = "windows")]
+    if !ensure_single_instance() {
+        return;
+    }
+
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
@@ -339,9 +403,35 @@ pub fn run() {
                         let _ = app.emit(EVENT_VPN_TRAY, event.id.as_ref().to_string());
                     }
                     "quit" => {
-                        // 退出前先请求 worker 收尾，避免留下无人回收的路由
-                        vpn::commands::shutdown(app);
-                        app.exit(0);
+                        // Windows 便携包从解压目录运行：先等 worker 把
+                        // openconnect 等子进程收掉，再退出主进程，避免用户
+                        // 退出后删目录时报“文件或文件夹已在另一程序打开”。
+                        // 不能阻塞托盘菜单事件线程，所以放到后台线程里等。
+                        #[cfg(target_os = "windows")]
+                        {
+                            // 双保险：正常路径等 worker 收尾后 app.exit；如果 Tauri
+                            // 的 ExitRequested 回调或 tasklist 卡住，12 秒后由看门狗
+                            // 强制结束主进程，避免用户点了“退出”还一直挂在任务管理器里。
+                            std::thread::spawn(|| {
+                                std::thread::sleep(std::time::Duration::from_secs(12));
+                                std::process::exit(0);
+                            });
+                            let app = app.clone();
+                            std::thread::spawn(move || {
+                                vpn::commands::shutdown_and_wait(
+                                    &app,
+                                    std::time::Duration::from_secs(8),
+                                );
+                                app.exit(0);
+                            });
+                        }
+                        #[cfg(not(target_os = "windows"))]
+                        {
+                            // macOS 保持原有行为：这里不等收尾，避免 Dock/菜单
+                            // 退出被卡住；macOS 的 openconnect 进程不占用 .app 目录。
+                            vpn::commands::shutdown(app);
+                            app.exit(0);
+                        }
                     }
                     _ => {}
                 })

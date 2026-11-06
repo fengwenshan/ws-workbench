@@ -65,6 +65,8 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
   const connectors = ref<ConnectorInfo[]>([])
   const status = ref<VpnStatus>(emptyStatus())
   const elevation = ref<ElevationInfo | null>(null)
+  /** 注册/移除计划任务期间的忙碌态：按钮要立刻变成 loading，不能点完没反馈 */
+  const elevationBusy = ref(false)
   const guide = ref<InstallGuide | null>(null)
   const logs = ref<LogEntry[]>([])
   /** 会话目录实际落在哪儿（Roaming 不可写时会回退） */
@@ -154,15 +156,46 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
   }
 
   async function setupElevation() {
-    const message = await invoke<string>('vpn_setup_elevation')
-    await refreshElevation()
-    pushLog('success', message)
+    if (elevationBusy.value) return
+    elevationBusy.value = true
+    pushLog('info', '正在注册免 UAC 计划任务…')
+    try {
+      const message = await invoke<string>('vpn_setup_elevation')
+      await refreshElevation()
+      // 后端返回成功只代表 schtasks 执行完了；任务是否指向当前程序必须以
+      // vpn_elevation_info 的 task_ready 为准。否则会出现“日志成功、按钮不变”。
+      if (!elevation.value?.task_ready) {
+        pushLog(
+          'error',
+          '计划任务已创建，但没有指向当前程序/会话目录；请先移除任务再重试（或查看 worker.log 里的任务定义）',
+        )
+        return
+      }
+      pushLog('success', message)
+    } catch (err: any) {
+      await refreshElevation()
+      pushLog('error', `注册免 UAC 计划任务失败: ${err}`)
+    } finally {
+      elevationBusy.value = false
+    }
   }
 
   async function removeElevation() {
-    const message = await invoke<string>('vpn_remove_elevation')
-    await refreshElevation()
-    pushLog('info', message)
+    if (elevationBusy.value) return
+    elevationBusy.value = true
+    pushLog('info', '正在移除免 UAC 计划任务…')
+    try {
+      const message = await invoke<string>('vpn_remove_elevation')
+      await refreshElevation()
+      pushLog('success', message)
+    } catch (err: any) {
+      // 以前这里没有 catch：后端拒绝访问时 Promise 直接 reject，
+      // 界面既不改状态也不写日志，用户看到的就是“点了没反应”。
+      await refreshElevation()
+      pushLog('error', `移除免 UAC 计划任务失败: ${err}`)
+    } finally {
+      elevationBusy.value = false
+    }
   }
 
   async function importOpenconnect() {
@@ -305,22 +338,11 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
 
   // ============================ 配置增删改 ============================
 
-  function newRule(
-    kind: VpnRuleKind = 'DOMAIN-SUFFIX',
-    value = '',
-    policy: VpnPolicy = 'DIRECT',
-  ): VpnRule {
-    return { id: crypto.randomUUID(), kind, value, policy, remark: '', enabled: true }
-  }
-
   async function addProfile(input: NewVpnProfileInput) {
     const name = input.name.trim() || '新建 VPN 配置'
     const server = input.server.trim()
-    // 新配置默认带一条公司内网规则：example.com 及其子域走 VPN，其余直连。
-    // 用 DOMAIN-SUFFIX 而不是 DOMAIN-KEYWORD —— 规则模式靠路由注入实现，
-    // 关键字匹配没有数据面可用，做不到（见 vpn/split.rs）。
-    const corp = newRule('DOMAIN-SUFFIX', 'example.com', 'VPN')
-    corp.remark = '公司内网域名走 VPN'
+    // 不预置任何厂商/开发环境规则：默认规则属于用户配置，不能把某套
+    // 内网域名写死进生产包。新配置从空规则开始，用户显式添加后才参与分流。
 
     const now = nowIso()
     const profile: VpnProfile = {
@@ -333,7 +355,7 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
       protocol: input.protocol?.trim() || 'anyconnect',
       connector: 'auto',
       proxy_mode: 'rule',
-      rules: [corp],
+      rules: [],
       rules_default_policy: 'DIRECT',
       extra_args: input.extra_args ?? [],
       connector_path: '',
@@ -568,6 +590,7 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
     noConnector,
     status,
     elevation,
+    elevationBusy,
     guide,
     logs,
     detecting,

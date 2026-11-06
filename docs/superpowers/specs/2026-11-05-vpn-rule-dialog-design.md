@@ -51,11 +51,11 @@
   没有数据面可用、写了也不生效，已从下拉下架（历史配置里若还留着，列表里打「不生效」标记，
   能删不生效）。
 - 规则内容输入框，placeholder 跟着类型变：
-  - DOMAIN → `example.com`
-  - DOMAIN-SUFFIX → `example.com`（连带所有子域）
+  - DOMAIN → `oa.example.com`（推荐，按这个主机精确注入）
+  - DOMAIN-SUFFIX → `example.com`（只解析该域名本身；子域请用完整域名或全局模式）
   - IP-CIDR → `10.0.0.0/8`
-- 新建配置的默认规则：`DOMAIN-SUFFIX example.com` 走 VPN（原来是
-  `DOMAIN-KEYWORD corp`，语义在路由注入模式下做不到）
+- 新建配置**不再预置任何规则**。`example.com` 是开发环境数据，不能写进生产包；
+  默认规则属于用户配置，必须由用户显式添加。
 - 代理策略下拉：直连 DIRECT / 走 VPN
 - 「添加规则」按钮：校验 → 追加到末尾 → 清空内容框，焦点回内容框
 - 不显示 MATCH 兜底行：没命中就是直连，不需要单独一行；列表为空时只留一句提示文字

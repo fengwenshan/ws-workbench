@@ -53,6 +53,11 @@ struct Worker {
     tail: Vec<String>,
     /// script.log 已经读过的行数（脚本的 stdout 接不到管道，只能靠这个文件回传）
     script_log_lines: usize,
+    /// 读取失败只记一次，避免每 200ms 刷一行
+    script_log_error_logged: bool,
+    /// 脚本写完 `done=connect` 才代表接口地址/MTU 已配置完；否则路由可能
+    /// 装在一个还没地址的接口上。
+    script_done: bool,
     /// 当前生效的代理模式（可由主进程通过 mode 文件改）
     applied_mode: ProxyMode,
     /// 当前生效的规则与兜底走向（可由主进程通过 rules.json 改）
@@ -97,6 +102,8 @@ impl Worker {
             server_def_domain: None,
             tail: Vec::new(),
             script_log_lines: 0,
+            script_log_error_logged: false,
+            script_done: false,
             applied_mode,
             current_rules,
             current_default_policy,
@@ -127,9 +134,61 @@ impl Worker {
     fn fail(&mut self, message: &str) -> i32 {
         self.status.error = message.to_string();
         self.set_phase(VpnPhase::Failed, message);
+        // 失败现场最重要：先抓一眼网卡/路由/NRPT，再清理。
+        #[cfg(target_os = "windows")]
+        self.dump_network_state("失败时");
         self.cleanup_routes();
         let _ = self.session.write_status(&self.status);
         EXIT_FAILED
+    }
+
+    /// Windows：把当前网卡、IP、路由、NRPT 状态写进 worker.log。
+    ///
+    /// 现场机器拿不到管理员 shell 时，这是唯一能远程判断「路由装没装、
+    /// NRPT 有没有生效」的证据。命令本身也会进 powershell.log。
+    #[cfg(target_os = "windows")]
+    fn dump_network_state(&mut self, label: &str) {
+        let idx = self.status.tun_index;
+        // 还没拿到 tunidx（认证失败、连接器不存在等）时也要留一份全局网络状态，
+        // 否则失败现场只剩 NRPT/Dnscache，最关键的网卡和默认路由反而没有。
+        let iface = if idx == 0 {
+            r#"'--- adapters ---';
+Get-NetAdapter | Format-Table Name,InterfaceDescription,Status,LinkSpeed,ifIndex -AutoSize | Out-String -Width 220;
+'--- ipv4 ---';
+Get-NetIPAddress -AddressFamily IPv4 | Format-Table IPAddress,PrefixLength,InterfaceIndex,InterfaceAlias -AutoSize | Out-String -Width 220;
+'--- routes ---';
+Get-NetRoute -AddressFamily IPv4 | Format-Table DestinationPrefix,NextHop,InterfaceIndex,RouteMetric -AutoSize | Out-String -Width 220;
+'--- dns ---';
+Get-DnsClientServerAddress | Format-Table InterfaceIndex,InterfaceAlias,AddressFamily,ServerAddresses -AutoSize | Out-String -Width 220;
+"#
+            .to_string()
+        } else {
+            format!(
+                r#"'--- adapter ---';
+Get-NetAdapter -InterfaceIndex {idx} | Format-List Name,InterfaceDescription,Status,LinkSpeed;
+'--- ipv4 ---';
+Get-NetIPAddress -InterfaceIndex {idx} -AddressFamily IPv4 | Format-List IPAddress,PrefixLength,PrefixOrigin;
+'--- routes ---';
+Get-NetRoute -InterfaceIndex {idx} -AddressFamily IPv4 | Format-Table DestinationPrefix,NextHop,RouteMetric -AutoSize | Out-String -Width 220;
+'--- dns ---';
+Get-DnsClientServerAddress -InterfaceIndex {idx} -AddressFamily IPv4 | Format-List ServerAddresses;
+"#,
+                idx = idx
+            )
+        };
+        let script = format!(
+            r#"$ErrorActionPreference='SilentlyContinue';
+{iface}'--- nrpt ---';
+Get-DnsClientNrptRule | Where-Object -Property DisplayName -Like 'ws-workbench:*' | Format-List DisplayName,Namespace,NameServers;
+'--- dnscache ---';
+Get-Service -Name Dnscache | Format-List Status,StartType
+"#,
+            iface = iface
+        );
+        match crate::winps::run(&script) {
+            Ok(text) => self.log(&format!("[诊断] {} 网络状态:\n{}", label, text.trim())),
+            Err(e) => self.log(&format!("[诊断] {} 读取网络状态失败：{}", label, e)),
+        }
     }
 
     /// 记录一行输出；同时从脚本回报里提取隧道参数
@@ -159,7 +218,23 @@ impl Worker {
                         .map(|s| s.to_string())
                         .collect();
                 }
-                "done" => {}
+                "done" => {
+                    self.script_done = value.trim() == "connect";
+                    self.log(&format!(
+                        "[脚本] 配置阶段结束：{}（{}）",
+                        value,
+                        if self.script_done {
+                            "接口地址/MTU 已完成，可以装路由"
+                        } else {
+                            "非 connect，不触发接管"
+                        }
+                    ));
+                }
+                "error" => {
+                    // 脚本主动回报的致命错误；openconnect 随后会以非零退出，
+                    // 这里先原样打出来，方便没有 worker.log 时也能定位。
+                    self.log(&format!("[脚本] 脚本报告错误：{}", value));
+                }
                 // 服务端下发的默认域名：按域名分流解析就能覆盖整族子域，
                 // 不用用户把每个内网域名都列出来
                 "defdomain" => {
@@ -182,7 +257,9 @@ impl Worker {
     }
 
     fn tunnel_ready(&self) -> bool {
-        !self.status.vpn_ip.is_empty() && (self.status.tun_index > 0 || !self.status.tun_dev.is_empty())
+        self.script_done
+            && !self.status.vpn_ip.is_empty()
+            && (self.status.tun_index > 0 || !self.status.tun_dev.is_empty())
     }
 
     /// 读取脚本自己写的 `script.log`，这是隧道参数的真正来源。
@@ -193,11 +270,37 @@ impl Worker {
     /// 由这里增量读取——不这么做 `tunnel_ready()` 永远不会为真，界面就会一直停在
     /// 「连接中」，直到 CONNECT_TIMEOUT（120s）才报超时。
     fn ingest_script_log(&mut self) {
-        let text = match std::fs::read_to_string(self.session.script_log_path()) {
+        let path = self.session.script_log_path();
+        // 文件还没出现是正常的启动瞬间，不要把它记成错误。
+        if !path.exists() {
+            return;
+        }
+        let text = match crate::vpn::script::read_log(&path) {
             Ok(text) => text,
-            Err(_) => return,
+            Err(e) => {
+                // 文件存在却读失败（被占用/权限）才值得记，且只记一次。
+                if !self.script_log_error_logged {
+                    self.script_log_error_logged = true;
+                    self.log(&format!("[脚本] 读取 script.log 失败：{}", e));
+                }
+                return;
+            }
         };
+        if self.script_log_error_logged {
+            self.script_log_error_logged = false;
+            self.log("[脚本] script.log 已可读取");
+        }
         let lines: Vec<&str> = text.lines().collect();
+        // 新脚本在 connect 时会把上一份日志改名成 script.prev.log，文件行数
+        // 可能比旧会话少；不重置游标就会永远读不到新文件里的 marker。
+        if lines.len() < self.script_log_lines {
+            self.log(&format!(
+                "[脚本] script.log 从 {} 行变为 {} 行（已重建/截断），从头读取",
+                self.script_log_lines,
+                lines.len()
+            ));
+            self.script_log_lines = 0;
+        }
         if lines.len() <= self.script_log_lines {
             return;
         }
@@ -803,6 +906,22 @@ impl Worker {
 
     fn connect_openconnect(&mut self) -> Result<(Child, Vec<String>), String> {
         self.clear_stale_server_routes();
+        if !self.request.connector_path.is_empty() {
+            let (version_text, version_ok) = crate::process::run_with_timeout(
+                Path::new(&self.request.connector_path),
+                &["--version"],
+                Duration::from_secs(10),
+            );
+            if version_ok {
+                let first = version_text.lines().next().unwrap_or("").trim();
+                self.log(&format!("[隧道] openconnect 版本：{}", first));
+            } else {
+                self.log(&format!(
+                    "[隧道] 读取 openconnect 版本失败：{}",
+                    version_text.lines().next().unwrap_or("").trim()
+                ));
+            }
+        }
         let (file_name, content) = script::generate(&script::ScriptContext {
             session_dir: &self.session.dir,
             original_gateway: &self.snapshot.default_gateway,
@@ -890,7 +1009,7 @@ impl Worker {
                     let reason = format!(
                         "路由脚本执行失败，隧道无法完成配置。openconnect 的原话：{}\n\
                          {}脚本本身由本程序生成，\
-                         如需排查请把会话目录里的 worker.log 与 script.log 一并提供。",
+                         如需排查请把会话目录里的 worker.log、script.log、powershell.log 一并提供。",
                         raw, hint
                     );
                     return self.fail(&reason);
@@ -905,6 +1024,8 @@ impl Worker {
                     let _ = child.wait();
                     return self.fail(&e);
                 }
+                #[cfg(target_os = "windows")]
+                self.dump_network_state("接管成功后");
                 match self.degraded_reason.clone() {
                     // 降级：隧道在建，但没有接管系统流量（例如当前平台还没有分流实现）
                     Some(reason) => {
@@ -1086,6 +1207,21 @@ fn now() -> String {
     crate::util::time::now_local_rfc3339()
 }
 
+/// 两个 exe 路径是否指同一个程序文件。
+///
+/// 只用于启动时的一致性告警：Windows 盘符/路径大小写不敏感，斜杠方向也可能
+/// 因来源不同而不一致；macOS/Linux 的路径大小写敏感，不能一律小写比较。
+fn same_program(a: &Path, b: &Path) -> bool {
+    if a.as_os_str().is_empty() || b.as_os_str().is_empty() {
+        return false;
+    }
+    #[cfg(target_os = "windows")]
+    let normalize = |path: &Path| path.to_string_lossy().replace('\\', "/").to_lowercase();
+    #[cfg(not(target_os = "windows"))]
+    let normalize = |path: &Path| path.to_string_lossy().to_string();
+    normalize(a) == normalize(b)
+}
+
 /// 从 RFC3339 时间戳算到现在过了多久
 fn elapsed_since(timestamp: &str) -> Duration {
     match chrono::DateTime::parse_from_rfc3339(timestamp) {
@@ -1107,6 +1243,27 @@ pub fn run(session_dir: &Path) -> i32 {
     }
 
     session.append_log(&format!("[worker] 启动，pid {}", std::process::id()));
+    session.append_log(&format!(
+        "[worker] 版本 {}，系统 {} {}，计算机 {}，用户 {}",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        std::env::var("COMPUTERNAME").unwrap_or_else(|_| "未知".to_string()),
+        std::env::var("USERNAME").unwrap_or_else(|_| "未知".to_string())
+    ));
+
+    // 先设好，才能把 cleanup_stale / restore_stale 里的 PowerShell 也记进
+    // powershell.log（这些清理命令失败是“内网域名全解析不了”的常见原因）。
+    #[cfg(target_os = "windows")]
+    {
+        let ps_log = session.dir.join("powershell.log");
+        std::env::set_var("WS_VPN_PS_LOG", &ps_log);
+        session.append_log(&format!(
+            "[worker] PowerShell 完整日志：{}；脚本完整日志：{}（UTF-16LE）",
+            ps_log.display(),
+            session.script_log_path().display()
+        ));
+    }
 
     let request = match session.read_request() {
         Ok(request) => request,
@@ -1128,22 +1285,46 @@ pub fn run(session_dir: &Path) -> i32 {
     // 权限问题排查的第一现场：日志里必须先能回答「这个 worker 到底提权了没有、
     // 跑的是哪个 exe」。之前只有间接证据（Get-NetAdapter 报「拒绝访问」），
     // 用户看到失败根本分不清是没提权、提权到了旧版本、还是别的原因。
+    //
+    // 现在把主进程的 exe 也一起打出来：便携版/安装版共用同一份会话目录时，
+    // 计划任务可能还指向另一个旧 exe，日志里两个路径一不一样立刻就能看出来。
+    let self_exe = std::env::current_exe().ok();
+    let main_exe = Path::new(&worker.request.hook_exe);
     worker.log(&format!(
-        "[worker] 提权状态：{}，程序 {}，会话目录 {}",
+        "[worker] 提权状态：{}，程序 {}，主程序 {}，会话目录 {}",
         if crate::vpn::elevate::is_elevated() {
             "管理员"
         } else {
             "非管理员（建隧道、改路由、写 DNS 都会失败）"
         },
-        std::env::current_exe()
+        self_exe
+            .as_ref()
             .map(|path| path.display().to_string())
-            .unwrap_or_else(|_| "未知".to_string()),
+            .unwrap_or_else(|| "未知".to_string()),
+        if main_exe.as_os_str().is_empty() {
+            "未知".to_string()
+        } else {
+            main_exe.display().to_string()
+        },
         worker.session.dir.display()
     ));
+    if let Some(self_exe) = self_exe.as_deref() {
+        if !main_exe.as_os_str().is_empty() && !same_program(self_exe, main_exe) {
+            worker.log(
+                "[worker] 警告：worker 与主进程不是同一个程序文件，计划任务很可能还指向旧版本。\
+                 本次会按这份 worker 的旧逻辑运行（心跳判定、分流行为都可能与主程序不一致），\
+                 请先在 VPN 页移除并重新注册免 UAC 计划任务。",
+            );
+        }
+    }
 
     if worker.request.connector_path.is_empty() {
         return worker.fail("没有可用的连接器，请先在 VPN 页确认连接器状态");
     }
+
+    // 先把阶段落成「准备中」。默认状态是 Disconnected，采集网络快照时会原样写盘，
+    // 主进程的心跳线程若正好读到这一份，会误以为会话已经结束而停止续命。
+    worker.set_phase(VpnPhase::Preparing, "正在准备连接");
 
     // 只剩 openconnect 一条通道，连接器路径一定是 openconnect 可执行文件
     let code = worker.run_openconnect();
@@ -1302,6 +1483,61 @@ mod tests {
     #[test]
     fn next_hop_empty_ip_is_empty() {
         assert_eq!(tunnel_next_hop("", "24"), "");
+    }
+
+    #[test]
+    fn ingest_script_log_reads_utf16_and_recovers_after_rotation() {
+        let dir = std::env::temp_dir().join("ws-worker-test-script-log-utf16");
+        let _ = std::fs::remove_dir_all(&dir);
+        let session = VpnSession::new(dir.clone());
+        session.ensure().unwrap();
+        let request = VpnRequest {
+            conn_identity: String::new(),
+            proxy_mode: "rule".to_string(),
+            profile_id: "p".into(),
+            profile_name: "n".into(),
+            server: "s".into(),
+            username: "u".into(),
+            password: "p".into(),
+            protocol: "anyconnect".into(),
+            connector: crate::vpn::models::ConnectorKind::Auto,
+            connector_path: "x".into(),
+            rules: vec![],
+            default_policy: "DIRECT".into(),
+            extra_args: vec![],
+            script_path: "s".into(),
+            hook_exe: "h".into(),
+            created_at: String::new(),
+        };
+        let mut worker = Worker::new(session, request);
+
+        let text = "WS-WORKBENCH ip4=10.10.0.2\n\
+                    WS-WORKBENCH tunidx=7\n\
+                    WS-WORKBENCH tundev=测试网卡\n\
+                    WS-WORKBENCH done=connect\n";
+        let mut bytes = vec![0xFF, 0xFE];
+        for unit in text.encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        std::fs::write(worker.session.script_log_path(), &bytes).unwrap();
+        worker.ingest_script_log();
+        assert_eq!(worker.status.vpn_ip, "10.10.0.2");
+        assert_eq!(worker.status.tun_index, 7);
+        assert_eq!(worker.status.tun_dev, "测试网卡");
+        assert!(worker.script_done);
+        assert!(worker.tunnel_ready());
+
+        // 模拟 connect 时脚本把旧日志改成 script.prev.log，新日志更短：
+        // 游标必须回退到 0，否则新文件的内容全被当成「已读」。
+        let shorter = "WS-WORKBENCH ip4=10.9.0.3\n";
+        let mut bytes = vec![0xFF, 0xFE];
+        for unit in shorter.encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        std::fs::write(worker.session.script_log_path(), &bytes).unwrap();
+        worker.ingest_script_log();
+        assert_eq!(worker.status.vpn_ip, "10.9.0.3");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1481,6 +1717,9 @@ mod tests {
         worker.status.vpn_ip = "198.51.100.39".into();
         assert!(!worker.tunnel_ready());
         worker.status.tun_index = 21;
+        // 地址已经回报，但脚本还没写完 done：不能抢跑装路由
+        assert!(!worker.tunnel_ready());
+        worker.script_done = true;
         assert!(worker.tunnel_ready());
     }
 
@@ -1556,6 +1795,34 @@ mod tests {
             dir.join("vpnc-script.sh"),
             "不含空格的路径原样返回，不做无谓搬迁"
         );
+    }
+
+    #[test]
+    fn same_program_compares_paths_the_way_the_platform_does() {
+        #[cfg(target_os = "windows")]
+        {
+            assert!(same_program(
+                Path::new(r"D:\App\ws.exe"),
+                Path::new("d:/app/WS.EXE")
+            ));
+            assert!(!same_program(
+                Path::new(r"D:\App\ws.exe"),
+                Path::new(r"D:\App2\ws.exe")
+            ));
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            assert!(same_program(
+                Path::new("/opt/ws/ws-workbench"),
+                Path::new("/opt/ws/ws-workbench")
+            ));
+            // macOS/Linux 大小写敏感，不能把两个不同目录当成同一个
+            assert!(!same_program(
+                Path::new("/opt/ws/ws-workbench"),
+                Path::new("/opt/WS/ws-workbench")
+            ));
+        }
+        assert!(!same_program(Path::new(""), Path::new("x")));
     }
 
     #[test]

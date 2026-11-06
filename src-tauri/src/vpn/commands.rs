@@ -355,7 +355,9 @@ pub fn vpn_preview_rules(
 pub struct ElevationInfo {
     /// 当前进程是否已是管理员
     pub elevated: bool,
-    /// Windows 计划任务是否已注册（注册后连接不再弹 UAC）
+    /// 任务本身是否存在（可能指向旧程序/旧会话目录）
+    pub task_exists: bool,
+    /// Windows 计划任务是否已注册且指向当前程序（注册后连接不再弹 UAC）
     pub task_ready: bool,
     /// 平台
     pub platform: String,
@@ -371,13 +373,13 @@ pub fn vpn_elevation_info(app: AppHandle) -> ElevationInfo {
     let elevated = elevate::is_elevated();
     // 任务存在还不够：里面写死了会话目录，回退过就作废了，
     // 否则界面会显示「已注册免 UAC」，结果连接时又弹一次 UAC。
-    let task_ready = match session_of(&app) {
-        Ok(session) => {
+    let task_exists = elevate::worker_task_exists();
+    let task_ready = match (session_of(&app), std::env::current_exe()) {
+        (Ok(session), Ok(exe)) => {
             let recorded = recorded_task_dir(&app);
-            elevate::worker_task_exists()
-                && elevate::worker_task_matches(&session.dir, recorded.as_deref())
+            task_exists && elevate::worker_task_matches(&exe, &session.dir, recorded.as_deref())
         }
-        Err(_) => elevate::worker_task_exists(),
+        _ => task_exists,
     };
 
     let hint = if elevated {
@@ -385,6 +387,8 @@ pub fn vpn_elevation_info(app: AppHandle) -> ElevationInfo {
     } else if Platform::is_windows(&Platform) {
         if task_ready {
             "已注册免 UAC 计划任务，之后连接不再弹管理员确认".to_string()
+        } else if task_exists {
+            "检测到旧计划任务，但没有指向当前程序/会话目录；请先移除旧任务，再重新注册".to_string()
         } else {
             "尚未注册免 UAC 计划任务，首次连接会弹一次管理员确认".to_string()
         }
@@ -396,6 +400,7 @@ pub fn vpn_elevation_info(app: AppHandle) -> ElevationInfo {
 
     ElevationInfo {
         elevated,
+        task_exists,
         task_ready,
         platform: os.as_str().to_string(),
         hint,
@@ -410,11 +415,17 @@ pub fn vpn_setup_elevation(app: AppHandle) -> Result<String, String> {
     session
         .ensure()
         .map_err(|err| format!("{}{}", err, session_dir_diagnosis()))?;
-    elevate::ensure_worker_task(&exe, &session)?;
-    if elevate::worker_task_exists() {
+    let matched = elevate::ensure_worker_task(&exe, &session)?;
+    if matched {
         // 任务命令行里带着会话目录，记下来，下次连接就知道它还有没有效
         remember_task_dir(&app, &session.dir);
         Ok("计划任务已注册，之后连接不再弹 UAC".to_string())
+    } else if elevate::worker_task_exists() {
+        session.append_log(
+            "[elevate] 计划任务已存在，但任务定义没有指向当前程序或会话目录；\
+             请先移除任务后重试",
+        );
+        Err("计划任务已存在，但没有指向当前程序/会话目录，状态未生效。请先点“移除任务”，再重新注册。".to_string())
     } else {
         Err("计划任务注册后未查询到，可能被系统策略拦截".to_string())
     }
@@ -422,7 +433,23 @@ pub fn vpn_setup_elevation(app: AppHandle) -> Result<String, String> {
 
 #[tauri::command]
 pub fn vpn_remove_elevation(app: AppHandle) -> Result<String, String> {
-    elevate::delete_worker_task()?;
+    if elevate::worker_task_exists() {
+        if let Err(first) = elevate::delete_worker_task() {
+            // 任务以 HIGHEST 权限注册，普通权限删除可能被拒绝。以前这里直接
+            // 把错误抛给前端，但前端没有 catch，按钮看起来就是“没反应”。
+            let session = session_of(&app)?;
+            session.append_log(&format!(
+                "[elevate] 普通权限删除计划任务失败，改用 UAC 提权删除: {}",
+                first
+            ));
+            elevate::delete_worker_task_elevated(&session).map_err(|second| {
+                format!(
+                    "移除计划任务失败：{}；提权删除也失败：{}",
+                    first, second
+                )
+            })?;
+        }
+    }
     forget_task_dir(&app);
     Ok("已移除免 UAC 计划任务".to_string())
 }
@@ -673,26 +700,47 @@ pub async fn vpn_connect(
 
     // 接下来可能弹出 UAC 并等用户点确认，这一步必须放开锁：
     // 否则状态轮询线程会被一起卡住，界面看上去就像死了。
+    //
+    // 这条日志先于任何提权动作落盘：如果 worker 根本没起来（现场 11:02 的
+    // worker.log 只有心跳行），至少要能证明主进程确实请求过启动、以及失败在哪。
+    session.append_log(&format!(
+        "[启动] 正在请求启动 worker：管理员={}，程序={}，会话目录={}",
+        elevate::is_elevated(),
+        exe.display(),
+        session.dir.display()
+    ));
     let elevation = if elevate::is_elevated() {
-        spawn_worker_directly(&exe, &session)?;
-        "直接启动（当前已是管理员）".to_string()
+        match spawn_worker_directly(&exe, &session) {
+            Ok(()) => "直接启动（当前已是管理员）".to_string(),
+            Err(e) => {
+                session.append_log(&format!("[启动] 直接启动 worker 失败: {}", e));
+                return Err(e);
+            }
+        }
     } else {
-        // 计划任务的命令行里写死了会话目录，所以「任务存在」不等于「任务可用」。
-        // 配置里记着上次注册时用的目录（见 remember_task_dir），比一下就知道。
+        // 计划任务的命令行里写死了「exe 路径 + 会话目录」，所以「任务存在」
+        // 不等于「任务可用」：便携版/安装版共用同一份 AppData 会话目录时，
+        // 旧任务会一直拉起另一个位置的旧版本 worker。两者任一不一致都要重注册。
         let mut recorded = recorded_task_dir(&app);
         let task_usable = elevate::worker_task_exists()
-            && elevate::worker_task_matches(&session.dir, recorded.as_deref());
+            && elevate::worker_task_matches(&exe, &session.dir, recorded.as_deref());
 
         if Platform::is_windows(&Platform) && !task_usable {
             // 注册计划任务：首次会弹一次 UAC，之后免 UAC。
-            // 会话目录回退过的话，旧任务里写死的是旧路径，必须重新注册，
-            // 否则 worker 会往旧目录写、主进程在新目录等，连接必然失败。
+            // 会话目录回退、或程序换了位置，旧任务里写死的都是旧路径，必须重新注册，
+            // 否则 worker 会往旧目录写 / 跑旧版本，主进程等不到正确的状态。
             match elevate::ensure_worker_task(&exe, &session) {
-                Ok(_) => {
+                Ok(true) => {
                     remember_task_dir(&app, &session.dir);
                     // 任务已经指向当前目录了，别再拿旧记录去判断，
                     // 否则刚注册完又会被当成「过期任务」而白白弹一次 UAC。
                     recorded = Some(session.dir.to_string_lossy().to_string());
+                }
+                Ok(false) => {
+                    session.append_log(
+                        "[elevate] 计划任务已存在，但没有指向当前程序/会话目录；\
+                         本次改走 UAC 提权",
+                    );
                 }
                 Err(e) => {
                     session.append_log(&format!(
@@ -702,7 +750,16 @@ pub async fn vpn_connect(
                 }
             }
         }
-        elevate::start_worker(&exe, &session, recorded.as_deref())?
+        match elevate::start_worker(&exe, &session, recorded.as_deref()) {
+            Ok(method) => {
+                session.append_log(&format!("[启动] worker 启动请求已返回：{}", method));
+                method
+            }
+            Err(e) => {
+                session.append_log(&format!("[启动] worker 启动失败: {}", e));
+                return Err(e);
+            }
+        }
     };
 
     if let Ok(mut runtime) = state.0.lock() {
@@ -717,6 +774,11 @@ pub async fn vpn_connect(
             heartbeat.append_log("[心跳] 开始为 worker 续命");
             let started = Instant::now();
             let mut failures = 0u32;
+            // 是否见过 worker 真正进入活动阶段。
+            // worker 启动时先落盘的那份状态可能还是默认的 Disconnected（例如
+            // 采集网络快照那一步），心跳如果把这当成「会话结束」就会提前停止续命，
+            // worker 随后误判主进程死亡、把刚建好的隧道收掉。见下方判定。
+            let mut seen_active = false;
             loop {
                 if let Err(err) = heartbeat.touch_alive() {
                     // 一次写失败绝不能当成「主进程死了」：真机现场出现过隧道刚
@@ -740,21 +802,21 @@ pub async fn vpn_connect(
                 }
                 std::thread::sleep(Duration::from_secs(2));
                 match heartbeat.read_status() {
-                    Some(status)
-                        if matches!(
-                            status.phase,
-                            VpnPhase::Disconnected | VpnPhase::Failed
-                        ) =>
-                    {
-                        heartbeat.append_log("[心跳] 会话已结束，停止续命");
-                        break;
+                    Some(status) => {
+                        if heartbeat_should_stop(seen_active, status.phase) {
+                            heartbeat.append_log("[心跳] 会话已结束，停止续命");
+                            break;
+                        }
+                        if !matches!(status.phase, VpnPhase::Disconnected | VpnPhase::Failed) {
+                            seen_active = true;
+                        }
                     }
                     // 启动阶段可能还读不到状态；超过两分钟仍读不到就放弃
                     None if started.elapsed() > Duration::from_secs(120) => {
                         heartbeat.append_log("[心跳] 两分钟读不到状态，停止续命");
                         break;
                     }
-                    _ => {}
+                    None => {}
                 }
             }
         });
@@ -765,6 +827,20 @@ pub async fn vpn_connect(
         connector_path: connector.path,
         elevation,
     })
+}
+
+/// 心跳线程是否该停止续命。
+///
+/// `Failed` 一定是本次会话的终点；`Disconnected` 则必须等 worker 真正进入过
+/// 活动阶段（准备中/连接中/配路由/已连接）才算数——否则启动早期那份默认状态
+/// 就会把心跳线程骗停，worker 再因为心跳过期拆掉隧道。这正是现场
+/// 「CSTP connected 之后几秒断开」的一类成因。
+fn heartbeat_should_stop(seen_active: bool, phase: VpnPhase) -> bool {
+    match phase {
+        VpnPhase::Failed => true,
+        VpnPhase::Disconnected => seen_active,
+        _ => false,
+    }
 }
 
 /// 当前进程已是管理员时，直接起 worker，省掉一次多余的系统授权
@@ -852,7 +928,10 @@ fn is_process_alive(pid: u32) -> bool {
         let (text, _) = crate::process::run_with_timeout(
             std::path::Path::new("tasklist.exe"),
             &["/FI", &format!("PID eq {}", pid), "/NH"],
-            Duration::from_secs(15),
+            // 退出流程会轮询这个检查；15 秒的超时会让“退出”看起来卡死。
+            // tasklist 正常是毫秒级，3 秒足够；超时就当作不可判定，不再
+            // 无限期拖住退出（主进程仍有托盘退出的看门狗兜底）。
+            Duration::from_secs(3),
         );
         text.contains(&pid.to_string())
     }
@@ -1011,7 +1090,13 @@ pub fn start_status_poller(app: AppHandle) {
 pub fn shutdown(app: &AppHandle) {
     if let Ok(session) = session_of(app) {
         if let Some(status) = session.read_status() {
-            if status.phase != VpnPhase::Disconnected && status.phase != VpnPhase::Failed {
+            // 即使状态已经写成 Disconnected/Failed，只要 worker 进程还活着，
+            // 也要发停止请求：它可能还在杀 openconnect、还原路由。
+            let worker_alive = status.pid != 0 && is_process_alive(status.pid);
+            if worker_alive
+                || (status.phase != VpnPhase::Disconnected
+                    && status.phase != VpnPhase::Failed)
+            {
                 elevate::stop_worker(&session);
             }
         }
@@ -1020,9 +1105,72 @@ pub fn shutdown(app: &AppHandle) {
     }
 }
 
+/// Windows 托盘退出用：等 worker 收尾后再退出主进程。
+///
+/// 便携包是从解压目录直接运行的，worker 和 openconnect.exe 也在该目录下。
+/// 旧逻辑写完 stop.flag 立刻 `app.exit(0)`，用户马上删目录时 worker 还没
+/// 杀掉 openconnect，Windows 就会报“文件或文件夹已在另一程序打开”。
+/// 这里最多等 `timeout`，让 worker 先杀子进程、还原路由，再退出主程序。
+#[cfg(target_os = "windows")]
+pub fn shutdown_and_wait(app: &AppHandle, timeout: Duration) {
+    let Ok(session) = session_of(app) else {
+        return;
+    };
+    session.append_log("[退出] 收到托盘退出请求，开始收尾");
+    let status = session.read_status();
+    let pid = status.as_ref().map(|status| status.pid).unwrap_or(0);
+    let worker_alive = pid != 0 && is_process_alive(pid);
+    let active = status
+        .as_ref()
+        .map(|status| {
+            status.phase != VpnPhase::Disconnected && status.phase != VpnPhase::Failed
+        })
+        .unwrap_or(false);
+
+    if worker_alive || active {
+        session.append_log("[退出] 正在请求 worker 收尾，等待隧道和子进程退出");
+        elevate::stop_worker(&session);
+    } else {
+        session.append_log("[退出] 没有活动 worker，直接退出");
+    }
+
+    if worker_alive {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if !is_process_alive(pid) {
+                session.append_log("[退出] worker 已退出，主程序准备退出");
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        if is_process_alive(pid) {
+            session.append_log(&format!(
+                "[退出] worker 在 {}s 内未退出，主程序仍将退出；若目录被占用，请在任务管理器“详细信息”里结束 ws-workbench.exe / openconnect.exe",
+                timeout.as_secs()
+            ));
+        }
+    }
+
+    // 最后再清控制文件：先清 main.alive 会让 worker 提前判定主进程死亡，
+    // 但这里本来就是在请求退出，先写 stop、等它收尾更稳。
+    session.remove_control_files();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn heartbeat_ignores_the_startup_disconnected_status() {
+        // worker 一开始写的默认阶段是 Disconnected；心跳线程不能把这一份
+        // 当成「会话结束」，否则刚建好的隧道会被误杀。
+        assert!(!heartbeat_should_stop(false, VpnPhase::Disconnected));
+        // 已经见过活动阶段（连接中/已连接）之后再回到 Disconnected 才是真结束
+        assert!(heartbeat_should_stop(true, VpnPhase::Disconnected));
+        // 失败一定是终点，哪怕还没见过活动阶段
+        assert!(heartbeat_should_stop(false, VpnPhase::Failed));
+        assert!(!heartbeat_should_stop(false, VpnPhase::Connecting));
+    }
 
     #[test]
     fn validates_the_three_live_kinds() {

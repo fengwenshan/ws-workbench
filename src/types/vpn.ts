@@ -154,6 +154,8 @@ export interface ConnectResult {
 
 export interface ElevationInfo {
   elevated: boolean
+  /** 任务存在，但未必指向当前程序/会话目录 */
+  task_exists: boolean
   task_ready: boolean
   platform: string
   hint: string
