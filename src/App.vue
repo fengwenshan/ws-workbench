@@ -20,7 +20,7 @@ import { initPlatform, platform } from "@/platform";
 import appIcon from "@/assets/app-icon.png";
 import { decryptToTemp } from "@/api/attachments";
 import { openFile } from "@/api/system";
-import type { AttachmentMeta, QuickAttachmentItem } from "@/types";
+import type { AttachmentMeta, EntityKind, QuickAttachmentItem } from "@/types";
 import ProjectList from "@/components/ProjectList.vue";
 import GroupDetail from "@/components/GroupDetail.vue";
 import ProjectDetail from "@/components/ProjectDetail.vue";
@@ -487,10 +487,9 @@ async function handleRenameGroup(id: string, name: string) {
 }
 
 // 笔记 / 附件（分组与项目共用，按当前选中实体落盘）
-async function handleEntityNote(note: string) {
-  const sel = selection.value;
-  if (!sel) return;
-  await updateNote(sel.kind, sel.id, note);
+// 笔记带实体 id：切换实体时旧编辑器卸载补交，不能落到新选中项上
+async function handleEntityNote(kind: EntityKind, id: string, note: string) {
+  await updateNote(kind, id, note);
 }
 
 async function handleEntityAddAttachment(meta: AttachmentMeta) {
@@ -785,7 +784,7 @@ async function handlePack(project: any, asZip: boolean = false) {
               :key="'group-' + selection.id"
               :group="selectedGroup"
               :default-upload-dir="config.default_upload_dir"
-              @update-note="handleEntityNote"
+              @update-note="(id, note) => handleEntityNote('group', id, note)"
               @open-settings="handleOpenSettings"
               @add-attachment="handleEntityAddAttachment"
               @remove-attachment="handleEntityRemoveAttachment"
@@ -799,7 +798,7 @@ async function handlePack(project: any, asZip: boolean = false) {
               :default-upload-dir="config.default_upload_dir"
               @update="handleUpdate"
               @pack="handlePack"
-              @update-note="handleEntityNote"
+              @update-note="(id, note) => handleEntityNote('project', id, note)"
               @open-settings="handleOpenSettings"
               @add-attachment="handleEntityAddAttachment"
               @remove-attachment="handleEntityRemoveAttachment"

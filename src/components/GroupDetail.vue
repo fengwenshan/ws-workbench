@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { Tabs, TabPane } from 'ant-design-vue'
-import NoteEditor from './NoteEditor.vue'
+import NoteWorkspace from './NoteWorkspace.vue'
 import AttachmentPanel from './AttachmentPanel.vue'
 import type { AttachmentMeta, LogLevel, ProjectGroup } from '@/types'
 
@@ -10,7 +10,8 @@ defineProps<{
 }>()
 
 const emit = defineEmits<{
-  updateNote: [note: string]
+  /** 带上实体 id：卸载补交的笔记不能落到切换后的新选中项上 */
+  updateNote: [id: string, note: string]
   addAttachment: [meta: AttachmentMeta]
   removeAttachment: [id: string]
   renameAttachment: [id: string, name: string]
@@ -27,10 +28,10 @@ const emit = defineEmits<{
     </div>
     <Tabs class="detail-tabs">
       <TabPane key="note" tab="笔记">
-        <NoteEditor
+        <NoteWorkspace
           :note="group.note"
           :default-upload-dir="defaultUploadDir"
-          @update="(note) => emit('updateNote', note)"
+          @update="(note) => emit('updateNote', group.id, note)"
           @log="(level, message) => emit('log', level, message)"
         />
       </TabPane>

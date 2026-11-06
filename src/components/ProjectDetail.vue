@@ -2,7 +2,7 @@
 import { ref } from 'vue'
 import { Tabs, TabPane } from 'ant-design-vue'
 import ProjectConfigPanel from './ProjectConfig.vue'
-import NoteEditor from './NoteEditor.vue'
+import NoteWorkspace from './NoteWorkspace.vue'
 import AttachmentPanel from './AttachmentPanel.vue'
 import type { AttachmentMeta, LogLevel, ProjectConfig } from '@/types'
 
@@ -16,7 +16,8 @@ const configRef = ref<InstanceType<typeof ProjectConfigPanel> | null>(null)
 const emit = defineEmits<{
   update: [id: string, data: Partial<ProjectConfig>]
   pack: [project: ProjectConfig, asZip: boolean]
-  updateNote: [note: string]
+  /** 带上实体 id：卸载补交的笔记不能落到切换后的新选中项上 */
+  updateNote: [id: string, note: string]
   addAttachment: [meta: AttachmentMeta]
   removeAttachment: [id: string]
   renameAttachment: [id: string, name: string]
@@ -53,10 +54,10 @@ const emit = defineEmits<{
       </template>
       <TabPane key="note" tab="笔记">
         <div class="tab-pad">
-          <NoteEditor
+          <NoteWorkspace
             :note="project.note"
             :default-upload-dir="defaultUploadDir"
-            @update="(note) => emit('updateNote', note)"
+            @update="(note) => emit('updateNote', project.id, note)"
             @log="(level, message) => emit('log', level, message)"
           />
         </div>
