@@ -22,8 +22,8 @@ const vpn = props.vpn
  * 已从下拉里下架；历史配置里若还留着这种规则，列表里会打「不生效」标记。
  */
 const KIND_OPTIONS: { value: VpnRuleKind; label: string; placeholder: string }[] = [
-  { value: 'DOMAIN', label: '完整域名 (DOMAIN)', placeholder: 'example.com' },
-  { value: 'DOMAIN-SUFFIX', label: '域名后缀 (DOMAIN-SUFFIX)', placeholder: 'example.com（连带所有子域）' },
+  { value: 'DOMAIN', label: '完整域名 (DOMAIN)', placeholder: 'oa.example.com（推荐，按这个主机精确注入）' },
+  { value: 'DOMAIN-SUFFIX', label: '域名后缀 (DOMAIN-SUFFIX)', placeholder: 'example.com（只解析该域名本身；子域请用完整域名或全局模式）' },
   { value: 'IP-CIDR', label: 'IP 网段 (IP-CIDR)', placeholder: '10.0.0.0/8' },
 ]
 
@@ -44,7 +44,7 @@ const DEFAULT_POLICY: VpnPolicy = 'DIRECT'
 
 const originalRules = JSON.stringify(profile?.rules ?? [])
 
-const kind = ref<VpnRuleKind>('DOMAIN-SUFFIX')
+const kind = ref<VpnRuleKind>('DOMAIN')
 const value = ref('')
 const policy = ref<VpnPolicy>('VPN')
 const error = ref('')

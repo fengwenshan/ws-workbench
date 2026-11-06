@@ -110,7 +110,7 @@ pub struct VpnRuleSet {
 pub struct VpnProfile {
     pub id: String,
     pub name: String,
-    /// 服务器地址，可带端口，例如 vpn.risencn.com:1218
+    /// 服务器地址，可带端口，例如 vpn.example.com:1218
     pub server: String,
     pub username: String,
     /// 密码密文（Windows 为 DPAPI 密文，macOS 为钥匙串引用标记），见 vpn/credential.rs

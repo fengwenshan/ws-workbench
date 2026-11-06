@@ -542,7 +542,7 @@ impl SplitTunnel {
                     }
                     Ok(Ok(_)) => session.append_log(&format!(
                         "[自检] {} 的查询已走到按域名分流解析，但这个域名本身没有 A 记录\
-                         （内网主机请用完整域名，比如 oa.risencn.com）",
+                         （内网主机请用完整域名，比如 oa.example.com）",
                         domain
                     )),
                     Ok(Err(e)) => {
@@ -551,11 +551,14 @@ impl SplitTunnel {
                         let text = e.to_string();
                         let no_record = text.contains("nodename")
                             || text.contains("no such host")
-                            || text.contains("Name or service not known");
+                            || text.contains("Name or service not known")
+                            // 中文 Windows 的 getaddrinfo 文案
+                            || text.contains("不知道这样的主机")
+                            || text.contains("找不到主机");
                         if no_record {
                             session.append_log(&format!(
                                 "[自检] {domain} 查询链路是通的，但这个名字本身没有 A 记录\
-                                 （内网主机请用完整域名，比如 oa.{domain}）；原始错误：{text}"
+                                 （内网主机请用完整域名，比如 oa.{domain}）；系统返回：{text}"
                             ));
                         } else {
                             session.append_log(&format!(
@@ -899,7 +902,7 @@ fn resolve_loop(
                     if added == 0 {
                         session.append_log(
                             "[分流] 首批没有拿到可用的内网地址：VPN DNS 可能经隧道不可达，\
-                             或这些域名本身没有 A 记录（内网主机请写完整域名，比如 oa.risencn.com）",
+                             或这些域名本身没有 A 记录（内网主机请写完整域名，比如 oa.example.com）",
                         );
                     }
                 }

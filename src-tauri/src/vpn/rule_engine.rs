@@ -9,9 +9,9 @@
 /// 规则的匹配类型。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuleKind {
-    /// 精确域名：`oa.risencn.com`
+    /// 精确域名：`oa.example.com`
     Domain,
-    /// 域名后缀：`risencn.com`（含所有子域）
+    /// 域名后缀：`example.com`（DNS 上含子域；路由注入只解析字面域名本身）
     DomainSuffix,
     /// IPv4 网段：`192.168.136.0/22`
     IpCidr,

@@ -128,6 +128,14 @@ impl VpnSession {
             self.mode_path(),
             self.rules_path(),
             self.alive_path(),
+            // 这些是上一轮提权/启动/PowerShell 的现场文件，不清理会让新会话的
+            // 收集包混入旧内容，误判成「这次也执行了同样的命令」。
+            self.dir.join("powershell.log"),
+            self.dir.join("elevate.exit"),
+            self.dir.join("elevate.out"),
+            self.dir.join("create-task.cmd"),
+            self.dir.join("run-worker.cmd"),
+            self.dir.join("delete-task.cmd"),
         ] {
             if path.exists() {
                 let _ = fs::remove_file(path);
@@ -231,7 +239,15 @@ impl VpnSession {
     /// 刷新父进程心跳
     pub fn touch_alive(&self) -> Result<(), String> {
         self.ensure()?;
-        fs::write(self.alive_path(), b"")
+        // 必须写入非空内容。Windows 上对已存在的空文件再次 `fs::write(..., b"")`
+        // 只做截断、不更新 LastWriteTime；worker 用文件 mtime 判断年龄，会看到
+        // 心跳永远停在第一次创建的时刻，约 11 秒后误判主进程死亡并拆隧道。
+        // 现场 12:39 的 `主进程心跳已停止（11s 未刷新）` 就是这个原因。
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_millis().to_string())
+            .unwrap_or_else(|_| "alive".to_string());
+        fs::write(self.alive_path(), stamp.as_bytes())
             .map_err(|e| format!("刷新心跳失败: {}", e))
     }
 
@@ -575,5 +591,34 @@ mod tests {
         assert!(age.as_secs() < 5);
         session.remove_control_files();
         assert!(session.alive_age().is_none());
+    }
+
+    #[test]
+    fn touch_alive_refreshes_mtime_even_on_windows() {
+        let session = temp_session("alive-mtime");
+        session.prepare().unwrap();
+        session.touch_alive().unwrap();
+
+        // 把 mtime 拨回一分钟前，模拟 worker 看到的旧心跳；touch_alive 必须
+        // 真的刷新它。旧实现写空字节，在 Windows 上不会更新 LastWriteTime，
+        // 这个测试会失败。
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .open(session.alive_path())
+            .unwrap();
+        file.set_modified(old).unwrap();
+        drop(file);
+
+        session.touch_alive().unwrap();
+        let modified = fs::metadata(session.alive_path())
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert!(
+            modified > old + std::time::Duration::from_secs(30),
+            "touch_alive 没有刷新 LastWriteTime: {:?}",
+            modified
+        );
     }
 }

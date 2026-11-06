@@ -45,7 +45,10 @@ Add-DnsClientNrptRule -Namespace 'risencn.com' -NameServers '172.18.160.12' `
 ```
 
 - 只影响命中命名空间的查询，不改系统 DNS、不改默认路由。
-- 命名空间按 DNS 后缀匹配，规则 `risencn.com` 覆盖它自己和所有子域，和 `/etc/resolver/risencn.com` 等价。
+- 命名空间按 DNS 后缀匹配，规则 `example.com` 覆盖它自己和所有子域，和 `/etc/resolver/example.com` 等价。
+- 但**路由注入只解析规则里的字面域名**：`DOMAIN-SUFFIX example.com` 不会自动解析 `oa.example.com`。
+  如果 `example.com` 本身没有 A 记录，子域即使 DNS 能解析，也不会有 `/32` 路由。
+  子域要么逐条写 `DOMAIN oa.example.com`，要么使用全局模式。
 - 由 `Dnscache`（DNS Client）服务执行，服务没跑规则不生效。
 
 ### 4.2 NRPT 的应答在 DNS Client 里，用户态看不到

@@ -181,11 +181,14 @@ watch(
 /**
  * 切换成功后撤掉乐观值，让高亮交回真实状态。
  *
- * 不能立刻撤：已连接时高亮取 worker 回写的 applied_mode，它要等一次状态轮询
- * 才追上来，立刻撤会看到「闪回旧模式」。最多等 3 秒，等不到也交回真实状态。
+ * 不能立刻撤：已连接时高亮取 worker 回写的 applied_mode，它要等状态轮询
+ * 才追上来，立刻撤会看到「闪回旧模式」。全局模式要撤/装半默认路由和 DNS，
+ * 现场约 4 秒，3 秒超时会在 worker 回报前先把高亮交回旧模式，等下一轮状态
+ * 到了再跳回新模式——表现就是「切过去、又自动切回来、再切过去」。
+ * 这里放宽到 15 秒，并且只认真正匹配；超时只告警，不再假装已到达。
  */
 function settleOptimistic(mode: VpnProxyMode) {
-  const deadline = Date.now() + 3000
+  const deadline = Date.now() + 15_000
   const timer = window.setInterval(() => {
     if (optimisticMode.value !== mode) {
       // 用户又点了别的模式，这次不用管了
@@ -193,11 +196,18 @@ function settleOptimistic(mode: VpnProxyMode) {
       return
     }
     const reached = vpn.isConnected
-      ? appliedMode.value === mode || appliedMode.value === null
+      ? appliedMode.value === mode
       : vpn.selectedProfile?.proxy_mode === mode
-    if (reached || Date.now() > deadline) {
+    if (reached) {
       optimisticMode.value = null
       window.clearInterval(timer)
+      return
+    }
+    if (Date.now() > deadline) {
+      // 真实状态一直没追上：交回真实值，并在日志里留下一句，别无限高亮
+      optimisticMode.value = null
+      window.clearInterval(timer)
+      vpn.pushLog('warn', `模式切换后 15 秒内没有等到 worker 确认，已按实际状态显示`)
     }
   }, 120)
 }
@@ -372,16 +382,20 @@ watch(
             <button
               v-if="vpn.elevation.platform === 'windows' && !vpn.elevation.task_ready && !vpn.elevation.elevated"
               class="btn btn-secondary btn-xs"
+              :disabled="vpn.elevationBusy"
+              :aria-busy="vpn.elevationBusy"
               @click="vpn.setupElevation()"
             >
-              注册免 UAC 任务
+              {{ vpn.elevationBusy ? '注册中…' : '注册免 UAC 任务' }}
             </button>
             <button
-              v-if="vpn.elevation.platform === 'windows' && vpn.elevation.task_ready"
+              v-if="vpn.elevation.platform === 'windows' && (vpn.elevation.task_ready || vpn.elevation.task_exists)"
               class="btn btn-secondary btn-xs"
+              :disabled="vpn.elevationBusy"
+              :aria-busy="vpn.elevationBusy"
               @click="vpn.removeElevation()"
             >
-              移除任务
+              {{ vpn.elevationBusy ? '移除中…' : '移除任务' }}
             </button>
           </div>
         </div>
