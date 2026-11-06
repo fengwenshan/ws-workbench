@@ -63,6 +63,8 @@ struct Worker {
     last_mode_check: Instant,
     last_rules_check: Instant,
     last_alive_check: Instant,
+    /// 连续几次看到心跳过期。见 `check_parent_alive`：一次过期不算数。
+    stale_alive_checks: u32,
     /// 心跳过期：主进程已经不在了，循环里看到就把隧道收掉
     parent_lost: bool,
 }
@@ -102,6 +104,7 @@ impl Worker {
             last_mode_check: Instant::now(),
             last_rules_check: Instant::now(),
             last_alive_check: Instant::now(),
+            stale_alive_checks: 0,
             parent_lost: false,
         }
     }
@@ -331,28 +334,44 @@ impl Worker {
 
     // ======================= 心跳与守护 =======================
 
-    /// 心跳守卫：主进程被强杀时没人来收尾，心跳停了就自己走正常停止流程
+    /// 心跳守卫：主进程被强杀时没人来收尾，心跳停了就自己走正常停止流程。
+    ///
+    /// 判据要宽松一点：心跳就是「每 2s 重写一个空文件」，被杀软短暂独占、
+    /// 或者系统卡一下，mtime 落后个几秒都很正常。真机现场出现过隧道刚建好
+    /// （CSTP connected）就被一次过期判定掐掉的情况——所以这里要求连续两次
+    /// （间隔 ≥1s）都过期，并且把实测的秒数写进日志，下次能一眼分辨是
+    /// 「主进程真没了」还是「心跳抖动」。
     fn check_parent_alive(&mut self) {
         if self.last_alive_check.elapsed() < Duration::from_secs(1) {
             return;
         }
         self.last_alive_check = Instant::now();
-        match self.session.alive_age() {
+        let stale = match self.session.alive_age() {
             // 心跳文件还没出现：给启动留 10s 宽限期
-            None => {
-                if elapsed_since(&self.status.started_at) > Duration::from_secs(10) {
-                    self.parent_lost = true;
-                }
-            }
-            Some(age) => {
-                if age > Duration::from_secs(8) {
-                    self.parent_lost = true;
-                }
-            }
+            None => elapsed_since(&self.status.started_at) > Duration::from_secs(10),
+            Some(age) => age > Duration::from_secs(10),
+        };
+        if !stale {
+            self.stale_alive_checks = 0;
+            return;
+        }
+        self.stale_alive_checks += 1;
+        if self.stale_alive_checks < 2 {
+            return;
         }
         if self.parent_lost {
-            self.log("[worker] 主进程心跳已停止，自动收尾并退出");
+            return;
         }
+        self.parent_lost = true;
+        let age = self
+            .session
+            .alive_age()
+            .map(|age| age.as_secs())
+            .unwrap_or(u64::MAX);
+        self.log(&format!(
+            "[worker] 主进程心跳已停止（{}s 未刷新），自动收尾并退出",
+            age
+        ));
     }
 
     /// 轮询 mode 文件：变化时只改判定开关，已建立的连接不受影响
@@ -1310,6 +1329,53 @@ mod tests {
         worker.tail.push("CSTP connected".into());
         worker.tail.push("Login failed.".into());
         assert!(worker.tail_summary().contains("Login failed"));
+    }
+
+    #[test]
+    fn single_stale_heartbeat_does_not_kill_the_tunnel() {
+        // 现场：CSTP 刚连上，2 秒后 worker 就宣布「心跳已停止」把隧道收了。
+        // 现在要求连续两次过期才判定，单次抖动不能误杀。
+        let session = VpnSession::new(std::env::temp_dir().join("ws-worker-test-alive"));
+        session.ensure().unwrap();
+        session.touch_alive().unwrap();
+        let request = VpnRequest {
+            conn_identity: String::new(),
+            proxy_mode: "rule".to_string(),
+            profile_id: "p".into(),
+            profile_name: "n".into(),
+            server: "s".into(),
+            username: "u".into(),
+            password: "p".into(),
+            protocol: "anyconnect".into(),
+            connector: crate::vpn::models::ConnectorKind::Auto,
+            connector_path: "x".into(),
+            rules: vec![],
+            default_policy: "DIRECT".into(),
+            extra_args: vec![],
+            script_path: "s".into(),
+            hook_exe: "h".into(),
+            created_at: String::new(),
+        };
+        let mut worker = Worker::new(session.clone(), request);
+
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(30);
+        {
+            let file = std::fs::File::options()
+                .write(true)
+                .open(session.alive_path())
+                .unwrap();
+            file.set_modified(old).unwrap();
+        }
+
+        // Worker::new 里 last_alive_check 是「现在」，第一次调用会因为是刚检查过而跳过，
+        // 所以每次都把上次检查时间往回拨，模拟每秒一次的轮询。
+        worker.last_alive_check = std::time::Instant::now() - std::time::Duration::from_secs(2);
+        worker.check_parent_alive();
+        assert!(!worker.parent_lost, "第一次读到过期不能直接判定主进程没了");
+
+        worker.last_alive_check = std::time::Instant::now() - std::time::Duration::from_secs(2);
+        worker.check_parent_alive();
+        assert!(worker.parent_lost, "连续两次过期才算真的没了");
     }
 
     #[test]
