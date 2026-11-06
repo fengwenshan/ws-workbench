@@ -46,23 +46,24 @@ Add-DnsClientNrptRule -Namespace 'risencn.com' -NameServers '172.18.160.12' `
 
 - 只影响命中命名空间的查询，不改系统 DNS、不改默认路由。
 - 命名空间按 DNS 后缀匹配，规则 `example.com` 覆盖它自己和所有子域，和 `/etc/resolver/example.com` 等价。
-- 但**路由注入只解析规则里的字面域名**：`DOMAIN-SUFFIX example.com` 不会自动解析 `oa.example.com`。
-  如果 `example.com` 本身没有 A 记录，子域即使 DNS 能解析，也不会有 `/32` 路由。
-  子域要么逐条写 `DOMAIN oa.example.com`，要么使用全局模式。
 - 由 `Dnscache`（DNS Client）服务执行，服务没跑规则不生效。
 
-### 4.2 NRPT 的应答在 DNS Client 里，用户态看不到
+### 4.2 Windows 也走本机转发器：NRPT 指向 `127.0.0.1:53`
 
-macOS 的转发器是「应用 → 127.0.0.1:53 → 转发器 → VPN DNS」同一条链路，所以能在**把应答回给应用之前**注入 `/32`，没有时间差。
+只写 NRPT 还不够：NRPT 由 DNS Client 直接问 VPN DNS，用户态看不到子域查询，也就没有「拿到 A 记录后、应用连接前」这个注入时机。
 
-Windows 的 NRPT 由 DNS Client 直接向 VPN DNS 发查询并缓存应答，用户态没有「应答即将返回」的钩子。
-两条路都试过、都不可靠：
+现在 Windows 和 macOS 共用同一条数据面：
 
-- 把 NRPT 指向本机转发器（`127.0.0.1`）：DNS Client 对 loopback DNS 的行为没有文档保证，实测资料互相矛盾；
-- 拦 UDP/53：需要 WFP 或 WinDivert，等于把刚删掉的捕获引擎再引回来一半。
+```text
+应用 -> 系统解析器 -> NRPT -> 127.0.0.1:53 本机转发器
+     -> VPN DNS -> 解析 A 记录 -> 先装 /32 隧道路由 -> 回包给应用
+```
 
-**结论**：按域名解析出的地址改为**主动解析线程**注入 —— 每 15 秒按规则里的域名直接问 VPN DNS，把 A 记录逐个装 `/32`。
-代价是新地址最多晚一个周期（15 秒）生效；服务端下发的 split-include 网段不受影响，一开始就整段注入。
+- `DOMAIN-SUFFIX risencn.com` 由 NRPT 覆盖所有子域；转发器看到哪个子域，就给哪个 A 记录装 `/32`，不再依赖规则里写死的字面域名。
+- 转发器绑定失败（53 被占用）、NRPT 指向 loopback 失败、或 1.5 秒内没有查询进来时，自动回退到旧路径：
+  NRPT 直连 VPN DNS + 后台每 15 秒主动解析字面域名；worker.log 会写明回退原因。
+- 不用 WFP / WinDivert 拦包，不把刚删掉的捕获引擎引回来。
+- 仍只覆盖「系统解析器（getaddrinfo）」；自带 DoH/DoT 的应用不受控。
 
 ### 4.3 隧道侧路由一律 on-link
 
@@ -113,8 +114,8 @@ worker 断开走 SIGKILL，脚本的 `disconnect` 分支不会执行。可能残
 
 | 能力 | macOS | Windows |
 | --- | --- | --- |
-| 按域名指定 DNS | `/etc/resolver/<域名>` | NRPT（`Add-DnsClientNrptRule`） |
-| 域名 → 内网 IP 的注入时机 | 转发器在回包前注入 | 后台线程每 15 秒主动查询后注入 |
+| 按域名指定 DNS | `/etc/resolver/<域名>` → `127.0.0.1:53` | NRPT（`Add-DnsClientNrptRule`）→ `127.0.0.1:53` |
+| 域名 → 内网 IP 的注入时机 | 转发器在回包前注入 | 同一个转发器在回包前注入；失败才回退到后台 15 秒轮询 |
 | 隧道路由 | `route -n add -interface utunN` | `New-NetRoute -NextHop 0.0.0.0`（on-link） |
 | 删路由 | `route -n delete` | `Remove-NetRoute` |
 | 全局模式 DNS | `scutil` + `networksetup`（两处） | 只改隧道网卡（`Set-DnsClientServerAddress`） |
@@ -131,9 +132,12 @@ cleanup_stale(session)              // 先清崩溃残留（只清自己的）
 install_routes(plan.cidrs)          // VPN DNS /32 + IP-CIDR + split-include 网段 -> 隧道
   └ 失败：teardown 已做的部分，返回错误
 install_resolver()                  // 有域名规则才做
-  ├ NRPT 成功：nrpt_installed = true
-  └ NRPT 失败：退回「只给隧道网卡配 DNS」+ 记日志；两者都失败才报错
-start_resolver()                    // 主动解析线程
+  ├ 优先：绑定 127.0.0.1:53 转发器 -> NRPT 指向 127.0.0.1
+  │   ├ 1.5 秒内收到探针查询：local_dns_proxy = true，收工
+  │   └ 绑定 / NRPT / 探针失败：停转发器，记日志，走旧路径
+  ├ 旧路径：NRPT 直连 VPN DNS
+  └ 旧路径也失败：退回「只给隧道网卡配 DNS」；两者都失败才报错
+start_resolver()                    // 本地转发器已起则空操作；旧路径起 15 秒主动解析线程
 flush_dns_cache()
 ```
 
@@ -141,7 +145,14 @@ flush_dns_cache()
 - 有域名规则但服务端没下发 DNS → 直接报错，不进入降级（否则域名永远解析不了，用户会以为规则没生效）。
 - `teardown` 幂等：断开、切模式、apply 中途失败都走它。
 
-### 6.2 主动解析线程
+### 6.2 本机转发器（首选）
+
+- 收 DNS Client 的查询 -> 经隧道问 VPN DNS -> `parse_a_records` -> 先 `ensure_onlink_routes` 装 `/32` -> 再把原始应答回给 DNS Client。
+- 上游按列表逐个尝试，2 秒超时；只接受 ID 相同且 `QR=1` 的应答。
+- 只注入可路由的单播地址（过滤 `0.0.0.0`、回环、组播、链路本地、广播）。
+- 用一条随机子域探针确认 NRPT 真的把查询送进了 loopback；没有查询就回退，不假装成功。
+
+### 6.3 旧路径：主动解析线程（回退）
 
 - 每个域名一个线程并发查（UDP 直接问 VPN DNS，1.5 秒超时），一轮最多等 5 秒。
 - 只接受 `is_response_to(id)` 的应答，过滤掉伪造 / 串包。
@@ -150,17 +161,19 @@ flush_dns_cache()
 - 失败日志只在错误文本变化时记一行，避免每 15 秒刷同一条把 `worker.log` 冲垮。
 - 第一轮一个地址都没拿到时给一条可执行的提示（VPN DNS 不可达 / 域名不是完整内网域名）。
 
-### 6.3 守护
+### 6.4 守护
 
 每 15 秒：
 
 - `ensure_onlink_routes(static_routes)` 一条 PowerShell 补全缺的路由；
 - `installed_domains()` 比对 NRPT 规则，缺了就**重下全部域名**（`apply_namespace_rules` 的脚本会先清掉自己所有规则再重建，只传缺的那几个会把还在的规则一起删掉）；
+- 本机转发器模式重下时仍指向 `127.0.0.1`；旧路径重下时指向 VPN DNS；
 - 退回到「隧道网卡 DNS」时检查网卡 DNS 有没有被改掉。
 
-### 6.4 已知取舍
+### 6.5 已知取舍
 
-- 按域名解析出的 `/32` 最晚约 15 秒生效；这段时间里应用可能已经拿着新 IP 发起连接，会走系统默认路由（大概率失败一次重试）。这是 NRPT 不给钩子的必然结果。
+- 本机转发器模式下，`/32` 在应答回给应用之前就装好，不再有 15 秒窗口。
+- 回退路径下，按域名解析出的 `/32` 最晚约 15 秒生效；应用可能已经拿着新 IP 发起连接，会走系统默认路由（大概率失败一次重试）。
 - 动态 `/32` 只增不减：DNS 轮换出的旧地址会留到 teardown。路由表条目量级是「域名数 × 轮换次数」，实际很小。
 
 ## 7. 全局模式（`fulltunnel.rs`）

@@ -10,24 +10,27 @@
 //!
 //! | 步骤 | macOS | Windows |
 //! | --- | --- | --- |
-//! | 命中域名的解析交给 VPN DNS | 写 `/etc/resolver/<域名>` + 本机转发器 | NRPT 规则（`Add-DnsClientNrptRule`） |
-//! | 解析出来的内网 IP 进隧道 | 转发器在应答前注入 `/32` 路由 | 后台解析线程向 VPN DNS 要 A 记录，再注入 `/32` |
+//! | 命中域名的解析交给本机转发器 | 写 `/etc/resolver/<域名>` | NRPT 规则指向 `127.0.0.1:53` |
+//! | 本机转发器把查询交给 VPN DNS | `127.0.0.1:53` 转发器 | 同一个 `127.0.0.1:53` 转发器 |
+//! | 解析出来的内网 IP 进隧道 | 转发器在应答前注入 `/32` 路由 | 同左 |
 //! | `IP-CIDR` / 服务端 split-include | 直接注入隧道路由 | 同左 |
 //!
 //! 默认路由、系统 DNS、其它流量一律不动 —— 结构上不可能再出现「一连上就断网」。
 //!
+//! Windows 的 NRPT 只负责把命中域名的查询交给本机转发器；转发器在把应答交回
+//! DNS Client 之前，先按 A 记录装好 `/32` 路由。这样 `DOMAIN-SUFFIX` 才能像
+//! macOS 一样覆盖任意子域，而不是靠后台线程只解析规则里写死的字面域名。
+//! 如果本机 53 端口被占用，或 NRPT 指向 loopback 后没有查询进来，会退回原来的
+//! 「NRPT 直连 VPN DNS + 后台主动解析」路径，并在 worker.log 里写明原因。
+//!
 //! 代价（必须让用户知道）：
 //! - `DOMAIN-KEYWORD` / `PROCESS-NAME` / `DST-PORT` 没有数据面可用，做不到；
 //! - 域名只覆盖「系统解析器（getaddrinfo）」这条路：自带 DoH/DoT 的应用不受控
-//!   （但它解析出来的 IP 若命中 IP-CIDR 规则，照样能进隧道）；
-//! - Windows 没有「应答前注入」这个时机（NRPT 的查询由 DNS Client 服务发出，
-//!   用户态看不到），所以按域名解析出来的地址是**后台轮询**注入的：正常内网域名
-//!   在连接建立后 1~2 秒内就会补齐 `/32`，服务端下发的 split-include 网段则一开始
-//!   就整段注入，不依赖解析时机。
+//!   （但它解析出来的 IP 若命中 IP-CIDR 规则，照样能进隧道）。
 
 use std::collections::BTreeSet;
 use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -37,10 +40,16 @@ use super::route;
 use super::rule_engine::{Policy, RuleKind};
 use super::session::VpnSession;
 
-/// 本机 DNS 转发器监听地址（macOS：`/etc/resolver` 只能写 nameserver 地址，
-/// 用 53 端口最省事；worker 以 root 运行，绑 1024 以下端口没问题）。
-#[cfg(target_os = "macos")]
+/// 本机 DNS 转发器监听地址。
+///
+/// macOS 的 `/etc/resolver` 只能写 nameserver 地址，Windows 的 NRPT 也只能写
+/// 一个 IP；两边都用 loopback 的 53 端口最直接。worker 以管理员/root 运行，
+/// Windows 上 53 不要求特权端口，但可能被别的 DNS 服务占用，占用时回退。
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub const FORWARDER_ADDR: &str = "127.0.0.1:53";
+/// NRPT 指向本机转发器时使用的地址。
+#[cfg(target_os = "windows")]
+const LOCAL_DNS_SERVER: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 1);
 /// `/etc/resolver` 目录（macOS 的按域名分流解析配置目录）
 #[cfg(target_os = "macos")]
 pub const RESOLVER_DIR: &str = "/etc/resolver";
@@ -48,10 +57,10 @@ pub const RESOLVER_DIR: &str = "/etc/resolver";
 #[cfg(target_os = "macos")]
 pub const MANIFEST_FILE: &str = "resolver-manifest.txt";
 /// 单次上游查询的超时
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(2);
 /// 转发线程的收包粒度：只为了让 stop 标志能及时生效
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 const POLL_TIMEOUT: Duration = Duration::from_millis(500);
 /// Windows：单次主动解析的超时。内网 DNS 正常是毫秒级，1.5s 足够，
 /// 也避免一条不通的上游把整轮解析拖到十几秒。
@@ -93,7 +102,10 @@ pub fn plan(rules: &[VpnRule], default_policy: &str) -> SplitPlan {
         let kind = match RuleKind::parse(&rule.kind) {
             Ok(kind) => kind,
             Err(e) => {
-                push_unique(&mut out.notes, format!("{} {}：{}", rule.kind, rule.value, e));
+                push_unique(
+                    &mut out.notes,
+                    format!("{} {}：{}", rule.kind, rule.value, e),
+                );
                 continue;
             }
         };
@@ -143,7 +155,10 @@ impl SplitPlan {
     /// 返回是否真的新增了。
     pub fn add_cidr(&mut self, raw: &str) -> bool {
         match route::parse_cidr(raw) {
-            Ok((net, prefix)) => add_unique(&mut self.cidrs, format!("{}/{}", Ipv4Addr::from(net), prefix)),
+            Ok((net, prefix)) => add_unique(
+                &mut self.cidrs,
+                format!("{}/{}", Ipv4Addr::from(net), prefix),
+            ),
             Err(_) => false,
         }
     }
@@ -170,7 +185,10 @@ fn push_unique(list: &mut Vec<String>, item: String) {
 pub fn normalize_domain(value: &str) -> Option<String> {
     let mut text = value.trim().to_ascii_lowercase();
     text = text.trim_start_matches("*.").to_string();
-    text = text.trim_start_matches('.').trim_end_matches('.').to_string();
+    text = text
+        .trim_start_matches('.')
+        .trim_end_matches('.')
+        .to_string();
     if text.is_empty() || text.len() > 253 || !text.contains('.') {
         return None;
     }
@@ -193,7 +211,7 @@ pub fn normalize_domain(value: &str) -> Option<String> {
 /// 把一条 DNS 查询改写成 SERVFAIL 应答（上游全都不通时用）。
 ///
 /// 只保留头部与问题段：应用需要收到一个「明确失败」的应答，否则它会一直等到超时。
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 pub fn servfail(query: &[u8]) -> Option<Vec<u8>> {
     if query.len() < 12 {
         return None;
@@ -213,7 +231,7 @@ pub fn servfail(query: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// 问题段结束位置（含 QTYPE/QCLASS 四个字节）。
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 fn question_end(packet: &[u8]) -> Option<usize> {
     let mut pos = 12usize;
     loop {
@@ -259,6 +277,11 @@ pub struct SplitTunnel {
     /// Windows：NRPT 不可用时退回了「只给隧道网卡配 DNS」
     #[cfg(target_os = "windows")]
     adapter_dns_fallback: bool,
+    /// Windows：NRPT 是否指向本机 127.0.0.1:53 转发器
+    #[cfg(target_os = "windows")]
+    local_dns_proxy: bool,
+    /// 本机转发器收到的查询数：Windows 用来确认 NRPT→loopback 是否真的通了
+    dns_queries: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,
     /// macOS 的 DNS 转发线程 / Windows 的主动解析线程
     thread: Option<std::thread::JoinHandle<()>>,
@@ -274,7 +297,9 @@ impl SplitTunnel {
         plan: SplitPlan,
     ) -> Result<Self, String> {
         if plan.domains.is_empty() && plan.cidrs.is_empty() {
-            return Err("规则里没有可用的分流动作：域名请用「域名后缀」，网段请用 IP-CIDR".to_string());
+            return Err(
+                "规则里没有可用的分流动作：域名请用「域名后缀」，网段请用 IP-CIDR".to_string(),
+            );
         }
         // 上一轮被 SIGKILL 时留下的解析器配置先清掉，否则清不干净的域名
         // 会一直指向一个已经断掉的 DNS（macOS）或一条过期规则（Windows）。
@@ -301,6 +326,9 @@ impl SplitTunnel {
             nrpt_installed: false,
             #[cfg(target_os = "windows")]
             adapter_dns_fallback: false,
+            #[cfg(target_os = "windows")]
+            local_dns_proxy: false,
+            dns_queries: Arc::new(AtomicUsize::new(0)),
             stop: Arc::new(AtomicBool::new(false)),
             thread: None,
         };
@@ -352,37 +380,7 @@ impl SplitTunnel {
         }
         #[cfg(target_os = "windows")]
         {
-            // NRPT 是 Windows 官方的「按命名空间指定 DNS」机制，等价于 /etc/resolver。
-            // 只影响命中域名的查询，其余域名仍走本机原来的 DNS。
-            match super::win_dns::apply_namespace_rules(&self.domains, &self.vpn_dns) {
-                Ok(count) => {
-                    self.nrpt_installed = true;
-                    session.append_log(&format!(
-                        "[分流] 已为 {} 个域名配置按域名解析（NRPT），命中即交给 VPN DNS {:?}",
-                        count, self.vpn_dns
-                    ));
-                    Ok(())
-                }
-                Err(e) => {
-                    // 退而求其次：把 VPN DNS 配到隧道网卡上。这样内网域名至少能解析，
-                    // 代价是这台机器所有 DNS 都可能经隧道（NRPT 只覆盖列出的域名）。
-                    match super::win_dns::set_interface_dns(self.tun_index(), &self.vpn_dns) {
-                        Ok(()) => {
-                            self.adapter_dns_fallback = true;
-                            session.append_log(&format!(
-                                "[分流] 按域名解析（NRPT）不可用：{}；已退回「只给隧道网卡配 DNS」{}，\
-                                 内网域名仍可解析，但公共域名也可能走 VPN DNS",
-                                e, self.tun_dev
-                            ));
-                            Ok(())
-                        }
-                        Err(e2) => Err(format!(
-                            "按域名解析（NRPT）配置失败：{}；退回隧道网卡 DNS 也失败：{}",
-                            e, e2
-                        )),
-                    }
-                }
-            }
+            self.install_windows_resolver(session)
         }
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
@@ -424,15 +422,21 @@ impl SplitTunnel {
         Ok(())
     }
 
-    /// 起 DNS 分流线程：macOS 是 127.0.0.1:53 的转发器，Windows 是主动解析线程。
+    /// 起 DNS 分流线程：macOS 是 127.0.0.1:53 的转发器；Windows 优先也是同一个
+    /// 转发器（NRPT 指过来），只有转发器不可用时才退回后台主动解析线程。
     fn start_resolver(&mut self, session: &VpnSession) -> Result<(), String> {
         #[cfg(target_os = "macos")]
         {
-            return self.start_forwarder(session);
+            self.start_forwarder(session)
         }
         #[cfg(target_os = "windows")]
         {
-            self.start_resolve_thread(session)
+            if self.local_dns_proxy {
+                // 转发线程已经在 install_windows_resolver 里起来了
+                Ok(())
+            } else {
+                self.start_resolve_thread(session)
+            }
         }
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
@@ -441,7 +445,7 @@ impl SplitTunnel {
         }
     }
 
-    /// 起 DNS 转发线程（监听 127.0.0.1:53，macOS）。
+    /// 绑定 127.0.0.1:53 并起转发线程（macOS）。
     #[cfg(target_os = "macos")]
     fn start_forwarder(&mut self, session: &VpnSession) -> Result<(), String> {
         let socket = UdpSocket::bind(FORWARDER_ADDR).map_err(|e| {
@@ -450,22 +454,185 @@ impl SplitTunnel {
                 FORWARDER_ADDR, e
             )
         })?;
-        socket.set_read_timeout(Some(POLL_TIMEOUT)).map_err(|e| e.to_string())?;
+        socket
+            .set_read_timeout(Some(POLL_TIMEOUT))
+            .map_err(|e| e.to_string())?;
+        self.spawn_forwarder(socket, session)
+    }
+
+    /// 起转发线程（macOS / Windows 共用）。
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn spawn_forwarder(&mut self, socket: UdpSocket, session: &VpnSession) -> Result<(), String> {
         let upstreams: Vec<SocketAddrV4> = self
             .vpn_dns
             .iter()
             .map(|ip| SocketAddrV4::new(*ip, 53))
             .collect();
         let tun_dev = self.tun_dev.clone();
+        let tun_index = self.tun_index();
         let dynamic = Arc::clone(&self.dynamic);
+        let queries = Arc::clone(&self.dns_queries);
         let stop = Arc::clone(&self.stop);
         let log = session.clone();
         let handle = std::thread::Builder::new()
             .name("ws-dns-forwarder".to_string())
-            .spawn(move || forward_loop(socket, upstreams, tun_dev, dynamic, stop, log))
+            .spawn(move || {
+                forward_loop(
+                    socket, upstreams, tun_dev, tun_index, dynamic, queries, stop, log,
+                )
+            })
             .map_err(|e| format!("启动 DNS 转发线程失败：{}", e))?;
         self.thread = Some(handle);
         Ok(())
+    }
+
+    /// Windows：优先把 NRPT 指向本机 127.0.0.1:53 转发器，失败再退回旧路径。
+    ///
+    /// 这是 Windows 上和 macOS 对齐的关键：NRPT 只负责把命中域名的查询交给
+    /// 本机转发器；转发器拿到 VPN DNS 的应答后，先按 A 记录装 `/32` 路由，
+    /// 再把应答交回 DNS Client。这样 `DOMAIN-SUFFIX` 的任意子域都能在
+    /// 「应用拿到地址之前」完成路由注入。
+    #[cfg(target_os = "windows")]
+    fn install_windows_resolver(&mut self, session: &VpnSession) -> Result<(), String> {
+        match self.start_windows_local_proxy(session) {
+            Ok(()) => {
+                match super::win_dns::apply_namespace_rules(&self.domains, &[LOCAL_DNS_SERVER]) {
+                    Ok(count) => {
+                        self.nrpt_installed = true;
+                        self.local_dns_proxy = true;
+                        flush_dns_cache();
+                        if self.local_proxy_receives_queries() {
+                            session.append_log(&format!(
+                                "[分流] NRPT 已把 {} 个域名交给本机 DNS 转发器 {}；\
+                                 按应答注入内网 /32 路由（DOMAIN-SUFFIX 覆盖任意子域）",
+                                count, FORWARDER_ADDR
+                            ));
+                            return Ok(());
+                        }
+                        // NRPT 写成功了，但系统没有把查询送进 loopback：不能假装成功。
+                        session.append_log(&format!(
+                            "[分流] NRPT 已指向 {}，但 1.5 秒内没有查询进入本机转发器；\
+                             可能系统不接受 loopback DNS，回退到「NRPT 直连 VPN DNS + 后台解析」",
+                            FORWARDER_ADDR
+                        ));
+                        let _ = super::win_dns::remove_all_rules();
+                        self.nrpt_installed = false;
+                        self.stop_local_forwarder();
+                    }
+                    Err(e) => {
+                        session.append_log(&format!(
+                            "[分流] 本机 DNS 转发器已启动，但 NRPT 指向 {} 失败：{}；回退到旧路径",
+                            FORWARDER_ADDR, e
+                        ));
+                        self.stop_local_forwarder();
+                    }
+                }
+            }
+            Err(e) => {
+                session.append_log(&format!(
+                    "[分流] 本机 DNS 转发器不可用：{}；回退到「NRPT 直连 VPN DNS + 后台解析」",
+                    e
+                ));
+            }
+        }
+
+        // 旧路径：NRPT 直接指向 VPN DNS 时，用户态看不到子域查询，只能靠后台
+        // 主动解析规则里的字面域名；这是保底，不再是首选。
+        match super::win_dns::apply_namespace_rules(&self.domains, &self.vpn_dns) {
+            Ok(count) => {
+                self.nrpt_installed = true;
+                session.append_log(&format!(
+                    "[分流] 已为 {} 个域名配置按域名解析（NRPT），命中即交给 VPN DNS {:?}",
+                    count, self.vpn_dns
+                ));
+                Ok(())
+            }
+            Err(e) => {
+                // 退而求其次：把 VPN DNS 配到隧道网卡上。这样内网域名至少能解析，
+                // 代价是这台机器所有 DNS 都可能经隧道（NRPT 只覆盖列出的域名）。
+                match super::win_dns::set_interface_dns(self.tun_index(), &self.vpn_dns) {
+                    Ok(()) => {
+                        self.adapter_dns_fallback = true;
+                        session.append_log(&format!(
+                            "[分流] 按域名解析（NRPT）不可用：{}；已退回「只给隧道网卡配 DNS」{}，\
+                             内网域名仍可解析，但公共域名也可能走 VPN DNS",
+                            e, self.tun_dev
+                        ));
+                        Ok(())
+                    }
+                    Err(e2) => Err(format!(
+                        "按域名解析（NRPT）配置失败：{}；退回隧道网卡 DNS 也失败：{}",
+                        e, e2
+                    )),
+                }
+            }
+        }
+    }
+
+    /// Windows：绑定 127.0.0.1:53 并起转发线程。失败时不会留下半启动状态。
+    #[cfg(target_os = "windows")]
+    fn start_windows_local_proxy(&mut self, session: &VpnSession) -> Result<(), String> {
+        let socket = UdpSocket::bind(FORWARDER_ADDR).map_err(|e| {
+            format!(
+                "绑定 {} 失败：{}（端口被其它 DNS 服务占用？）",
+                FORWARDER_ADDR, e
+            )
+        })?;
+        socket
+            .set_read_timeout(Some(POLL_TIMEOUT))
+            .map_err(|e| e.to_string())?;
+        self.spawn_forwarder(socket, session)?;
+        self.local_dns_proxy = true;
+        session.append_log(&format!(
+            "[分流] 本机 DNS 转发器已监听 {}，上游 VPN DNS {:?}",
+            FORWARDER_ADDR, self.vpn_dns
+        ));
+        Ok(())
+    }
+
+    /// 停掉本机转发线程，并把 stop 标志复位，方便回退路径再起主动解析线程。
+    #[cfg(target_os = "windows")]
+    fn stop_local_forwarder(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.thread.take() {
+            let _ = handle.join();
+        }
+        self.stop = Arc::new(AtomicBool::new(false));
+        self.local_dns_proxy = false;
+    }
+
+    /// 用一条随机子域查询确认「NRPT -> 127.0.0.1:53」真的能把查询送进来。
+    /// 只看 NRPT 写成功不够：Windows 对 loopback DNS 的支持在不同版本/策略下
+    /// 不一致，没查询进来时应当回退，而不是让用户以为子域分流已经生效。
+    #[cfg(target_os = "windows")]
+    fn local_proxy_receives_queries(&self) -> bool {
+        let before = self.dns_queries.load(Ordering::Relaxed);
+        let Some(domain) = self.domains.first() else {
+            return false;
+        };
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let probe = format!("ws-probe-{}-{}.{}", std::process::id(), stamp, domain);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            use std::net::ToSocketAddrs;
+            let _ = (probe.as_str(), 443u16).to_socket_addrs();
+            let _ = tx.send(());
+        });
+        let _ = rx.recv_timeout(Duration::from_millis(1500));
+        self.dns_queries.load(Ordering::Relaxed) > before
+    }
+
+    /// 当前 NRPT 应该指向谁：本机转发器，或退回时的 VPN DNS。
+    #[cfg(target_os = "windows")]
+    fn nrpt_servers(&self) -> Vec<Ipv4Addr> {
+        if self.local_dns_proxy {
+            vec![LOCAL_DNS_SERVER]
+        } else {
+            self.vpn_dns.clone()
+        }
     }
 
     /// 起主动解析线程（Windows）。
@@ -509,24 +676,24 @@ impl SplitTunnel {
             // 看到「还没见到隧道路由」，把正常的 1~2 秒延迟误报成故障。
             #[cfg(target_os = "windows")]
             std::thread::sleep(Duration::from_secs(3));
-            session.append_log(
-                "[自检] 开始：系统解析器 -> 按域名分流 -> 隧道 -> VPN DNS",
-            );
+            session.append_log("[自检] 开始：系统解析器 -> 按域名分流 -> 隧道 -> VPN DNS");
             for domain in domains.iter().take(3) {
                 let name = domain.clone();
                 let (tx, rx) = std::sync::mpsc::channel();
                 std::thread::spawn(move || {
                     use std::net::ToSocketAddrs;
-                    let result = (name.as_str(), 443u16).to_socket_addrs().map(|it| {
-                        it.map(|a| a.ip().to_string()).collect::<Vec<_>>()
-                    });
+                    let result = (name.as_str(), 443u16)
+                        .to_socket_addrs()
+                        .map(|it| it.map(|a| a.ip().to_string()).collect::<Vec<_>>());
                     let _ = tx.send(result);
                 });
                 match rx.recv_timeout(Duration::from_secs(5)) {
                     Ok(Ok(ips)) if !ips.is_empty() => {
                         let routed = ips.iter().any(|ip| {
                             ip.parse::<Ipv4Addr>()
-                                .map(|v4| dynamic.lock().map(|set| set.contains(&v4)).unwrap_or(false))
+                                .map(|v4| {
+                                    dynamic.lock().map(|set| set.contains(&v4)).unwrap_or(false)
+                                })
                                 .unwrap_or(false)
                         });
                         session.append_log(&format!(
@@ -601,17 +768,21 @@ impl SplitTunnel {
             // 结果是每 15 秒把解析打出一个空洞。
             if self.nrpt_installed {
                 if let Ok(installed) = super::win_dns::installed_domains() {
-                    let missing = self.domains.iter().any(|domain| !installed.contains(domain));
+                    let missing = self
+                        .domains
+                        .iter()
+                        .any(|domain| !installed.contains(domain));
                     if missing {
-                        let _ =
-                            super::win_dns::apply_namespace_rules(&self.domains, &self.vpn_dns);
+                        let _ = super::win_dns::apply_namespace_rules(
+                            &self.domains,
+                            &self.nrpt_servers(),
+                        );
                     }
                 }
             }
             if self.adapter_dns_fallback {
                 let current = super::win_dns::interface_dns(self.tun_index()).unwrap_or_default();
-                let wanted: Vec<String> =
-                    self.vpn_dns.iter().map(|ip| ip.to_string()).collect();
+                let wanted: Vec<String> = self.vpn_dns.iter().map(|ip| ip.to_string()).collect();
                 if !wanted.iter().all(|ip| current.contains(ip)) {
                     let _ = super::win_dns::set_interface_dns(self.tun_index(), &self.vpn_dns);
                 }
@@ -763,13 +934,16 @@ pub fn cleanup_stale(session: &VpnSession) {
     }
 }
 
-/// 转发线程主体（macOS）：收应用（系统解析器）的查询 -> 经隧道问 VPN DNS -> 注入路由 -> 回包。
-#[cfg(target_os = "macos")]
+/// 转发线程主体（macOS / Windows）：收本机 DNS Client 的查询 -> 经隧道问 VPN DNS
+/// -> 注入路由 -> 回包。
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn forward_loop(
     socket: UdpSocket,
     upstreams: Vec<SocketAddrV4>,
     tun_dev: String,
+    tun_index: u32,
     dynamic: Arc<Mutex<BTreeSet<Ipv4Addr>>>,
+    queries: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,
     session: VpnSession,
 ) {
@@ -794,6 +968,7 @@ fn forward_loop(
         if len < 12 {
             continue;
         }
+        queries.fetch_add(1, Ordering::Relaxed);
         let mut answer: Option<Vec<u8>> = None;
         for dns in &upstreams {
             if upstream.send_to(&query[..len], *dns).is_err() {
@@ -803,10 +978,8 @@ fn forward_loop(
                 continue;
             };
             // 只认同一次查询的应答（ID 相同且 QR=1），避免把迟到的旧应答当成结果
-            let same_query = got >= 12
-                && reply[0] == query[0]
-                && reply[1] == query[1]
-                && reply[2] & 0x80 != 0;
+            let same_query =
+                got >= 12 && reply[0] == query[0] && reply[1] == query[1] && reply[2] & 0x80 != 0;
             if same_query {
                 answer = Some(reply[..got].to_vec());
                 break;
@@ -814,7 +987,7 @@ fn forward_loop(
         }
         match answer {
             Some(resp) => {
-                install_dynamic_routes(&resp, &tun_dev, &dynamic, &session);
+                install_dynamic_routes(&resp, &tun_dev, tun_index, &dynamic, &session);
                 let _ = socket.send_to(&resp, from);
             }
             None => {
@@ -826,32 +999,80 @@ fn forward_loop(
     }
 }
 
-/// 把应答里的 A 记录逐个注入隧道（已注入过的不重复装；macOS）。
-#[cfg(target_os = "macos")]
+/// 把应答里的 A 记录注入隧道（已注入过的不重复装；macOS / Windows）。
+///
+/// Windows 必须在 DNS 应答回给应用之前装好路由；多 A 记录时逐条起 PowerShell
+/// 会把回包拖到 DNS Client 超时，所以先把新地址攒起来，一条 PowerShell 批量装。
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn install_dynamic_routes(
     packet: &[u8],
     tun_dev: &str,
+    tun_index: u32,
     dynamic: &Arc<Mutex<BTreeSet<Ipv4Addr>>>,
     session: &VpnSession,
 ) {
-    for ip in dns_client::parse_a_records(packet) {
-        if !usable_tunnel_ip(ip) {
-            continue;
-        }
-        let mut set = match dynamic.lock() {
+    let candidates: Vec<Ipv4Addr> = {
+        let set = match dynamic.lock() {
             Ok(set) => set,
             Err(_) => return,
         };
-        if set.contains(&ip) {
-            continue;
-        }
-        let cidr = format!("{}/32", ip);
-        match add_tunnel_route(&cidr, tun_dev, 0) {
-            Ok(()) => {
-                set.insert(ip);
-                session.append_log(&format!("[分流] 内网 IP {} 已注入隧道 {}", ip, tun_dev));
+        let mut out = Vec::new();
+        for ip in dns_client::parse_a_records(packet) {
+            if usable_tunnel_ip(ip) && !set.contains(&ip) && !out.contains(&ip) {
+                out.push(ip);
             }
-            Err(e) => session.append_log(&format!("[分流] 内网 IP {} 注入隧道失败：{}", ip, e)),
+        }
+        out
+    };
+    if candidates.is_empty() {
+        return;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let cidrs: Vec<String> = candidates.iter().map(|ip| format!("{}/32", ip)).collect();
+        match route::ensure_onlink_routes(&cidrs, tun_index, 1) {
+            Ok(()) => {
+                if let Ok(mut set) = dynamic.lock() {
+                    for ip in &candidates {
+                        set.insert(*ip);
+                    }
+                }
+                for ip in &candidates {
+                    session.append_log(&format!(
+                        "[分流] 内网 IP {} 已注入隧道 {}",
+                        ip, tun_dev
+                    ));
+                }
+            }
+            Err(e) => session.append_log(&format!(
+                "[分流] 内网 IP {} 注入隧道失败：{}",
+                candidates
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                e
+            )),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let _ = tun_index;
+        for ip in candidates {
+            let cidr = format!("{}/32", ip);
+            match add_tunnel_route(&cidr, tun_dev, 0) {
+                Ok(()) => {
+                    if let Ok(mut set) = dynamic.lock() {
+                        set.insert(ip);
+                    }
+                    session.append_log(&format!("[分流] 内网 IP {} 已注入隧道 {}", ip, tun_dev));
+                }
+                Err(e) => {
+                    session.append_log(&format!("[分流] 内网 IP {} 注入隧道失败：{}", ip, e))
+                }
+            }
         }
     }
 }
@@ -1027,10 +1248,7 @@ fn sync_dynamic_routes(
     if wanted.is_empty() {
         return Ok(0);
     }
-    let before: BTreeSet<Ipv4Addr> = dynamic
-        .lock()
-        .map(|set| set.clone())
-        .unwrap_or_default();
+    let before: BTreeSet<Ipv4Addr> = dynamic.lock().map(|set| set.clone()).unwrap_or_default();
     let cidrs: Vec<String> = wanted.iter().map(|ip| format!("{}/32", ip)).collect();
     route::ensure_onlink_routes(&cidrs, tun_index, 1)?;
     let mut added = 0usize;
@@ -1186,7 +1404,10 @@ mod tests {
 
     #[test]
     fn normalize_domain_rejects_path_traversal_and_junk() {
-        assert_eq!(normalize_domain("*.OA.RisenCN.com."), Some("oa.risencn.com".into()));
+        assert_eq!(
+            normalize_domain("*.OA.RisenCN.com."),
+            Some("oa.risencn.com".into())
+        );
         assert_eq!(normalize_domain("risencn.com"), Some("risencn.com".into()));
         assert_eq!(normalize_domain("../../etc/passwd"), None);
         assert_eq!(normalize_domain("/etc/resolver/x"), None);
@@ -1214,7 +1435,7 @@ mod tests {
     ///
     /// 真机上监听 53 需要 root，这里用随机端口起同一份 `forward_loop`，
     /// 上游也用随机端口，验证「转发 + 回包」这段逻辑本身没写错。
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     #[test]
     fn forwarder_relays_upstream_answer() {
         let dir = std::env::temp_dir().join(format!("ws-split-test-{}", std::process::id()));
@@ -1235,12 +1456,17 @@ mod tests {
             std::thread::spawn(move || {
                 forward_loop(
                     stub,
-                    vec![SocketAddrV4::new(match upstream_addr.ip() {
-                        std::net::IpAddr::V4(v4) => v4,
-                        _ => unreachable!(),
-                    }, upstream_addr.port())],
+                    vec![SocketAddrV4::new(
+                        match upstream_addr.ip() {
+                            std::net::IpAddr::V4(v4) => v4,
+                            _ => unreachable!(),
+                        },
+                        upstream_addr.port(),
+                    )],
                     "utun-test".to_string(),
+                    0,
                     dynamic,
+                    Arc::new(AtomicUsize::new(0)),
                     stop,
                     session,
                 )
@@ -1273,12 +1499,14 @@ mod tests {
             .set_read_timeout(Some(Duration::from_secs(5)))
             .expect("设置超时");
         let query = dns_client::build_query("oa.risencn.com", 0x4321).expect("构造查询");
-        client
-            .send_to(&query, stub_addr)
-            .expect("发给本机转发器");
+        client.send_to(&query, stub_addr).expect("发给本机转发器");
         let mut buf = [0u8; 1024];
         let (len, _) = client.recv_from(&mut buf).expect("应当收到应答");
-        assert_eq!(u16::from_be_bytes([buf[0], buf[1]]), 0x4321, "ID 要原样带回");
+        assert_eq!(
+            u16::from_be_bytes([buf[0], buf[1]]),
+            0x4321,
+            "ID 要原样带回"
+        );
         assert_eq!(buf[2] & 0x80, 0x80, "QR=1");
         let addresses = dns_client::parse_a_records(&buf[..len]);
         assert_eq!(addresses.len(), 1);
@@ -1340,10 +1568,16 @@ mod tests {
         let mut plan = SplitPlan::default();
         assert!(plan.add_domain("RisenCN.com."));
         assert!(!plan.add_domain("risencn.com"), "重复域名不该重复加");
-        assert!(!plan.add_domain("*.risencn.com"), "通配写法归一化后仍是同一个");
+        assert!(
+            !plan.add_domain("*.risencn.com"),
+            "通配写法归一化后仍是同一个"
+        );
         assert!(plan.add_cidr("192.168.136.7/22"));
         assert_eq!(plan.cidrs, vec!["192.168.136.0/22"], "网段要归一化");
-        assert!(!plan.add_cidr("192.168.136.9/22"), "归一化后同一个网段不重复加");
+        assert!(
+            !plan.add_cidr("192.168.136.9/22"),
+            "归一化后同一个网段不重复加"
+        );
         assert!(!plan.add_cidr("not-a-cidr"));
         assert_eq!(plan.domains, vec!["risencn.com"]);
     }
