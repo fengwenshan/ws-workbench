@@ -53,7 +53,6 @@ async function handleRescan() {
     <div class="cleaner-head">
       <div class="cleaner-title">
         <h3>系统清理</h3>
-        <p>卸载软件并清理残留，或查看内存占用、结束进程、深度释放。</p>
       </div>
       <button
         class="btn btn-secondary"

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { Checkbox, Input, Modal, message } from 'ant-design-vue'
+import { SearchOutlined } from '@ant-design/icons-vue'
 import type { CleanerApi } from '@/composables/useCleaner'
 import type {
   InstalledApp,
@@ -418,7 +419,11 @@ function requestDeleteLeftovers() {
         class="apps-search"
         placeholder="搜索名称、发布者或安装位置"
         allow-clear
-      />
+      >
+        <template #prefix>
+          <SearchOutlined />
+        </template>
+      </Input>
       <div class="sort-group" role="group" aria-label="排序方式">
         <button
           v-for="option in SORT_OPTIONS"
@@ -839,15 +844,8 @@ function requestDeleteLeftovers() {
   width: 300px;
   flex-shrink: 0;
 }
-.apps-search {
-  height: 28px;
-}
-.apps-search :deep(.ant-input-affix-wrapper) {
-  height: 28px;
-}
-.apps-search :deep(.ant-input) {
-  height: 26px;
-  font-size: 12px;
+.apps-search :deep(.ant-input-prefix) {
+  color: var(--text-muted);
 }
 .sort-group {
   display: flex;
@@ -858,8 +856,8 @@ function requestDeleteLeftovers() {
   display: inline-flex;
   align-items: center;
   gap: 2px;
-  height: 28px;
-  padding: 0 10px;
+  height: 32px;
+  padding: 0 12px;
   border: 1px solid var(--border-color);
   border-radius: 6px;
   background: var(--bg-input);
