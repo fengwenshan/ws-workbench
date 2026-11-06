@@ -30,6 +30,14 @@ export interface QuickAttachmentItem extends AttachmentMeta {
   entityPath: string
 }
 
+/** 笔记内联资源的只读元信息（来自密文 WST1 明文头，不触发解密） */
+export interface AttachmentStat {
+  /** 原始（明文）字节数 */
+  size: number
+  /** 密文文件最后修改时间（毫秒时间戳），取不到为 0 */
+  modified_at: number
+}
+
 export interface ProjectConfig {
   id: string
   name: string

@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
-import type { AttachmentMeta } from '@/types'
+import type { AttachmentMeta, AttachmentStat } from '@/types'
 
 /** 附件加密存储相关命令 */
 
@@ -49,6 +49,14 @@ export function decryptExportFile(
   targetPath: string,
 ): Promise<void> {
   return invoke('decrypt_export_file', { blobDir, id, targetPath })
+}
+
+/** 读取密文附件的原始大小与修改时间（只读 WST1 明文头，不解密内容） */
+export function statAttachment(
+  blobDir: string,
+  id: string,
+): Promise<AttachmentStat> {
+  return invoke<AttachmentStat>('stat_attachment', { blobDir, id })
 }
 
 export function removeAttachmentFile(

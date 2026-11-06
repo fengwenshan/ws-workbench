@@ -383,6 +383,7 @@ pub fn run() {
             commands::decrypt_export_file,
             commands::decrypt_to_temp,
             commands::remove_attachment_file,
+            commands::stat_attachment,
             commands::encrypt_upload_bytes,
             vpn::commands::vpn_detect_connectors,
             vpn::commands::vpn_import_openconnect,

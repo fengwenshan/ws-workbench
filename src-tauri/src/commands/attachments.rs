@@ -1,5 +1,6 @@
 //! 附件加密上传、解密导出、目录解析与笔记内联图片服务。
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
@@ -271,6 +272,47 @@ pub fn remove_attachment_file(blob_dir: String, id: String) -> Result<(), String
     }
 }
 
+/// 笔记内联资源的只读元信息（不解密内容）
+#[derive(serde::Serialize)]
+pub struct AttachmentStat {
+    /// 原始（明文）字节数，来自 WST1 明文头
+    pub size: u64,
+    /// 密文文件最后修改时间（毫秒时间戳），取不到为 0
+    pub modified_at: u64,
+}
+
+/// 读取密文附件的原始大小与修改时间。
+///
+/// 只读 14 字节的 WST1 明文头（magic / version / flags / orig_size）和文件元信息，
+/// 引擎密钥不参与、不产生临时明文，供「笔记附件」栏显示资源大小。
+#[tauri::command]
+pub fn stat_attachment(blob_dir: String, id: String) -> Result<AttachmentStat, String> {
+    if Uuid::parse_str(&id).is_err() {
+        return Err("附件 id 不合法".to_string());
+    }
+    let blob = PathBuf::from(&blob_dir).join(format!("{}.wst", id));
+    let meta = std::fs::metadata(&blob).map_err(|e| format!("附件文件不存在: {}", e))?;
+    let mut file = std::fs::File::open(&blob).map_err(|e| format!("读取附件失败: {}", e))?;
+    let mut header = [0u8; 14];
+    file.read_exact(&mut header)
+        .map_err(|e| format!("读取附件头失败: {}", e))?;
+    if &header[0..4] != b"WST1" {
+        return Err("附件格式不正确".to_string());
+    }
+    let size = u64::from_le_bytes(
+        header[6..14]
+            .try_into()
+            .map_err(|_| "附件头损坏".to_string())?,
+    );
+    let modified_at = meta
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0);
+    Ok(AttachmentStat { size, modified_at })
+}
+
 /// 解析笔记内联图片请求并返回响应：
 /// `<prefix>/img?id=<uuid>&ext=<png>&dir=<urlencoded 绝对目录>`
 ///
@@ -375,5 +417,45 @@ fn hex_val(b: u8) -> Option<u8> {
         b'a'..=b'f' => Some(b - b'a' + 10),
         b'A'..=b'F' => Some(b - b'A' + 10),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 写一个只有 WST1 明文头的假密文，验证 stat_attachment 只读头、不解密
+    fn write_fake_wst(dir: &Path, id: &str, orig_size: u64) {
+        let mut header = Vec::new();
+        header.extend_from_slice(b"WST1");
+        header.push(0x01);
+        header.push(0x00);
+        header.extend_from_slice(&orig_size.to_le_bytes());
+        // 结束标记 + 32 字节 MAC 占位，stat 不会读到这里
+        header.extend_from_slice(&0u32.to_le_bytes());
+        header.extend_from_slice(&[0u8; 32]);
+        std::fs::write(dir.join(format!("{}.wst", id)), header).unwrap();
+    }
+
+    #[test]
+    fn stat_attachment_reads_wst_header() {
+        let dir = std::env::temp_dir().join(format!("wst-stat-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let id = Uuid::new_v4().to_string();
+        write_fake_wst(&dir, &id, 123_456);
+        let dir_string = dir.to_string_lossy().to_string();
+
+        let stat = stat_attachment(dir_string.clone(), id.clone()).expect("读取 WST1 头失败");
+        assert_eq!(stat.size, 123_456);
+        assert!(stat.modified_at > 0);
+
+        // 不合法的 id、缺失的文件、坏 magic 都必须报错而不是 panic
+        assert!(stat_attachment(dir_string.clone(), "not-a-uuid".to_string()).is_err());
+        assert!(stat_attachment(dir_string.clone(), Uuid::new_v4().to_string()).is_err());
+        let broken = Uuid::new_v4().to_string();
+        std::fs::write(dir.join(format!("{}.wst", broken)), b"NOTWST1HEADER!!").unwrap();
+        assert!(stat_attachment(dir_string.clone(), broken).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
