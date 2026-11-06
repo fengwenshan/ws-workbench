@@ -106,11 +106,11 @@ onBeforeUnmount(() => {
       <button
         v-if="sidebarCollapsed"
         class="sidebar-fab"
-        title="展开笔记附件 / 大纲"
+        title="展开笔记大纲 / 附件"
         @click="sidebarCollapsed = false"
       >
         <PaperClipOutlined />
-        <span>附件</span>
+        <span>大纲 / 附件</span>
         <span v-if="assetCount > 0" class="sidebar-fab-count">{{ assetCount }}</span>
       </button>
     </div>
@@ -118,7 +118,6 @@ onBeforeUnmount(() => {
       v-show="!sidebarCollapsed"
       class="note-sidebar"
       :markdown="markdown"
-      :default-upload-dir="defaultUploadDir"
       @insert="insertMarkdown"
       @update-markdown="onSidebarUpdate"
       @scroll-to-heading="scrollToHeading"

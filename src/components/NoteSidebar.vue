@@ -10,29 +10,22 @@ import {
   EyeOutlined,
   FileImageOutlined,
   FolderOpenOutlined,
-  InboxOutlined,
   PlusOutlined,
-  UploadOutlined,
 } from '@ant-design/icons-vue'
 import type { AttachmentStat, LogLevel } from '@/types'
 import {
   decryptExportFile,
   decryptToTemp,
-  encryptUploadBytes,
-  encryptUploadFile,
   removeAttachmentFile,
-  resolveUploadDir,
   statAttachment,
 } from '@/api/attachments'
 import { openFile } from '@/api/system'
-import { pickFiles, pickSavePath } from '@/utils/dialog'
-import { basename } from '@/utils/path'
+import { pickSavePath } from '@/utils/dialog'
 import { errorText } from '@/utils/error'
 import {
   noteAssetDisplayName,
   noteAssetFileName,
   noteAssetMarkdown,
-  noteImageUrl,
   parseNoteAssets,
   removeNoteAssetFromMarkdown,
   renameNoteAssetInMarkdown,
@@ -51,8 +44,6 @@ import { parseNoteHeadings } from '@/utils/note-text'
  */
 const props = defineProps<{
   markdown: string
-  /** 设置里配置的全局上传目录（null 表示落到 App 私有目录） */
-  defaultUploadDir: string | null
 }>()
 
 const emit = defineEmits<{
@@ -66,7 +57,7 @@ const emit = defineEmits<{
   log: [level: LogLevel, message: string]
 }>()
 
-const activeTab = ref<'assets' | 'outline'>('assets')
+const activeTab = ref<'assets' | 'outline'>('outline')
 
 const assets = computed<NoteAsset[]>(() => parseNoteAssets(props.markdown ?? ''))
 const headings = computed(() => parseNoteHeadings(props.markdown ?? ''))
@@ -334,186 +325,6 @@ function confirmDelete(asset: NoteAsset) {
   })
 }
 
-// ========== 上传 ==========
-const uploading = ref(false)
-
-/** 拆文件名主体与扩展名：alt 用主体名，扩展名交给后端校验 */
-function splitFileName(fileName: string): { stem: string; ext: string } {
-  const dot = fileName.lastIndexOf('.')
-  if (dot > 0 && dot < fileName.length - 1) {
-    return { stem: fileName.slice(0, dot), ext: fileName.slice(dot + 1).toLowerCase() }
-  }
-  return { stem: fileName, ext: '' }
-}
-
-function safeAlt(name: string): string {
-  return (name || '').replace(/[\]\n\r]/g, ' ').trim()
-}
-
-function markdownForUpload(name: string, id: string, ext: string, dir: string): string {
-  return `![${safeAlt(name)}](${noteImageUrl(id, ext, dir)})`
-}
-
-/** 解析上传目录；失败返回 null，调用方直接结束 */
-async function resolveDirOrWarn(): Promise<string | null> {
-  try {
-    return await resolveUploadDir(props.defaultUploadDir)
-  } catch (err) {
-    emit('log', 'error', `解析上传目录失败: ${errorText(err)}`)
-    message.error('无法解析上传目录，资源未上传')
-    return null
-  }
-}
-
-async function handlePickUpload() {
-  if (uploading.value) return
-  if (!hasTauriRuntime()) {
-    message.warning('浏览器预览环境不支持上传，请在桌面端使用')
-    return
-  }
-  let paths: string[] = []
-  try {
-    paths = await pickFiles({ title: '选择要加密上传的资源' })
-  } catch (err) {
-    emit('log', 'error', `打开文件选择器失败: ${errorText(err)}`)
-    message.error('无法打开文件选择器')
-    return
-  }
-  if (!paths.length) return
-
-  uploading.value = true
-  try {
-    const dir = await resolveDirOrWarn()
-    if (!dir) return
-    for (const path of paths) {
-      const fileName = basename(path)
-      try {
-        const meta = await encryptUploadFile(path, dir, fileName)
-        emit('insert', markdownForUpload(splitFileName(fileName).stem, meta.id, meta.ext, meta.dir))
-        emit('log', 'success', `已加密上传资源: ${fileName}`)
-      } catch (err) {
-        emit('log', 'error', `资源上传失败（${fileName}）: ${errorText(err)}`)
-        message.error(`上传失败: ${fileName}`)
-      }
-    }
-  } finally {
-    uploading.value = false
-  }
-}
-
-// ========== 拖拽上传 ==========
-// 窗口关了 Tauri 原生拖放，所以走 HTML5 drop：从 dataTransfer 拿 File，
-// 读成 base64 交给 encrypt_upload_bytes 逐条加密落盘。
-let dragDepth = 0
-const dragActive = ref(false)
-// 拖拽走 IPC 传字节，大文件会占大量内存；超过这个大小建议用「上传资源」按钮
-const DROP_SIZE_LIMIT = 100 * 1024 * 1024
-
-function isFileDrag(event: DragEvent): boolean {
-  const transfer = event.dataTransfer
-  if (!transfer) return false
-  if (Array.from(transfer.types ?? []).includes('Files')) return true
-  // 某些 WebKit 版本在 dragover 阶段 types 不全，兜底看 files
-  return (transfer.files?.length ?? 0) > 0
-}
-
-function onDragEnter(event: DragEvent) {
-  if (!isFileDrag(event)) return
-  event.preventDefault()
-  dragDepth += 1
-  dragActive.value = true
-}
-
-function onDragOver(event: DragEvent) {
-  if (!isFileDrag(event)) return
-  // 不 preventDefault 浏览器就不会把 drop 交给我们
-  event.preventDefault()
-  if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy'
-  dragActive.value = true
-}
-
-function onDragLeave(event: DragEvent) {
-  if (!isFileDrag(event)) return
-  dragDepth = Math.max(0, dragDepth - 1)
-  if (dragDepth === 0) dragActive.value = false
-}
-
-async function onDrop(event: DragEvent) {
-  event.preventDefault()
-  dragDepth = 0
-  dragActive.value = false
-  if (!isFileDrag(event)) return
-
-  const files: File[] = []
-  let skippedDir = false
-  for (const item of Array.from(event.dataTransfer?.items ?? [])) {
-    if (item.kind !== 'file') continue
-    // 整目录拖进来暂不支持：没有递归遍历，跳过并提示
-    if (item.webkitGetAsEntry?.()?.isDirectory) {
-      skippedDir = true
-      continue
-    }
-    const file = item.getAsFile()
-    if (file) files.push(file)
-  }
-  if (!files.length) {
-    for (const file of Array.from(event.dataTransfer?.files ?? [])) files.push(file)
-  }
-  if (skippedDir) message.warning('暂不支持拖入文件夹，请拖入具体文件')
-  await uploadDroppedFiles(files)
-}
-
-/** File → base64（不含 data URL 前缀），后端解密后按字节加密落盘 */
-function fileToBase64(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => {
-      const result = String(reader.result ?? '')
-      const comma = result.indexOf(',')
-      resolve(comma >= 0 ? result.slice(comma + 1) : result)
-    }
-    reader.onerror = () => reject(reader.error ?? new Error('读取文件失败'))
-    reader.readAsDataURL(file)
-  })
-}
-
-async function uploadDroppedFiles(files: File[]) {
-  if (!files.length) return
-  if (uploading.value) {
-    message.warning('正在上传，请稍候')
-    return
-  }
-  if (!hasTauriRuntime()) {
-    message.warning('浏览器预览环境不支持上传，请在桌面端使用')
-    return
-  }
-  uploading.value = true
-  try {
-    const dir = await resolveDirOrWarn()
-    if (!dir) return
-    for (const file of files) {
-      if (file.size > DROP_SIZE_LIMIT) {
-        const msg = `「${file.name}」超过 100MB，请用「上传资源」按钮选择大文件`
-        message.error(msg)
-        emit('log', 'warn', msg)
-        continue
-      }
-      try {
-        const dataB64 = await fileToBase64(file)
-        const { stem, ext } = splitFileName(file.name)
-        const meta = await encryptUploadBytes(dir, file.name, ext, dataB64)
-        emit('insert', markdownForUpload(stem, meta.id, meta.ext, meta.dir))
-        emit('log', 'success', `已加密上传资源: ${file.name}`)
-      } catch (err) {
-        emit('log', 'error', `拖入资源上传失败（${file.name}）: ${errorText(err)}`)
-        message.error(`上传失败: ${file.name}`)
-      }
-    }
-  } finally {
-    uploading.value = false
-  }
-}
-
 // ========== 大纲 ==========
 function outlineIndent(level: number): string {
   return `${8 + Math.max(0, Math.min(level, 6) - 1) * 12}px`
@@ -521,27 +332,9 @@ function outlineIndent(level: number): string {
 </script>
 
 <template>
-  <div
-    class="note-sidebar"
-    :class="{ 'drag-over': dragActive }"
-    @dragenter="onDragEnter"
-    @dragover="onDragOver"
-    @dragleave="onDragLeave"
-    @drop="onDrop"
-  >
+  <div class="note-sidebar">
     <!-- 顶部页签 + 收起按钮 -->
     <div class="sidebar-tabs" role="tablist">
-      <button
-        type="button"
-        role="tab"
-        class="sidebar-tab"
-        :class="{ active: activeTab === 'assets' }"
-        :aria-selected="activeTab === 'assets'"
-        @click="activeTab = 'assets'"
-      >
-        <span>附件</span>
-        <span class="sidebar-tab-count">{{ assets.length }}</span>
-      </button>
       <button
         type="button"
         role="tab"
@@ -552,6 +345,17 @@ function outlineIndent(level: number): string {
       >
         <span>大纲</span>
         <span class="sidebar-tab-count">{{ headings.length }}</span>
+      </button>
+      <button
+        type="button"
+        role="tab"
+        class="sidebar-tab"
+        :class="{ active: activeTab === 'assets' }"
+        :aria-selected="activeTab === 'assets'"
+        @click="activeTab = 'assets'"
+      >
+        <span>附件</span>
+        <span class="sidebar-tab-count">{{ assets.length }}</span>
       </button>
       <span class="sidebar-tab-spacer" />
       <Tooltip title="收起侧栏">
@@ -569,20 +373,12 @@ function outlineIndent(level: number): string {
 
     <!-- 附件页 -->
     <div v-show="activeTab === 'assets'" class="sidebar-body">
-      <div class="assets-toolbar">
-        <Button type="primary" size="small" :loading="uploading" @click="handlePickUpload">
-          <template #icon><UploadOutlined /></template>
-          上传资源
-        </Button>
-        <span class="assets-toolbar-hint">也可把图片拖入这里</span>
-      </div>
-
-      <!-- 空状态：没有资源时给粘贴 / 拖入的说明 -->
+      <!-- 空状态：附件由正文引用自动解析，不提供手动上传 -->
       <div v-if="assets.length === 0" class="assets-empty">
-        <InboxOutlined class="assets-empty-icon" />
+        <FileImageOutlined class="assets-empty-icon" />
         <p class="assets-empty-title">还没有附件资源</p>
         <p class="assets-empty-text">
-          在笔记里粘贴 / 拖入图片、或点上方「上传资源」，资源会出现在这里
+          在笔记里插入图片（工具栏 / 粘贴 / 拖入正文），正文引用到的资源会自动出现在这里
         </p>
         <p class="assets-empty-formats">支持 png · jpg · jpeg · gif · webp · bmp · svg</p>
       </div>
@@ -781,13 +577,7 @@ function outlineIndent(level: number): string {
   background: var(--bg-primary);
   border: 1px solid var(--border-color);
   border-radius: 8px;
-  transition: background 0.15s, outline-color 0.15s;
-}
-/* 拖文件进来：整块侧栏都是落点，横向一圈虚线提示 */
-.note-sidebar.drag-over {
-  outline: 1px dashed var(--primary);
-  outline-offset: -3px;
-  background: rgba(59, 130, 246, 0.04);
+  transition: background 0.15s;
 }
 
 /* ===== 顶部页签 ===== */
@@ -859,20 +649,6 @@ function outlineIndent(level: number): string {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-}
-
-/* ===== 附件工具条 ===== */
-.assets-toolbar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 10px 8px;
-  flex-shrink: 0;
-}
-.assets-toolbar-hint {
-  font-size: 11px;
-  line-height: 1.4;
-  color: var(--text-muted);
 }
 
 /* ===== 附件空状态 ===== */
