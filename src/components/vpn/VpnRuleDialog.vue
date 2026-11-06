@@ -141,11 +141,19 @@ async function closeDialog() {
   if (saving.value) return
   if (dirty.value) {
     saving.value = true
+    const startedAt = Date.now()
     try {
       await vpn.saveRules(draftRules.value, DEFAULT_POLICY)
     } catch (err: any) {
+      // 保存/下发失败就留在弹窗里，别一关遮住错误；用户还能改完重试
       vpn.pushLog('error', `保存规则失败: ${err}`)
+      return
     } finally {
+      // 未连接时写盘很快，避免 loading 只闪一帧、看起来仍像没反应
+      const remaining = 300 - (Date.now() - startedAt)
+      if (remaining > 0) {
+        await new Promise((resolve) => window.setTimeout(resolve, remaining))
+      }
       saving.value = false
     }
   }
@@ -165,7 +173,7 @@ async function closeDialog() {
     wrap-class-name="vpn-rule-modal"
     @cancel="closeDialog"
   >
-    <div class="rule-editor">
+    <div class="rule-editor" :aria-busy="saving">
       <!-- 左：三个输入项 + 添加 -->
       <div class="rule-form">
         <div class="form-field">
@@ -288,10 +296,21 @@ async function closeDialog() {
           </div>
         </div>
       </div>
+
+      <div v-if="saving" class="rule-saving-mask" role="status" aria-live="polite">
+        <span class="btn-spinner" aria-hidden="true" />
+        正在保存并应用规则…
+      </div>
     </div>
 
     <div class="rule-editor-footer">
-      <button class="btn btn-primary" :disabled="saving" @click="closeDialog">
+      <button
+        class="btn btn-primary"
+        :disabled="saving"
+        :aria-busy="saving"
+        @click="closeDialog"
+      >
+        <span v-if="saving" class="btn-spinner" aria-hidden="true" />
         {{ saving ? '保存中…' : '完成' }}
       </button>
     </div>
@@ -300,9 +319,40 @@ async function closeDialog() {
 
 <style scoped>
 .rule-editor {
+  position: relative;
   display: flex;
   gap: 16px;
   min-height: 360px;
+}
+.rule-saving-mask {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg-primary) 82%, transparent);
+  color: var(--text-secondary);
+  font-size: 14px;
+  backdrop-filter: blur(1px);
+}
+.btn-spinner {
+  display: inline-block;
+  flex: none;
+  width: 13px;
+  height: 13px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: ws-rule-spin 0.7s linear infinite;
+  vertical-align: -2px;
+}
+@keyframes ws-rule-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 .rule-form {
   width: 280px;
@@ -498,5 +548,8 @@ async function closeDialog() {
   margin-top: 16px;
   padding-top: 12px;
   border-top: 1px solid var(--border-color);
+}
+.rule-editor-footer .btn-spinner {
+  margin-right: 6px;
 }
 </style>

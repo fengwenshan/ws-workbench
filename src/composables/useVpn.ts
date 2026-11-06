@@ -74,6 +74,12 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
   const selectedProfileId = ref<string>('')
   const detecting = ref(false)
   const connecting = ref(false)
+  /** 正在等 worker 收尾断开；按钮要有可见的 loading，不能点完没反应 */
+  const disconnecting = ref(false)
+  /** 正在切换代理模式并等 worker 回写 applied_mode */
+  const modeSwitching = ref(false)
+  /** 规则写盘并热推给 worker 的过程 */
+  const rulesApplying = ref(false)
 
   let logId = 0
   const unlisteners: UnlistenFn[] = []
@@ -296,6 +302,8 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
   }
 
   async function disconnect() {
+    if (disconnecting.value) return
+    disconnecting.value = true
     try {
       const message = await invoke<string>('vpn_disconnect')
       pushLog('info', message)
@@ -303,6 +311,7 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
       pushLog('error', `断开失败: ${err}`)
     } finally {
       await refreshSnapshot()
+      disconnecting.value = false
     }
   }
 
@@ -329,6 +338,7 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
   }
 
   async function toggleConnection() {
+    if (connecting.value || disconnecting.value) return
     if (isConnected.value || phaseBusy.value) {
       await disconnect()
     } else {
@@ -397,63 +407,86 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
   async function setProxyMode(mode: VpnProxyMode): Promise<boolean> {
     const profile = selectedProfile.value
     if (!profile) return true
+    if (modeSwitching.value) return false
     // 配置里已经是这个模式、但 worker 里跑的是另一个：允许再点一次把 worker 纠过来
     const appliedRaw = String(status.value?.applied_mode ?? '').trim().toLowerCase()
     const drifted = isConnected.value && !!appliedRaw && appliedRaw !== mode
     if (profile.proxy_mode === mode && !drifted) return true
     const previous = profile.proxy_mode
-    await updateProfile(profile.id, { proxy_mode: mode })
     const label = mode === 'rule' ? '规则' : mode === 'global' ? '全局' : '直连'
-    if (isConnected.value) {
-      try {
+    modeSwitching.value = true
+    try {
+      await updateProfile(profile.id, { proxy_mode: mode })
+      if (isConnected.value) {
+        pushLog('info', `正在把代理模式切换为${label}，等待 worker 确认…`)
         await invoke('vpn_set_proxy_mode', { mode })
-        pushLog('info', `代理模式已切换为${label}：切换即刻生效`)
-        // worker 按约 200ms 轮询 mode 文件，稍等一下抓一次最新状态，
-        // 界面上的「正在切换」高亮才能尽快交回真实状态
-        window.setTimeout(() => {
-          void refreshSnapshot()
-        }, 400)
-        return true
-      } catch (err: any) {
-        pushLog('error', `切换代理模式失败: ${err}`)
-        // 配置也要跟着回滚，否则下次连接会用一个根本没切成功的模式
-        try {
-          await updateProfile(profile.id, { proxy_mode: previous })
-        } catch {
-          /* 回滚失败就保持原样，至少日志里已经说明 */
+        // worker 约 200ms 轮询 mode 文件；全局/直连要撤换 /1 路由和 DNS，
+        // 现场可能 2~4 秒。这里等真实 applied_mode，而不是 invoke 返回就收工，
+        // 否则 loading 只闪一下、界面又会看起来没反应。
+        const reached = await waitForAppliedMode(mode, 10_000)
+        if (reached) {
+          pushLog('info', `代理模式已切换为${label}：worker 已确认生效`)
+        } else {
+          pushLog(
+            'warn',
+            `代理模式已下发为${label}，但 10 秒内没有等到 worker 确认；请查看日志里的 [模式] 行`,
+          )
         }
-        return false
+        return true
       }
+      pushLog('info', `代理模式已切换为${label}，下次连接生效`)
+      return true
+    } catch (err: any) {
+      pushLog('error', `切换代理模式失败: ${err}`)
+      // 配置也要跟着回滚，否则下次连接会用一个根本没切成功的模式
+      try {
+        await updateProfile(profile.id, { proxy_mode: previous })
+      } catch {
+        /* 回滚失败就保持原样，至少日志里已经说明 */
+      }
+      return false
+    } finally {
+      modeSwitching.value = false
     }
-    pushLog('info', `代理模式已切换为${label}，下次连接生效`)
-    return true
+  }
+
+  /** 轮询状态直到 worker 回写目标模式；只用于给 UI 的 loading 定终点。 */
+  async function waitForAppliedMode(mode: VpnProxyMode, timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => window.setTimeout(resolve, 250))
+      await refreshSnapshot()
+      const raw = String(status.value?.applied_mode ?? '').trim().toLowerCase()
+      if (raw === mode) return true
+      if (!isConnected.value) return false
+    }
+    return false
   }
 
   /**
-   * 规则变更后推给正在运行的 worker（防抖 300ms）。
+   * 规则变更后推给正在运行的 worker。
    *
    * 只推「当前连接中的那个配置」的规则：运行时只有一份规则表，
    * 连着 A 却在编辑 B 时推送，会把 A 的运行期规则覆盖成 B 的。
+   *
+   * 这里不再用 setTimeout 防抖后立刻返回：规则弹窗的「完成」要等这次
+   * invoke 返回，loading 才有真实的终点；弹窗一次只保存一次，不需要防抖。
    */
-  let rulesPushTimer: number | undefined
   async function pushRulesIfConnected() {
     const profile = selectedProfile.value
     if (!profile) return
     // 运行期的规则表属于「当前生效配置」，不是隧道拥有者。
     // 同通道切换后两者会不同，推错对象会把别人的规则顶上去。
     if (!isConnected.value || policyProfileId.value !== profile.id) return
-    window.clearTimeout(rulesPushTimer)
-    rulesPushTimer = window.setTimeout(async () => {
-      try {
-        await invoke('vpn_push_rules', {
-          rules: profile.rules ?? [],
-          defaultPolicy: profile.rules_default_policy ?? 'DIRECT',
-        })
-        pushLog('info', '规则已热更新，分流布线已按新规则重新下发')
-      } catch (err: any) {
-        pushLog('error', `规则未生效: ${err}`)
-      }
-    }, 300)
+    await invoke('vpn_push_rules', {
+      rules: profile.rules ?? [],
+      defaultPolicy: profile.rules_default_policy ?? 'DIRECT',
+    })
+    // 后端写完后 worker 约 200ms 轮询到；给界面一个能看见的落点，
+    // 再刷新一次状态，避免弹窗关掉后日志还没出现。
+    await new Promise((resolve) => window.setTimeout(resolve, 300))
+    await refreshSnapshot()
+    pushLog('info', '规则已热更新，分流布线已按新规则重新下发')
   }
 
   /**
@@ -465,10 +498,16 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
   async function saveRules(rules: VpnRule[], defaultPolicy: VpnPolicy) {
     const profile = selectedProfile.value
     if (!profile) return
-    profile.rules = rules.map((rule) => ({ ...rule }))
-    profile.rules_default_policy = defaultPolicy
-    await saveConfig()
-    await pushRulesIfConnected()
+    if (rulesApplying.value) return
+    rulesApplying.value = true
+    try {
+      profile.rules = rules.map((rule) => ({ ...rule }))
+      profile.rules_default_policy = defaultPolicy
+      await saveConfig()
+      await pushRulesIfConnected()
+    } finally {
+      rulesApplying.value = false
+    }
   }
 
   async function selectProfile(id: string) {
@@ -595,6 +634,9 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
     logs,
     detecting,
     connecting,
+    disconnecting,
+    modeSwitching,
+    rulesApplying,
     phaseBusy,
     isConnected,
     selectedProfileId,

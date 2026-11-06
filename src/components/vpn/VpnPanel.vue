@@ -61,8 +61,13 @@ const MODE_OPTIONS: Array<{
 
 // ============================ 连接操作 ============================
 
+const connectionBusy = computed(
+  () => vpn.connecting || vpn.disconnecting || vpn.phaseBusy,
+)
+
 const connectLabel = computed(() => {
-  if (vpn.phaseBusy) return '处理中…'
+  if (vpn.disconnecting) return '断开中…'
+  if (vpn.connecting || vpn.phaseBusy) return '处理中…'
   if (!vpn.isConnected) return '连接'
   if (isPolicyOwner.value) return '断开'
   return vpn.sharesTunnel(vpn.selectedProfile?.id) ? '切换到该配置' : '切换（需断开重连）'
@@ -100,7 +105,9 @@ const selectedDotState = computed<ProfileDotState>(() =>
   vpn.selectedProfile ? profileDotState(vpn.selectedProfile) : 'off',
 )
 
-const canConnect = computed(() => !!vpn.selectedProfile && !vpn.connecting)
+const canConnect = computed(
+  () => !!vpn.selectedProfile && !vpn.connecting && !vpn.disconnecting,
+)
 
 // ============================ 代理模式 ============================
 
@@ -138,10 +145,17 @@ const currentMode = computed(
   () => MODE_OPTIONS.find((item) => item.value === proxyMode.value) ?? MODE_OPTIONS[0],
 )
 const modeLocked = computed(
-  () => vpn.phaseBusy || vpn.connecting || (vpn.isConnected && !isPolicyOwner.value),
+  () =>
+    vpn.phaseBusy ||
+    vpn.connecting ||
+    vpn.disconnecting ||
+    vpn.modeSwitching ||
+    (vpn.isConnected && !isPolicyOwner.value),
 )
 
 const modeLockText = computed(() => {
+  if (vpn.modeSwitching) return '正在应用新的代理模式，等待 worker 确认…'
+  if (vpn.disconnecting) return '正在断开连接，暂时不能切换代理模式。'
   if (vpn.phaseBusy || vpn.connecting) return '正在连接中，暂时不能切换代理模式。'
   if (vpn.isConnected && !isPolicyOwner.value) {
     return '这份配置当前没有生效，切过去之后才能改它的代理模式。'
@@ -215,6 +229,7 @@ function settleOptimistic(mode: VpnProxyMode) {
 // ============================ 交互 ============================
 
 async function handleConnect() {
+  if (vpn.connecting || vpn.disconnecting) return
   // 未连接或收尾中：走原来的连接/断开逻辑
   if (!vpn.isConnected || vpn.phaseBusy) {
     await vpn.toggleConnection()
@@ -436,18 +451,25 @@ watch(
             <div class="status-actions">
               <button
                 class="btn"
-                :class="vpn.isConnected || vpn.phaseBusy ? 'btn-danger' : 'btn-primary'"
-                :disabled="!canConnect && !vpn.isConnected"
+                :class="[
+                  vpn.isConnected || vpn.phaseBusy ? 'btn-danger' : 'btn-primary',
+                  { 'is-loading': connectionBusy },
+                ]"
+                :disabled="vpn.disconnecting || (!canConnect && !vpn.isConnected)"
+                :aria-busy="connectionBusy"
                 @click="handleConnect"
               >
+                <span v-if="connectionBusy" class="btn-spinner" aria-hidden="true" />
                 {{ connectLabel }}
               </button>
               <button
                 class="btn btn-secondary"
-                :disabled="!vpn.selectedProfile"
+                :disabled="!vpn.selectedProfile || vpn.rulesApplying"
+                :aria-busy="vpn.rulesApplying"
                 @click="ruleDialogOpen = true"
               >
-                规则
+                <span v-if="vpn.rulesApplying" class="btn-spinner" aria-hidden="true" />
+                {{ vpn.rulesApplying ? '应用中…' : '规则' }}
               </button>
               <button
                 class="btn btn-secondary"
@@ -477,7 +499,11 @@ watch(
           <p v-if="importHint" class="import-hint">{{ importHint }}</p>
 
           <!-- 代理模式：和 Clash 一样在规则/全局/直连之间切换 -->
-          <section class="proxy-mode-card">
+          <section
+            class="proxy-mode-card"
+            :class="{ 'is-switching': vpn.modeSwitching }"
+            :aria-busy="vpn.modeSwitching"
+          >
             <div class="proxy-mode-head">
               <span class="proxy-mode-icon">
                 <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
@@ -519,7 +545,14 @@ watch(
                     <path d="M7 10l2 2 4-4" stroke-linecap="round" stroke-linejoin="round" />
                   </svg>
                 </span>
-                <span>{{ mode.label }}</span>
+                <span class="mode-label">
+                  <span
+                    v-if="vpn.modeSwitching && mode.value === activeMode"
+                    class="mode-spinner"
+                    aria-hidden="true"
+                  />
+                  {{ mode.label }}
+                </span>
               </button>
             </div>
 
@@ -996,9 +1029,43 @@ watch(
   cursor: not-allowed;
   opacity: 0.72;
 }
+.proxy-mode-card.is-switching .proxy-mode-icon {
+  opacity: 0.7;
+}
+.mode-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
 .mode-icon {
   display: grid;
   place-items: center;
+}
+
+/* 操作按钮的加载圈：原生 button 里也能和文字并排 */
+.btn-spinner,
+.mode-spinner {
+  display: inline-block;
+  flex: none;
+  width: 12px;
+  height: 12px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: ws-vpn-spin 0.7s linear infinite;
+  vertical-align: -2px;
+}
+.btn-spinner {
+  margin-right: 6px;
+}
+.mode-spinner {
+  width: 11px;
+  height: 11px;
+}
+@keyframes ws-vpn-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 .mode-icon svg {
   width: 18px;
