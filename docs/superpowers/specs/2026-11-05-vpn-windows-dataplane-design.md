@@ -45,7 +45,11 @@ Add-DnsClientNrptRule -Namespace 'risencn.com' -NameServers '172.18.160.12' `
 ```
 
 - 只影响命中命名空间的查询，不改系统 DNS、不改默认路由。
-- 命名空间按 DNS 后缀匹配，规则 `example.com` 覆盖它自己和所有子域，和 `/etc/resolver/example.com` 等价。
+- **命名空间带不带前导点，语义不同**：不带点的 `risencn.com` 是**精确匹配**，只命中
+  这个名字本身；带点的 `.risencn.com` 才是**后缀匹配**，覆盖它和所有子域。微软自家
+  VPN 配置示例就是用 `<DomainName>.corp.contoso.com</DomainName>` 表示整族子域，
+  另一个不带点的 `<DomainName>hrsite.corporate.contoso.com</DomainName>` 是单台主机。
+  现场 16:30 的日志（探针查询没进转发器）就是只写了不带点的规则导致的。
 - 由 `Dnscache`（DNS Client）服务执行，服务没跑规则不生效。
 
 ### 4.2 Windows 也走本机转发器：NRPT 指向 `127.0.0.1:53`
@@ -55,13 +59,19 @@ Add-DnsClientNrptRule -Namespace 'risencn.com' -NameServers '172.18.160.12' `
 现在 Windows 和 macOS 共用同一条数据面：
 
 ```text
-应用 -> 系统解析器 -> NRPT -> 127.0.0.1:53 本机转发器
+应用 -> 系统解析器 -> NRPT(.risencn.com) -> 127.0.0.1:53 本机转发器
      -> VPN DNS -> 解析 A 记录 -> 先装 /32 隧道路由 -> 回包给应用
 ```
 
-- `DOMAIN-SUFFIX risencn.com` 由 NRPT 覆盖所有子域；转发器看到哪个子域，就给哪个 A 记录装 `/32`，不再依赖规则里写死的字面域名。
-- 转发器绑定失败（53 被占用）、NRPT 指向 loopback 失败、或 1.5 秒内没有查询进来时，自动回退到旧路径：
-  NRPT 直连 VPN DNS + 后台每 15 秒主动解析字面域名；worker.log 会写明回退原因。
+- 每个域名写**两条** NRPT 规则：`.risencn.com`（后缀，覆盖任意子域）和
+  `risencn.com`（精确，保留裸域名解析的旧行为）。只有后缀规则能命中
+  `oa.risencn.com`；只写不带点的那条时，子域查询根本不会进转发器。
+- 后缀规则写失败（个别系统/安全软件可能拒绝带点的命名空间）不会拖垮精确规则，
+  脚本里单独 `try/catch`；探针会如实报告「没收到查询」并回退。
+- 转发器看到哪个子域，就给它的 A 记录装 `/32`，不再依赖规则里写死的字面域名。
+- 转发器绑定失败（53 被占用）、NRPT 指向 loopback 失败、或 2.5 秒内没有查询进来时，
+  自动回退到旧路径：NRPT 直连 VPN DNS + 后台解析；worker.log 会写明原因和系统
+  实际存下来的命名空间。
 - 不用 WFP / WinDivert 拦包，不把刚删掉的捕获引擎引回来。
 - 仍只覆盖「系统解析器（getaddrinfo）」；自带 DoH/DoT 的应用不受控。
 
@@ -132,10 +142,10 @@ cleanup_stale(session)              // 先清崩溃残留（只清自己的）
 install_routes(plan.cidrs)          // VPN DNS /32 + IP-CIDR + split-include 网段 -> 隧道
   └ 失败：teardown 已做的部分，返回错误
 install_resolver()                  // 有域名规则才做
-  ├ 优先：绑定 127.0.0.1:53 转发器 -> NRPT 指向 127.0.0.1
-  │   ├ 1.5 秒内收到探针查询：local_dns_proxy = true，收工
-  │   └ 绑定 / NRPT / 探针失败：停转发器，记日志，走旧路径
-  ├ 旧路径：NRPT 直连 VPN DNS
+  ├ 优先：绑定 127.0.0.1:53 转发器 -> NRPT 写「精确 + .后缀」两条规则指向 127.0.0.1
+  │   ├ 2.5 秒内收到「随机子域」探针查询：local_dns_proxy = true，收工
+  │   └ 绑定 / NRPT / 探针失败：停转发器，记日志（含实际命名空间），走旧路径
+  ├ 旧路径：NRPT（精确 + .后缀）直连 VPN DNS + 后台解析（扫缓存 + 主动查字面域名）
   └ 旧路径也失败：退回「只给隧道网卡配 DNS」；两者都失败才报错
 start_resolver()                    // 本地转发器已起则空操作；旧路径起 15 秒主动解析线程
 flush_dns_cache()
@@ -150,16 +160,17 @@ flush_dns_cache()
 - 收 DNS Client 的查询 -> 经隧道问 VPN DNS -> `parse_a_records` -> 先 `ensure_onlink_routes` 装 `/32` -> 再把原始应答回给 DNS Client。
 - 上游按列表逐个尝试，2 秒超时；只接受 ID 相同且 `QR=1` 的应答。
 - 只注入可路由的单播地址（过滤 `0.0.0.0`、回环、组播、链路本地、广播）。
-- 用一条随机子域探针确认 NRPT 真的把查询送进了 loopback；没有查询就回退，不假装成功。
+- 用一条随机**子域**探针（`ws-probe-<pid>-<时间戳>.<域名>`）确认 NRPT 的后缀规则真的把子域查询送进 loopback：只有带了前导点的命名空间才会命中它。2.5 秒没有查询就回退，并打印系统实际存下来的命名空间，不假装成功。
 
-### 6.3 旧路径：主动解析线程（回退）
+### 6.3 旧路径：后台解析线程（回退）
 
-- 每个域名一个线程并发查（UDP 直接问 VPN DNS，1.5 秒超时），一轮最多等 5 秒。
-- 只接受 `is_response_to(id)` 的应答，过滤掉伪造 / 串包。
+- 每 3 秒扫一次系统 DNS Client 缓存（`Get-DnsClientCache`，Type=A），把属于规则域名（含子域）的 A 记录补成 `/32` 隧道路由。回退路径下用户态看不到子域查询，但应用解析过的名字一定在缓存里 —— 这是「`DOMAIN-SUFFIX` 覆盖任意子域」的保底，最多晚 3 秒生效。
+- 每 15 秒（5 个扫描周期）直接向 VPN DNS 主动解析规则里的**字面域名**，覆盖「还没有人访问过」和服务端轮询地址的情况。
+- 每个域名一个线程并发查（UDP 直接问 VPN DNS，1.5 秒超时），一轮最多等 5 秒；只接受 `is_response_to(id)` 的应答。
 - 每轮把「本轮所有可用地址」交给 `ensure_onlink_routes`（幂等）：路由被别的软件删掉也能在下一轮补回来。
-- 只注入可路由的单播地址（过滤 `0.0.0.0`、回环、组播、链路本地、广播）。
-- 失败日志只在错误文本变化时记一行，避免每 15 秒刷同一条把 `worker.log` 冲垮。
-- 第一轮一个地址都没拿到时给一条可执行的提示（VPN DNS 不可达 / 域名不是完整内网域名）。
+- 只注入可路由的单播地址（过滤 `0.0.0.0`、回环、组播、链路本地、广播）；后缀边界按标签判断，`notrisencn.com` 不会被 `risencn.com` 命中。
+- 失败日志只在错误文本变化时记一行，避免每 3 秒刷同一条把 `worker.log` 冲垮。
+- 第一轮一个地址都没拿到时给一条可执行的提示（VPN DNS 不可达 / 域名不是完整内网域名 / 浏览器解析后由缓存补齐）。
 
 ### 6.4 守护
 
@@ -172,8 +183,8 @@ flush_dns_cache()
 
 ### 6.5 已知取舍
 
-- 本机转发器模式下，`/32` 在应答回给应用之前就装好，不再有 15 秒窗口。
-- 回退路径下，按域名解析出的 `/32` 最晚约 15 秒生效；应用可能已经拿着新 IP 发起连接，会走系统默认路由（大概率失败一次重试）。
+- 本机转发器模式下，`/32` 在应答回给应用之前就装好，不再有等待窗口。
+- 回退路径下，子域 `/32` 靠系统 DNS 缓存补齐，最晚约 3 秒；应用可能已经带着新 IP 发起连接，会走系统默认路由（大概率失败一次，刷新/重试后正常）。
 - 动态 `/32` 只增不减：DNS 轮换出的旧地址会留到 teardown。路由表条目量级是「域名数 × 轮换次数」，实际很小。
 
 ## 7. 全局模式（`fulltunnel.rs`）
@@ -204,7 +215,11 @@ flush_dns_cache()
 
 1. **NRPT 命名空间匹配**：连上后
    `Get-DnsClientNrptRule | Where-Object DisplayName -like 'ws-workbench:*' | Format-List Namespace,NameServers`，
-   再 `Resolve-DnsName oa.<默认域名>` 应返回内网地址；`Resolve-DnsName www.baidu.com` 仍返回公网地址。
+   每个域名应看到**两条**：`risencn.com`（精确）和 `.risencn.com`（后缀）；缺了带点的那条，
+   子域就不会进转发器。再 `Resolve-DnsName oa.<默认域名>` 应返回内网地址；`Resolve-DnsName www.baidu.com` 仍返回公网地址。
+   日志里出现「2.5 秒内没有查询进入本机转发器」时，看紧随其后的 `当前 NRPT 命名空间` 行：
+   如果只有不带点的那条，说明系统拒绝了带点的命名空间（后缀规则没生效），此时回退路径会靠
+   `Get-DnsClientCache` 在 3 秒内补齐子域路由。
 2. **NRPT 生效时机**：`Add-DnsClientNrptRule` 之后是否需要 `Restart-Service Dnscache` 才生效。若需要，在
    `win_dns::apply_namespace_rules` 里加一次重启并记日志（本设计假设不需要，cmdlet 会通知服务）。
 3. **on-link 路由**：`Get-NetRoute -InterfaceIndex <隧道> | Format-Table DestinationPrefix,NextHop,RouteMetric`，
@@ -226,8 +241,10 @@ flush_dns_cache()
 ## 10. 测试
 
 - `route.rs`：on-link 脚本幂等且落点正确、崩溃清理只碰 VPN 网卡（纯函数单测）。
-- `win_dns.rs`：NRPT 脚本只按自己的前缀清理、不写 GPO、不按命名空间猜；没有 DNS 时不写规则。
-- `split.rs`：plan 归一化、不支持的规则给提示、动态 IP 过滤、`query_a_records` 解析真实应答、服务端范围并入。
+- `win_dns.rs`：NRPT 脚本只按自己的前缀清理、不写 GPO、不按命名空间猜；每个域名同时写
+  `.域名`（后缀）和 `域名`（精确）两条，后缀失败不拖垮精确；没有 DNS 时不写规则。
+- `split.rs`：plan 归一化、不支持的规则给提示、动态 IP 过滤、`query_a_records` 解析真实应答、服务端范围并入；
+  系统 DNS 缓存解析器只收后缀边界内（`notrisencn.com` 不算）的可路由 A 记录、大小写 / 末尾点归一化、去重。
 - `script.rs`：Windows 脚本纯 ASCII、cscript 能编译；**新增**一条用 cscript 真跑 `reason=connect` 的测试，
   断言 `CISCO_DEF_DOMAIN` / `CISCO_SPLIT_INC_*` 被正确回报并写进 `script.log`。
 - 全量：`cargo test --lib`（265 通过 / 3 条需要管理员权限的集成测试在当前环境失败，与本次改动无关）。

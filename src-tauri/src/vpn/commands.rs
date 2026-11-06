@@ -11,7 +11,7 @@ use crate::vpn::guide;
 use crate::vpn::models::*;
 use crate::vpn::session::{LogCursor, VpnSession};
 use crate::vpn::models::ProxyMode;
-use crate::vpn::{detect, elevate};
+use crate::vpn::{detect, elevate, notify};
 
 /// 状态轮询间隔：既能让界面反应够快，也不会把磁盘打满
 const POLL_INTERVAL: Duration = Duration::from_millis(600);
@@ -386,11 +386,17 @@ pub fn vpn_elevation_info(app: AppHandle) -> ElevationInfo {
         "当前已是管理员权限，无需额外提权".to_string()
     } else if Platform::is_windows(&Platform) {
         if task_ready {
-            "已注册免 UAC 计划任务，之后连接不再弹管理员确认".to_string()
+            "已注册免 UAC 计划任务，之后连接不再弹管理员确认；\
+             换新包时覆盖解压到同一个目录，升级后也不会再弹"
+                .to_string()
         } else if task_exists {
-            "检测到旧计划任务，但没有指向当前程序/会话目录；请先移除旧任务，再重新注册".to_string()
+            "现有计划任务指向旧程序或旧目录：下次连接只弹一次 UAC，\
+             会在同一次里自动刷新到当前版本，之后不再弹"
+                .to_string()
         } else {
-            "尚未注册免 UAC 计划任务，首次连接会弹一次管理员确认".to_string()
+            "首次连接会弹一次管理员确认，并在同一次里自动注册免 UAC 任务；\
+             之后连接不再弹框"
+                .to_string()
         }
     } else if Platform::is_macos(&Platform) {
         "首次连接会弹出系统授权框（等价于 Windows 的 UAC）".to_string()
@@ -534,11 +540,31 @@ pub fn vpn_push_rules(
         .unwrap_or_else(|| "DIRECT".to_string());
     let enabled: Vec<VpnRule> = rules.into_iter().filter(|r| r.enabled).collect();
     validate_rule_set(&enabled, &default_policy)?;
-    let runtime = state.0.lock().map_err(|_| "内部状态锁定失败".to_string())?;
-    if !session_is_active(&runtime.session) {
-        return Ok(());
-    }
-    runtime.session.write_rules(&enabled, &default_policy)
+    let enabled_count = enabled.len();
+    let (profile_name, session) = {
+        let runtime = state.0.lock().map_err(|_| "内部状态锁定失败".to_string())?;
+        if !session_is_active(&runtime.session) {
+            return Ok(());
+        }
+        let profile_name = runtime
+            .session
+            .read_status()
+            .map(|status| status.profile_name)
+            .unwrap_or_default();
+        runtime.session.write_rules(&enabled, &default_policy)?;
+        (profile_name, runtime.session.clone())
+    };
+    // 写进请求文件只代表 worker 会在 200ms 内读到；流水线上这就是「已生效」。
+    // 锁已经放开再发通知：PowerShell 要几十到几百毫秒，别占着状态锁。
+    spawn_notify(
+        &session,
+        "分流规则已生效",
+        &format!(
+            "{} 条规则已重新下发到隧道（{}）",
+            enabled_count, profile_name
+        ),
+    );
+    Ok(())
 }
 
 /// 同通道切换的三种结论
@@ -721,37 +747,29 @@ pub async fn vpn_connect(
         // 计划任务的命令行里写死了「exe 路径 + 会话目录」，所以「任务存在」
         // 不等于「任务可用」：便携版/安装版共用同一份 AppData 会话目录时，
         // 旧任务会一直拉起另一个位置的旧版本 worker。两者任一不一致都要重注册。
-        let mut recorded = recorded_task_dir(&app);
+        //
+        // 注意这里**不再单独预注册**：注册本身要过一次 UAC，而下面 start_worker
+        // 在任务不可用时会把「注册 + 启动」合并进同一次提权里做完，单独来一遍
+        // 只会让换新包后的第一次连接连弹两次 UAC（现场就是被这个坑到，
+        // 才变成每次都手点「注册免 UAC 任务」）。
+        let recorded = recorded_task_dir(&app);
         let task_usable = elevate::worker_task_exists()
             && elevate::worker_task_matches(&exe, &session.dir, recorded.as_deref());
 
         if Platform::is_windows(&Platform) && !task_usable {
-            // 注册计划任务：首次会弹一次 UAC，之后免 UAC。
-            // 会话目录回退、或程序换了位置，旧任务里写死的都是旧路径，必须重新注册，
-            // 否则 worker 会往旧目录写 / 跑旧版本，主进程等不到正确的状态。
-            match elevate::ensure_worker_task(&exe, &session) {
-                Ok(true) => {
-                    remember_task_dir(&app, &session.dir);
-                    // 任务已经指向当前目录了，别再拿旧记录去判断，
-                    // 否则刚注册完又会被当成「过期任务」而白白弹一次 UAC。
-                    recorded = Some(session.dir.to_string_lossy().to_string());
-                }
-                Ok(false) => {
-                    session.append_log(
-                        "[elevate] 计划任务已存在，但没有指向当前程序/会话目录；\
-                         本次改走 UAC 提权",
-                    );
-                }
-                Err(e) => {
-                    session.append_log(&format!(
-                        "[elevate] 计划任务注册失败，将回退到 UAC 提权: {}",
-                        e
-                    ));
-                }
-            }
+            session.append_log(
+                "[启动] 免 UAC 任务不在当前程序/会话目录上：本次提权启动会顺带注册或刷新它\
+                 （只多这一次 UAC，之后连接不再弹框）",
+            );
         }
         match elevate::start_worker(&exe, &session, recorded.as_deref()) {
             Ok(method) => {
+                // 任务确实修好了才记目录：记早了会让面板显示「已注册」却仍然弹 UAC
+                if Platform::is_windows(&Platform)
+                    && elevate::worker_task_matches(&exe, &session.dir, None)
+                {
+                    remember_task_dir(&app, &session.dir);
+                }
                 session.append_log(&format!("[启动] worker 启动请求已返回：{}", method));
                 method
             }
@@ -1037,6 +1055,9 @@ pub fn start_status_poller(app: AppHandle) {
     std::thread::spawn(move || {
         let mut cursor = LogCursor::default();
         let mut last_status_json = String::new();
+        // 上一次已经比对过的状态：通知只在「跃迁」那一拍发，避免每轮写盘都弹一次
+        let mut notified = notify::Snapshot::default();
+        let mut notified_ready = false;
 
         loop {
             std::thread::sleep(POLL_INTERVAL);
@@ -1047,7 +1068,7 @@ pub fn start_status_poller(app: AppHandle) {
                 None => return,
             };
 
-            let (status, elevation, lines, policy_owner) = {
+            let (status, elevation, lines, policy_owner, session) = {
                 let runtime = match state.0.lock() {
                     Ok(runtime) => runtime,
                     Err(_) => continue,
@@ -1059,6 +1080,7 @@ pub fn start_status_poller(app: AppHandle) {
                     runtime.elevation.clone(),
                     lines,
                     runtime.policy_profile_id.clone(),
+                    runtime.session.clone(),
                 )
             };
 
@@ -1077,6 +1099,38 @@ pub fn start_status_poller(app: AppHandle) {
                         },
                     );
                 }
+
+                // 系统通知由主进程发，而不是等 webview 回调：窗口收进托盘、webview
+                // 被销毁时也要能提示；同时避免前端两处状态同时到达时重复弹。
+                let current = notify::Snapshot::new(
+                    status.phase.as_str(),
+                    status.applied_mode.as_str(),
+                );
+                if notified_ready {
+                    for trigger in notify::triggers(&notified, &current) {
+                        let (title, body) = match trigger {
+                            notify::Trigger::Connected => (
+                                "VPN 已连接",
+                                format!("{} 已生效{}", status.profile_name, ip_suffix(&status.vpn_ip)),
+                            ),
+                            notify::Trigger::Disconnected => (
+                                "VPN 已断开",
+                                format!("{} 已断开，分流与路由已还原", status.profile_name),
+                            ),
+                            notify::Trigger::ModeSwitched => (
+                                "代理模式已切换",
+                                format!(
+                                    "当前：{}（{}）",
+                                    mode_label(&status.applied_mode),
+                                    status.profile_name
+                                ),
+                            ),
+                        };
+                        spawn_notify(&session, title, &body);
+                    }
+                }
+                notified = current;
+                notified_ready = true;
             }
 
             if !lines.is_empty() {
@@ -1084,6 +1138,59 @@ pub fn start_status_poller(app: AppHandle) {
             }
         }
     });
+}
+
+/// 系统通知一律另起线程发，不能占着状态轮询线程或命令线程（起一次 PowerShell
+/// 要几百毫秒，占住了界面状态就不动了）。两条平台实现都在 `notify` 里：
+/// Windows 走 WinRT toast（发不出去时如实返回错误），macOS 走 `osascript`。
+///
+/// 失败也要在日志里留一行 —— 现场判断「为什么没弹」全靠它。
+fn spawn_notify(session: &VpnSession, title: &str, body: &str) {
+    let session = session.clone();
+    let title = title.to_string();
+    let body = body.to_string();
+    std::thread::spawn(move || {
+        match notify::notify(&title, &body) {
+            Ok(()) => session.append_log(&format!(
+                "[通知] 已向系统提交「{}」（是否显示取决于系统通知设置）",
+                title
+            )),
+            Err(err) => session.append_log(&format!(
+                "[通知] 系统通知「{}」发送失败：{}",
+                title,
+                first_line(&err)
+            )),
+        }
+    });
+}
+
+/// 错误文本里常有整段 PowerShell 的 CLIXML，日志里只留第一行有用信息
+fn first_line(text: &str) -> String {
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("未知错误")
+        .chars()
+        .take(200)
+        .collect()
+}
+
+/// 连接通知里附带的隧道地址；没有地址就什么都不加
+fn ip_suffix(vpn_ip: &str) -> String {
+    if vpn_ip.trim().is_empty() {
+        String::new()
+    } else {
+        format!("（{}）", vpn_ip.trim())
+    }
+}
+
+/// `applied_mode` 的中文名
+fn mode_label(mode: &str) -> &'static str {
+    match mode.trim().to_ascii_lowercase().as_str() {
+        "global" => "全局",
+        "direct" => "直连",
+        _ => "规则",
+    }
 }
 
 /// 应用退出前请求 worker 停止，避免留下无人回收的路由

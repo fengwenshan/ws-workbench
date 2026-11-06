@@ -154,7 +154,8 @@ const modeLocked = computed(
 )
 
 const modeLockText = computed(() => {
-  if (vpn.modeSwitching) return '正在应用新的代理模式，等待 worker 确认…'
+  // 切换中这里不再重复：卡片标题已经写着「正在切换到「X」，等待 worker 确认…」
+  if (vpn.modeSwitching) return ''
   if (vpn.disconnecting) return '正在断开连接，暂时不能切换代理模式。'
   if (vpn.phaseBusy || vpn.connecting) return '正在连接中，暂时不能切换代理模式。'
   if (vpn.isConnected && !isPolicyOwner.value) {
@@ -331,7 +332,6 @@ watch(
   async (isActive) => {
     if (!isActive) return
     await vpn.refreshSnapshot()
-    await vpn.refreshElevation()
     await vpn.refreshConnectors()
   },
 )
@@ -386,32 +386,6 @@ watch(
           </div>
           <div v-if="vpn.profiles.length === 0" class="list-empty">
             还没有配置，点上方「+ 新建」创建一个
-          </div>
-        </div>
-
-        <!-- 提权状态：固定在列表底部，不跟配置列表一起滚动 -->
-        <div v-if="vpn.elevation" class="elevation-box">
-          <div class="elevation-title">提权方式</div>
-          <p class="elevation-hint">{{ vpn.elevation.hint }}</p>
-          <div class="elevation-actions">
-            <button
-              v-if="vpn.elevation.platform === 'windows' && !vpn.elevation.task_ready && !vpn.elevation.elevated"
-              class="btn btn-secondary btn-xs"
-              :disabled="vpn.elevationBusy"
-              :aria-busy="vpn.elevationBusy"
-              @click="vpn.setupElevation()"
-            >
-              {{ vpn.elevationBusy ? '注册中…' : '注册免 UAC 任务' }}
-            </button>
-            <button
-              v-if="vpn.elevation.platform === 'windows' && (vpn.elevation.task_ready || vpn.elevation.task_exists)"
-              class="btn btn-secondary btn-xs"
-              :disabled="vpn.elevationBusy"
-              :aria-busy="vpn.elevationBusy"
-              @click="vpn.removeElevation()"
-            >
-              {{ vpn.elevationBusy ? '移除中…' : '移除任务' }}
-            </button>
           </div>
         </div>
       </aside>
@@ -506,7 +480,13 @@ watch(
           >
             <div class="proxy-mode-head">
               <span class="proxy-mode-icon">
-                <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                <!-- 切换期间这里转圈：比一颗安静的小圆点更容易被看见 -->
+                <span
+                  v-if="vpn.modeSwitching"
+                  class="mode-spinner mode-spinner-lg"
+                  aria-hidden="true"
+                />
+                <svg v-else viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
                   <rect x="3" y="8" width="14" height="7" rx="2" />
                   <path d="M6 8V5.5h8V8M7 13h.01M10.5 13h.01" stroke-linecap="round" />
                   <path d="M16 4.5l1.5-1.5M17.5 4.5L16 3" stroke-linecap="round" />
@@ -514,7 +494,8 @@ watch(
               </span>
               <div class="proxy-mode-title">
                 <h4>代理模式</h4>
-                <p>{{ currentMode.description }}</p>
+                <p v-if="vpn.modeSwitching">正在切换到「{{ modeLabel(activeMode) }}」，等待 worker 确认…</p>
+                <p v-else>{{ currentMode.description }}</p>
               </div>
             </div>
 
@@ -580,7 +561,7 @@ watch(
       </section>
     </div>
 
-    <!-- 规则编辑：三个输入项 + 现有列表，和 Clash 一个思路 -->
+    <!-- 规则编辑：四个输入项 + 现有列表（可编辑），和 Clash 一个思路 -->
     <VpnRuleDialog v-if="ruleDialogOpen" :vpn="vpn" @close="ruleDialogOpen = false" />
 
     <!-- 实时日志抽屉：入口在动作栏「日志」 -->
@@ -654,12 +635,12 @@ watch(
 .profile-identity {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 4px;
   min-width: 0;
 }
 .identity-name {
   min-width: 0;
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 600;
   color: var(--text-primary);
   overflow: hidden;
@@ -681,7 +662,7 @@ watch(
   height: 20px;
   padding: 0;
   border: none;
-  border-radius: 5px;
+  border-radius: 6px;
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
@@ -773,7 +754,7 @@ watch(
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 7px 8px 7px 10px;
+  padding: 8px 8px 8px 10px;
   margin-bottom: 2px;
   border-radius: 8px;
   color: var(--text-secondary);
@@ -811,7 +792,7 @@ watch(
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
-  column-gap: 7px;
+  column-gap: 8px;
   row-gap: 2px;
 }
 .item-dot {
@@ -883,44 +864,6 @@ watch(
   color: var(--text-muted);
   text-align: center;
 }
-/* 提权状态固定在列表底部，像一条状态栏而不是一块老式设置卡片 */
-.elevation-box {
-  flex-shrink: 0;
-  margin: 0;
-  padding: 12px 16px;
-  border-top: 1px solid var(--border-color);
-  background: var(--bg-primary);
-}
-.elevation-title {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-secondary);
-  margin-bottom: 6px;
-}
-.elevation-title::before {
-  content: '';
-  flex: none;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--warning);
-}
-.elevation-hint {
-  font-size: 12px;
-  line-height: 1.55;
-  color: var(--text-muted);
-}
-.elevation-actions {
-  margin-top: 10px;
-}
-.elevation-actions .btn {
-  height: 28px;
-  padding: 0 10px;
-  font-size: 12px;
-}
 
 .detail {
   flex: 1;
@@ -945,7 +888,7 @@ watch(
   border-radius: 8px;
   padding: 14px;
   text-align: center;
-  font-size: 13px;
+  font-size: 14px;
   color: var(--text-muted);
   background: var(--bg-primary);
 }
@@ -987,7 +930,7 @@ watch(
 }
 .proxy-mode-title p {
   margin: 0;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-muted);
 }
 .proxy-mode-options {
@@ -1000,13 +943,13 @@ watch(
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 7px;
+  gap: 8px;
   height: 40px;
   border: 1px solid var(--border-color);
-  border-radius: 7px;
+  border-radius: 8px;
   background: var(--bg-secondary);
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: 14px;
   cursor: pointer;
 }
 .proxy-mode-option:hover:not(:disabled) {
@@ -1029,8 +972,11 @@ watch(
   cursor: not-allowed;
   opacity: 0.72;
 }
+.proxy-mode-card.is-switching {
+  border-color: var(--primary);
+}
 .proxy-mode-card.is-switching .proxy-mode-icon {
-  opacity: 0.7;
+  opacity: 1;
 }
 .mode-label {
   display: inline-flex;
@@ -1059,8 +1005,16 @@ watch(
   margin-right: 6px;
 }
 .mode-spinner {
-  width: 11px;
-  height: 11px;
+  width: 12px;
+  height: 12px;
+}
+/* 卡片标题旁那颗转圈：和 18px 的模式图标同尺寸占位 */
+.mode-spinner-lg {
+  width: 18px;
+  height: 18px;
+  border-width: 2px;
+  color: var(--primary);
+  vertical-align: 0;
 }
 @keyframes ws-vpn-spin {
   to {
@@ -1074,12 +1028,12 @@ watch(
 }
 .proxy-mode-lock {
   margin: 6px 0 0;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--warning);
 }
 .proxy-mode-hint {
   margin: 6px 0 0;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-muted);
 }
 
@@ -1091,7 +1045,7 @@ watch(
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 13px;
+  font-size: 14px;
   color: var(--text-muted);
 }
 .detail-empty-create {
@@ -1100,7 +1054,7 @@ watch(
   text-align: center;
 }
 .empty-title {
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 600;
   color: var(--text-primary);
 }

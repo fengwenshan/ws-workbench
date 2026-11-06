@@ -971,6 +971,267 @@ DOMAIN-SUFFIX risencn.com
 
 `cargo test --lib vpn::` → **158 passed, 0 failed**。
 
+### 14.15 16:30 现场：转发器没收到子域查询 —— NRPT 命名空间少了前导点
+
+现场（便携包 `20261106-1422`）只配了一条 `DOMAIN-SUFFIX risencn.com`，访问
+`https://oa.risencn.com:9508/...` 仍然不走 VPN；把规则改成 `oa.risencn.com` 就正常。
+日志关键几行：
+
+```text
+16:31:18 INFO [分流] 本机 DNS 转发器已监听 127.0.0.1:53，上游 VPN DNS [223.5.5.5]
+16:31:19 INFO [分流] NRPT 已指向 127.0.0.1:53，但 1.5 秒内没有查询进入本机转发器；
+          可能系统不接受 loopback DNS，回退到「NRPT 直连 VPN DNS + 后台解析」
+16:31:21 INFO [分流] 按域名解析：1 个域名，首批注入 0 个内网地址
+```
+
+转发器绑定成功、NRPT 也写成功，但**探针（随机子域）一次都没进来**。这排除了「53 被占用」，
+也说明问题不在 loopback：14.14 写的规则是 `Add-DnsClientNrptRule -Namespace 'risencn.com'`，
+而 NRPT 里**不带前导点**的命名空间是精确匹配，只有 `risencn.com` 本身命中；
+`ws-probe-*.risencn.com`、`oa.risencn.com` 都不在里面。日志里 14.14 把「命名空间按后缀匹配」
+当成了事实，这一步错了。
+
+对照微软 VPN 配置样例（<https://learn.microsoft.com/en-us/windows/security/operating-system-security/network-security/vpn/vpn-profile-options>）：
+
+```xml
+<DomainNameInformation>
+  <DomainName>hrsite.corporate.contoso.com</DomainName>   <!-- 精确：单台主机 -->
+  ...
+  <DomainName>.corp.contoso.com</DomainName>              <!-- 后缀：整族子域 -->
+```
+
+同一个域名族里，精确规则不带点，后缀规则带点 —— 带点才是后缀语义。
+
+另外这份现场日志还确认了 `/32` 是必需的：`oa.risencn.com` 的公网 A 记录是
+`192.168.18.41`（`Resolve-DnsName ... -Server 223.5.5.5` 实测），不在服务端下发的
+`192.168.136.0/22` 里；没有 `/32` 就会走物理默认路由。
+
+改法（`win_dns::build_apply_script`）：
+
+- 每个域名写两条 NRPT 规则：`.risencn.com`（后缀，覆盖任意子域）+ `risencn.com`（精确，保留旧行为）；
+- 带点的那条包在 `try/catch` 里，个别系统拒绝带点命名空间时不拖垮精确规则；
+- 探针超时从 1.5 秒放宽到 2.5 秒（刚写完规则时 DNS Client 还要刷新策略表）；
+- 探针失败时把 `Get-DnsClientNrptRule` 里**实际存下来的命名空间**打进日志，
+  下次现场一眼能区分「规则没点」和「loopback 不通」；
+- 回退路径不再只解析字面域名：每 3 秒扫一次 `Get-DnsClientCache`，把属于规则域名
+  （含子域）的 A 记录补成 `/32`，所以即使 NRPT 后缀规则被拒绝，子域也能在 3 秒内走 VPN
+  （首次连接可能失败一次，刷新后正常）。
+
+现场验证看三行：
+
+1. `Get-DnsClientNrptRule | Where-Object DisplayName -like 'ws-workbench:*' | Format-List Namespace,NameServers`
+   每个域名应有两条（带点 + 不带点）；
+2. worker.log 应出现「NRPT 已写好 N 条规则（域名 + 前导点子域后缀）」而不是「没有查询进入本机转发器」；
+3. 浏览器开 `oa.risencn.com` 后，`Find-NetRoute -RemoteIPAddress 192.168.18.41` 的第一跳应是隧道。
+
+`cargo test --lib vpn::` → **166 passed, 0 failed**（新增 8 条：后缀命名空间、命名空间归一化、
+规则计数解析、DNS 缓存后缀边界/去重/容错、规则计数脚本）。
+
+### 14.16 17:40 换新包就得手点「注册免 UAC 任务」：合并成一次提权
+
+现场反馈：每换一个新包（解压到新的日期目录），连接时又要弹 UAC；为了之后不弹，
+得先点一次「注册免 UAC 任务」、再过一次 UAC —— 等于每次升级都要手动两步。
+
+原因不在一处，而是两条路径叠加：
+
+1. 任务定义里写死了「exe 路径 + 会话目录」，新包换了目录 → `worker_task_matches` 为 false；
+2. `vpn_connect` 在任务不可用时**先**调一次 `ensure_worker_task`（注册要过一次 UAC），
+   再进 `start_worker` 的「刷新任务 + 拉起 worker」回退路径（又一次 UAC）。
+   注册若在第二步校验没通过（重试 5×200ms 不够、或任务被策略改写），就退化成
+   「每次连接弹一次 UAC」，用户只好回头去点那个按钮。
+
+改法：
+
+- `elevate::task_create_and_launch_command()`：一条批处理里先 `schtasks /Create ... /RL HIGHEST /F`
+  再 `start "" <exe> --vpn-worker <dir>`，两条命令用 `&` 而不是 `&&` —— 注册被组策略拦了
+  也要把本次 worker 拉起来，schtasks 的原始输出写进会话目录 `create-task.log`；
+- `start_worker()` 的任务不可用分支改用这条合并命令，并在拉起后复查
+  `worker_task_matches()`：成功就在日志里写「已自动注册免 UAC 任务」，失败则明确写
+  「下次连接仍会弹一次 UAC」；
+- `vpn_connect` **删掉**单独的预注册调用（那正是双弹的来源），改为 `start_worker()` 成功
+  且任务确实匹配后才 `remember_task_dir()`；
+- 面板提示改成三种状态各说清「会不会弹、弹几次」：可用（不再弹，覆盖解压可永久免）、
+  存在但过期（下次连接弹一次并自动刷新）、不存在（首次连接弹一次并自动注册）。
+
+结果：
+
+| 场景 | 改前 | 改后 |
+| --- | --- | --- |
+| 同一目录内升级 | 每次连接弹 UAC（任务对不上） | 0 次（`/TR` 路径没变，直接 `/Run`） |
+| 解压到新目录 | 手动点注册 + UAC，或每次连接弹 | 首次连接 1 次 UAC（顺带修好任务），之后 0 次 |
+| 组策略禁止建任务 | 每次连接弹 1 次 | 每次连接弹 1 次（日志写明原因） |
+
+> 安全性说明：这里没有把提权入口改成「用户可写的固定脚本」。计划任务永远指向
+> 具体 exe 路径，且每次注册都要过一次 UAC；否则任何以当前用户身份运行的进程
+> 都能替换那个脚本，从而静默拿到管理员权限 —— 那是本机提权漏洞，不能为了少点
+> 一次 UAC 去换。
+
+`cargo test --lib vpn::` → **167 passed, 0 failed**（新增 `create-task-and-launch` 命令拼装 1 条）。
+
+> 17:50 追加：同一次改动里曾加过「解析地址」面板（域名 → IP → 建议网段 + 一键加 IP-CIDR），
+> 现场反馈一个域名会解析出多个地址、列表太长，已整块回退（含 `VpnStatus.resolved`、
+> `split` 的解析结果记录、`dns_client::question_name`）。要查某个域名解析到什么，
+> 用 `nslookup <域名> <VPN DNS>` 即可，不必塞进面板。
+
+### 14.17 18:05 三个「生效」时刻加系统通知
+
+需求：连接生效、新规则生效、代理模式切换生效时各发一条系统通知（窗口最小化到托盘时也要知道结果）。
+
+**没引 `tauri-plugin-notification`**，直接用系统自带能力，理由是便携包：插件在 Windows 上依赖
+应用注册的开始菜单快捷方式（AppUserModelId），而本项目的发布物就是解压即用的 zip。
+
+| | 触发点 | 判据 |
+| --- | --- | --- |
+| 连接生效 | `useVpn` 里 `watch(() => status.phase)` | `phase` 从非 `connected` → `connected`（状态事件会重复推送，必须比上一拍） |
+| 规则生效 | `pushRulesIfConnected()` 成功之后 | 推送完成 + 300ms 后状态已刷新回来 |
+| 模式生效 | `setProxyMode()` 等到 `waitForAppliedMode` | worker 回写了目标 `applied_mode`；10 秒没等到只写 warn 日志，不发通知 |
+
+**踩到的坑：`-Command` 会吃掉 toast XML 里的双引号。** 实测：
+
+```powershell
+powershell.exe -Command "...$xml.LoadXml('<toast><visual><binding template=\"ToastGeneric\">...')"
+# → Exception from HRESULT: 0xC00CE502（XML 解析失败），Show 再报「参数错误」
+```
+
+错误回显里 `template=` 后面的引号已经没了 —— 脚本要穿过「Rust 拼命令行 → Win32 解析 →
+PowerShell 再解析」三层，`\"` 在某层被当成普通的 `"` 处理。改成 `-EncodedCommand`
+（脚本按 UTF-16LE 编码再 base64）后零转义，实测退出码 0；顺带解决中文在此代码页下
+变问号的问题。同一条命令写进文件、用 `-File` 跑也是 0，说明 toast 本身在便携 exe 上
+可用（AUMID 用固定的 `WsWorkbench`，不注册快捷方式也能弹）。
+
+回归测试 4 条（全部纯逻辑，不真的弹窗）：`clip` 压平换行并截断、toast 脚本做 XML 转义
+（并断言单引号字符串里不出现裸 `'`）、AppleScript 转义、`encoded_command` 能 UTF-16 回读。
+
+`cargo test --lib vpn::` → **171 passed, 0 failed**。
+
+### 14.18 18:20 提权区块从界面撤掉，规则弹窗减到三项
+
+两个界面上的「多余东西」，都是同一条原则：能自动做的不摆按钮，能靠开关表达的不加标签。
+
+**提权**：面板左下角那块「提权方式 + 注册免 UAC 任务 / 移除任务」整块删掉。原因是注册这件事
+已经在连接那次提权里做完了（`/Create /F` 顺带覆盖过期任务，等于「自动移除 + 自动注册」），
+按钮除了让人以为「必须手动点一次」之外没有作用。现在提权状态只出现在日志的 `[启动]` /
+`[elevate]` 行里，用户不需要先点按钮再连接。
+
+**规则弹窗**：表单从「类型 / 内容 / 策略 / 启用 / 备注」减到前三项，去掉的几处：
+
+| 删掉的东西 | 原因 |
+| --- | --- |
+| 类型下方的解释长句 | 三类规则名字已经说明白了 |
+| 按类型变的长 placeholder | 太长、看着像已经填好，直接固定「请输入」 |
+| 表单里的启用开关 | 状态在列表行的开关上，两处开关会互相矛盾 |
+| 备注输入框 | 没人用，占一屏 |
+| 添加/编辑按钮下方的提示文字 | 「追加到末尾、从上往下匹配」是内部实现细节 |
+
+列表行同步去掉「已禁用」标签和备注副标题（开关本身就是状态），编辑/删除图标换成项目分组
+模块那套铅笔与叉号 SVG。**编辑一条被禁用的规则并保存，它会被重新启用** —— 表单里没有开关，
+改内容就等于重新启用；只想停用就直接点行上的开关。
+
+### 14.19 18:35 「连上了没提示」的真凶：Win11 便携 exe 没有程序包标识符
+
+现场反馈：连接成功后没有任何系统提示，而且点连接时按钮会「转一下 → 停 → 又开始转」。
+
+**先说按钮闪烁。** `vpn_connect` 只是把请求文件写进会话目录就返回了，此时状态机还停在
+`disconnected`，前端 `finally` 里把 `connecting` 清掉的瞬间就退回了「连接」文案；几百毫秒后
+worker 才把 phase 推进到 `elevating/connecting`，界面又亮起来。加了 `waitForConnectOutcome()`：
+先等 `phase` 离开静止态（见到 `elevating/connecting/configuring_routes` 之类），再等它落到
+`connected|failed|disconnected`；一直没起步（UAC 框上还没点）最多等 60 秒就把按钮放回去。
+
+**再说通知。** 用 `cargo run --example notify_probe` 走真实调用链，拿到真错误：
+
+```
+Exception calling "CreateToastNotifier" with "1" argument(s):
+"The process has no package identity. (Exception from HRESULT: 0x80073D54)"
+```
+
+排查过程（每一步都有实测，不是猜）：
+
+| 试法 | 结果 |
+| --- | --- |
+| 从 `pwsh` 里调同一段脚本、同一个 `WsWorkbench` AUMID | **成功**，退出码 0，通知历史里有记录 |
+| 从 Rust 子进程调同一段脚本（stdio 分别 piped / null / 继承、加不加 `CREATE_NO_WINDOW`） | 全部 `0x80073D54` |
+| 换系统已注册的 PowerShell AUMID（`{1AC14E77-…}\WindowsPowerShell\v1.0\powershell.exe`） | 从 pwsh 成功，从 Rust 子进程仍 `0x80073D54` |
+| `SetCurrentProcessExplicitAppUserModelID('WsWorkbench')` + `HKCU\Software\Classes\AppUserModelId` 注册 | 仍 `0x80073D54` |
+| `notify-rust` 4（`tauri-plugin-notification` 的 Windows 后端） | 同一个错，`Err(Os(HRESULT(0x80073D54)))` |
+| `.NET NotifyIcon.ShowBalloonTip` 托盘气泡兜底 | 退出码 0，但**通知历史里查不到任何记录**（`wpndatabase.db`），等于没弹 |
+
+结论：这不是脚本写法问题，是 Win11 24H2/25H2 对 `CreateToastNotifier` 的硬要求 —— 调用进程
+要么有 MSIX 包身份，要么有同 AUMID 的开始菜单快捷方式。便携 zip 两者都没有。从 `pwsh` 能成，
+是因为那台机器上的 pwsh 是打包版本，子进程带上了身份，属于「在我的终端里能跑」。
+
+**改法**：系统通知只当「尽力而为」，发不出去必须**如实返回错误**（脚本首行
+`$ErrorActionPreference = 'Stop'`，否则 `Show` 失败只进 stderr、进程照样 0 退出，调用方会
+误判「已经弹出去了」）。失败时：
+
+1. 写一行 `[通知] … 发送失败：<首行错误>` 进 VPN 日志，现场有据可查；
+2. 后端补发 `vpn-notice` 事件，前端用 ant-design-vue 的 `notification` 在右上角弹一条应用内
+   提示 —— 窗口在的时候用户照样知道「连上了 / 模式换了 / 规则生效了」。
+
+同时把通知的**触发点从 webview 挪到 Rust 状态轮询线程**：窗口收进托盘、webview 被销毁时也要
+能发；判定改成「和上一次状态快照比」，状态文件每 600ms 重写同样的内容不会连环弹；通知本身在
+独立线程里发，绝不占轮询线程和命令线程（PowerShell 一次几百毫秒）。
+
+新增/调整的回归测试：`toast_script_reports_failure_instead_of_exiting_zero`（断言首行是
+`Stop`、且没有自己 `catch` 掉）、`only_the_transition_into_connected_notifies`、
+`mode_switch_only_counts_while_already_connected`（连上那一拍 `applied_mode` 一起写入，不能
+算成用户切模式）。`cargo test --lib vpn::` → **174 passed, 0 failed**。
+
+### 14.20 18:52 现场日志判定：退出码 0 不等于「弹出来了」
+
+装 18:36 那个包在真机上连了一次、又切了两次代理模式，日志里**一行 `[通知]` 都没有**（连接 18:43:56
+生效，模式在 18:45:12 与 18:45:24 各生效一次）。失败分支才会写 `[通知] … 发送失败`，所以只能
+说明 PowerShell 返回了 0 —— 也就是 `ToastNotificationManager.Show()` 被系统接受了，但屏幕上什么
+都没出现。
+
+结论：**退出码只能证明「系统收下了这条通知」，不能证明「用户看见了」**。便携 exe 只要没在系统里
+注册成已知应用（没有 MSIX 包身份、没有同 AUMID 的开始菜单快捷方式），`Show` 就可能被静默丢弃。
+所以原来那套「成功就不提示、失败才退回界面内提示」的设计是可证的错误。
+
+**改法：两条通道都发，界面内提示是可靠的那条。**
+
+| 通道 | 条件 | 说明 |
+| --- | --- | --- |
+| 界面内提示（右上角卡片） | 每次触发都发（`vpn-notice` 事件） | 唯一可靠；`success=true` 的「VPN 已连接」用成功样式 |
+| Windows 系统通知 | 每次触发都尝试 | 窗口在托盘里时只能靠它；窗口在眼前时多一条也不算打扰 |
+
+同时给 toast 脚本加了「按当前用户注册 AUMID」这一步（`HKCU\Software\Classes\AppUserModelId\WsWorkbench`
+写 `DisplayName` / `IconUri` / `ShowInSettings`，免管理员、可反复写、失败不影响发通知）：注册过之后
+系统设置的通知列表里才算有这么一个应用，被静默丢弃的概率最低。日志两种结局都要留痕：
+`[通知] 已向系统提交「…」（是否显示取决于 Windows 通知设置）` 或
+`[通知] 系统通知「…」发送失败：…`。
+
+回归测试相应调整：`toast_script_reports_failure_instead_of_exiting_zero` 现在断言
+「`CreateToastNotifier` 之后不能再有 `catch`」（注册段可以 catch，`Show` 不行），
+`toast_script_escapes_xml_and_registers_aumid` 断言注册段与 XML 转义同时存在。
+
+### 14.21 18:53 样式里的 px 一律用偶数
+
+`11px` 写 `12px`、`13px` 写 `14px`。缩放不是 100% 时奇数尺寸会被摆到半个像素上，图标、边框、
+文字都发虚。`1px` 的描边与分隔线是刻意留的发丝线，不受这条约束。全仓 79 处奇数 px 已按 +1 规则
+改成偶数（字体 11→12、13→14，间距 3→4、5→6、7→8，圆角 3→4、9→10，点状指示 11→12）。
+
+### 14.22 18:58 真机确认系统通知能弹 → 撤掉界面内卡片
+
+装上 18:55 那个包再连一次，**系统通知真的弹出来了**（注册 AUMID 那一步起了作用：之前
+`Show` 被静默丢弃，正是因为没有 `HKCU\Software\Classes\AppUserModelId\WsWorkbench`）。
+于是：
+
+1. **界面内提示撤掉**：`EVENT_NOTICE` / `VpnNoticePayload` / `vpn_notify` 命令 / 前端的
+   `notification.info` 全部删除。一事件一条通知，不重复。验收只看系统通知。
+2. **补上「断开」通知**：`notify::Trigger::Disconnected`，规则是「本来连着」→
+   落到 `disconnecting` 或 `disconnected`。`disconnecting → disconnected` 是同一次断开，
+   只报一条（否则会连弹两条）；`failed` / 未连接 → `disconnected` 不报。
+   文案：`VPN 已断开 / {配置} 已断开，分流与路由已还原`。
+3. **macOS 也发系统通知**：以前只有 Windows 分支被验证过，macOS 走
+   `osascript -e 'display notification … with title … sound name "default"'`，现在明确
+   写进 README 并补了 `sound name "default"`（通知中心默认只闪一下，容易漏）。两平台的
+   触发判定完全共用同一段 Rust 代码，不存在「只在 Windows 生效」的分叉。
+4. **代理模式切换的加载态加强**：原来只有选中的那颗按钮里有个 12px 小圈，等于没有。
+   现在切换期间卡片标题左侧的图标位换成 18px 转圈、副标题改成「正在切换到「全局」，
+   等待 worker 确认…」、卡片描边变主题色；下方那行锁提示同场景不再重复。
+
+`cargo test --lib vpn::` → **175 passed, 0 failed**（新增
+`disconnect_notifies_once_and_only_after_being_connected`）。
+
 ---
 
 ## 15. 参考资料

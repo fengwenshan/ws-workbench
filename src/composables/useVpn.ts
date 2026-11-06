@@ -291,13 +291,38 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
         'info',
         `开始连接：连接器 ${result.connector_name}，提权方式 ${result.elevation}`,
       )
-      await refreshElevation()
       await refreshSnapshot()
+      // invoke 返回只代表「请求已写进会话目录」；提权 + 建隧道还有几秒。
+      // 这里一直转圈到状态机真的落点，否则按钮会「亮一下 → 灭 → 再亮」。
+      await waitForConnectOutcome()
     } catch (err: any) {
       pushLog('error', `连接失败: ${err}`)
       await refreshSnapshot()
     } finally {
       connecting.value = false
+    }
+  }
+
+  /**
+   * 等这一次连接有结果：连上、失败、或回到未连接。
+   *
+   * 判定用「是否离开过静止态」：先见到 elevating/connecting 之类才算这次连接真的
+   * 起步了；起步之后才等终态。一直没起步（用户在 UAC 框上还没点、或者 worker 没
+   * 拉起来）最多等 60 秒就把按钮放回去，别让界面一直卡在「处理中」。
+   */
+  async function waitForConnectOutcome() {
+    const start = Date.now()
+    let progressed = false
+    for (;;) {
+      const phase = status.value.phase
+      const terminal =
+        phase === 'connected' || phase === 'failed' || phase === 'disconnected'
+      if (!terminal) progressed = true
+      if (progressed && terminal) return
+      const waited = Date.now() - start
+      if (!progressed && waited > 60_000) return
+      if (waited > 180_000) return
+      await new Promise((resolve) => window.setTimeout(resolve, 150))
     }
   }
 

@@ -26,6 +26,7 @@
 //! - `fulltunnel`  全局模式：半默认路由 + 系统 DNS 指向隧道（等价裸跑 openconnect）
 //! - `win_dns`     Windows 专用：NRPT 按域名分流与接口 DNS（`Set-DnsClientServerAddress`）
 //! - `elevate`     提权启动（Windows 计划任务免 UAC / macOS 系统授权框）
+//! - `notify`      系统通知（连接生效 / 规则热更新 / 代理模式切换）
 //! - `worker`      提权进程入口，连接生命周期主体
 //! - `guide`       openconnect 不可用时的安装引导
 
@@ -42,6 +43,7 @@ pub mod elevate;
 pub mod fulltunnel;
 pub mod guide;
 pub mod models;
+pub mod notify;
 pub mod route;
 pub mod rule_engine;
 pub mod script;

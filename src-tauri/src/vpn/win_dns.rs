@@ -54,7 +54,24 @@ pub fn flush_cache() {
     let _ = winps::run("Clear-DnsClientCache -ErrorAction SilentlyContinue");
 }
 
+/// NRPT 的「子域后缀」命名空间：`risencn.com` → `.risencn.com`。
+///
+/// NRPT 里**不带前导点**的命名空间是「精确匹配」：规则 `risencn.com` 只命中
+/// `risencn.com` 本身，`oa.risencn.com` 不会被它命中 —— 这也是现场「Windows 必须逐条
+/// 写完整域名」的根因。带前导点才是「后缀匹配」，覆盖整族子域；微软自己的
+/// VPN 配置示例也是用 `<DomainName>.corp.contoso.com</DomainName>` 表示后缀规则
+/// （另一个不带点的 `<DomainName>hrsite.corporate.contoso.com</DomainName>` 是精确 FQDN）。
+///
+/// 和 macOS 的 `/etc/resolver/<域名>` 对齐：那边写一个域名就覆盖所有子域。
+pub fn suffix_namespace(domain: &str) -> String {
+    format!(".{}", domain)
+}
+
 /// 生成「先清掉自己的旧规则，再按域名逐条写 NRPT」的脚本（纯函数，便于单测）。
+///
+/// 每个域名写两条规则：
+/// 1. `.域名` —— 后缀匹配，任何子域都命中（`DOMAIN-SUFFIX` 能覆盖子域的关键）；
+/// 2. `域名` —— 精确匹配，保留旧行为，裸域名本身也要能解析。
 ///
 /// 域名已经过 [`crate::vpn::split::normalize_domain`] 校验，只含字母数字、`-`、`_`、`.`，
 /// 不会破坏单引号字符串；DNS 服务器是 `Ipv4Addr`，同样安全。
@@ -62,7 +79,8 @@ pub fn build_apply_script(domains: &[String], servers: &[Ipv4Addr]) -> String {
     let mut script = String::from(
         "$old = @(Get-DnsClientNrptRule -ErrorAction SilentlyContinue | \
          Where-Object { $_.DisplayName -like 'ws-workbench:*' }); \
-         foreach ($r in $old) { Remove-DnsClientNrptRule -Name $r.Name -Force -ErrorAction SilentlyContinue }; ",
+         foreach ($r in $old) { Remove-DnsClientNrptRule -Name $r.Name -Force -ErrorAction SilentlyContinue }; \
+         $added = 0; ",
     );
     if servers.is_empty() {
         return script;
@@ -73,20 +91,31 @@ pub fn build_apply_script(domains: &[String], servers: &[Ipv4Addr]) -> String {
         .collect::<Vec<_>>()
         .join(",");
     for domain in domains {
-        // 先删同名规则再建：NRPT 允许同一个命名空间存在多条规则，
-        // 重复添加会让「哪条生效」变成未定义行为。
+        let suffix = suffix_namespace(domain);
+        // 后缀规则是新增能力，但个别系统/安全软件可能拒绝带点的命名空间：
+        // 它失败不能把整条 NRPT 布线（精确规则）一起拖垮，所以单独 try/catch。
         script.push_str(&format!(
-            "Get-DnsClientNrptRule -ErrorAction SilentlyContinue | \
-             Where-Object {{ $_.DisplayName -eq '{prefix}{domain}' }} | \
-             ForEach-Object {{ Remove-DnsClientNrptRule -Name $_.Name -Force -ErrorAction SilentlyContinue }}; \
-             Add-DnsClientNrptRule -Namespace '{domain}' -NameServers {servers} \
-             -DisplayName '{prefix}{domain}' -Comment '{comment}' -ErrorAction Stop | Out-Null; ",
+            "try {{ Add-DnsClientNrptRule -Namespace '{suffix}' -NameServers {servers} \
+             -DisplayName '{prefix}{suffix}' -Comment '{comment}' -ErrorAction Stop | Out-Null; \
+             $added++ }} catch {{ }}; ",
+            suffix = suffix,
+            prefix = RULE_PREFIX,
+            servers = server_list,
+            comment = RULE_COMMENT
+        ));
+        // 精确规则保留旧行为；同样吞掉错误 —— 规则写不进去时由「成功条数为 0」
+        // 和探针一起暴露，不能让一条规则把整条 NRPT 布线（含子域后缀）拖垮。
+        script.push_str(&format!(
+            "try {{ Add-DnsClientNrptRule -Namespace '{domain}' -NameServers {servers} \
+             -DisplayName '{prefix}{domain}' -Comment '{comment}' -ErrorAction Stop | Out-Null; \
+             $added++ }} catch {{ }}; ",
             prefix = RULE_PREFIX,
             domain = domain,
             servers = server_list,
             comment = RULE_COMMENT
         ));
     }
+    script.push_str("$added");
     script
 }
 
@@ -113,8 +142,8 @@ pub fn build_remove_script() -> String {
 
 /// 按域名写 NRPT 规则：只影响这些域名的解析，其余域名照旧。
 ///
-/// 返回写成功的规则数。任何一步失败都返回错误，由调用方决定降级；
-/// 不会留下「一半域名生效、一半没有」的中间态太久（脚本本身就是先删后建）。
+/// 返回**写成功的规则条数**（每个域名两条：精确 + 子域后缀）。调用方用 0 判断
+/// 「一条都没写进去」；后缀规则被系统拒绝时，这个数会比 `domains.len()*2` 小。
 pub fn apply_namespace_rules(domains: &[String], servers: &[Ipv4Addr]) -> Result<usize, String> {
     if domains.is_empty() {
         return Ok(0);
@@ -125,23 +154,69 @@ pub fn apply_namespace_rules(domains: &[String], servers: &[Ipv4Addr]) -> Result
     if !ensure_dns_client() {
         return Err("DNS Client 服务（Dnscache）没有运行，NRPT 规则不会生效".to_string());
     }
-    winps::run(&build_apply_script(domains, servers))?;
-    Ok(domains.len())
+    let text = winps::run(&build_apply_script(domains, servers))?;
+    Ok(parse_added_count(&text))
+}
+
+/// 从脚本输出里取最后一行数字（`$added`）。PowerShell 的警告可能混在 stdout 里，
+/// 所以只认「整行就是数字」的最后一行，而不是直接 `trim().parse()`。
+fn parse_added_count(text: &str) -> usize {
+    text.lines()
+        .rev()
+        .find_map(|line| line.trim().parse::<usize>().ok())
+        .unwrap_or(0)
 }
 
 /// 列出当前生效的、属于我们的域名（`ws-workbench:` 前缀被打掉）。
+///
+/// 新版本每个域名有两条规则（`域名` 和 `.域名`），这里统一归一化成基础域名并去重，
+/// 这样 `guard` 的「规则还在不在」判断不需要关心后缀规则是否存在。
 pub fn installed_domains() -> Result<Vec<String>, String> {
     let text = winps::run(&build_list_script())?;
     let value = winps::parse_json(&text)?;
     let mut out = Vec::new();
     for item in winps::json_array(value) {
         if let Some(name) = item.as_str() {
-            if let Some(domain) = name.strip_prefix(RULE_PREFIX) {
-                out.push(domain.to_string());
+            if let Some(domain) = display_name_to_domain(name) {
+                if !out.contains(&domain) {
+                    out.push(domain);
+                }
             }
         }
     }
     Ok(out)
+}
+
+/// `ws-workbench:.risencn.com` / `ws-workbench:risencn.com` → `risencn.com`。
+pub fn display_name_to_domain(display_name: &str) -> Option<String> {
+    let raw = display_name.strip_prefix(RULE_PREFIX)?;
+    let domain = raw.trim_start_matches('.').to_ascii_lowercase();
+    if domain.is_empty() {
+        return None;
+    }
+    Some(domain)
+}
+
+/// 列出当前生效的、属于我们的**原始命名空间**（带前导点会原样保留）。
+///
+/// 只用于现场诊断：用它能一眼确认系统到底存了 `.risencn.com` 还是把点吞掉了。
+pub fn installed_namespaces() -> Result<Vec<String>, String> {
+    let text = winps::run(&build_namespace_script())?;
+    let value = winps::parse_json(&text)?;
+    Ok(winps::json_array(value)
+        .into_iter()
+        .filter_map(|item| item.as_str().map(str::to_string))
+        .collect())
+}
+
+/// 生成「列出我们自己的规则的 Namespace」的脚本，输出 JSON 数组。
+fn build_namespace_script() -> String {
+    format!(
+        "$ns = @(Get-DnsClientNrptRule -ErrorAction SilentlyContinue | \
+         Where-Object {{ $_.DisplayName -like '{}*' }} | ForEach-Object {{ $_.Namespace }}); \
+         ConvertTo-Json -InputObject $ns -Compress",
+        RULE_PREFIX
+    )
 }
 
 /// 删掉我们写过的全部 NRPT 规则，返回删掉的条数。
@@ -231,11 +306,64 @@ mod tests {
         // 命名空间 + DNS 服务器都要写对
         assert!(script.contains("-Namespace 'risencn.com'"));
         assert!(script.contains("-NameServers '172.18.160.12','172.18.160.13'"));
-        // 先删同名规则再建，避免同一命名空间多条规则
-        assert_eq!(script.matches("Add-DnsClientNrptRule").count(), 2);
+        // 每个域名两条规则：精确 + 子域后缀
+        assert_eq!(script.matches("Add-DnsClientNrptRule").count(), 4);
         // 绝不写注册表 / 组策略
         assert!(!script.contains("GpoName"));
         assert!(!script.contains("Set-DnsClientNrptRule"));
+    }
+
+    #[test]
+    fn apply_script_covers_subdomains_with_a_dotted_namespace() {
+        let script = build_apply_script(&["risencn.com".to_string()], &ips());
+        // 不带点的规则只精确匹配 risencn.com；子域必须靠 .risencn.com
+        assert!(script.contains("-Namespace '.risencn.com'"));
+        assert!(script.contains("-DisplayName 'ws-workbench:.risencn.com'"));
+        // 任何一条规则被系统拒绝都不能拖垮另一条：两条都包在 try/catch 里，
+        // 用 $added 统计成功条数（0 条由调用方判定失败）。
+        let dotted = script.find("try { Add-DnsClientNrptRule -Namespace '.risencn.com'");
+        let exact = script.find("try { Add-DnsClientNrptRule -Namespace 'risencn.com'");
+        assert!(dotted.is_some(), "后缀规则要能单独失败");
+        assert!(exact.is_some(), "精确规则也要能单独失败");
+        assert!(dotted < exact, "先写后缀规则，子域优先");
+        assert!(script.contains("$added++"));
+    }
+
+    #[test]
+    fn apply_script_counts_successful_rules() {
+        let script = build_apply_script(&["risencn.com".to_string()], &ips());
+        // $added 初值 0、每条成功规则 +1、脚本最后把数字输出给调用方
+        assert!(script.contains("$added = 0;"));
+        assert_eq!(script.matches("$added++").count(), 2);
+        assert!(script.ends_with("$added"));
+    }
+
+    #[test]
+    fn suffix_namespace_is_the_dotted_form() {
+        assert_eq!(suffix_namespace("risencn.com"), ".risencn.com");
+        assert_eq!(suffix_namespace("OA.RisenCN.com"), ".OA.RisenCN.com");
+    }
+
+    #[test]
+    fn display_names_normalize_both_rule_kinds() {
+        assert_eq!(
+            display_name_to_domain("ws-workbench:risencn.com"),
+            Some("risencn.com".to_string())
+        );
+        assert_eq!(
+            display_name_to_domain("ws-workbench:.risencn.com"),
+            Some("risencn.com".to_string())
+        );
+        assert_eq!(display_name_to_domain("ws-workbench:."), None);
+        assert_eq!(display_name_to_domain("other:risencn.com"), None);
+    }
+
+    #[test]
+    fn added_count_ignores_warning_lines() {
+        assert_eq!(parse_added_count("4"), 4);
+        assert_eq!(parse_added_count("WARNING: 某条规则被跳过\n3\n"), 3);
+        assert_eq!(parse_added_count(""), 0);
+        assert_eq!(parse_added_count("no digits here"), 0);
     }
 
     #[test]
@@ -243,6 +371,7 @@ mod tests {
         let script =
             build_apply_script(&["risencn.com".to_string()], &[Ipv4Addr::new(127, 0, 0, 1)]);
         assert!(script.contains("-Namespace 'risencn.com'"));
+        assert!(script.contains("-Namespace '.risencn.com'"));
         assert!(script.contains("-NameServers '127.0.0.1'"));
     }
 

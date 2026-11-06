@@ -335,6 +335,23 @@ pub fn worker_launch_command(exe: &Path, session_dir: &Path) -> String {
     )
 }
 
+/// 生成「注册任务 + 立刻拉起 worker」的命令：一次 UAC 把两件事都办完。
+///
+/// 用在「任务不存在」或「任务指向旧程序/旧目录」的那次连接上：既然这次必然
+/// 要过一次 UAC（换新包、换了目录、或上次注册没做成），就把免 UAC 任务顺手
+/// 注册好，**下一次连接开始就不用再点任何东西**。
+///
+/// 注册失败（组策略禁止建任务等）不能拖累本次连接：两条命令用 `&` 串，不是
+/// `&&`；注册脚本的完整输出写进会话目录的 `create-task.log`，现场能直接看。
+pub fn task_create_and_launch_command(exe: &Path, session_dir: &Path) -> String {
+    format!(
+        "{} > \"{}\" 2>&1 & {}",
+        task_create_command(exe, session_dir),
+        session_dir.join("create-task.log").display(),
+        worker_launch_command(exe, session_dir)
+    )
+}
+
 /// 注册（或刷新）Windows 计划任务。返回 Ok(true) 表示任务可用。
 pub fn ensure_worker_task(exe: &Path, session: &VpnSession) -> Result<bool, String> {
     #[cfg(target_os = "windows")]
@@ -457,6 +474,12 @@ pub fn start_worker(
         // 否则 /Run 起来的是旧版本 exe（或往旧目录写的 worker），主进程等不到
         // 任何状态，甚至会被旧 worker 用旧逻辑把刚建好的隧道收掉。
         let task_exists = worker_task_exists();
+        if !task_exists {
+            session.append_log(
+                "[elevate] 还没有免 UAC 计划任务：首次连接会弹一次 UAC，\
+                 并在同一次里自动注册好任务，之后连接不再弹框",
+            );
+        }
         if task_exists {
             let matches = worker_task_matches(exe, &session.dir, recorded_task_dir);
             session.append_log(&format!(
@@ -493,7 +516,8 @@ pub fn start_worker(
                 }
             } else {
                 session.append_log(
-                    "[elevate] 计划任务指向的程序或会话目录已过期，改用 UAC 提权拉起当前版本 worker",
+                    "[elevate] 计划任务指向的程序或会话目录已过期：本次用 UAC 提权启动，\
+                     并在同一次里把任务刷新到当前版本（新包只需要这一次 UAC）",
                 );
                 if let Some(definition) = worker_task_definition() {
                     let preview: String = definition.chars().take(1200).collect();
@@ -505,15 +529,29 @@ pub fn start_worker(
             }
         }
 
-        // 退回：直接提权拉起 worker
-        let body = worker_launch_command(exe, &session.dir);
-        session.append_log("[elevate] 改用 UAC 提权启动 worker");
+        // 退回：提权拉起 worker，并在同一次提权里把免 UAC 任务注册好。
+        // 「只在第一次连接点一次 UAC」就是靠这里：换新包、换了目录、上次没注册
+        // 成功，都只会在这一次提权里顺带修好，下一次连接直接走 schtasks /Run。
+        let body = task_create_and_launch_command(exe, &session.dir);
+        session.append_log(
+            "[elevate] 改用 UAC 提权启动 worker，并在同一次提权里自动注册免 UAC 任务\
+             （注册失败不影响本次连接，详见会话目录里的 create-task.log）",
+        );
         let before = fs::metadata(session.log_path())
             .map(|meta| meta.len())
             .unwrap_or(0);
-        run_elevated_batch(session, "run-worker", &body)?;
+        run_elevated_batch(session, "create-task-and-run", &body)?;
         if wait_for_worker_log(session, before, std::time::Duration::from_secs(15)) {
-            Ok("UAC 提权".to_string())
+            // 注册是否成功不影响本次连接的结果，只是决定下次还弹不弹
+            if worker_task_matches(exe, &session.dir, recorded_task_dir) {
+                Ok("UAC 提权（已自动注册免 UAC 任务）".to_string())
+            } else {
+                session.append_log(
+                    "[elevate] 本次连接已启动，但免 UAC 任务没有注册成功（可能被组策略拦截）；\
+                     下次连接仍会弹一次 UAC",
+                );
+                Ok("UAC 提权".to_string())
+            }
         } else {
             session.append_log("[elevate] UAC 提权命令已执行，但 15s 内没有 worker 启动日志");
             Err("提权命令已执行，但 worker 未启动（15s 内无日志）；请查看 worker.log，并尝试以管理员身份运行程序".to_string())
@@ -616,6 +654,27 @@ mod tests {
         );
         // 必须以 start 开头：否则批处理会一直等 worker 退出（整整一个会话）
         assert!(command.starts_with(r#"start "" "#));
+        assert!(command.contains(r#"--vpn-worker "C:\Users\demo"#));
+    }
+
+    #[test]
+    fn create_and_launch_registers_first_then_starts_unconditionally() {
+        let command = task_create_and_launch_command(
+            Path::new(r"C:\Users\demo\Desktop\ws-workbench\ws-workbench.exe"),
+            Path::new(r"C:\Users\demo\AppData\Roaming\com.ws.workbench\vpn"),
+        );
+        // 先建任务（/RL HIGHEST + /F），再无条件 start：
+        // 用 `&` 而不是 `&&`，注册被组策略拦了也要把本次 worker 拉起来
+        let register_at = command.find("schtasks /Create").expect("要先注册任务");
+        let start_at = command.find(r#"start "" "#).expect("要拉起 worker");
+        assert!(register_at < start_at, "注册必须在 start 之前: {command}");
+        assert!(command.contains("/RL HIGHEST"));
+        assert!(
+            !command.contains("&&"),
+            "注册失败不能连累本次连接: {command}"
+        );
+        // 注册日志落在会话目录，现场能直接看到 schtasks 的原始报错
+        assert!(command.contains("create-task.log"));
         assert!(command.contains(r#"--vpn-worker "C:\Users\demo"#));
     }
 
