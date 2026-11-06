@@ -144,6 +144,17 @@ Windows 上的虚拟网卡由 Wintun 驱动提供（`src-tauri/resources/apps/op
 
 openconnect 探测失败时，代理页给出按平台区分的安装引导：macOS/Linux 给可复制的安装命令加官方下载地址；Windows 只说明内置副本缺失并提示覆盖安装，不引导下载外部二进制。
 
+### 系统清理
+
+左侧图标栏第四个工具（`⌘/Ctrl+4`），两个页签：
+
+- **软件卸载**：Windows 读注册表 `Uninstall` 键（HKLM 64/32 位、HKCU），macOS 扫 `/Applications` 与 `~/Applications`；支持按名称/发布者/位置搜索，按名称、大小、安装日期排序（顺序记在本地）。卸载执行 `UninstallString`（MSI 的 `/I` 自动换成 `/X`，需要时一次 UAC），macOS 直接把 `.app` 移入废纸篓；没有卸载命令的条目提供「强制移除」（Windows 删注册表项，macOS 结束进程后删除）。卸载后按 bundle id / 注册表键精确匹配文件与注册表残留，按「文件系统 / 注册表」分组、带置信度展示，勾选后删除。
+- **内存占用**：按应用聚合进程 RSS（Chromium/Electron 的 helper 归到宿主应用），显示总占用率、已用/总量/swap 与应用排行，2 秒轮询（页面不可见时暂停）。支持结束进程（先优雅退出，3 秒后仍在运行再确认强制结束）与「深度释放」（macOS 一次授权跑 `purge`；Windows 清进程工作集 + 系统待机列表，一次 UAC）。释放前后都用真实采样，展示差值，不夸大收益。
+
+安全约束：删除只进废纸篓（需 root 的条目走一次提权批处理）；所有路径过白名单校验，`/`、主目录、`/System`、`/usr`、`C:\Windows` 等硬拒绝；`pkgutil` 安装收据只读展示；系统应用（SIP / `com.apple.*`）不提供卸载。macOS 的废纸篓走 `NSFileManager` API，不会弹「控制 Finder」的自动化授权。
+
+已知限制：Windows 侧只做了交叉编译检查与验收清单，未实机跑卸载/UAC/深度释放；`purge` 只回收可缓存页，收益有限；残留按精确匹配，宁可漏报不误删。
+
 ### 设置
 
 显示运行环境（操作系统、架构、可执行文件后缀、是否需要提权、配置文件位置、各网卡的 MAC 与全部 IP —— 多 IP 逐条列出），以及附件实际落盘位置（可直接打开目录）。
@@ -307,6 +318,9 @@ VPN 会话目录同时被主进程和提权 worker 使用，因此不做路径�
 - 捕获与分流只处理 IPv4 TCP/UDP；ICMP 和 IPv6 仍走系统默认路由，不参与域名规则
 - 规则改动需要断开重连才生效
 - 学习模式只给建议，采纳候选网段需要手动点击
+- 系统清理的 Windows 运行时行为（注册表枚举、UAC 卸载、工作集/待机列表）只做了交叉编译检查，需按设计文档第 9 节的 Windows 清单实机验收
+- macOS 深度释放的 `purge` 只回收可缓存页，收益有限；`~/.Trash` 内容受 TCC 保护，删除结果以「原路径消失 + trash API 成功」为准
+- 卸载残留只做精确匹配（bundle id / 注册表键 / 精确应用名），存在非标准目录的数据需要手动清理
 
 ## 目录结构
 
@@ -329,6 +343,7 @@ src-tauri/src/
   netinfo.rs       本机网卡 MAC / IP（Windows 走 PowerShell，macOS/Linux 走 getifaddrs）
   process.rs/winps.rs  进程管理与 PowerShell 调用
   apps/            外部应用定位（finder / registry）
+  cleaner/         系统清理：安装列表/卸载/残留扫描/内存占用（平台实现按 cfg 拆文件）
   vpn/
     models.rs      规则、规则集、VPN 配置、状态
     rule_engine.rs Clash 式有序列规则引擎（纯逻辑，可离线单测）
@@ -357,12 +372,13 @@ src/
     vpn/           VpnPanel / VpnProfileForm / VpnRuleTable / VpnRoutePreview /
                    VpnLearnCard / VpnInstallGuide
     settings/      SettingsPanel
-  composables/     useConfig / usePack / useVpn / useApps / useLog / useUpdater /
+    cleaner/       CleanerPanel / InstalledAppsPanel / MemoryPanel / AppIcon
+  composables/     useConfig / usePack / useVpn / useCleaner / useApps / useLog / useUpdater /
                    useWorkbenchLayout / useEntitySelection / useProjectForm /
                    useDeleteConfirm / safeStorage
-  api/             后端命令的类型化封装（config / project / system / attachments / apps）
+  api/             后端命令的类型化封装（config / project / system / attachments / apps / cleaner）
   utils/           通用小工具（time / dialog / path / error）
-  types/           前后端共享的数据结构
+  types/           前后端共享的数据结构（含 cleaner）
 scripts/release.mjs  构建、上传、更新清单合并
 updates/latest.json  更新清单（由发布脚本生成并提交）
 ```

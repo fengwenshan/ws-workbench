@@ -2,7 +2,7 @@
 
 - 日期：2026-11-06
 - 分支：feat/uninstaller
-- 状态：待评审（用户已确认方向，按此实现）
+- 状态：已实现（v1；macOS 已实机冒烟，Windows 仅交叉编译检查，待实机验收）
 - 关联：新增工具页；不改动现有项目/打包/代理逻辑
 
 ## 1. 背景与目标
@@ -289,14 +289,17 @@ pub struct CleanerProgress {
 
 ### 4.4 删除
 
-- 统一走 `trash_guard::trash_path`：先校验路径在平台白名单根下，再调用 `trash::delete`
+- 统一走 `trash_guard::trash_path`：先校验路径在平台白名单根下，再移入废纸篓
+- macOS 固定用 `trash` crate 的 `DeleteMethod::NsFileManager`（`trashItemAtURL`）：默认的 Finder 实现会弹「控制 Finder」自动化授权、有删除音效，未授权时失败
 - 白名单根（只允许这些具体目录，**不允许整个 `$HOME`**）：
-  - macOS：`/Applications`、`~/Applications`、`~/Library/{Application Support,Caches,Preferences,Logs,Saved Application State,Containers,Group Containers,HTTPStorages,WebKit,Cookies,Application Scripts,LaunchAgents}`、`/Library/{Application Support,Caches,Preferences,LaunchAgents,LaunchDaemons,PrivilegedHelperTools}`、`~/Library/Preferences/*.plist`
-  - Windows：`%APPDATA%`、`%LOCALAPPDATA%`、`%PROGRAMDATA%`、`Program Files*` 下且必须带有应用名/发布者名作为路径段
+  - macOS：`/Applications`、`~/Applications`、`~/Library/{Application Support,Caches,Preferences,Logs,Saved Application State,Containers,Group Containers,HTTPStorages,WebKit,Cookies,Application Scripts,LaunchAgents,LaunchDaemons,PreferencePanes}`、`/Library/{Application Support,Caches,Preferences,LaunchAgents,LaunchDaemons,PrivilegedHelperTools,Extensions,Filesystems,PreferencePanes,StartupItems}`、`~/Library/Preferences/*.plist`、`~/.Trash` 下扫描命中的精确条目
+  - Windows：`%APPDATA%`、`%LOCALAPPDATA%`、`%PROGRAMDATA%`、`Program Files*` 下且必须带有应用名/发布者名作为路径段；桌面 `.lnk` 需要 `%USERPROFILE%\Desktop` / `%PUBLIC%\Desktop` 单独放行
 - 明确拒绝：`/`、`/System`、`/usr`、`/bin`、`/sbin`、`C:\Windows`、`C:\`、用户主目录本身
+- `~/.Trash` 里命中的残留是「从废纸篓真正删除」（它已在废纸篓，再移入是空操作），置信度 low、默认不勾选，必须用户手动勾选
 - 注册表删除（Windows）：`winreg` 删除子键，白名单限制在 `HKCU/HKLM\SOFTWARE` 下，且必须是扫描时列出的键
 - 需要提权的条目：macOS 用一次 `osascript ... with administrator privileges` 执行生成的临时 shell 脚本（逐行 `rm -rf` 用单引号转义）；Windows 用一次提权 PowerShell；失败条目逐条回传，不影响其他条目
 - 每次删除都把「路径 + 结果」写进页面内的操作结果列表，供用户核对
+- 验收说明：macOS 的 `~/.Trash` 属于 TCC 保护目录，未获「完全磁盘访问」的进程无法读取其内容；实机冒烟只能断言「原路径消失 + trash API 返回成功」，废纸篓内容的肉眼确认留给用户
 
 ## 5. 内存占用
 
@@ -424,6 +427,19 @@ Windows 验收清单（用户在 Windows 机器执行）：
 4. 结束进程：CloseMainWindow 生效；强制结束生效
 5. 深度释放：UAC 授权一次，工作集下降；取消授权有提示
 6. 高 DPI/中文系统下路径与名称不乱码
+
+### 9.3 已执行验证（2026-11-06，macOS aarch64）
+
+| 检查 | 结果 |
+| --- | --- |
+| `cargo test --lib`（macOS） | 280 passed / 1 failed / 1 ignored。失败项为**未改动的既有** `vpn::detect::tests::bundled_openconnect_is_probed_not_skipped`：仓库内 `openconnect.exe` 是 Windows PE，macOS 上无法被探测（`git diff` 证明本分支未改 `src/vpn`、`src/apps`） |
+| cleaner 单测 | 26 个全绿（Windows UninstallString/注册表过滤去重/EstimatedSize、macOS plist/残留规则/白名单、内存聚合、符号链接防环、并行 map 顺序） |
+| `cargo check`（macOS） | exit 0，无 warning |
+| `cargo xwin check --target x86_64-pc-windows-msvc` | exit 0，无 warning |
+| `pnpm build`（vue-tsc + vite） | exit 0（仅原有 chunk > 500kB 提示） |
+| 实机冒烟 `cleaner::macos_smoke`（`#[ignore]`，`CLEANER_SMOKE=1` 触发） | 通过：真实创建 `~/Applications/*.app` + 3 份 `~/Library` 残留 → 列表扫到（54 条）→ 残留扫描命中 3 条 high → 删除后原路径消失、`trash` 返回成功 → 卸载后 app 包移出 `~/Applications` → 内存采样 328 个应用、占用 78.6%、按内存降序。测试创建的文件在结束（含失败）时清理；`~/.Trash` 内容因 TCC 读不到，未做内容断言 |
+
+未覆盖（需人工）：GUI 里的真实点击链路（前端已用 stub IPC 做过渲染/交互冒烟）、macOS 提权删除与 `purge` 的授权弹窗、Windows 上所有运行时行为。
 
 ## 10. 实施顺序
 
