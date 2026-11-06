@@ -205,6 +205,20 @@ pub struct CleanerProgress {
 
 本设计取用其中「注册表枚举 + UninstallString + 文件/注册表残留分组 + 强制移除」这四件事，其余按第 1 节的目标重做。
 
+### 4.0.1 腾讯柠檬 5.3.7 解析结论（macOS 行为参考）
+
+对用户提供的 `/Applications/Tencent Lemon.app`（5.3.7，universal x86_64+arm64，Developer ID: Tencent Technology (Shenzhen)，Hardened Runtime）做了静态解析：
+
+- **常驻提权架构**：root 守护进程 `com.tencent.LemonDaemon`（安装到 `/Library/Application Support/Lemon/LemonDaemon`，LaunchDaemon `/Library/LaunchDaemons/com.tencent.Lemon.plist`，`MachServices` + `KeepAlive`），进程内 `setuid(0)`，XPC 入口用 `SecCodeCopyGuestWithAttributes` / `SecCodeCopySigningInformation` 校验调用方签名，并对 plist 路径做 traversal/白名单校验（与本设计 4.4 的白名单思路一致）。另有 `~/Library/LaunchAgents/com.tencent.Lemon.trash.plist` 监听 `~/.Trash`，实现「拖进废纸篓 → 自动清残留」。
+- **内存采集**：`LemonStat` 用 `host_statistics64` 取整机页统计；`QMCoreFunction` / `LemonDaemon` 用 `proc_listpids` + `proc_pidinfo(PROC_PIDTASKINFO)` 取每个进程的 `pti_resident_size`；应用身份/退出用 `NSRunningApplication`。等价于本设计选用的 `sysinfo`（macOS 后端同样是这些系统调用）。
+- **内存释放（三档）**：
+  1. `malloc_zone_pressure_relief` —— 只能释放本进程的 malloc zone，对整机无意义；
+  2. `purgeByLocal` / `purgeRamByHugeMMAPFree` / `purgeRamByHugeMallocFree` —— 临时申请巨块匿名内存制造内存压力、促使内核回收可回收缓存，再释放，**不需要授权**，并用 `GetPhysMemoryInfo2` 前后差值报「回收了多少」，内存不足时提示 `No reclaimable memory`；
+  3. `purgeBySystem` —— 通过 root 守护进程执行 `purge`（需常驻提权或一次授权）。
+  本设计 v1 采用第 3 档（一次 `osascript` 授权），第 2 档列为 v1.1 增强（避免每次弹授权）。
+- **应用卸载**：扫 `/Applications`（含子目录）、`~/Applications`，识别 `*uninstall*.app` / `*remover.app` 等自带卸载器；按 bundle id / pkg id / 应用名以 `contains[cd]`（大小写与变音符号不敏感）匹配残留，根目录覆盖面见 4.3；同时清理 LoginItems、LaunchAgents/LaunchDaemons、kext、pkg receipts，并删除垃圾桶里同名残留。
+- **取舍**：柠檬为了常驻监控/自动清理装了永久 root 守护进程；本设计不常驻提权，特权操作按需触发，代价是每次弹一次系统授权。残留匹配我们只做**精确同名**，不采用柠檬的 `contains[cd]` 模糊匹配，避免误删。
+
 ### 4.1 列表数据源
 
 **Windows**（`installer_windows.rs`）
@@ -255,8 +269,9 @@ pub struct CleanerProgress {
 **macOS**（bundle id / 应用名精确匹配）
 
 - high：`~/Library/Caches/<bundleId>`、`~/Library/Preferences/<bundleId>.plist`、`~/Library/Saved Application State/<bundleId>.savedState`、`~/Library/Application Support/<bundleId>`、`~/Library/Containers/<bundleId>`、`~/Library/Group Containers/*<bundleId>`、`~/Library/HTTPStorages/<bundleId>`、`~/Library/WebKit/<bundleId>`、`~/Library/Application Scripts/<bundleId>`、`~/Library/LaunchAgents/<bundleId>*.plist`
-- medium：按应用名命名的 `Application Support`/`Caches`/`Logs` 目录
-- 需要提权（`requires_elevation=true`）：`/Library/Application Support`、`/Library/Caches`、`/Library/Preferences`、`/Library/LaunchAgents`、`/Library/LaunchDaemons`、`/Library/PrivilegedHelperTools` 下的精确匹配项
+- medium：按应用名命名的 `Application Support`/`Caches`/`Logs` 目录、`~/Library/PreferencePanes/<name>.prefPane`、`~/Library/LaunchDaemons/<bundleId>*.plist`
+- 需要提权（`requires_elevation=true`）：`/Library/Application Support`、`/Library/Caches`、`/Library/Preferences`、`/Library/LaunchAgents`、`/Library/LaunchDaemons`、`/Library/PrivilegedHelperTools`、`/Library/Extension`、`/Library/Filesystems`、`/Library/PreferencePanes`、`/Library/StartupItems` 下的精确匹配项（柠檬的 4.0.1 解析覆盖了这些根，我们只按精确同名收）
+- low：`~/.Trash` 里与 bundle id / 应用名精确匹配的条目
 - `pkgutil` receipts：本版本只读展示（kind=`receipt`），不自动删除
 
 **匹配原则**
