@@ -714,10 +714,29 @@ pub async fn vpn_connect(
     {
         let heartbeat = session.clone();
         std::thread::spawn(move || {
+            heartbeat.append_log("[心跳] 开始为 worker 续命");
             let started = Instant::now();
+            let mut failures = 0u32;
             loop {
-                if heartbeat.touch_alive().is_err() {
-                    break;
+                if let Err(err) = heartbeat.touch_alive() {
+                    // 一次写失败绝不能当成「主进程死了」：真机现场出现过隧道刚
+                    // CSTP connected、两秒后就被 worker 判成心跳停止而掐掉的情况，
+                    // 而主进程其实好好的——这个文件每 2s 被重写一次，杀软扫描、
+                    // 磁盘瞬时占用都会让某一次写失败。
+                    failures += 1;
+                    if failures == 1 || failures % 15 == 0 {
+                        heartbeat.append_log(&format!(
+                            "[心跳] 第 {} 次刷新失败，继续重试: {}",
+                            failures, err
+                        ));
+                    }
+                    if failures >= 30 {
+                        // 连续一分钟都写不进去，认输：让 worker 的兜底生效
+                        heartbeat.append_log("[心跳] 连续刷新失败，停止续命");
+                        break;
+                    }
+                } else {
+                    failures = 0;
                 }
                 std::thread::sleep(Duration::from_secs(2));
                 match heartbeat.read_status() {
@@ -727,10 +746,14 @@ pub async fn vpn_connect(
                             VpnPhase::Disconnected | VpnPhase::Failed
                         ) =>
                     {
+                        heartbeat.append_log("[心跳] 会话已结束，停止续命");
                         break;
                     }
                     // 启动阶段可能还读不到状态；超过两分钟仍读不到就放弃
-                    None if started.elapsed() > Duration::from_secs(120) => break,
+                    None if started.elapsed() > Duration::from_secs(120) => {
+                        heartbeat.append_log("[心跳] 两分钟读不到状态，停止续命");
+                        break;
+                    }
                     _ => {}
                 }
             }
