@@ -69,7 +69,6 @@ const TOOLBAR = [
   'redo',
   '|',
   'edit-mode',
-  'preview',
 ]
 
 // ========== 编辑器生命周期 ==========
@@ -84,7 +83,7 @@ onMounted(() => {
     cdn: '/vditor',
     theme: 'classic',
     lang: 'zh_CN',
-    icon: 'material',
+    icon: 'ant',
     cache: { enable: false },
     outline: { enable: false, position: 'left' },
     counter: { enable: false },
@@ -475,7 +474,7 @@ function onPasteCapture(event: ClipboardEvent) {
 </template>
 
 <style scoped>
-/* 编辑器外壳：边框 / 圆角 / 背景都由这里负责，Vditor 本体只做内部布局 */
+/* 编辑器外壳：不再画卡片边框，笔记区与页面融为一体（参考 Typora 的整页编辑） */
 .note-editor {
   --note-border-color: var(--border-color);
   --note-bg: var(--bg-primary);
@@ -490,8 +489,6 @@ function onPasteCapture(event: ClipboardEvent) {
   height: 100%;
   min-height: 0;
   overflow: hidden;
-  border: 1px solid var(--note-border-color);
-  border-radius: 8px;
   background: var(--note-bg);
 }
 
@@ -509,10 +506,9 @@ function onPasteCapture(event: ClipboardEvent) {
   justify-content: space-between;
   gap: 12px;
   flex-shrink: 0;
-  height: 26px;
-  padding: 0 10px;
-  border-top: 1px solid var(--note-border-color);
-  background: var(--note-bg);
+  height: 30px;
+  padding: 0 4px 6px;
+  background: transparent;
   font-size: 12px;
   line-height: 1;
   color: var(--note-text-muted);
@@ -533,15 +529,16 @@ function onPasteCapture(event: ClipboardEvent) {
   border-radius: 0;
   background: var(--note-bg);
   font-family: inherit;
+  --toolbar-height: 32px;
 
   /* Vditor 有自己的同名变量，这里用外壳变量重新映射一遍 */
   --border-color: var(--note-border-color);
   --second-color: var(--note-text-muted);
   --panel-background-color: var(--note-bg);
-  --panel-shadow: 0 1px 2px rgba(15, 23, 42, 0.12);
+  --panel-shadow: 0 6px 20px rgba(15, 23, 42, 0.12);
   --toolbar-background-color: var(--note-bg);
   --toolbar-icon-color: var(--note-text-secondary);
-  --toolbar-icon-hover-color: var(--note-primary);
+  --toolbar-icon-hover-color: var(--note-text);
   --textarea-background-color: var(--note-bg);
   --textarea-text-color: var(--note-text);
   --resize-icon-color: var(--note-border-color);
@@ -562,23 +559,84 @@ function onPasteCapture(event: ClipboardEvent) {
   --ir-paren-color: var(--note-text-muted);
 }
 
+/* ========== 工具栏：扁平、悬停高亮、tooltip 放在下方 ========== */
 .note-editor :deep(.vditor-toolbar) {
-  padding: 0 8px;
+  padding-top: 6px;
+  padding-bottom: 4px;
   background: var(--note-bg);
-  border-bottom: 1px solid var(--note-border-color);
+  border-bottom: 0;
 }
-
+.note-editor :deep(.vditor-toolbar--pin) {
+  z-index: 3;
+}
 .note-editor :deep(.vditor-toolbar__item .vditor-tooltipped) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 32px;
+  padding: 0;
+  margin: 0 1px;
+  border-radius: 6px;
   color: var(--note-text-secondary);
+  transition: background-color 0.15s ease, color 0.15s ease;
 }
-
+.note-editor :deep(.vditor-toolbar__item .vditor-tooltipped svg) {
+  width: 17px;
+  height: 17px;
+}
 .note-editor :deep(.vditor-toolbar__item .vditor-tooltipped:hover),
 .note-editor :deep(.vditor-toolbar__item .vditor-tooltipped:focus) {
-  color: var(--note-primary);
+  color: var(--note-text);
   background: var(--note-bg-soft);
-  border-radius: 4px;
+}
+.note-editor :deep(.vditor-toolbar__item .vditor-tooltipped:active) {
+  background: var(--note-border-color);
+}
+.note-editor :deep(.vditor-toolbar__divider) {
+  height: 18px;
+  margin: 7px 7px;
+  border-left-color: var(--note-border-color);
 }
 
+/* Vditor 默认把 tooltip 放在按钮上方，而工具栏贴着编辑器顶部会被 overflow 裁掉；
+   这里改到下方，并换成更现代的深色气泡。 */
+.note-editor :deep(.vditor-toolbar .vditor-tooltipped::after) {
+  top: calc(100% + 8px);
+  bottom: auto;
+  right: auto;
+  left: 50%;
+  transform: translateX(-50%);
+  margin: 0;
+  padding: 5px 9px;
+  border-radius: 6px;
+  background: #1f2329;
+  color: #fff;
+  font-size: 12px;
+  line-height: 1.5;
+  font-weight: 400;
+  letter-spacing: 0.2px;
+  white-space: nowrap;
+  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.18);
+  z-index: 20;
+  opacity: 1;
+  animation: none;
+}
+.note-editor :deep(.vditor-toolbar .vditor-tooltipped::before) {
+  top: calc(100% + 3px);
+  bottom: auto;
+  right: auto;
+  left: 50%;
+  margin: 0 0 0 -5px;
+  border: 5px solid transparent;
+  border-top-color: transparent;
+  border-bottom-color: #1f2329;
+  z-index: 21;
+  opacity: 1;
+  animation: none;
+}
+
+/* ========== 正文 ========== */
 .note-editor :deep(.vditor-content) {
   background: var(--note-bg);
 }
@@ -588,6 +646,8 @@ function onPasteCapture(event: ClipboardEvent) {
 .note-editor :deep(.vditor-sv),
 .note-editor :deep(.vditor-preview) {
   font-family: inherit;
+  font-size: 15px;
+  line-height: 1.75;
   color: var(--note-text);
   background: var(--note-bg);
 }
@@ -598,9 +658,45 @@ function onPasteCapture(event: ClipboardEvent) {
   --blockquote-text-color: var(--note-text-secondary);
 }
 
-.note-editor :deep(.vditor-reset h1),
-.note-editor :deep(.vditor-reset h2) {
-  border-bottom-color: var(--note-border-color);
+/* IR 左侧的 H1~H6 等级标签在 Typora 里没有，去掉更接近纯写作视图 */
+.note-editor :deep(.vditor-ir .vditor-reset > h1::before),
+.note-editor :deep(.vditor-ir .vditor-reset > h2::before),
+.note-editor :deep(.vditor-ir .vditor-reset > h3::before),
+.note-editor :deep(.vditor-ir .vditor-reset > h4::before),
+.note-editor :deep(.vditor-ir .vditor-reset > h5::before),
+.note-editor :deep(.vditor-ir .vditor-reset > h6::before) {
+  display: none;
+}
+
+/* 所见即所得模式套用同样的克制风格 */
+.note-editor :deep(.vditor-wysiwyg .vditor-reset > h1::before),
+.note-editor :deep(.vditor-wysiwyg .vditor-reset > h2::before),
+.note-editor :deep(.vditor-wysiwyg .vditor-reset > h3::before),
+.note-editor :deep(.vditor-wysiwyg .vditor-reset > h4::before),
+.note-editor :deep(.vditor-wysiwyg .vditor-reset > h5::before),
+.note-editor :deep(.vditor-wysiwyg .vditor-reset > h6::before),
+.note-editor :deep(.vditor-wysiwyg div.vditor-wysiwyg__block::before) {
+  content: none !important;
+  display: none !important;
+}
+.note-editor :deep(.vditor-wysiwyg .vditor-reset > h1),
+.note-editor :deep(.vditor-wysiwyg .vditor-reset > h2) {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+.note-editor :deep(.vditor-wysiwyg .vditor-copy) {
+  display: none !important;
+}
+
+/* 标题不带下划线，层级靠字号和字重区分 */
+.note-editor :deep(.vditor-ir .vditor-reset > h1),
+.note-editor :deep(.vditor-ir .vditor-reset > h2),
+.note-editor :deep(.vditor-ir .vditor-reset > h3),
+.note-editor :deep(.vditor-ir .vditor-reset > h4),
+.note-editor :deep(.vditor-ir .vditor-reset > h5),
+.note-editor :deep(.vditor-ir .vditor-reset > h6) {
+  padding-bottom: 0;
+  border-bottom: 0;
 }
 
 .note-editor :deep(.vditor-reset blockquote:not(.callout)) {
@@ -610,28 +706,93 @@ function onPasteCapture(event: ClipboardEvent) {
   background-color: var(--note-border-color);
 }
 
-.note-editor :deep(.vditor-reset code:not(.hljs):not(.highlight-chroma)) {
-  color: var(--note-text);
-  background: var(--note-bg-soft);
-}
-
-.note-editor :deep(.vditor-reset pre > code) {
-  padding: 10px 12px;
-  background: var(--note-bg-soft);
-  background-image: none;
+/* 行内代码：细边框小胶囊；只作用于非 pre 内的 code */
+.note-editor :deep(.vditor-reset :not(pre) > code) {
+  padding: 2px 6px;
   border: 1px solid var(--note-border-color);
-  border-radius: 6px;
+  border-radius: 4px;
+  background: var(--note-bg-soft);
+  color: var(--note-text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.86em;
 }
 
+/* ========== 代码块：一个圆角面板，编辑态只保留可编辑的那一份 ========== */
+.note-editor :deep(.vditor-ir div[data-type='code-block']),
+.note-editor :deep(.vditor-wysiwyg div[data-type='code-block']) {
+  margin: 14px 0;
+  border: 1px solid var(--note-border-color);
+  border-radius: 8px;
+  background: var(--note-bg-soft);
+  overflow: hidden;
+}
+
+/* 收起态会留下不可见的 marker 占位，会把面板撑出一大块空白，这里直接隐藏 */
+.note-editor :deep(.vditor-ir div[data-type='code-block']) {
+  white-space: normal;
+}
+.note-editor :deep(.vditor-ir div[data-type='code-block']:not(.vditor-ir__node--expand) .vditor-ir__marker--info),
+.note-editor :deep(.vditor-ir div[data-type='code-block']:not(.vditor-ir__node--expand) > pre.vditor-ir__marker--pre) {
+  display: none;
+}
+
+/* 展开编辑时 Vditor 会同时显示「原始 pre + 渲染副本」，只保留可编辑的那份 */
+.note-editor :deep(.vditor-ir .vditor-ir__node--expand[data-type='code-block'] pre.vditor-ir__preview) {
+  display: none;
+}
+
+/* 展开态不再用伪元素画出 ``` 围栏 */
+.note-editor :deep(.vditor-ir__node--expand[data-type='code-block']::before),
+.note-editor :deep(.vditor-ir__node--expand[data-type='code-block']::after) {
+  content: none !important;
+  display: none !important;
+}
+
+/* 语言标签放到代码块右上角，像 Typora 那样低调 */
+.note-editor :deep(.vditor-ir div[data-type='code-block'] .vditor-ir__marker--info) {
+  display: block;
+  padding: 7px 14px 0;
+  font-size: 11px;
+  line-height: 1;
+  text-align: right;
+  color: var(--note-text-muted);
+}
+
+.note-editor :deep(.vditor-ir div[data-type='code-block'] pre),
+.note-editor :deep(.vditor-wysiwyg div[data-type='code-block'] pre) {
+  margin: 0;
+  padding: 12px 16px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  overflow-x: auto;
+}
+
+.note-editor :deep(.vditor-ir div[data-type='code-block'] pre code),
+.note-editor :deep(.vditor-wysiwyg div[data-type='code-block'] pre code) {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+/* IR 编辑时用不到代码块右上角的复制按钮 */
+.note-editor :deep(.vditor-ir .vditor-copy) {
+  display: none !important;
+}
+
+/* ========== 表格 ========== */
 .note-editor :deep(.vditor-reset table tr) {
-  background-color: var(--note-bg-soft);
+  background-color: var(--note-bg);
   border-top-color: var(--note-border-color);
+}
+.note-editor :deep(.vditor-reset table tr:nth-child(2n)) {
+  background-color: var(--note-bg-soft);
 }
 .note-editor :deep(.vditor-reset table td),
 .note-editor :deep(.vditor-reset table th) {
   border-color: var(--note-border-color);
-}
-.note-editor :deep(.vditor-reset table tbody tr:nth-child(2n)) {
-  background-color: var(--note-bg);
 }
 </style>

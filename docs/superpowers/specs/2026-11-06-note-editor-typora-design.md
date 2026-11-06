@@ -52,13 +52,18 @@
 ### 3.1 编辑器（NoteEditor.vue）
 
 - 依赖 `vditor@4.0.1`，移除 `md-editor-v3`。
-- 初始化：`mode: 'ir'`、`cdn: '/vditor'`、`theme: 'classic'`、`lang: 'zh_CN'`、`icon: 'material'`、`cache: { enable: false }`、`outline/counter` 关闭（大纲与字数由外层自己画）。
-- 工具栏：`headings, bold, italic, strike, link, |, list, ordered-list, check, quote, line, code, inline-code, |, upload, table, |, undo, redo, |, edit-mode, preview`；`toolbarConfig.pin = true`。
+- 初始化：`mode: 'ir'`、`cdn: '/vditor'`、`theme: 'classic'`、`lang: 'zh_CN'`、`icon: 'ant'`（线性图标，风格接近掘金编辑器）、`cache: { enable: false }`、`outline/counter` 关闭（大纲与字数由外层自己画）。
+- 工具栏：`headings, bold, italic, strike, link, |, list, ordered-list, check, quote, line, code, inline-code, |, upload, table, |, undo, redo, |, edit-mode`；`toolbarConfig.pin = true`。不提供「预览」按钮，IR 本身就是所见即所得，避免误入分屏。
+- 工具栏交互：扁平样式、图标 17px、悬停浅灰圆角底色；Vditor 原生 tooltip 默认在按钮上方，会被编辑器 `overflow: hidden` 裁掉，这里统一改到按钮下方并换成深色气泡（文案直接用 `aria-label`，如「粗体 <⌘B>」）。
 - 图片上传：`upload.multiple = true`，`upload.handler(files)` 内逐个读 base64 → `resolveUploadDir` → `encryptUploadBytes` → `noteImageUrl`，全部成功后 `vditor.insertValue(...)` 插入 `![](url)`；配置了 handler 时 Vditor 不会自动插入，必须自己插。
 - 保存：沿用现有策略（500ms 防抖 `emit('update')`；切换实体时 `watch(props.note)` 同步；卸载前补交；`destroy()` 清理）。
 - 状态栏：字数（`countNoteWords`）+ 保存状态（编辑中… / 已保存）。
 - 对外暴露：`insertMarkdown(md)`、`setMarkdown(md)`（静默，不触发 update）、`focus()`、`scrollToHeading(index)`。
-- 视觉：复用 `main.css` 的 CSS 变量覆盖 Vditor 的边框 / 圆角 / 字体 / 背景 / 代码块配色，与现有界面一致。
+- 视觉：复用 `main.css` 的 CSS 变量覆盖 Vditor 的字体 / 背景 / 代码块配色，与现有界面一致。
+  - 编辑器外壳不再画卡片边框 / 圆角，笔记区与页面融为一体，贴近 Typora 的整页写作视图。
+  - IR 中 Vditor 会在标题左侧画 H1~H6 等级标签、给 h1/h2 加下划线，编辑态还会用伪元素补出 ``` 围栏、同时显示原始与渲染两份代码块；这些都被去掉，保留单一、圆角的代码块面板（语言标签只在编辑该块时出现在右上角）。
+  - 收起态的代码块会留下不可见的 marker 占位，面板会被撑出一大块空白，因此收起时隐藏 `<pre.vditor-ir__marker--pre>` 与语言标记。
+  - 所见即所得（WYSIWYG）模式套用同一套标题 / 代码块规则，保持一致。
 
 ### 3.2 离线资源管线（vite.config.ts）
 
