@@ -26,11 +26,17 @@ use tauri::{
 
 /// 托盘菜单里点击 VPN 相关项时推给前端的事件名
 pub const EVENT_VPN_TRAY: &str = "vpn-tray";
-/// 托盘菜单里点击页面入口（代理 / 设置 / 日志）时推给前端的事件名
+/// 托盘菜单里点击页面入口（清理 / 代理 / 设置 / 日志）时推给前端的事件名
 pub const EVENT_NAV_TRAY: &str = "nav-tray";
 
-// 把主窗口重新显示出来（从托盘左键、托盘菜单、Dock 图标进入）
-fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
+/// 托盘快捷面板的窗口 label（前端 `/quick.html`）
+pub const QUICK_PANEL_LABEL: &str = "quick-panel";
+/// 面板的逻辑尺寸，和 `QuickPanel.vue` 的布局保持一致
+const QUICK_PANEL_WIDTH: f64 = 360.0;
+const QUICK_PANEL_HEIGHT: f64 = 560.0;
+
+// 把主窗口重新显示出来（托盘菜单、Dock 图标、快捷面板里的「打开主窗口」进入）
+pub(crate) fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
         let _ = window.unminimize();
@@ -193,6 +199,147 @@ fn create_main_window(app: &mut tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
+/// 创建托盘快捷面板：柠檬式无边框小窗，启动时建好但保持隐藏。
+///
+/// 提前创建而不是每次点击现建，是为了第一次点托盘图标就能立刻出内容；
+/// 窗体的显隐/定位在 `toggle_quick_panel` 里处理。
+fn create_quick_panel(app: &mut tauri::App) -> tauri::Result<()> {
+    let window = tauri::WebviewWindowBuilder::new(
+        app.handle(),
+        QUICK_PANEL_LABEL,
+        tauri::WebviewUrl::App("quick.html".into()),
+    )
+    .title("ws-workbench")
+    .inner_size(QUICK_PANEL_WIDTH, QUICK_PANEL_HEIGHT)
+    .resizable(false)
+    .maximizable(false)
+    .minimizable(false)
+    .decorations(false)
+    // 透明窗口 + CSS 圆角/投影，才能做出柠檬那种悬浮卡片的样子
+    .transparent(true)
+    .shadow(false)
+    // macOS：第一次点击就落到面板上，不用先激活应用再点第二下
+    .accept_first_mouse(true)
+    .skip_taskbar(true)
+    .always_on_top(true)
+    .visible(false)
+    .build()?;
+    // dev 下把面板窗口的实际地址/尺寸打出来，方便确认 quick.html 是否被正确加载
+    #[cfg(debug_assertions)]
+    eprintln!(
+        "[quick-panel] created url={:?} size={:?} visible={:?}",
+        window.url().map(|url| url.to_string()),
+        window.outer_size(),
+        window.is_visible()
+    );
+    Ok(())
+}
+
+/// 面板最近一次因失焦被收起的时间（unix 毫秒）。
+///
+/// 点托盘图标关闭面板时，macOS 可能先发失焦收起、再发点击事件；没有这个时间戳，
+/// 点击事件会看到「已隐藏」又立刻把面板弹回来，看起来像关不掉。
+static QUICK_PANEL_BLUR_HIDDEN_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 面板收起后 250ms 内的托盘点击视为「关闭动作的余波」，不再重新弹出
+const QUICK_PANEL_TOGGLE_GRACE_MS: u64 = 250;
+
+fn unix_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// 左键点托盘图标：已显示就收起，否则贴着图标弹出。
+fn toggle_quick_panel<R: Runtime>(app: &AppHandle<R>, rect: tauri::Rect) {
+    let Some(window) = app.get_webview_window(QUICK_PANEL_LABEL) else {
+        return;
+    };
+    if window.is_visible().unwrap_or(false) {
+        let _ = window.hide();
+        return;
+    }
+    // 刚被失焦收起：这次点击就是刚才那下，不要再弹出来
+    let hidden_at = QUICK_PANEL_BLUR_HIDDEN_AT.load(std::sync::atomic::Ordering::Relaxed);
+    if hidden_at != 0 && unix_millis().saturating_sub(hidden_at) < QUICK_PANEL_TOGGLE_GRACE_MS {
+        return;
+    }
+
+    // Rect 是逻辑坐标，先按当前缩放换成物理像素再算位置
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let tray_pos = rect.position.to_physical::<i32>(scale);
+    let tray_size = rect.size.to_physical::<u32>(scale);
+    let panel = window
+        .outer_size()
+        .unwrap_or_else(|_| {
+            tauri::PhysicalSize::new(
+                (QUICK_PANEL_WIDTH * scale).round() as u32,
+                (QUICK_PANEL_HEIGHT * scale).round() as u32,
+            )
+        });
+
+    // 图标所在显示器的可用范围：多显示器/刘海屏/任务栏在屏幕上方时都要夹住
+    let monitor = app
+        .monitor_from_point(tray_pos.x as f64, tray_pos.y as f64)
+        .ok()
+        .flatten();
+    let screen = monitor
+        .map(|monitor| {
+            let position = monitor.position();
+            let size = monitor.size();
+            (
+                position.x,
+                position.y,
+                size.width as i32,
+                size.height as i32,
+            )
+        })
+        .unwrap_or((0, 0, 1920, 1080));
+
+    let (x, y) = panel_origin(
+        (tray_pos.x, tray_pos.y, tray_size.width, tray_size.height),
+        (panel.width, panel.height),
+        screen,
+    );
+
+    let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+    let _ = window.show();
+    let _ = window.set_focus();
+}
+
+/// 计算面板左上角（物理像素）。
+///
+/// 纯函数，单测直接覆盖多显示器负坐标、任务栏在上/下、屏幕比面板还小这几种情况：
+/// 图标在屏幕上半部分（macOS 菜单栏 / 顶部任务栏）时面板朝下，否则朝上，
+/// 最后把结果夹进显示器范围，避免越界或被任务栏盖住。
+fn panel_origin(
+    tray: (i32, i32, u32, u32),
+    panel: (u32, u32),
+    screen: (i32, i32, i32, i32),
+) -> (i32, i32) {
+    const MARGIN: i32 = 8;
+    let (tray_x, tray_y, tray_w, tray_h) = tray;
+    let (panel_w, panel_h) = (panel.0 as i32, panel.1 as i32);
+    let (screen_x, screen_y, screen_w, screen_h) = screen;
+
+    let tray_center_y = tray_y + tray_h as i32 / 2;
+    let below = tray_center_y < screen_y + screen_h / 2;
+    let mut x = tray_x + tray_w as i32 / 2 - panel_w / 2;
+    let mut y = if below {
+        tray_y + tray_h as i32 + 6
+    } else {
+        tray_y - panel_h - 6
+    };
+
+    // 屏幕比面板还小时 clamp 会 panic，先算出不会越界上限再夹
+    let max_x = (screen_x + screen_w - panel_w - MARGIN).max(screen_x + MARGIN);
+    x = x.min(max_x).max(screen_x + MARGIN);
+    let max_y = (screen_y + screen_h - panel_h - MARGIN).max(screen_y + MARGIN);
+    y = y.min(max_y).max(screen_y + MARGIN);
+    (x, y)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
@@ -265,10 +412,15 @@ pub fn run() {
             commands::cleaner_memory_snapshot,
             commands::cleaner_quit_apps,
             commands::cleaner_deep_release,
+            // 托盘快捷面板：隐藏 / 打开主窗口并切页
+            commands::quick_panel_hide,
+            commands::quick_panel_open_main,
         ])
         .setup(|app| {
             // 先建主窗口：窗口配置在 tauri.conf.json 里，但 create: false 交给这里
             create_main_window(app)?;
+            // 托盘快捷面板：同样提前建好、默认隐藏，点托盘图标时再定位显示
+            create_quick_panel(app)?;
 
             // dev 模式（裸二进制）Dock 会显示系统占位图标，这里补上真实图标
             #[cfg(target_os = "macos")]
@@ -306,6 +458,7 @@ pub fn run() {
             // 托盘：关掉窗口后应用仍在后台运行，从托盘菜单重新打开或退出
             let show = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
             // 页面入口：点一下把窗口唤到前台并切到对应页面
+            let nav_cleaner = MenuItem::with_id(app, "nav-cleaner", "清理", true, None::<&str>)?;
             let nav_proxy = MenuItem::with_id(app, "nav-proxy", "代理", true, None::<&str>)?;
             let nav_settings =
                 MenuItem::with_id(app, "nav-settings", "设置", true, None::<&str>)?;
@@ -322,6 +475,7 @@ pub fn run() {
                 &[
                     &show,
                     &separator,
+                    &nav_cleaner,
                     &nav_proxy,
                     &nav_settings,
                     &nav_logs,
@@ -336,12 +490,12 @@ pub fn run() {
             let mut tray = TrayIconBuilder::with_id("main")
                 // 不设 tooltip：菜单栏图标悬浮时不要弹出应用名
                 .menu(&menu)
-                // 左键单击直接打开客户端，不弹菜单；菜单只在右键时出现
+                // 左键单击弹快捷面板，不弹菜单；菜单只在右键时出现
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => show_main_window(app),
-                    // 页面入口：唤起窗口，让前端切到代理 / 设置 / 日志页
-                    "nav-proxy" | "nav-settings" | "nav-logs" => {
+                    // 页面入口：唤起窗口，让前端切到清理 / 代理 / 设置 / 日志页
+                    "nav-cleaner" | "nav-proxy" | "nav-settings" | "nav-logs" => {
                         show_main_window(app);
                         let _ = app.emit(EVENT_NAV_TRAY, event.id.as_ref().to_string());
                     }
@@ -361,10 +515,11 @@ pub fn run() {
                     if let TrayIconEvent::Click {
                         button: MouseButton::Left,
                         button_state: MouseButtonState::Up,
+                        rect,
                         ..
                     } = event
                     {
-                        show_main_window(tray.app_handle());
+                        toggle_quick_panel(tray.app_handle(), rect);
                     }
                 });
             if let Some(icon) = tray_icon_image() {
@@ -375,6 +530,16 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            // 快捷面板失焦就收起：点桌面/别的应用/主窗口都算「点外面」
+            if let WindowEvent::Focused(false) = event {
+                if window.label() == QUICK_PANEL_LABEL {
+                    let _ = window.hide();
+                    QUICK_PANEL_BLUR_HIDDEN_AT.store(
+                        unix_millis(),
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                }
+            }
             // 点关闭只隐藏到后台，不退出应用
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
@@ -416,4 +581,54 @@ pub fn run() {
             let _ = (app_handle, event);
         }
     });
+}
+
+#[cfg(test)]
+mod quick_panel_tests {
+    use super::{panel_origin, QUICK_PANEL_HEIGHT, QUICK_PANEL_WIDTH};
+
+    const MENUBAR_SCREEN: (i32, i32, i32, i32) = (0, 0, 1920, 1080);
+    const PANEL: (u32, u32) = (QUICK_PANEL_WIDTH as u32, QUICK_PANEL_HEIGHT as u32);
+
+    /// macOS 菜单栏图标：面板居中挂在图标下方，顶部留 6px
+    #[test]
+    fn opens_below_top_menubar_icon() {
+        let (x, y) = panel_origin((1000, 0, 30, 24), PANEL, MENUBAR_SCREEN);
+        assert_eq!(x, 1000 + 15 - PANEL.0 as i32 / 2);
+        assert_eq!(y, 24 + 6);
+    }
+
+    /// Windows 底部任务栏图标：面板朝上，不能盖住任务栏
+    #[test]
+    fn opens_above_bottom_taskbar_icon() {
+        let (_, y) = panel_origin((1500, 1044, 30, 36), PANEL, MENUBAR_SCREEN);
+        assert_eq!(y, 1044 - PANEL.1 as i32 - 6);
+    }
+
+    /// 贴左/右边缘的图标：x 必须夹进显示器，不能有一半跑到屏幕外
+    #[test]
+    fn clamps_into_screen_edges() {
+        let (left_x, _) = panel_origin((0, 0, 20, 24), PANEL, MENUBAR_SCREEN);
+        assert_eq!(left_x, 8, "左边距不足时贴住 8px 安全边");
+
+        let (right_x, _) = panel_origin((1910, 0, 20, 24), PANEL, MENUBAR_SCREEN);
+        assert_eq!(right_x, 1920 - PANEL.0 as i32 - 8);
+    }
+
+    /// 多显示器：负坐标的副屏也要按它自己的范围夹，而不是按 0 点
+    #[test]
+    fn handles_negative_monitor_coordinates() {
+        let screen = (-1920, 0, 1920, 1080);
+        let (x, y) = panel_origin((-1000, 0, 30, 24), PANEL, screen);
+        assert_eq!(x, -1000 + 15 - PANEL.0 as i32 / 2);
+        assert_eq!(y, 30);
+    }
+
+    /// 显示器比面板还小时不能 panic，结果停在左上角安全边
+    #[test]
+    fn tiny_screen_does_not_panic() {
+        let (x, y) = panel_origin((100, 0, 20, 24), PANEL, (0, 0, 320, 300));
+        assert_eq!(x, 8);
+        assert_eq!(y, 8);
+    }
 }
