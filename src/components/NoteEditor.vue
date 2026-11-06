@@ -145,6 +145,8 @@ onMounted(() => {
   document.addEventListener('selectionchange', syncTableOps)
   document.addEventListener('scroll', syncTableOps, true)
   window.addEventListener('resize', syncTableOps)
+  host.addEventListener('mousedown', rememberCodeClick, true)
+  host.addEventListener('click', restoreCodeCaret, false)
 })
 
 function onReady() {
@@ -169,6 +171,9 @@ onBeforeUnmount(() => {
   document.removeEventListener('selectionchange', syncTableOps)
   document.removeEventListener('scroll', syncTableOps, true)
   window.removeEventListener('resize', syncTableOps)
+  hostRef.value?.removeEventListener('mousedown', rememberCodeClick, true)
+  hostRef.value?.removeEventListener('click', restoreCodeCaret, false)
+  pendingCodeClick = null
   tableOps.value = null
   if (emitTimer) {
     window.clearTimeout(emitTimer)
@@ -334,6 +339,112 @@ function scrollToHeading(index: number) {
   textarea.focus()
   textarea.setSelectionRange(position, Math.min(position + (lines[line]?.length ?? 0), textarea.value.length))
   textarea.scrollTop = Math.max(0, (line / Math.max(1, lines.length)) * textarea.scrollHeight - textarea.clientHeight / 3)
+}
+
+// ========== 代码块：点击定位到鼠标位置 ==========
+// Vditor 的 IR 点击处理里有一条「点击后光标落于预览区」的逻辑：只要点击命中
+// .vditor-ir__preview，就把光标挪到代码块开头。代码块的预览层和可编辑层是叠在
+// 一起的，个别 WebView 里点击会命中预览层，导致点哪都跳回第一行。这里在事件冒泡
+// 结束后按点击坐标重新定位光标，把位置映射回可编辑的原始代码。
+let pendingCodeClick: { block: HTMLElement; x: number; y: number } | null = null
+
+function rememberCodeClick(event: MouseEvent) {
+  pendingCodeClick = null
+  if (event.button !== 0) return
+  const host = hostRef.value
+  const editor = vditor.value
+  if (!host || !editor || !ready || editor.getCurrentMode() !== 'ir') return
+  const target = event.target
+  if (!(target instanceof Node) || !host.contains(target)) return
+  const root = host.querySelector<HTMLElement>('.vditor-ir')
+  if (!root || !root.contains(target)) return
+  const element = target instanceof Element ? target : target.parentElement
+  const block = element?.closest<HTMLElement>('[data-type="code-block"]')
+  if (!block) return
+  pendingCodeClick = { block, x: event.clientX, y: event.clientY }
+}
+
+function caretRangeAtPoint(x: number, y: number): Range | null {
+  const doc = document as Document & {
+    caretRangeFromPoint?: (x: number, y: number) => Range | null
+    caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node; offset: number } | null
+  }
+  if (doc.caretRangeFromPoint) return doc.caretRangeFromPoint(x, y)
+  if (doc.caretPositionFromPoint) {
+    const position = doc.caretPositionFromPoint(x, y)
+    if (!position) return null
+    const range = document.createRange()
+    range.setStart(position.offsetNode, position.offset)
+    range.collapse(true)
+    return range
+  }
+  return null
+}
+
+/** 节点内某位置之前的字符数，用来把预览层的偏移换算到原始代码 */
+function charOffsetWithin(root: HTMLElement, node: Node, offset: number): number {
+  if (node !== root && !root.contains(node)) return -1
+  try {
+    const range = document.createRange()
+    range.setStart(root, 0)
+    range.setEnd(node, offset)
+    return range.toString().length
+  } catch {
+    return -1
+  }
+}
+
+function textNodeAtOffset(root: HTMLElement, offset: number): { node: Text; offset: number } | null {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
+  let remaining = offset
+  let node = walker.nextNode()
+  while (node) {
+    const length = node.textContent?.length ?? 0
+    if (remaining <= length) return { node: node as Text, offset: remaining }
+    remaining -= length
+    node = walker.nextNode()
+  }
+  return null
+}
+
+function restoreCodeCaret() {
+  const pending = pendingCodeClick
+  pendingCodeClick = null
+  if (!pending) return
+  const editor = vditor.value
+  if (!editor || !ready || editor.getCurrentMode() !== 'ir') return
+  // 拖选代码时不抢选区
+  const selection = window.getSelection()
+  if (selection && !selection.isCollapsed) return
+  const { block, x, y } = pending
+  if (!block.isConnected) return
+  // Vditor 的点击处理已经把代码块展开，可编辑层此时才可见
+  const rawPre = block.querySelector<HTMLElement>('pre.vditor-ir__marker--pre')
+  const rawCode = rawPre?.querySelector<HTMLElement>('code') ?? rawPre
+  const previewCode = block.querySelector<HTMLElement>('pre.vditor-ir__preview code')
+  if (!rawPre || !rawCode || !previewCode || getComputedStyle(rawPre).display === 'none') return
+
+  const pointRange = caretRangeAtPoint(x, y)
+  if (!pointRange) return
+  const pointNode = pointRange.startContainer
+
+  let offset = -1
+  if (rawPre.contains(pointNode)) {
+    // 可编辑层在光标下面（Chromium），浏览器自己已经算好了位置
+    offset = charOffsetWithin(rawCode, pointNode, pointRange.startOffset)
+  } else {
+    // 命中渲染层（部分 WebView）：按同一段文本映射回原始代码
+    offset = charOffsetWithin(previewCode, pointNode, pointRange.startOffset)
+  }
+  const rawText = rawCode.textContent ?? ''
+  if (offset < 0 || offset > rawText.length) return
+  const target = textNodeAtOffset(rawCode, offset)
+  if (!target) return
+  const range = document.createRange()
+  range.setStart(target.node, Math.min(target.offset, target.node.textContent?.length ?? 0))
+  range.collapse(true)
+  selection?.removeAllRanges()
+  selection?.addRange(range)
 }
 
 // ========== 表格：光标在表格里时提供加行 / 加列 ==========
