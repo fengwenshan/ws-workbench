@@ -92,6 +92,7 @@ const canPack = computed(() => projectType.value === 'layui')
 - 路由注入模式没有「按连接判定」这一步：`VPN` 规则只负责把命中的域名 / 网段送进隧道，未命中的一律直连（所以 `DIRECT` 规则天然满足，写不写都一样）
 - 服务端下发的默认域名（`CISCO_DEF_DOMAIN`）与 split-include 网段会被自动并入，不用手工抄一遍
 - 保存前校验规则语法，可以预览一条规则对指定「域名 / IP」的判定结果
+- 右侧规则列表可编辑（点编辑按钮或双击整行，原地改，顺序不变）、可逐条启用/禁用（默认启用）；禁用的规则不参与分流但保留在列表里。编辑一条被禁用的规则并保存后，它会变成启用
 
 三种代理模式，已连接时也能运行期切换（都是本地布线，点了就生效）：
 
@@ -103,6 +104,25 @@ const canPack = computed(() => projectType.value === 'layui')
 
 `DOMAIN-KEYWORD` / `PROCESS-NAME` / `DST-PORT` / `RULE-SET` 需要按连接抓包或按进程判定，路由注入模式没有落点，保存时直接报错并提示改法，不会再「显示已启用但从不生效」。
 
+#### 系统通知
+
+四个「状态真的变了」的时刻发一条**系统通知**（Windows 通知 / macOS 通知中心），窗口最小化到托盘、或者用户切到别的应用时也能知道结果：
+
+- **连接生效**：`phase` 从非 `connected` 跳到 `connected`（不是点完按钮就发，避免「点了但没连上」也报成功）
+- **断开生效**：从 `connected` 落到 `disconnecting` / `disconnected`。`disconnecting → disconnected` 算同一次断开，只报一条；本来就失败或没连上的不报
+- **规则生效**：规则热更新写进会话目录之后
+- **代理模式生效**：`applied_mode` 在已连接状态下发生变化才算；连上那一拍 worker 会把 `applied_mode` 一起写进去，不能当成用户切了模式
+
+这些通知由 **Rust 侧的状态轮询线程**发，不是前端在 `watch` 里调命令：窗口收进托盘、webview 被销毁时同样要提示；判定用「和上一次的状态快照比」，状态文件每 600ms 重复写同样的内容不会连环弹。通知都在独立线程里发（起一次 PowerShell 要几百毫秒），不占状态轮询和命令线程。界面上不再额外弹卡片，只走系统通知。
+
+实现不依赖第三方通知库：Windows 用 PowerShell 调 WinRT 的 `ToastNotificationManager`（AUMID 固定为 `WsWorkbench`），macOS 用 `osascript -e 'display notification … with title … sound name "default"'`（带提示音，避免只闪一下被漏看）。Windows 的脚本通过 `-EncodedCommand`（UTF-16LE + base64）传给 PowerShell，而不是 `-Command` —— toast 的 XML 属性必须带双引号，走命令行转义时会被吃掉（`LoadXml` 报 `0xC00CE502`），编码方式零转义、也不受控制台代码页影响。
+
+**Windows 上这条路并不保证成功**：Win11 24H2/25H2 起，便携 exe（没有 MSIX 包身份、也没有同 AUMID 的开始菜单快捷方式）调 `CreateToastNotifier` 会直接报 `0x80073D54`「该进程没有程序包标识符」——第三方库 `notify-rust` 报的是同一个错，实测过；而在放行 toast 的机器上，`Show` 也可能被系统静默吞掉。所以：
+
+- 每次触发都会把结果写进 VPN 日志：`[通知] 已向系统提交「…」` 或 `[通知] 系统通知「…」发送失败：…`；
+- 发送前会按当前用户注册一次 AUMID（`HKCU\Software\Classes\AppUserModelId\WsWorkbench`，写 `DisplayName`/`IconUri`/`ShowInSettings`，免管理员、可反复写），让系统设置里能看到这个应用，降低被静默丢弃的概率；
+- 不用托盘气泡兜底：`NotifyIcon.ShowBalloonTip` 在同一台机器上既不弹也不报错（通知历史里查不到记录），指望不上。
+
 #### 权限与进程拆分
 
 建虚拟网卡、改路由表都要管理员权限，但让 GUI 常驻管理员既危险又每次启动弹窗，因此拆成两个进程：
@@ -112,8 +132,19 @@ const canPack = computed(() => projectType.value === 'layui')
 
 提权方式按平台区分：
 
-- Windows：`schtasks /Create /RL HIGHEST /F` 注册计划任务 `WsWorkbenchVpnWorker`，之后免 UAC；注册失败时回退到 `Start-Process -Verb RunAs`，弹一次系统授权框
+- Windows：`schtasks /Create /RL HIGHEST /F` 注册计划任务 `WsWorkbenchVpnWorker`，之后免 UAC。
+  任务可用（存在且指向当前 exe + 当前会话目录）时连接直接 `schtasks /Run`，不弹任何框；
+  **不可用时不再单独预注册**，而是把「注册任务 + 拉起 worker」合并进同一次提权批处理
+  （`create-task-and-launch`）：这一次 UAC 同时把任务修好，下一次连接起就不再弹。
+  `/F` 会把指向旧路径的过期任务直接覆盖掉，所以「移除旧任务」也是自动的，不需要用户点按钮。
+  界面上**不再有「提权方式」区块**（原先的「注册免 UAC 任务 / 移除任务」按钮已撤掉）：
+  整个生命周期跟着「连接」按钮走，状态只体现在日志里（`[启动]` / `[elevate]` 行）。
+  注册失败（组策略禁止建任务）不影响本次连接，schtasks 的原始输出落在会话目录的
+  `create-task.log` 里；这种机器只能每次连接弹一次系统授权框。
 - macOS：`osascript ... with administrator privileges`
+
+> 换新包时**覆盖解压到同一个目录**，任务的 `/TR` 里 exe 路径不变，升级后也完全不会弹 UAC；
+> 解压到日期命名的新目录则会多一次 UAC（这一次会把任务挪到新路径）。
 
 两个进程之间没有管道可用（提权进程拿不到父进程的句柄），IPC 全部靠会话目录里的文件。
 
@@ -186,6 +217,8 @@ pnpm exec tauri dev   # 起完整桌面应用
 ```
 
 Vite 固定在 8790 端口并开启 `strictPort`，端口被占用会直接失败而不是换端口；`@` 别名指向 `./src`，监听忽略 `src-tauri/`。
+
+**样式里的 px 一律用偶数**（`11px` 写 `12px`，`13px` 写 `14px`）：缩放不是 100% 时，奇数尺寸会被摆到半个像素上，边框、图标、文字都会发虚。`1px` 的描边和分隔线是刻意留的发丝线，不受这条约束。
 
 注意别用 `pnpm tauri dev`。`package.json` 里有一个名为 `tauri` 的脚本（内容是 `tauri dev`），`pnpm tauri dev` 会被解析成 `pnpm run tauri dev`，最终执行 `tauri dev dev` —— 多出来的 `dev` 会被当成传给 runner 的附加参数，和预期行为不一致。
 

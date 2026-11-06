@@ -59,6 +59,20 @@ pub enum VpnPhase {
 }
 
 impl VpnPhase {
+    /// 状态文件 / 前端 `VpnPhase` 里的原始取值（serde 序列化用的就是它）
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            VpnPhase::Disconnected => "disconnected",
+            VpnPhase::Preparing => "preparing",
+            VpnPhase::Elevating => "elevating",
+            VpnPhase::Connecting => "connecting",
+            VpnPhase::ConfiguringRoutes => "configuring_routes",
+            VpnPhase::Connected => "connected",
+            VpnPhase::Disconnecting => "disconnecting",
+            VpnPhase::Failed => "failed",
+        }
+    }
+
     pub fn label(&self) -> &'static str {
         match self {
             VpnPhase::Disconnected => "未连接",

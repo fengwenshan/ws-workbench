@@ -69,6 +69,22 @@ const RESOLVE_TIMEOUT: Duration = Duration::from_millis(1500);
 /// Windows：按域名解析出来的地址多久刷新一次（服务端可能做轮询/负载均衡）
 #[cfg(target_os = "windows")]
 const RESOLVE_INTERVAL: Duration = Duration::from_secs(15);
+/// Windows：系统 DNS 缓存多久扫一次。
+///
+/// 回退路径下用户态看不到子域查询，但应用解析过的名字会留在 DNS Client 缓存里；
+/// 每 3 秒扫一遍，`DOMAIN-SUFFIX` 的任意子域最多晚 3 秒拿到 `/32` 路由，
+/// 而不是「只能解析规则里写死的字面域名」。
+#[cfg(target_os = "windows")]
+const CACHE_POLL_INTERVAL: Duration = Duration::from_secs(3);
+/// Windows：每扫几次缓存做一轮字面域名的主动解析（15 秒 / 3 秒 = 5）
+#[cfg(target_os = "windows")]
+const CACHE_ROUNDS_PER_RESOLVE: u64 = 5;
+/// Windows：确认「NRPT → 127.0.0.1:53」真的把查询送进来要等多久。
+///
+/// 1.5 秒在实机上偏紧：刚写完 NRPT 规则时 DNS Client 还要刷新策略表，
+/// 太短会把「只是慢一点」误判成「loopback 不通」。
+#[cfg(target_os = "windows")]
+const PROBE_TIMEOUT: Duration = Duration::from_millis(2500);
 /// Windows：一轮解析最多等多久（域名多、并发线程多时兜底）
 #[cfg(target_os = "windows")]
 const RESOLVE_ROUND_DEADLINE: Duration = Duration::from_secs(5);
@@ -497,26 +513,44 @@ impl SplitTunnel {
         match self.start_windows_local_proxy(session) {
             Ok(()) => {
                 match super::win_dns::apply_namespace_rules(&self.domains, &[LOCAL_DNS_SERVER]) {
-                    Ok(count) => {
+                    Ok(count) if count > 0 => {
                         self.nrpt_installed = true;
                         self.local_dns_proxy = true;
                         flush_dns_cache();
                         if self.local_proxy_receives_queries() {
                             session.append_log(&format!(
-                                "[分流] NRPT 已把 {} 个域名交给本机 DNS 转发器 {}；\
-                                 按应答注入内网 /32 路由（DOMAIN-SUFFIX 覆盖任意子域）",
+                                "[分流] NRPT 已写好 {} 条规则（域名 + 前导点子域后缀），\
+                                 查询交给本机转发器 {}；按应答注入内网 /32 路由\
+                                 （DOMAIN-SUFFIX 覆盖任意子域）",
                                 count, FORWARDER_ADDR
                             ));
                             return Ok(());
                         }
-                        // NRPT 写成功了，但系统没有把查询送进 loopback：不能假装成功。
+                        // NRPT 写成功了，但系统没有把（子域）查询送进 loopback：
+                        // 不能假装成功，先说明白再回退。
                         session.append_log(&format!(
-                            "[分流] NRPT 已指向 {}，但 1.5 秒内没有查询进入本机转发器；\
-                             可能系统不接受 loopback DNS，回退到「NRPT 直连 VPN DNS + 后台解析」",
-                            FORWARDER_ADDR
+                            "[分流] NRPT 已指向 {}，但 {}ms 内没有查询进入本机转发器；\
+                             回退到「NRPT 直连 VPN DNS + 后台解析」",
+                            FORWARDER_ADDR,
+                            PROBE_TIMEOUT.as_millis()
                         ));
+                        // 把系统实际存下来的命名空间打进日志：带前导点的才覆盖子域，
+                        // 现场能据此判断是「规则没点」还是「loopback 不通」。
+                        if let Ok(namespaces) = super::win_dns::installed_namespaces() {
+                            session.append_log(&format!(
+                                "[分流] 当前 NRPT 命名空间：{:?}（只有带前导点的才匹配子域）",
+                                namespaces
+                            ));
+                        }
                         let _ = super::win_dns::remove_all_rules();
                         self.nrpt_installed = false;
+                        self.stop_local_forwarder();
+                    }
+                    Ok(_) => {
+                        session.append_log(
+                            "[分流] NRPT 规则一条都没写进去（域名与子域后缀都被系统拒绝）；\
+                             回退到「NRPT 直连 VPN DNS + 后台解析」",
+                        );
                         self.stop_local_forwarder();
                     }
                     Err(e) => {
@@ -537,15 +571,33 @@ impl SplitTunnel {
         }
 
         // 旧路径：NRPT 直接指向 VPN DNS 时，用户态看不到子域查询，只能靠后台
-        // 主动解析规则里的字面域名；这是保底，不再是首选。
+        // 主动解析 + 扫系统 DNS 缓存补齐子域路由；这是保底，不再是首选。
         match super::win_dns::apply_namespace_rules(&self.domains, &self.vpn_dns) {
-            Ok(count) => {
+            Ok(count) if count > 0 => {
                 self.nrpt_installed = true;
                 session.append_log(&format!(
-                    "[分流] 已为 {} 个域名配置按域名解析（NRPT），命中即交给 VPN DNS {:?}",
+                    "[分流] 已写好 {} 条 NRPT 规则（域名 + 前导点子域后缀），命中即交给 VPN DNS {:?}；\
+                     子域地址从系统 DNS 缓存补齐",
                     count, self.vpn_dns
                 ));
                 Ok(())
+            }
+            Ok(_) => {
+                // 计数器为 0 有可能是脚本输出没解析出来；再用一次列表确认，避免误判。
+                if super::win_dns::installed_domains()
+                    .map(|domains| domains.is_empty())
+                    .unwrap_or(true)
+                {
+                    Err("NRPT 规则一条都没写进去：域名交给 VPN DNS 的布线没有生效".to_string())
+                } else {
+                    self.nrpt_installed = true;
+                    session.append_log(&format!(
+                        "[分流] 已为 {} 个域名配置按域名解析（NRPT），命中即交给 VPN DNS {:?}",
+                        self.domains.len(),
+                        self.vpn_dns
+                    ));
+                    Ok(())
+                }
             }
             Err(e) => {
                 // 退而求其次：把 VPN DNS 配到隧道网卡上。这样内网域名至少能解析，
@@ -601,9 +653,13 @@ impl SplitTunnel {
         self.local_dns_proxy = false;
     }
 
-    /// 用一条随机子域查询确认「NRPT -> 127.0.0.1:53」真的能把查询送进来。
-    /// 只看 NRPT 写成功不够：Windows 对 loopback DNS 的支持在不同版本/策略下
-    /// 不一致，没查询进来时应当回退，而不是让用户以为子域分流已经生效。
+    /// 用一条随机子域查询确认「NRPT -> 127.0.0.1:53」真的能把**子域**查询送进来。
+    ///
+    /// 只看 NRPT 写成功不够，两个原因：
+    /// 1. 带前导点的后缀命名空间可能被系统拒绝（只剩精确规则，子域根本不会进来）；
+    /// 2. Windows 对 loopback DNS 的支持在不同版本/策略下不一致。
+    /// 探针用的是 `随机子域.域名`，只有后缀规则生效才会命中；没查询进来就回退，
+    /// 而不是让用户以为子域分流已经生效。
     #[cfg(target_os = "windows")]
     fn local_proxy_receives_queries(&self) -> bool {
         let before = self.dns_queries.load(Ordering::Relaxed);
@@ -621,7 +677,7 @@ impl SplitTunnel {
             let _ = (probe.as_str(), 443u16).to_socket_addrs();
             let _ = tx.send(());
         });
-        let _ = rx.recv_timeout(Duration::from_millis(1500));
+        let _ = rx.recv_timeout(PROBE_TIMEOUT);
         self.dns_queries.load(Ordering::Relaxed) > before
     }
 
@@ -635,11 +691,15 @@ impl SplitTunnel {
         }
     }
 
-    /// 起主动解析线程（Windows）。
+    /// 起后台解析线程（Windows，回退路径）。
     ///
     /// NRPT 把查询交给系统 DNS Client，用户态看不到应答，所以拿不到「应用刚解析了
-    /// 哪个地址」这个时机。这里改成主动问：按规则里的域名向 VPN DNS 查 A 记录，
-    /// 把结果逐个注入隧道，并按 [`RESOLVE_INTERVAL`] 刷新，覆盖服务端轮询地址的情况。
+    /// 哪个地址」这个时机。这里用两条腿补：
+    /// - 每 [`CACHE_POLL_INTERVAL`] 扫一遍系统 DNS 缓存，把应用刚解析过的**任意子域**
+    ///   （只要属于规则里的域名）补成 `/32` 路由 —— `DOMAIN-SUFFIX` 因此不再要求
+    ///   用户逐条写完整域名；
+    /// - 每 [`RESOLVE_INTERVAL`] 直接向 VPN DNS 主动解析规则里的字面域名，覆盖
+    ///   「还没人访问过」和「服务端轮询地址」两种情况。
     #[cfg(target_os = "windows")]
     fn start_resolve_thread(&mut self, session: &VpnSession) -> Result<(), String> {
         let domains = self.domains.clone();
@@ -1042,10 +1102,7 @@ fn install_dynamic_routes(
                     }
                 }
                 for ip in &candidates {
-                    session.append_log(&format!(
-                        "[分流] 内网 IP {} 已注入隧道 {}",
-                        ip, tun_dev
-                    ));
+                    session.append_log(&format!("[分流] 内网 IP {} 已注入隧道 {}", ip, tun_dev));
                 }
             }
             Err(e) => session.append_log(&format!(
@@ -1072,9 +1129,7 @@ fn install_dynamic_routes(
                     }
                     session.append_log(&format!("[分流] 内网 IP {} 已注入隧道 {}", ip, tun_dev));
                 }
-                Err(e) => {
-                    session.append_log(&format!("[分流] 内网 IP {} 注入隧道失败：{}", ip, e))
-                }
+                Err(e) => session.append_log(&format!("[分流] 内网 IP {} 注入隧道失败：{}", ip, e)),
             }
         }
     }
@@ -1091,7 +1146,7 @@ fn usable_tunnel_ip(ip: Ipv4Addr) -> bool {
 
 // ============================== Windows：主动解析 ==============================
 
-/// 主动解析线程主体（Windows）：按域名问 VPN DNS -> 把 A 记录注入隧道 -> 定时刷新。
+/// 后台解析线程主体（Windows）：扫系统 DNS 缓存 + 定期主动解析 -> 注入隧道路由。
 #[cfg(target_os = "windows")]
 fn resolve_loop(
     domains: Vec<String>,
@@ -1105,11 +1160,30 @@ fn resolve_loop(
     let mut first = true;
     // 注入失败时只在错误变化时记一行：每 15 秒刷同一条会把 worker.log 冲垮
     let mut last_error = String::new();
+    let mut cache_error: Option<String> = None;
+    let mut round: u64 = 0;
     loop {
         if stop.load(Ordering::Relaxed) {
             return;
         }
-        let found = resolve_all(&domains, &upstreams);
+        let mut found: Vec<Ipv4Addr> = Vec::new();
+        // 回退路径下用户态看不到子域查询，但 DNS Client 的缓存里有应用刚解析过的
+        // 名字。每轮扫一遍，`DOMAIN-SUFFIX` 的任意子域也能补进隧道。
+        match scan_system_dns_cache(&domains, &dynamic, &session) {
+            Ok(ips) => found.extend(ips),
+            Err(e) => {
+                if cache_error.as_deref() != Some(e.as_str()) {
+                    session.append_log(&format!(
+                        "[分流] 读取系统 DNS 缓存失败：{}（只影响子域自动补路由）",
+                        e
+                    ));
+                    cache_error = Some(e);
+                }
+            }
+        }
+        if round % CACHE_ROUNDS_PER_RESOLVE == 0 {
+            found.extend(resolve_all(&domains, &upstreams));
+        }
         match sync_dynamic_routes(&found, tun_index, &tun_dev, &dynamic, &session) {
             Ok(added) => {
                 if !last_error.is_empty() {
@@ -1118,15 +1192,18 @@ fn resolve_loop(
                 }
                 if first {
                     session.append_log(&format!(
-                        "[分流] 按域名解析：{} 个域名，首批注入 {} 个内网地址；之后每 {} 秒刷新一次",
+                        "[分流] 按域名解析：{} 个域名，首批注入 {} 个内网地址；\
+                         之后每 {} 秒扫一次系统 DNS 缓存（子域），每 {} 秒主动解析一次字面域名",
                         domains.len(),
                         added,
+                        CACHE_POLL_INTERVAL.as_secs(),
                         RESOLVE_INTERVAL.as_secs()
                     ));
                     if added == 0 {
                         session.append_log(
                             "[分流] 首批没有拿到可用的内网地址：VPN DNS 可能经隧道不可达，\
-                             或这些域名本身没有 A 记录（内网主机请写完整域名，比如 oa.example.com）",
+                             或这些域名本身没有 A 记录；登录完成后浏览器解析过的子域\
+                             会由系统 DNS 缓存补进隧道（最多晚几秒）",
                         );
                     }
                 }
@@ -1139,8 +1216,9 @@ fn resolve_loop(
             }
         }
         first = false;
-        // 分片睡眠：teardown 时最多 200ms 就能退出，不用等满一个刷新周期
-        let deadline = std::time::Instant::now() + RESOLVE_INTERVAL;
+        round += 1;
+        // 分片睡眠：teardown 时最多 200ms 就能退出，不用等满一个扫描周期
+        let deadline = std::time::Instant::now() + CACHE_POLL_INTERVAL;
         while std::time::Instant::now() < deadline {
             if stop.load(Ordering::Relaxed) {
                 return;
@@ -1148,6 +1226,77 @@ fn resolve_loop(
             std::thread::sleep(Duration::from_millis(200));
         }
     }
+}
+
+/// 扫系统 DNS Client 缓存，挑出属于已配置域名（含子域）的 A 记录（Windows）。
+///
+/// 回退路径（NRPT 直连 VPN DNS）下应用解析过的名字会留在缓存里，这是唯一能在
+/// 「应用拿到地址之后」补装 `/32` 的时机；最多晚一个 [`CACHE_POLL_INTERVAL`]。
+/// 只返回还没注入过的地址，并顺手记一行「哪个子域带来的」，现场一眼能对上。
+#[cfg(target_os = "windows")]
+fn scan_system_dns_cache(
+    domains: &[String],
+    dynamic: &Arc<Mutex<BTreeSet<Ipv4Addr>>>,
+    session: &VpnSession,
+) -> Result<Vec<Ipv4Addr>, String> {
+    let value = crate::winps::run_json(&build_dns_cache_script())?;
+    let known: BTreeSet<Ipv4Addr> = dynamic.lock().map(|set| set.clone()).unwrap_or_default();
+    let mut out: Vec<Ipv4Addr> = Vec::new();
+    for (name, ip) in parse_dns_cache(value, domains) {
+        if known.contains(&ip) || out.contains(&ip) {
+            continue;
+        }
+        session.append_log(&format!(
+            "[分流] 系统 DNS 缓存发现子域 {} -> {}，补注入隧道",
+            name, ip
+        ));
+        out.push(ip);
+    }
+    Ok(out)
+}
+
+/// 扫缓存的 PowerShell：只要 A 记录（Type=1），字段固定是 `Entry` / `Data`。
+#[cfg(target_os = "windows")]
+fn build_dns_cache_script() -> String {
+    "ConvertTo-Json -InputObject @(Get-DnsClientCache -ErrorAction SilentlyContinue | \
+     Where-Object { $_.Type -eq 1 } | Select-Object Entry,Data) -Compress"
+        .to_string()
+}
+
+/// 从 `Get-DnsClientCache` 的 JSON 里挑出「属于这些域名（含子域）」的可路由地址。
+///
+/// 后缀边界必须按标签算：`notexample.com` 不能被 `example.com` 命中，
+/// 所以判断的是 `name == domain` 或 `name.ends_with("." + domain)`，
+/// 而不是简单的字符串包含。
+#[cfg(any(target_os = "windows", test))]
+fn parse_dns_cache(value: serde_json::Value, domains: &[String]) -> Vec<(String, Ipv4Addr)> {
+    let mut out: Vec<(String, Ipv4Addr)> = Vec::new();
+    for item in crate::winps::json_array(value) {
+        let Some(name) = item.get("Entry").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Some(data) = item.get("Data").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Ok(ip) = data.trim().parse::<Ipv4Addr>() else {
+            continue;
+        };
+        if !usable_tunnel_ip(ip) {
+            continue;
+        }
+        let name = name.trim().trim_end_matches('.').to_ascii_lowercase();
+        let matched = domains
+            .iter()
+            .any(|domain| name == *domain || name.ends_with(&format!(".{domain}")));
+        if !matched {
+            continue;
+        }
+        if out.iter().any(|(n, i)| *n == name && *i == ip) {
+            continue;
+        }
+        out.push((name, ip));
+    }
+    out
 }
 
 /// 并发解析所有域名，等一轮的结果（Windows）。
@@ -1403,6 +1552,63 @@ mod tests {
     fn plan_warns_when_default_policy_is_vpn() {
         let plan = plan(&[], "VPN");
         assert!(plan.notes.iter().any(|note| note.contains("全局模式")));
+    }
+
+    #[test]
+    fn dns_cache_fills_subdomains_of_suffix_rules() {
+        let value = serde_json::json!([
+            // 子域：DOMAIN-SUFFIX 必须覆盖
+            {"Entry": "oa.example.com", "Data": "192.0.2.41"},
+            // 裸域名本身也在缓存里
+            {"Entry": "example.com", "Data": "10.0.0.1"},
+            // 同名字但后缀边界不同：不能被 example.com 命中
+            {"Entry": "notexample.com", "Data": "10.0.0.2"},
+            // 公网域名：不碰
+            {"Entry": "www.baidu.com", "Data": "1.2.3.4"},
+            // Data 不是 IPv4：忽略
+            {"Entry": "bad.example.com", "Data": "vpn.example.com"},
+            // 不可路由地址：忽略
+            {"Entry": "loop.example.com", "Data": "127.0.0.1"},
+            // 大小写 / 末尾点归一化
+            {"Entry": "CAS.example.com.", "Data": "192.0.2.42"},
+        ]);
+        let got = parse_dns_cache(value, &["example.com".to_string()]);
+        assert_eq!(
+            got,
+            vec![
+                (
+                    "oa.example.com".to_string(),
+                    "192.0.2.41".parse().unwrap()
+                ),
+                ("example.com".to_string(), "10.0.0.1".parse().unwrap()),
+                (
+                    "cas.example.com".to_string(),
+                    "192.0.2.42".parse().unwrap()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn dns_cache_ignores_unrelated_domains_and_duplicates() {
+        let value = serde_json::json!([
+            {"Entry": "a.example.com", "Data": "10.0.0.1"},
+            {"Entry": "a.example.com", "Data": "10.0.0.1"},
+            {"Entry": "b.other.com", "Data": "10.0.0.2"},
+        ]);
+        let got = parse_dns_cache(value, &["example.com".to_string()]);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].0, "a.example.com");
+    }
+
+    #[test]
+    fn dns_cache_tolerates_null_and_empty_output() {
+        assert!(parse_dns_cache(serde_json::Value::Null, &["example.com".to_string()]).is_empty());
+        assert!(parse_dns_cache(
+            serde_json::json!({"Entry": "a.example.com"}),
+            &["example.com".to_string()]
+        )
+        .is_empty());
     }
 
     #[test]
