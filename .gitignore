@@ -42,6 +42,7 @@ src-tauri/resources/apps/*.zip
 .idea/
 .vscode/
 .trae/
+.tmp/
 *.log
 
 # 本地 brainstorm/技能运行状态
