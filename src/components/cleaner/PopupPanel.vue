@@ -107,7 +107,7 @@ async function handleIgnore(hit: PopupHit): Promise<void> {
         </span>
         <span class="popup-score">
           <span class="popup-score-value">{{ hit.score }}</span>
-          <span class="popup-reasons">{{ hit.reasons.join('；') }}</span>
+          <span class="popup-reasons" :title="hit.reasons.join('；')">{{ hit.reasons.join('；') }}</span>
         </span>
         <span class="popup-actions">
           <button class="btn btn-secondary btn-sm" @click="handleDismiss(hit, 'close')">关闭</button>
