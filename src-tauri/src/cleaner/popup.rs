@@ -112,6 +112,7 @@ impl PopupSettings {
 
 /// 永远不自动处理的进程：系统外壳 / 安全 / 输入法 / 本应用自己。
 /// 命中这些进程只会记录，绝不自动关闭。
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
 const PROTECTED_PROCESSES: [&str; 22] = [
     "explorer.exe",
     "dwm.exe",
@@ -138,6 +139,7 @@ const PROTECTED_PROCESSES: [&str; 22] = [
 ];
 
 /// 永远不自动处理的窗口类：桌面 / 任务栏 / 托盘 / 开始菜单等外壳窗口。
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
 const PROTECTED_CLASSES: [&str; 8] = [
     "progman",
     "workerw",
@@ -149,6 +151,7 @@ const PROTECTED_CLASSES: [&str; 8] = [
     "windows.ui.core.corewindow",
 ];
 
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
 fn is_protected_process(process: &str) -> bool {
     let lower = process.to_ascii_lowercase();
     if PROTECTED_PROCESSES
@@ -164,6 +167,7 @@ fn is_protected_process(process: &str) -> bool {
         .is_some_and(|own| own == lower)
 }
 
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
 fn is_protected_class(class_name: &str) -> bool {
     let lower = class_name.to_ascii_lowercase();
     PROTECTED_CLASSES
@@ -173,6 +177,7 @@ fn is_protected_class(class_name: &str) -> bool {
 
 /// 拦截模式的判定结果：要动窗口时带上动作，否则给不处理的原因（只用于调试/测试）。
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
 pub enum InterceptPlan {
     Intercept(&'static str),
     Skip(&'static str),
@@ -180,6 +185,7 @@ pub enum InterceptPlan {
 
 /// 拦截模式的纯逻辑闸门：设置开着、分数够、命中原因够多、没被保护、没被忽略、
 /// 没超过每分钟预算时，才允许自动处理。
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
 pub fn should_intercept(
     features: &WindowFeatures,
     score: u32,
