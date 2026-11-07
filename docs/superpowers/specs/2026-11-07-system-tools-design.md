@@ -1,0 +1,137 @@
+# 「系统」工具页扩展设计（屏幕休眠 / 开机自启 / 弹窗拦截 / 默认应用）
+
+- 日期：2026-11-07
+- 分支：feat/uninstaller
+- 状态：设计已确认（方案 B：`cleaner` 模块内按 tab 拆子模块），实现中
+- 关联：[2026-11-06-cleaner-design.md](./2026-11-06-cleaner-design.md)（软件卸载 + 内存占用）
+
+## 1. 背景与目标
+
+现有工具页叫「系统清理」，只有软件卸载 / 内存占用两个页签。这一版把它扩成「系统」工具页，除原有两个页签外新增：
+
+| 页签 | 能力 | 备注 |
+| --- | --- | --- |
+| 软件卸载 | 不变 | 已有 |
+| 内存占用 | 不变 | 已有 |
+| 弹窗拦截 | 实时列出可疑广告弹窗（检测模式，不自动关） | **仅 Windows**，放在内存占用后面 |
+| 屏幕休眠 | 阻止系统睡眠 / 屏幕关闭，可定时 | 参考 Amphetamine 的公开 API 做法 |
+| 开机自启 | 列出开机启动项，启用 / 禁用，含本应用登录启动开关 | Windows 注册表/启动文件夹，macOS LaunchAgents + 登录项 |
+| 默认应用 | 查看/修改常见文件类型的默认打开应用 | macOS 可改；Windows 只读 + 「选择默认应用」对话框 + 系统设置入口 |
+
+非目标（本期不做）：
+- 合盖不休眠（macOS `pmset disablesleep` 需 root，有残留风险）、away mode（仅 S3）
+- 弹窗「自动拦截」、DLL 注入、驱动、结束进程；只做检测 + 用户逐条手动关闭/隐藏
+- Windows 静默改写 `UserChoice`（Win8+ 有哈希保护，第三方写入会被系统重置，属于破坏行为）
+- 写系统级启动项（HKLM / 公共启动文件夹）——只读展示，需管理员的操作不自动触发
+
+## 2. 信息架构
+
+- 页面标题「系统清理」→「系统」；侧栏按钮 title/aria「清理」→「系统」；托盘菜单项「清理」→「系统」；快捷键 `⌘/Ctrl+4` 不变；内部 view key 仍为 `cleaner`（命令前缀也保持 `cleaner_*`，避免大范围改名）。
+- 页签顺序：`软件卸载 | 内存占用 | 弹窗拦截(仅 Windows) | 屏幕休眠 | 开机自启 | 默认应用`
+- 每个页签独立组件，容器 `CleanerPanel.vue` 只负责页签状态与懒加载（进入页签才拉数据 / 开监听）。
+
+## 3. 模块划分（方案 B：一个 cleaner 模块，内部按 tab 拆）
+
+后端：
+
+```text
+src-tauri/src/cleaner/
+  sleep.rs              屏幕休眠（内部 cfg 分支 / 平台函数）
+  startup.rs (+ startup_macos.rs / startup_windows.rs)
+  popup.rs              Windows-only 检测线程；非 Windows 返回「不支持」
+  defaultapps.rs (+ defaultapps_macos.rs / defaultapps_windows.rs)
+  models.rs             现有数据契约；新增类型就近放各自模块文件，避免共享文件冲突
+```
+
+命令层（每个 tab 一个文件，只做参数/错误翻译，不含业务）：
+
+```text
+src-tauri/src/commands/cleaner_sleep.rs
+src-tauri/src/commands/cleaner_startup.rs
+src-tauri/src/commands/cleaner_popup.rs
+src-tauri/src/commands/cleaner_defaultapps.rs
+```
+
+前端（每个 tab 一套：类型 / API / composable / 组件）：
+
+```text
+src/types/{sleep,startup,popup,defaultapps}.ts
+src/api/{sleep,startup,popup,defaultapps}.ts
+src/composables/use{KeepAwake,Startup,Popup,DefaultApps}.ts
+src/components/cleaner/{SleepPanel,StartupPanel,PopupPanel,DefaultAppsPanel}.vue
+```
+
+共享文件（`cleaner/mod.rs`、`commands/mod.rs`、`lib.rs` 的 handler 注册、`CleanerPanel.vue`、`App.vue`）由 Lead 统一改，实现者不改，避免冲突。
+
+## 4. 功能设计
+
+### 4.1 屏幕休眠（防休眠）
+
+交互：开关「保持唤醒」+ 时长（15/30/60/120 分钟 / 无限）+「允许屏幕关闭」勾选（默认关，即屏幕保持常亮）+ 状态卡（已保持时长、剩余时间、当前是否阻止屏幕关闭）+ 停止。
+
+命令：`keepawake_status` / `keepawake_start(duration_secs: Option<u64>, allow_display_sleep: bool)` / `keepawake_stop`。
+
+- macOS：IOKit `IOPMAssertionCreateWithName`，系统断言 `PreventUserIdleSystemSleep` 常建；`allow_display_sleep=false` 时加 `PreventUserIdleDisplaySleep`。断言名固定 `ws-workbench Keep Awake`，进程退出/崩溃由系统自动回收。不需要 root、不需要 TCC。
+- Windows：首版用 `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED [| ES_DISPLAY_REQUIRED])`，由专用线程每 25 秒重新置位，停止时发信号让线程复位 `ES_CONTINUOUS` 后退出。API 面比 `PowerCreateRequest` 小，不需要管理员；代价是 `powercfg /requests` 里看不到命名请求（后续要可见性再换 `PowerCreateRequest`）。
+- 定时：后端持有 `expires_at: Option<Instant>`，`std::thread` 定时器到期自动释放，`keepawake_status` 里还有一道惰性回收（定时器被系统挂起也不会残留断言）；`keepawake_status` 返回剩余秒数。
+- 失败/边界：断言或电源请求创建失败返回中文错误；Windows 不拦屏保/合盖/主动睡眠，Modern Standby 下可能被挂起，UI 写明；macOS 合盖不在支持范围。
+- 状态只在本进程内有效，重启应用即释放（不做登录级保活）。
+
+### 4.2 开机自启（启动项管理）
+
+数据：`StartupItem { id, name, command, source, scope, enabled, can_toggle, detail }`
+- `source`: `run` / `run_once` / `startup_folder` / `launch_agent` / `login_item`
+- `scope`: `user` / `machine`
+
+命令：`startup_list` / `startup_set_enabled(id, enabled)` / `startup_app_autostart_get` / `startup_app_autostart_set(enabled)`。
+
+Windows：
+- 枚举 `HKCU\...\Run`、`HKLM\...\Run`（含 `WOW6432Node` 32 位视图）、`RunOnce`（只读）、用户/公共启动文件夹。
+- 启用状态读 `Explorer\StartupApproved\{Run,Run32,StartupFolder}` 的 12 字节 REG_BINARY：`02` = 启用；`03` + FILETIME = 禁用；缺省视为启用。写状态前把当前值备份到 `<data_dir>/startup-backup.json`（带时间戳，可回滚）。
+- 禁用只写状态位、不删 Run 值；HKLM / 公共启动文件夹需要管理员 → `can_toggle=false` + 提示；`RunOnce` 只读。
+- 本应用登录启动：写/删 `HKCU\...\Run\ws-workbench`，默认关。
+
+macOS：
+- 枚举 `~/Library/LaunchAgents/*.plist`（读 `Label`、`Program`/`ProgramArguments`、`RunAtLoad`），`/Library/LaunchAgents` 只读（需要 root 才能改）。
+- 启用/禁用：`launchctl disable/enable gui/$UID/<label>` + `launchctl bootstrap/bootout gui/$UID <plist>`，只动用户域。
+- 登录项：`osascript` 走 System Events 读取名称并启停；首次会触发「控制 System Events」自动化授权，被拒绝时降级为只列 LaunchAgents 并给提示（不阻塞页面）。
+- 本应用登录启动：`SMAppService.mainApp`（macOS 13+）或 `~/Library/LaunchAgents/ws-workbench.plist`，默认关。
+
+安全：只切状态不删除条目；系统范围只读；桌面文件系统只读不写。
+
+### 4.3 弹窗拦截（仅 Windows，检测模式）
+
+交互：页签顶部「开启检测」开关（默认关）+ 最近弹窗列表（时间 / 进程 / 标题 / 类名 / 尺寸 / 命中特征 / 操作）+「清空」+ 忽略名单（按进程名）。
+
+命令：`popup_status` / `popup_start` / `popup_stop` / `popup_recent` / `popup_clear` / `popup_dismiss(id, action)` / `popup_ignore(process, ignored)`。
+
+- 实现：后台线程每 800ms `EnumWindows` 轮询可见顶层窗口（和火绒的定时器 + 枚举思路一致）。首版不用 `SetWinEventHook`：API 面更小、不会被 UIPI 挡事件；代价同样是「先显示后记录」。同一窗口（类名 + 标题）只记一次，窗口标题变化会重新记录。
+- 启发式打分（只用于「可疑」排序，不自动动作）：`WS_EX_TOOLWINDOW` / `WS_EX_NOACTIVATE` / `WS_EX_TOPMOST`、无标题、尺寸异常（< 200×120 或超过屏幕 80%）、`GetWindow(GW_OWNER)` 为空、所属进程不是前台进程、常见广告类名等；每项给分值 + 命中原因字符串。
+- 只记录不拦截：环形缓冲最多 200 条，新记录通过事件 `popup-detected` 推给前端；列表项操作由用户点击：`dismiss` 执行 `WM_CLOSE` 或 `SW_HIDE`（同进程 5 秒限流），`ignore` 把进程加入忽略名单（存 `<data_dir>/popup-ignore.json`，不动 AppConfig）。
+- 边界（写进 UI 说明）：只能显示后处理（弹窗会闪一下）；UIPI 下关不掉管理员窗口；UAC / 锁屏 / 内嵌广告不可见；不注入、不驱动、不杀进程。
+- 非 Windows：模块编译 stub，命令返回「仅 Windows 支持」；前端用 `platform.is_windows` 隐藏页签。
+
+### 4.4 默认应用
+
+交互：常用类型列表（扩展名 → 当前默认应用 → 「更换」），Windows 额外提供「选择默认应用…」与「打开系统默认应用设置」。
+
+命令：`defaultapps_list` / `defaultapps_candidates(extension)` / `defaultapps_set(extension, app_id)` / `defaultapps_reveal_settings` / `defaultapps_open_with(extension)`。
+
+- macOS：扩展名 → UTI（`UTTypeCreatePreferredIdentifierForTag(kUTTagClassFilenameExtension)`）→ 当前 handler（`LSCopyDefaultRoleHandlerForContentType`）→ 改（`LSSetDefaultRoleHandlerForContentType(kLSRolesAll, bundle_id)`）。候选应用 = `/Applications`、`~/Applications` 里能打开该 UTI 的 bundle（`LSCopyAllRoleHandlersForContentType` + `LSCopyApplicationURLsForBundleIdentifier`）。不需要 TCC/root。
+- Windows：只读展示扩展名当前关联（`HKCU\...\Explorer\FileExts\<ext>\UserChoice` 的 `ProgId` → `HKCR\<ProgId>\shell\open\command`）；「选择默认应用…」用 `rundll32 shell32.dll,OpenAs_RunDLL <临时文件>` 打开系统「打开方式」对话框（用户勾选「始终使用」即完成设置）；「打开系统设置」用 `ms-settings:defaultapps`。**不静默写 UserChoice**（Win8+ 哈希保护）。
+- 常见类型首批：`.txt .md .pdf .png .jpg .mp4 .mp3 .zip .html .json .csv .docx .xlsx .pptx`。
+- 错误：bundle 解析失败 / 没有可用应用 / 系统接口拒绝时返回中文提示并保持原值。
+
+## 5. 验证计划
+
+- 单测：启动项解析与 StartupApproved 编解码（正/反例）、弹窗启发式评分（构造特征组合）、防休眠状态机与定时（不依赖平台 API 的部分）、默认应用类型表与路径归一化。
+- macOS 实机：`pmset -g assertions` 断言出现/消失；临时 LaunchAgent 上 enable/disable 后清理；`LSSetDefaultRoleHandlerForContentType` 改一个测试扩展名再改回；备份 JSON 内容断言。
+- Windows：`cargo xwin check` + 实机验收清单（启动项状态位、`powercfg /requests`、弹窗检测、OpenAs 对话框）。
+- 前端：`pnpm build` + Tabbit mock 渲染截图（四个新页签）。
+
+## 6. 已知限制
+
+- 屏幕休眠：只防空闲睡眠/关屏；不拦屏保（macOS 屏幕断言会压制屏保）、合盖、主动睡眠。
+- 开机自启：Windows `StartupApproved` 格式无官方文档，按 Win10/11 观察实现，写坏了有备份可回滚；macOS 登录项依赖自动化授权。
+- 弹窗拦截：检测模式，误报（正常弹窗被标可疑）可忽略，不会自动做事；对管理员窗口无效。
+- 默认应用：Windows 不能静默改（系统限制），只能引导；macOS 用的 LaunchServices API 已标记 deprecated，但仍是当前唯一可行方式。

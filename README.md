@@ -183,16 +183,20 @@ Windows 上的虚拟网卡由 Wintun 驱动提供（`src-tauri/resources/apps/op
 
 openconnect 探测失败时，代理页给出按平台区分的安装引导：macOS/Linux 给可复制的安装命令加官方下载地址；Windows 只说明内置副本缺失并提示覆盖安装，不引导下载外部二进制。
 
-### 系统清理
+### 系统
 
-左侧图标栏第四个工具（`⌘/Ctrl+4`），两个页签：
+左侧图标栏第四个工具（`⌘/Ctrl+4`，托盘菜单里也叫「系统」），六个页签（弹窗拦截仅 Windows 可见）：
 
 - **软件卸载**：Windows 读注册表 `Uninstall` 键（HKLM 64/32 位、HKCU），macOS 扫 `/Applications` 与 `~/Applications`；支持按名称/发布者/位置搜索，按名称、大小、安装日期排序（顺序记在本地）。卸载执行 `UninstallString`（MSI 的 `/I` 自动换成 `/X`，需要时一次 UAC），macOS 直接把 `.app` 移入废纸篓；没有卸载命令的条目提供「强制移除」（Windows 删注册表项，macOS 结束进程后删除）。卸载后按 bundle id / 注册表键精确匹配文件与注册表残留，按「文件系统 / 注册表」分组、带置信度展示，勾选后删除。
 - **内存占用**：按应用聚合进程 RSS（Chromium/Electron 的 helper 归到宿主应用），显示总占用率、已用/总量/swap 与应用排行，2 秒轮询（页面不可见时暂停）。支持结束进程（先优雅退出，3 秒后仍在运行再确认强制结束）与「深度释放」（macOS 一次授权跑 `purge`；Windows 清进程工作集 + 系统待机列表，一次 UAC）。释放前后都用真实采样，展示差值，不夸大收益。
+- **弹窗拦截**（仅 Windows，检测模式）：默认关闭，开启后后台线程每 800ms `EnumWindows` 扫可见顶层窗口，按「工具窗口 / 不抢焦点 / 始终置顶 / 无标题 / 尺寸异常 / 类名与标题广告线索 / 进程不在前台」打分，可疑窗口进列表并通过 `popup-detected` 事件实时推给界面。**只记录不自动关**：每条由用户点「关闭 / 隐藏」，同进程 5 秒限流；「忽略」按进程名记到 `<data_dir>/popup-ignore.json`。不注入、不装驱动、不杀进程。
+- **屏幕休眠**：阻止系统空闲睡眠（参考 Amphetamine 的公开电源断言方案）。macOS 用 IOKit `IOPMAssertionCreateWithName`（`PreventUserIdleSystemSleep`，不勾「允许屏幕关闭」时再加 `PreventUserIdleDisplaySleep`，断言名 `ws-workbench Keep Awake`）；Windows 用专用线程持有 `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED [| ES_DISPLAY_REQUIRED])`。时长 15/30/60/120 分钟或无限，到点自动释放（状态查询还有一道惰性回收）；不需要 root / 管理员，也不做登录级保活。
+- **开机自启**：列出 Windows 的 `Run` 注册表项（HKLM/HKCU 64/32 位）与启动文件夹、macOS 的 LaunchAgents 与登录项；可启用/禁用，系统范围只读。Windows 禁用写标准的 `StartupApproved` 12 字节状态位（`02` 启用 / `03` + FILETIME 禁用），改前备份原值到应用数据目录，改失败就回滚；macOS 登录项（System Events）需要用户手动授权一次「自动化」，未授权时只展示不可改。本应用自己的登录启动也在这个页签里开关。
+- **默认应用**：列出常见扩展名的当前默认打开应用。macOS 走 LaunchServices（`LSCopyDefaultRoleHandlerForContentType` 读、`LSSetDefaultRoleHandlerForContentType` 写），候选应用从 `/Applications` 与 `~/Applications` 里找；Windows 只读展示，提供「选择默认应用…」（`rundll32 shell32.dll,OpenAs_RunDLL`）和「系统默认应用设置」（`ms-settings:defaultapps`），**不静默改 `UserChoice`**——系统会按哈希校验把它改回去，也会弹「应用默认设置被重置」。
 
-安全约束：删除只进废纸篓（需 root 的条目走一次提权批处理）；所有路径过白名单校验，`/`、主目录、`/System`、`/usr`、`C:\Windows` 等硬拒绝；`pkgutil` 安装收据只读展示；系统应用（SIP / `com.apple.*`）不提供卸载。macOS 的废纸篓走 `NSFileManager` API，不会弹「控制 Finder」的自动化授权。
+安全约束：删除只进废纸篓（需 root 的条目走一次提权批处理）；所有路径过白名单校验，`/`、主目录、`/System`、`/usr`、`C:\Windows` 等硬拒绝；`pkgutil` 安装收据只读展示；系统应用（SIP / `com.apple.*`）不提供卸载。macOS 的废纸篓走 `NSFileManager` API，不会弹「控制 Finder」的自动化授权。弹窗拦截不做注入/驱动/进程结束；屏幕休眠不碰合盖与主动睡眠。
 
-已知限制：Windows 侧只做了交叉编译检查与验收清单，未实机跑卸载/UAC/深度释放；`purge` 只回收可缓存页，收益有限；残留按精确匹配，宁可漏报不误删。
+已知限制：Windows 侧只做了交叉编译检查与验收清单，未实机跑卸载/UAC/深度释放/弹窗检测/自启切换；`purge` 只回收可缓存页，收益有限；残留按精确匹配，宁可漏报不误删；弹窗检测是「显示后处理」（弹窗会闪一下），UIPI 下关不掉管理员窗口，UAC / 锁屏 / 网页内嵌广告看不到；macOS 登录项在未授权「自动化」时只读。
 
 **托盘快捷面板**：左键点菜单栏/任务栏图标弹出柠檬式的无边框小面板（`quick.html`，360×560，失焦或 Esc 自动收起），两个页签：
 
@@ -382,7 +386,9 @@ src-tauri/src/
     project.rs     打包、校验、项目类型与 VCS 识别
     system.rs      打开目录/终端/编辑器、平台与网络信息
     attachments.rs 附件加解密、上传目录解析、笔记内联图片
-    cleaner.rs     系统清理命令（列表/卸载/残留/内存）
+    cleaner.rs     系统工具命令（列表/卸载/残留/内存）
+    cleaner_sleep.rs / cleaner_startup.rs / cleaner_popup.rs / cleaner_defaultapps.rs
+                   屏幕休眠 / 开机自启 / 弹窗拦截（仅 Windows）/ 默认应用的命令入口
     quick.rs       托盘快捷面板：隐藏、打开主窗口并切页
   util/            通用能力层
     fs.rs          目录创建、文本读写、可写性探测
@@ -396,7 +402,12 @@ src-tauri/src/
   netinfo.rs       本机网卡 MAC / IP（Windows 走 PowerShell，macOS/Linux 走 getifaddrs）
   process.rs/winps.rs  进程管理与 PowerShell 调用
   apps/            外部应用定位（finder / registry）
-  cleaner/         系统清理：安装列表/卸载/残留扫描/内存占用（平台实现按 cfg 拆文件）
+  cleaner/         系统工具：安装列表/卸载/残留扫描/内存占用 + 四个新页签的后端
+    sleep.rs       防休眠（macOS IOKit 断言 / Windows SetThreadExecutionState）
+    startup.rs     启动项枚举与启停（Windows 注册表+StartupApproved / macOS launchctl）
+    popup.rs       弹窗检测（仅 Windows：EnumWindows 轮询 + 启发式打分）
+    defaultapps.rs 默认应用（macOS LaunchServices 改写 / Windows 只读+引导）
+    *_macos.rs / *_windows.rs  平台实现，按 cfg 拆文件
   vpn/
     models.rs      规则、规则集、VPN 配置、状态
     mod.rs         模块导出与数据目录名
@@ -421,13 +432,16 @@ src/
     vpn/           VpnPanel / VpnProfileDialog / VpnRuleDialog / VpnRoutePreview /
                    VpnStatusDot / VpnLogDrawer / VpnInstallGuide
     settings/      SettingsPanel
-    cleaner/       CleanerPanel / InstalledAppsPanel / MemoryPanel / AppIcon
+    cleaner/       CleanerPanel / InstalledAppsPanel / MemoryPanel / AppIcon /
+                   PopupPanel / SleepPanel / StartupPanel / DefaultAppsPanel
   composables/     useConfig / usePack / useVpn / useCleaner / useApps / useLog / useUpdater /
                    useWorkbenchLayout / useEntitySelection / useProjectForm /
-                   useDeleteConfirm / safeStorage
-  api/             后端命令的类型化封装（config / project / system / attachments / apps / cleaner）
+                   useDeleteConfirm / safeStorage / useKeepAwake / useStartup / usePopup /
+                   useDefaultApps
+  api/             后端命令的类型化封装（config / project / system / attachments / apps / cleaner /
+                   sleep / startup / popup / defaultapps）
   utils/           通用小工具（time / dialog / path / error）
-  types/           前后端共享的数据结构（含 cleaner）
+  types/           前后端共享的数据结构（含 cleaner / sleep / startup / popup / defaultapps）
   quick/           托盘快捷面板（独立入口：quick.html + main.ts + QuickPanel.vue）
 scripts/release.mjs  构建、上传、更新清单合并
 updates/latest.json  更新清单（由发布脚本生成并提交）
