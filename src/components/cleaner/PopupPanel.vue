@@ -148,6 +148,12 @@ async function handleIgnore(hit: PopupHit): Promise<void> {
   flex-shrink: 0;
 }
 
+.popup-toolbar-right {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
 .popup-toolbar-left {
   display: flex;
   align-items: center;

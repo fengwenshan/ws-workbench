@@ -312,6 +312,15 @@ async function handleStop(): Promise<void> {
 </template>
 
 <style scoped>
+.fact {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.fact strong {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
 .sleep-panel {
   flex: 1;
   min-height: 0;

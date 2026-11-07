@@ -209,6 +209,14 @@ async function toggleAppAutostart(checked: boolean | string | number) {
 </template>
 
 <style scoped>
+.col-scope,
+.col-status {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
 .startup-panel {
   flex: 1;
   min-height: 0;
