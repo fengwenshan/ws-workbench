@@ -34,15 +34,6 @@ export function encryptUploadBytes(
   })
 }
 
-/** 解密到临时文件并返回路径，供系统默认程序打开 */
-export function decryptToTemp(
-  blobDir: string,
-  id: string,
-  name: string,
-): Promise<string> {
-  return invoke<string>('decrypt_to_temp', { blobDir, id, name })
-}
-
 export function decryptExportFile(
   blobDir: string,
   id: string,

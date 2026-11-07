@@ -18,8 +18,6 @@ import { useProjectForm } from "@/composables/useProjectForm";
 import { useDeleteConfirm } from "@/composables/useDeleteConfirm";
 import { initPlatform, platform } from "@/platform";
 import appIcon from "@/assets/app-icon.png";
-import { decryptToTemp } from "@/api/attachments";
-import { openFile } from "@/api/system";
 import type { AttachmentMeta, EntityKind, QuickAttachmentItem } from "@/types";
 import ProjectList from "@/components/ProjectList.vue";
 import GroupDetail from "@/components/GroupDetail.vue";
@@ -31,6 +29,7 @@ import VpnStatusDot from "@/components/vpn/VpnStatusDot.vue";
 import SettingsPanel from "@/components/settings/SettingsPanel.vue";
 import CleanerPanel from "@/components/cleaner/CleanerPanel.vue";
 import QuickOpenPalette from "@/components/QuickOpenPalette.vue";
+import AttachmentPreview from "@/components/AttachmentPreview.vue";
 
 const {
   config,
@@ -225,9 +224,13 @@ function handleQuickKeydown(event: KeyboardEvent) {
   openQuickSearch();
 }
 
-async function handleQuickChoose(item: QuickAttachmentItem) {
+// ⌘P 快速搜索里选中的附件直接在应用内预览（走 wst-img 协议按需解密，不落临时文件）
+const quickPreviewOpen = ref(false);
+const quickPreviewMeta = ref<AttachmentMeta | null>(null);
+
+function handleQuickChoose(item: QuickAttachmentItem) {
   quickOpenVisible.value = false;
-  // 附件属于别的分组/项目时先切过去，结果才能对上下面的页面
+  // 附件属于别的分组/项目时先切过去，关掉预览后看到的就是它所在的页面
   if (
     selection.value?.kind !== item.entityKind ||
     selection.value?.id !== item.entityId
@@ -235,21 +238,8 @@ async function handleQuickChoose(item: QuickAttachmentItem) {
     selection.value = { kind: item.entityKind, id: item.entityId };
     selectTool("home");
   }
-  let tempPath: string;
-  try {
-    tempPath = await decryptToTemp(item.dir, item.id, item.name);
-  } catch (err: any) {
-    addLog("error", `解密失败（${item.name}）: ${err}`);
-    message.error(`解密失败: ${err}`);
-    return;
-  }
-  try {
-    await openFile(tempPath);
-    addLog("info", `已解密预览: ${item.name}`);
-  } catch (err: any) {
-    addLog("error", `打开失败（${item.name}）: ${err}`);
-    message.error(`打开失败: ${err}`);
-  }
+  quickPreviewMeta.value = item;
+  quickPreviewOpen.value = true;
 }
 
 onMounted(() => window.addEventListener("keydown", handleQuickKeydown));
@@ -961,6 +951,9 @@ async function handlePack(project: any, asZip: boolean = false) {
         @close="quickOpenVisible = false"
         @choose="handleQuickChoose"
       />
+
+      <!-- 快速搜索选中的附件：应用内预览，不再解密到临时文件 -->
+      <AttachmentPreview v-model:open="quickPreviewOpen" :meta="quickPreviewMeta" />
   </div>
   </ConfigProvider>
 </template>

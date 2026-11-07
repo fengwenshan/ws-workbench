@@ -2,7 +2,6 @@
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { Button, Input, Progress, Empty, Modal, message } from 'ant-design-vue'
-import { FileImageOutlined } from '@ant-design/icons-vue'
 import type { AttachmentMeta, EntityKind, ProjectConfig, ProjectGroup } from '@/types'
 import {
   decryptExportFile,
@@ -13,7 +12,7 @@ import {
 } from '@/api/attachments'
 import { pickFiles, pickSavePath } from '@/utils/dialog'
 import { checkDir } from '@/api/system'
-import { noteImageUrl } from '@/utils/note-assets'
+import AttachmentPreview from '@/components/AttachmentPreview.vue'
 import { basename } from '@/utils/path'
 import { formatDateTime } from '@/utils/time'
 
@@ -139,45 +138,15 @@ async function uploadPaths(paths: string[]) {
 }
 
 // ========== 预览 / 下载 ==========
-// 预览走 `wst-img` 自定义协议：按需解密到内存渲染，不生成明文临时文件。
-// 旧的「打开」是解密到系统临时目录再交给默认程序，临时文件只会越积越多，已移除。
-const PREVIEW_IMAGE_EXTS = new Set([
-  'png',
-  'jpg',
-  'jpeg',
-  'gif',
-  'webp',
-  'bmp',
-  'svg',
-  'ico',
-  'avif',
-])
-
+// 预览由 AttachmentPreview 走 `wst-img` 协议按需解密渲染，不落临时文件；
+// 旧的「打开」（解密到系统临时目录再交给默认程序）已移除。
 const previewOpen = ref(false)
 const previewMeta = ref<AttachmentMeta | null>(null)
-const previewBroken = ref(false)
-const previewIsImage = computed(
-  () => !!previewMeta.value && PREVIEW_IMAGE_EXTS.has((previewMeta.value.ext || '').toLowerCase()),
-)
-const previewTitle = computed(() => previewMeta.value?.name ?? '预览附件')
-const previewUrl = computed(() =>
-  previewMeta.value
-    ? noteImageUrl(previewMeta.value.id, previewMeta.value.ext || '', previewMeta.value.dir)
-    : '',
-)
 
 function openPreview(meta: AttachmentMeta) {
   previewMeta.value = meta
-  previewBroken.value = false
   previewOpen.value = true
 }
-
-watch(previewOpen, (open) => {
-  if (!open) {
-    previewMeta.value = null
-    previewBroken.value = false
-  }
-})
 
 async function handleDownload(meta: AttachmentMeta) {
   const target = await pickSavePath(meta.name)
@@ -494,35 +463,7 @@ onUnmounted(() => {
     </div>
 
     <!-- 预览：图像走 wst-img 协议按需解密，不落临时文件；其他类型给出下载提示 -->
-    <Modal
-      v-model:open="previewOpen"
-      :title="previewTitle"
-      :footer="null"
-      centered
-      :width="720"
-      :mask-closable="true"
-      class="attachment-preview-modal"
-    >
-      <div class="attachment-preview-body">
-        <img
-          v-if="previewIsImage && !previewBroken"
-          :src="previewUrl"
-          :alt="previewTitle"
-          class="attachment-preview-image"
-          @error="previewBroken = true"
-        />
-        <div v-else class="attachment-preview-placeholder">
-          <FileImageOutlined class="attachment-preview-placeholder-icon" />
-          <span>
-            {{
-              previewBroken
-                ? '资源暂时无法预览（密文文件可能已丢失）'
-                : '该文件类型暂不支持在应用内预览，可下载后查看'
-            }}
-          </span>
-        </div>
-      </div>
-    </Modal>
+    <AttachmentPreview v-model:open="previewOpen" :meta="previewMeta" />
   </div>
 </template>
 
@@ -651,35 +592,5 @@ onUnmounted(() => {
   display: flex;
   gap: 6px;
   flex-shrink: 0;
-}
-
-/* ===== 应用内预览弹窗（走 wst-img 协议，不落临时文件） ===== */
-.attachment-preview-body {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 220px;
-  max-height: 68vh;
-  overflow: auto;
-}
-.attachment-preview-image {
-  display: block;
-  max-width: 100%;
-  max-height: 66vh;
-  object-fit: contain;
-}
-.attachment-preview-placeholder {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-  padding: 40px 24px;
-  font-size: 13px;
-  color: var(--text-secondary);
-  text-align: center;
-}
-.attachment-preview-placeholder-icon {
-  font-size: 34px;
-  color: var(--text-muted);
 }
 </style>
