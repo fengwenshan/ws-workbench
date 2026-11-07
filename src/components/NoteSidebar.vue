@@ -4,22 +4,19 @@ import { Button, Empty, Input, Modal, Tooltip, message } from 'ant-design-vue'
 import {
   CopyOutlined,
   DeleteOutlined,
+  DownloadOutlined,
   DoubleRightOutlined,
   EditOutlined,
-  ExportOutlined,
   EyeOutlined,
   FileImageOutlined,
-  FolderOpenOutlined,
   PlusOutlined,
 } from '@ant-design/icons-vue'
 import type { AttachmentStat, LogLevel } from '@/types'
 import {
   decryptExportFile,
-  decryptToTemp,
   removeAttachmentFile,
   statAttachment,
 } from '@/api/attachments'
-import { openFile } from '@/api/system'
 import { pickSavePath } from '@/utils/dialog'
 import { errorText } from '@/utils/error'
 import {
@@ -199,39 +196,10 @@ watch(previewOpen, (open) => {
   }
 })
 
-// ========== 打开 / 导出 ==========
+// ========== 下载 ==========
 const busyUrl = ref<string | null>(null)
 
-async function handleOpen(asset: NoteAsset) {
-  if (busyUrl.value) return
-  const name = noteAssetFileName(asset)
-  const label = noteAssetDisplayName(asset)
-  busyUrl.value = asset.url
-  try {
-    let tempPath: string
-    try {
-      tempPath = await decryptToTemp(asset.dir, asset.id, name)
-    } catch (err) {
-      markMissing(asset)
-      // 文件真的没了 / 浏览器环境：只降级提示，不抛异常
-      emit('log', 'error', `解密打开失败（${label}）: ${errorText(err)}`)
-      message.error(`打开失败: ${errorText(err)}`)
-      return
-    }
-    try {
-      await openFile(tempPath)
-      emit('log', 'info', `已打开资源: ${label}`)
-    } catch (err) {
-      // 解密成功、失败的是「用系统程序打开」，分开提示
-      emit('log', 'error', `用系统程序打开失败（${label}）: ${errorText(err)}`)
-      message.error(`打开失败: ${errorText(err)}`)
-    }
-  } finally {
-    busyUrl.value = null
-  }
-}
-
-async function handleExport(asset: NoteAsset) {
+async function handleDownload(asset: NoteAsset) {
   if (busyUrl.value) return
   const name = noteAssetFileName(asset)
   const label = noteAssetDisplayName(asset)
@@ -248,12 +216,12 @@ async function handleExport(asset: NoteAsset) {
   try {
     try {
       await decryptExportFile(asset.dir, asset.id, target)
-      message.success('已导出')
-      emit('log', 'success', `已导出资源: ${label}`)
+      message.success('已下载')
+      emit('log', 'success', `已下载资源: ${label}`)
     } catch (err) {
       markMissing(asset)
-      emit('log', 'error', `导出失败（${label}）: ${errorText(err)}`)
-      message.error(`导出失败: ${errorText(err)}`)
+      emit('log', 'error', `下载失败（${label}）: ${errorText(err)}`)
+      message.error(`下载失败: ${errorText(err)}`)
     }
   } finally {
     busyUrl.value = null
@@ -446,28 +414,16 @@ function outlineIndent(level: number): string {
                 <CopyOutlined />
               </Button>
             </Tooltip>
-            <Tooltip title="打开">
+            <Tooltip title="下载">
               <Button
                 type="text"
                 size="small"
                 class="asset-action"
-                aria-label="打开"
+                aria-label="下载"
                 :disabled="busyUrl === asset.url"
-                @click="handleOpen(asset)"
+                @click="handleDownload(asset)"
               >
-                <FolderOpenOutlined />
-              </Button>
-            </Tooltip>
-            <Tooltip title="导出">
-              <Button
-                type="text"
-                size="small"
-                class="asset-action"
-                aria-label="导出"
-                :disabled="busyUrl === asset.url"
-                @click="handleExport(asset)"
-              >
-                <ExportOutlined />
+                <DownloadOutlined />
               </Button>
             </Tooltip>
             <Tooltip title="重命名">
