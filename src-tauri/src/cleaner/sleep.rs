@@ -396,6 +396,47 @@ mod tests {
     }
 
     #[test]
+    fn trigger_session_is_released_by_same_trigger() {
+        let _serial = serial();
+        // 先清掉可能残留的会话
+        let _ = stop();
+        assert!(start_from_trigger("app-1").expect("trigger start"));
+        assert!(status().active);
+        assert_eq!(status().active_trigger.as_deref(), Some("app-1"));
+
+        // 别的规则不能停它
+        assert!(!release_trigger("ac-1"));
+        assert!(status().active);
+
+        // 自己可以停
+        assert!(release_trigger("app-1"));
+        assert!(!status().active);
+    }
+
+    #[test]
+    fn trigger_does_not_override_manual_session() {
+        let _serial = serial();
+        let _ = stop();
+        start(Some(60), false).expect("manual start");
+        // 手动会话在跑时，规则不接管也不覆盖
+        assert!(!start_from_trigger("app-1").expect("trigger start"));
+        assert_eq!(status().active_trigger, None, "仍然算手动会话");
+        let _ = stop();
+    }
+
+    #[test]
+    fn manual_session_survives_trigger_release() {
+        let _serial = serial();
+        let _ = stop();
+        start(None, false).expect("manual start");
+        // 规则退出时不应把手动会话一起停掉
+        assert!(!release_trigger("app-1"));
+        assert!(status().active);
+        assert_eq!(status().active_trigger, None);
+        let _ = stop();
+    }
+
+    #[test]
     fn starts_and_stops() {
         let _serial = serial();
         let started = start(None, false).expect("start");
