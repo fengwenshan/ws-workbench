@@ -99,16 +99,24 @@ macOS：
 
 安全：只切状态不删除条目；系统范围只读；桌面文件系统只读不写。
 
-### 4.3 弹窗拦截（仅 Windows，检测模式）
+### 4.3 弹窗拦截（仅 Windows，检测 + 可选拦截）
 
-交互：页签顶部「开启检测」开关（默认关）+ 最近弹窗列表（时间 / 进程 / 标题 / 类名 / 尺寸 / 命中特征 / 操作）+「清空」+ 忽略名单（按进程名）。
+交互：页签顶部「检测」开关（默认关）+「拦截模式」开关（默认关，检测开着时才可开）+ 拦截参数（自动动作 `close`/`hide`、最低可疑分 6/8/10/12）+ 最近弹窗列表（时间 / 进程 / 标题 / 类名 / 尺寸 / 命中特征 / 操作）+「清空」+ 忽略名单（按进程名）。
 
-命令：`popup_status` / `popup_start` / `popup_stop` / `popup_recent` / `popup_clear` / `popup_dismiss(id, action)` / `popup_ignore(process, ignored)`。
+命令：`popup_status` / `popup_start` / `popup_stop` / `popup_recent` / `popup_clear` / `popup_dismiss(id, action)` / `popup_ignore(process, ignored)` / `popup_settings_get` / `popup_settings_set(settings)`。
 
 - 实现：后台线程每 800ms `EnumWindows` 轮询可见顶层窗口（和火绒的定时器 + 枚举思路一致）。首版不用 `SetWinEventHook`：API 面更小、不会被 UIPI 挡事件；代价同样是「先显示后记录」。同一窗口（类名 + 标题）只记一次，窗口标题变化会重新记录。
 - 启发式打分（只用于「可疑」排序，不自动动作）：`WS_EX_TOOLWINDOW` / `WS_EX_NOACTIVATE` / `WS_EX_TOPMOST`、无标题、尺寸异常（< 200×120 或超过屏幕 80%）、`GetWindow(GW_OWNER)` 为空、所属进程不是前台进程、常见广告类名等；每项给分值 + 命中原因字符串。
-- 只记录不拦截：环形缓冲最多 200 条，新记录通过事件 `popup-detected` 推给前端；列表项操作由用户点击：`dismiss` 执行 `WM_CLOSE` 或 `SW_HIDE`（同进程 5 秒限流），`ignore` 把进程加入忽略名单（存 `<data_dir>/popup-ignore.json`，不动 AppConfig）。
-- 边界（写进 UI 说明）：只能显示后处理（弹窗会闪一下）；UIPI 下关不掉管理员窗口；UAC / 锁屏 / 内嵌广告不可见；不注入、不驱动、不杀进程。
+- 检测模式（默认）：环形缓冲最多 200 条，新记录通过事件 `popup-detected` 推给前端；列表项操作由用户点击：`dismiss` 执行 `WM_CLOSE` 或 `SW_HIDE`（同进程 5 秒限流），`ignore` 把进程加入忽略名单（存 `<data_dir>/popup-ignore.json`，不动 AppConfig）。
+- 拦截模式（可选，默认关）：命中后自动处理，判定是纯函数 `should_intercept`，全部条件都满足才动手：
+  1. 设置里 `intercept=true`，且 `score >= min_score`；
+  2. 命中原因至少两条（避免单一线索误杀）；
+  3. 不在受保护进程表（`explorer.exe`/`dwm.exe`/`winlogon.exe`/`svchost.exe`/`SearchHost.exe`/本应用等 22 个）与受保护窗口类（`Progman`/`WorkerW`/`Shell_TrayWnd`/`Shell_SecondaryTrayWnd` 等外壳窗口）里；
+  4. 进程不在忽略名单；
+  5. 同进程 5 秒冷却；
+  6. 每分钟自动处理数未达上限（默认 6，熔断防连环误杀）。
+  设置存 `<data_dir>/popup-settings.json`，后端会把 `action`/`min_score`/`max_per_minute` 收进安全范围；列表里被自动处理的记录带「已自动关闭 / 已自动隐藏」标记。
+- 边界（写进 UI 说明）：只能显示后处理（弹窗会闪一下）；UIPI 下关不掉管理员窗口；UAC / 锁屏 / 内嵌广告不可见；不注入、不驱动、不杀进程；拦截模式失败不会重试（下一轮轮询再判断）。
 - 非 Windows：模块编译 stub，命令返回「仅 Windows 支持」；前端用 `platform.is_windows` 隐藏页签。
 
 ### 4.4 默认应用
@@ -133,12 +141,12 @@ macOS：
 
 | 检查 | 命令 | 结果 |
 | --- | --- | --- |
-| Rust 全量单测 | `cargo test --lib` | 366 passed / 0 failed / 3 ignored（三个手动探针） |
+| Rust 全量单测 | `cargo test --lib` | 375 passed / 0 failed / 6 ignored（跨平台单测 + 手动探针） |
 | 电源断言真实性 | `cargo test --lib cleaner::sleep::tests::manual_assertion_shows_in_pmset -- --ignored` | `pmset -g assertions` 里出现 `ws-workbench Keep Awake`，`PreventUserIdleSystemSleep` + `PreventUserIdleDisplaySleep` 各一条，停止后消失 |
 | 启动项枚举 | `... cleaner::startup::tests::manual_list_real_items --ignored` | 本机 22 条（用户 LaunchAgents 可切、`/Library` 只读带原因、禁用时间反解正常） |
 | 默认应用读取 | `... cleaner::defaultapps::tests::manual_list_real_defaults --ignored` | 14 种类型全为真实 handler；`.txt` 候选 18 个（含 `~/Applications`） |
 | macOS 编译 | `cargo check` | 通过，仅 3 条 vpn 既有 warning |
-| Windows 交叉编译 | `cargo xwin check --target x86_64-pc-windows-msvc` | 通过，0 error |
+| Windows 交叉编译 | `cargo xwin check --target x86_64-pc-windows-msvc` | 通过，0 error（含拦截模式线程与 win32 调用） |
 | 前端构建 | `pnpm build` | 通过（vue-tsc + vite） |
 | 应用启动 | `pnpm tauri dev` | 正常启动，托盘快捷面板创建成功，无 panic |
 
