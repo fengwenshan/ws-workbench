@@ -1,13 +1,14 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch } from 'vue'
-import { Checkbox, message } from 'ant-design-vue'
+import { Checkbox, Input, Select, Switch, message } from 'ant-design-vue'
 import { useKeepAwake } from '@/composables/useKeepAwake'
 import { platform } from '@/platform'
-import type { KeepAwakeDurationMinutes } from '@/types/sleep'
+import type { KeepAwakeDurationMinutes, SleepTrigger, SleepTriggerKind } from '@/types/sleep'
 
 /**
  * 屏幕休眠页签：开关「保持唤醒」+ 时长（15/30/60/120 分钟 / 无限）+
- * 「允许屏幕关闭」勾选 + 状态卡（已保持时长、剩余时间、是否阻止屏幕关闭）+ 停止。
+ * 「允许屏幕关闭」勾选 + 状态卡（已保持时长、剩余时间、是否阻止屏幕关闭）+ 停止，
+ * 以及「自动保持唤醒」规则（App 运行 / 接通电源 / 外接显示器）。
  *
  * 轮询开关由父级传入的 `active` 决定（页签切走或整个工具页不可见就停），
  * 真正的 5 秒节拍与「页面隐藏暂停」在 useKeepAwake 里；剩余时间用本地 1 秒
@@ -157,6 +158,92 @@ function formatDuration(totalSecs: number): string {
   return `${seconds} 秒`
 }
 
+// ============================ 自动保持规则 ============================
+
+const KIND_LABEL: Record<SleepTriggerKind, string> = {
+  app_running: 'App 运行中',
+  ac_power: '接通电源',
+  external_display: '外接显示器',
+}
+
+const KIND_ICON: Record<SleepTriggerKind, string> = {
+  app_running: '▣',
+  ac_power: '⚡',
+  external_display: '▥',
+}
+
+const KIND_OPTIONS = (Object.keys(KIND_LABEL) as SleepTriggerKind[]).map((kind) => ({
+  value: kind,
+  label: KIND_LABEL[kind],
+}))
+
+/** 新增规则的表单 */
+const newTriggerKind = ref<SleepTriggerKind>('app_running')
+const newTriggerValue = ref('')
+
+const triggersState = computed(() => keepAwake.triggers)
+
+function triggerText(trigger: SleepTrigger): string {
+  if (trigger.kind === 'app_running') return `运行「${trigger.value}」时`
+  if (trigger.kind === 'ac_power') return '接通电源时'
+  return '连接外接显示器时'
+}
+
+/** 当前环境：直接告诉用户「为什么现在（没）保持」 */
+const detectedLabel = computed(() => {
+  const detected = triggersState.value?.detected
+  if (!detected) return '—'
+  const parts = [
+    detected.on_ac_power ? '已接电源' : '电池供电',
+    detected.external_display ? '有外接显示器' : '单屏',
+  ]
+  return parts.join(' · ')
+})
+
+/** 当前生效规则的名字（用于状态卡） */
+const activeTriggerLabel = computed(() => {
+  const id = status.value?.active_trigger
+  if (!id) return ''
+  const trigger = triggersState.value?.triggers.find((item) => item.id === id)
+  return trigger ? triggerText(trigger) : '自动规则'
+})
+
+async function handleArmed(next: boolean): Promise<void> {
+  const ok = await keepAwake.setTriggersArmed(next)
+  if (!ok) {
+    message.error(keepAwake.triggersError || '切换自动保持失败')
+    return
+  }
+  message.success(next ? '已开启自动保持' : '已关闭自动保持')
+}
+
+async function handleAddTrigger(): Promise<void> {
+  const kind = newTriggerKind.value
+  const value = kind === 'app_running' ? newTriggerValue.value.trim() : ''
+  if (kind === 'app_running' && !value) {
+    message.warning('请先填进程名，例如 Typora、Code')
+    return
+  }
+  const ok = await keepAwake.addTrigger(kind, value)
+  if (!ok) {
+    message.error(keepAwake.triggersError || '新增自动规则失败')
+    return
+  }
+  newTriggerValue.value = ''
+  message.success('规则已添加，下个 5 秒轮询生效')
+}
+
+async function handleToggleTrigger(id: string, enabled: boolean): Promise<void> {
+  const ok = await keepAwake.setTriggerEnabled(id, enabled)
+  if (!ok) message.error(keepAwake.triggersError || '更新规则失败')
+}
+
+async function handleRemoveTrigger(id: string): Promise<void> {
+  const ok = await keepAwake.removeTrigger(id)
+  if (!ok) message.error(keepAwake.triggersError || '删除规则失败')
+  else message.success('规则已删除')
+}
+
 // ============================ 动作 ============================
 
 async function handleStart(): Promise<void> {
@@ -214,6 +301,9 @@ async function handleStop(): Promise<void> {
           {{ active ? '保持唤醒中' : '未开启' }}
         </span>
         <span class="status-display">{{ displayLabel }}</span>
+        <span v-if="activeTriggerLabel" class="status-trigger">
+          自动规则：{{ activeTriggerLabel }}
+        </span>
       </div>
 
       <div class="status-facts">
@@ -308,6 +398,85 @@ async function handleStop(): Promise<void> {
         </button>
       </div>
     </section>
+
+    <!-- 自动保持规则 -->
+    <section class="sleep-card">
+      <div class="card-head">
+        <div class="card-titles">
+          <span class="card-label">自动保持唤醒</span>
+          <span class="card-sub">
+            条件满足时自动保持、失效自动释放；手动开启优先，不会被规则停掉
+          </span>
+        </div>
+        <Switch
+          :checked="triggersState?.armed ?? false"
+          :disabled="keepAwake.triggersBusy || !supported"
+          @change="(checked) => handleArmed(Boolean(checked))"
+        />
+      </div>
+
+      <p class="detected-line">当前环境：{{ detectedLabel }}</p>
+
+      <div v-if="triggersState?.armed" class="trigger-body">
+        <p v-if="!triggersState.triggers.length" class="empty-line">
+          还没有规则，选一种条件加一条。
+        </p>
+
+        <div v-for="trigger in triggersState.triggers" :key="trigger.id" class="trigger-row">
+          <span class="trigger-icon" aria-hidden="true">{{ KIND_ICON[trigger.kind] }}</span>
+          <span class="trigger-text">{{ triggerText(trigger) }}</span>
+          <Switch
+            :checked="trigger.enabled"
+            size="small"
+            :disabled="keepAwake.triggersBusy"
+            @change="(checked) => handleToggleTrigger(trigger.id, Boolean(checked))"
+          />
+          <button
+            type="button"
+            class="btn btn-secondary btn-xs"
+            :disabled="keepAwake.triggersBusy"
+            @click="handleRemoveTrigger(trigger.id)"
+          >
+            删除
+          </button>
+        </div>
+
+        <div class="trigger-add">
+          <Select
+            v-model:value="newTriggerKind"
+            :options="KIND_OPTIONS"
+            size="small"
+            class="trigger-kind"
+            :disabled="keepAwake.triggersBusy"
+          />
+          <Input
+            v-if="newTriggerKind === 'app_running'"
+            v-model:value="newTriggerValue"
+            size="small"
+            placeholder="进程名，如 Typora / Code"
+            class="trigger-input"
+            :disabled="keepAwake.triggersBusy"
+            @press-enter="handleAddTrigger"
+          />
+          <span v-else class="trigger-note">该条件由系统状态自动判断</span>
+          <button
+            type="button"
+            class="btn btn-primary btn-xs"
+            :disabled="
+              keepAwake.triggersBusy ||
+              (newTriggerKind === 'app_running' && !newTriggerValue.trim())
+            "
+            @click="handleAddTrigger"
+          >
+            添加
+          </button>
+        </div>
+      </div>
+
+      <p v-if="keepAwake.triggersError" class="error-bar">
+        <span>{{ keepAwake.triggersError }}</span>
+      </p>
+    </section>
   </div>
 </template>
 
@@ -319,6 +488,80 @@ async function handleStop(): Promise<void> {
 .fact strong {
   color: var(--text-primary);
   font-weight: 600;
+}
+
+.status-trigger {
+  margin-left: 8px;
+  padding: 1px 7px;
+  border-radius: 10px;
+  background: rgba(59, 130, 246, 0.1);
+  color: var(--text-active);
+  font-size: 11px;
+}
+
+.detected-line {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.trigger-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.trigger-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+}
+
+.trigger-icon {
+  color: var(--text-active);
+  font-size: 13px;
+}
+
+.trigger-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.trigger-add {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 2px;
+}
+
+.trigger-kind {
+  width: 118px;
+  flex-shrink: 0;
+}
+
+.trigger-input {
+  flex: 1;
+}
+
+.trigger-note {
+  flex: 1;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.empty-line {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-muted);
 }
 
 .sleep-panel {

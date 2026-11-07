@@ -3,9 +3,14 @@ import {
   keepAwakeStart,
   keepAwakeStatus,
   keepAwakeStop,
+  sleepTriggersAdd,
+  sleepTriggersRemove,
+  sleepTriggersSetArmed,
+  sleepTriggersSetEnabled,
+  sleepTriggersState,
 } from '@/api/sleep'
 import { errorText } from '@/utils/error'
-import type { KeepAwakeStatus } from '@/types/sleep'
+import type { KeepAwakeStatus, SleepTriggerKind, TriggersState } from '@/types/sleep'
 
 /**
  * 状态轮询间隔：后端到点会自动释放断言，5 秒一次足够把「已自动停止」显示出来；
@@ -30,6 +35,11 @@ export function useKeepAwake() {
   const stopping = ref(false)
   /** 是否「应该」轮询：页面不可见时只是暂停计时器，这个标记仍为 true */
   const polling = ref(false)
+  /** 自动保持规则状态 */
+  const triggers = ref<TriggersState | null>(null)
+  const triggersError = ref('')
+  /** 规则增删改的进行中标记（按钮禁用用） */
+  const triggersBusy = ref(false)
 
   let timer: ReturnType<typeof setTimeout> | null = null
 
@@ -53,10 +63,21 @@ export function useKeepAwake() {
     }
   }
 
+  /** 单次拉自动规则状态；失败不打断主状态轮询 */
+  async function refreshTriggers(): Promise<void> {
+    try {
+      triggers.value = await sleepTriggersState()
+      triggersError.value = ''
+    } catch (err) {
+      triggersError.value = errorText(err, '读取自动保持规则失败')
+    }
+  }
+
   /** 递归 setTimeout：上一次请求结束再排下一次，避免慢请求堆叠 */
   async function tick(): Promise<void> {
     if (!polling.value) return
     await refresh()
+    await refreshTriggers()
     if (!polling.value) return
     // 页面隐藏期间不排下一次；恢复可见时由 visibilitychange 立即补一次
     if (typeof document !== 'undefined' && document.hidden) return
@@ -120,6 +141,49 @@ export function useKeepAwake() {
     }
   }
 
+  /** 自动规则统一入口：成功就把后端返回的新状态收下，失败给提示 */
+  async function runTriggerAction(
+    action: () => Promise<TriggersState>,
+    failureText: string,
+  ): Promise<boolean> {
+    if (triggersBusy.value) return false
+    triggersBusy.value = true
+    triggersError.value = ''
+    try {
+      triggers.value = await action()
+      // 规则可能顺带开启/释放了会话，让状态卡下一轮立刻刷新
+      await refresh()
+      return true
+    } catch (err) {
+      triggersError.value = errorText(err, failureText)
+      return false
+    } finally {
+      triggersBusy.value = false
+    }
+  }
+
+  function setTriggersArmed(armed: boolean): Promise<boolean> {
+    return runTriggerAction(
+      () => sleepTriggersSetArmed(armed),
+      armed ? '开启自动保持失败' : '关闭自动保持失败',
+    )
+  }
+
+  function addTrigger(kind: SleepTriggerKind, value: string): Promise<boolean> {
+    return runTriggerAction(() => sleepTriggersAdd(kind, value), '新增自动规则失败')
+  }
+
+  function removeTrigger(id: string): Promise<boolean> {
+    return runTriggerAction(() => sleepTriggersRemove(id), '删除自动规则失败')
+  }
+
+  function setTriggerEnabled(id: string, enabled: boolean): Promise<boolean> {
+    return runTriggerAction(
+      () => sleepTriggersSetEnabled(id, enabled),
+      enabled ? '启用自动规则失败' : '停用自动规则失败',
+    )
+  }
+
   function onVisibilityChange(): void {
     if (typeof document === 'undefined') return
     if (document.hidden) {
@@ -152,6 +216,14 @@ export function useKeepAwake() {
     polling,
     active,
     refresh,
+    triggers,
+    triggersError,
+    triggersBusy,
+    refreshTriggers,
+    setTriggersArmed,
+    addTrigger,
+    removeTrigger,
+    setTriggerEnabled,
     startPolling,
     stopPolling,
     start,

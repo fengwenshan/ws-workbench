@@ -77,6 +77,18 @@ src/components/cleaner/{SleepPanel,StartupPanel,PopupPanel,DefaultAppsPanel}.vue
 - 失败/边界：断言或电源请求创建失败返回中文错误；Windows 不拦屏保/合盖/主动睡眠，Modern Standby 下可能被挂起，UI 写明；macOS 合盖不在支持范围。
 - 状态只在本进程内有效，重启应用即释放（不做登录级保活）。
 
+**自动保持（Triggers，对齐 Amphetamine）**：页签第三张卡「自动保持唤醒」，总开关默认关；开启后可按规则自动保持：
+
+- 规则类型（多条规则之间是「或」，任一满足即保持）：
+  - `app_running`：指定进程在运行时（进程名忽略大小写、包含即匹配，可填 `Typora` / `Code`）；
+  - `ac_power`：接通电源时（笔记本）；
+  - `external_display`：连接外接显示器时。
+- 命令：`sleep_triggers_state` / `sleep_triggers_set_armed(armed)` / `sleep_triggers_add(kind, value)` / `sleep_triggers_remove(id)` / `sleep_triggers_set_enabled(id, enabled)`。
+- 实现：`cleaner/sleep/triggers.rs` 后台线程 5 秒一轮探测；进程列表用 `sysinfo`（跨平台），电源 macOS 用 `pmset -g batt`（`AC Power`）/ Windows 用 `GetSystemPowerStatus().ACLineStatus`，外接显示器 macOS 用 CoreGraphics `CGGetActiveDisplayList` 数量 > 1 / Windows 用 `GetSystemMetrics(SM_CMONITORS) > 1`。全部只读、不需要管理员权限。
+- 优先级：手动开启优先——有手动会话时规则不接管；规则失效只释放「规则自己开」的会话（`Origin::Manual` / `Origin::Trigger(id)` 区分），不会误停手动会话。命中/失效时发事件 `sleep-triggers-changed`，状态卡显示「自动规则：…」。
+- 持久化：`<data_dir>/sleep-triggers.json`（`armed` + 规则列表，最多 20 条），不动 AppConfig。
+- 边界：规则只在应用运行期间生效（不做登录级保活、不装守护进程）；外接显示器按「活动屏幕数 > 1」判断，Sidecar/虚拟显示器也会算一块屏。
+
 ### 4.2 开机自启（启动项管理）
 
 数据：`StartupItem { id, name, command, source, scope, enabled, can_toggle, detail }`
@@ -141,12 +153,12 @@ macOS：
 
 | 检查 | 命令 | 结果 |
 | --- | --- | --- |
-| Rust 全量单测 | `cargo test --lib` | 375 passed / 0 failed / 6 ignored（跨平台单测 + 手动探针） |
+| Rust 全量单测 | `cargo test --lib` | 382 passed / 0 failed / 7 ignored（跨平台单测 + 手动探针） |
 | 电源断言真实性 | `cargo test --lib cleaner::sleep::tests::manual_assertion_shows_in_pmset -- --ignored` | `pmset -g assertions` 里出现 `ws-workbench Keep Awake`，`PreventUserIdleSystemSleep` + `PreventUserIdleDisplaySleep` 各一条，停止后消失 |
 | 启动项枚举 | `... cleaner::startup::tests::manual_list_real_items --ignored` | 本机 22 条（用户 LaunchAgents 可切、`/Library` 只读带原因、禁用时间反解正常） |
 | 默认应用读取 | `... cleaner::defaultapps::tests::manual_list_real_defaults --ignored` | 14 种类型全为真实 handler；`.txt` 候选 18 个（含 `~/Applications`） |
 | macOS 编译 | `cargo check` | 通过，仅 3 条 vpn 既有 warning |
-| Windows 交叉编译 | `cargo xwin check --target x86_64-pc-windows-msvc` | 通过，0 error（含拦截模式线程与 win32 调用） |
+| Windows 交叉编译 | `cargo xwin check --target x86_64-pc-windows-msvc` | 通过，0 error（含拦截模式线程、自动保持电源/显示器探测与 win32 调用） |
 | 前端构建 | `pnpm build` | 通过（vue-tsc + vite） |
 | 应用启动 | `pnpm tauri dev` | 正常启动，托盘快捷面板创建成功，无 panic |
 

@@ -59,6 +59,30 @@ impl CleanerState {
 // ============================== 公共小工具 ==============================
 
 /// 用户主目录；取不到时返回 None（测试环境与极端受限环境要能退化）。
+/// 应用数据目录（弹窗忽略/设置、启动项备份、休眠自动规则都写这里）。
+///
+/// 优先 `WS_WORKBENCH_DATA_DIR`（测试/调试用），否则按平台给默认位置，
+/// 目录不存在会创建。
+pub(crate) fn app_data_dir() -> Result<std::path::PathBuf, String> {
+    let base = std::env::var_os("WS_WORKBENCH_DATA_DIR")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            let home = home_dir()?;
+            if cfg!(target_os = "windows") {
+                Some(home.join("AppData").join("Roaming").join("ws-workbench"))
+            } else {
+                Some(
+                    home.join("Library")
+                        .join("Application Support")
+                        .join("ws-workbench"),
+                )
+            }
+        })
+        .ok_or_else(|| "取不到应用数据目录".to_string())?;
+    std::fs::create_dir_all(&base).map_err(|err| format!("创建数据目录失败：{err}"))?;
+    Ok(base)
+}
+
 pub(crate) fn home_dir() -> Option<std::path::PathBuf> {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))

@@ -10,12 +10,17 @@
 //!   不需要管理员；不拦屏保/合盖/主动睡眠。
 //!
 //! 状态只在本进程内有效：应用退出（含崩溃）即释放，不做登录级保活。
+//!
+//! 自动规则（Triggers）在 `sleep::triggers` 里：指定 App 运行 / 接通电源 /
+//! 连接外接显示器时自动开启保持唤醒，条件不满足自动释放；手动开启优先。
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
+
+pub mod triggers;
 
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct KeepAwakeStatus {
@@ -29,6 +34,15 @@ pub struct KeepAwakeStatus {
     pub remaining_secs: Option<u64>,
     /// 平台限制说明（直接展示给用户）
     pub platform_hint: String,
+    /// 当前会话由哪条自动规则开启（手动开启为 None）
+    pub active_trigger: Option<String>,
+}
+
+/// 会话来源：手动开启优先，自动规则只能在没有会话时接管
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Origin {
+    Manual,
+    Trigger(String),
 }
 
 struct Session {
@@ -39,6 +53,7 @@ struct Session {
     generation: u64,
     /// 平台资源，Drop 时释放
     _guard: imp::Guard,
+    origin: Origin,
 }
 
 static SESSION: Mutex<Option<Session>> = Mutex::new(None);
@@ -75,6 +90,10 @@ fn status_from(session: &Session) -> KeepAwakeStatus {
             .expires_at
             .map(|expires_at| expires_at.saturating_duration_since(Instant::now()).as_secs()),
         platform_hint: hint(session.allow_display_sleep),
+        active_trigger: match &session.origin {
+            Origin::Manual => None,
+            Origin::Trigger(id) => Some(id.clone()),
+        },
     }
 }
 
@@ -85,6 +104,7 @@ fn inactive_status() -> KeepAwakeStatus {
         started_at_ms: None,
         remaining_secs: None,
         platform_hint: hint(false),
+        active_trigger: None,
     }
 }
 
@@ -112,6 +132,40 @@ pub fn start(
     duration_secs: Option<u64>,
     allow_display_sleep: bool,
 ) -> Result<KeepAwakeStatus, String> {
+    start_inner(duration_secs, allow_display_sleep, Origin::Manual)
+}
+
+/// 自动规则触发：没有会话时才开启（手动会话优先，不覆盖）。
+///
+/// 返回本次是否真的新开了会话，方便调用方决定是否提示。
+pub fn start_from_trigger(trigger_id: &str) -> Result<bool, String> {
+    if status().active {
+        return Ok(false);
+    }
+    start_inner(None, false, Origin::Trigger(trigger_id.to_string()))?;
+    Ok(true)
+}
+
+/// 自动规则释放：只有当前会话正是这条规则开的才停。
+///
+/// 返回是否真的停了，避免规则之间互相误停。
+pub fn release_trigger(trigger_id: &str) -> bool {
+    let mut slot = SESSION.lock().unwrap_or_else(|poison| poison.into_inner());
+    let matched = slot.as_ref().is_some_and(|session| {
+        session.origin == Origin::Trigger(trigger_id.to_string())
+    });
+    if matched {
+        *slot = None;
+        return true;
+    }
+    false
+}
+
+fn start_inner(
+    duration_secs: Option<u64>,
+    allow_display_sleep: bool,
+    origin: Origin,
+) -> Result<KeepAwakeStatus, String> {
     let duration = match duration_secs {
         Some(secs) if secs > 0 => Some(secs),
         _ => None,
@@ -130,6 +184,7 @@ pub fn start(
         expires_at,
         generation,
         _guard: guard,
+        origin,
     });
     let status = slot.as_ref().map(status_from).unwrap_or_else(inactive_status);
     drop(slot);

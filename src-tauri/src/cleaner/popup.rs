@@ -478,24 +478,7 @@ fn save_settings(settings: &PopupSettings) -> Result<(), String> {
 }
 
 fn data_dir() -> Result<std::path::PathBuf, String> {
-    let base = std::env::var_os("WS_WORKBENCH_DATA_DIR")
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
-            let path = std::path::PathBuf::from(home);
-            if cfg!(target_os = "windows") {
-                Some(path.join("AppData").join("Roaming").join("ws-workbench"))
-            } else {
-                Some(
-                    path.join("Library")
-                        .join("Application Support")
-                        .join("ws-workbench"),
-                )
-            }
-        })
-        .ok_or_else(|| "取不到应用数据目录".to_string())?;
-    std::fs::create_dir_all(&base).map_err(|err| format!("创建数据目录失败：{err}"))?;
-    Ok(base)
+    crate::cleaner::app_data_dir()
 }
 
 // ============================== 平台实现 ==============================
