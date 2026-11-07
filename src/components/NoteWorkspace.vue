@@ -12,7 +12,6 @@ import { parseNoteAssets } from '@/utils/note-assets'
  * 数据流：
  * - 编辑器内部 500ms 防抖后 emit update，这里更新本地 markdown 并上抛给详情页
  * - 侧栏的增删改（重命名 / 删除资源）直接产出新正文，这里静默回写编辑器后上抛
- * - 侧栏「插入」交给编辑器在当前光标插入，正文变化仍由编辑器的 input 事件回流
  */
 const props = defineProps<{
   note: string
@@ -51,11 +50,6 @@ function onEditorUpdate(value: string) {
 /** 输入过程中同步最新正文（不落盘），避免侧栏拿到 500ms 前的旧内容 */
 function onEditorChange(value: string) {
   markdown.value = value
-}
-
-function insertMarkdown(md: string) {
-  if (!md) return
-  editorRef.value?.insertMarkdown(md)
 }
 
 /** 侧栏改正文（重命名 alt / 删除资源）：同步编辑器并立即落盘，避免再次防抖 */
@@ -118,7 +112,6 @@ onBeforeUnmount(() => {
       v-show="!sidebarCollapsed"
       class="note-sidebar"
       :markdown="markdown"
-      @insert="insertMarkdown"
       @update-markdown="onSidebarUpdate"
       @scroll-to-heading="scrollToHeading"
       @collapse="sidebarCollapsed = true"

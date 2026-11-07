@@ -9,7 +9,6 @@ import {
   EditOutlined,
   EyeOutlined,
   FileImageOutlined,
-  PlusOutlined,
 } from '@ant-design/icons-vue'
 import type { AttachmentStat, LogLevel } from '@/types'
 import {
@@ -34,7 +33,7 @@ import { parseNoteHeadings } from '@/utils/note-text'
  * 笔记右侧「附件 / 大纲」侧栏。
  *
  * 数据流是单向的：正文由父级（NoteWorkspace）持有，这里只解析 props.markdown；
- * 插入 / 改正文 / 滚动大纲 / 收起都通过 emit 交给父级，本组件不碰编辑器、不持有正文。
+ * 复制 / 改正文 / 滚动大纲 / 收起都通过 emit 或剪贴板完成，本组件不碰编辑器、不持有正文。
  *
  * 附件来自正文里内联的加密资源地址（wst-img:// 或 http://wst-img.localhost），
  * 所以老笔记不需要额外元数据也能在这里列出来。
@@ -44,8 +43,6 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  /** 插入 markdown 到编辑器光标处 */
-  insert: [markdown: string]
   /** 重命名 / 删除资源后的新正文 */
   updateMarkdown: [markdown: string]
   /** 大纲点击：跳转到第 index 个标题（0 起） */
@@ -129,12 +126,7 @@ function onThumbError(asset: NoteAsset) {
   failedThumbs.add(asset.url)
 }
 
-// ========== 插入 / 复制 ==========
-function insertAsset(asset: NoteAsset) {
-  emit('insert', noteAssetMarkdown(asset))
-  emit('log', 'info', `已插入资源引用: ${noteAssetDisplayName(asset)}`)
-}
-
+// ========== 复制 Markdown ==========
 /**
  * 写剪贴板：Tauri WebView 里 Clipboard API 可能被判成非安全上下文，
  * 失败就退回隐藏 textarea + execCommand（和 LogDrawer 一个套路）。
@@ -381,15 +373,15 @@ function outlineIndent(level: number): string {
           </div>
 
           <div class="asset-actions">
-            <Tooltip title="插入">
+            <Tooltip title="复制 Markdown">
               <Button
                 type="text"
                 size="small"
                 class="asset-action"
-                aria-label="插入"
-                @click="insertAsset(asset)"
+                aria-label="复制 Markdown"
+                @click="copyAssetMarkdown(asset)"
               >
-                <PlusOutlined />
+                <CopyOutlined />
               </Button>
             </Tooltip>
             <Tooltip title="预览">
@@ -401,17 +393,6 @@ function outlineIndent(level: number): string {
                 @click="openPreview(asset)"
               >
                 <EyeOutlined />
-              </Button>
-            </Tooltip>
-            <Tooltip title="复制 Markdown">
-              <Button
-                type="text"
-                size="small"
-                class="asset-action"
-                aria-label="复制 Markdown"
-                @click="copyAssetMarkdown(asset)"
-              >
-                <CopyOutlined />
               </Button>
             </Tooltip>
             <Tooltip title="下载">

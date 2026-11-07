@@ -12,7 +12,7 @@
 
 1. 笔记编辑器换成 **Vditor 4 即时渲染（IR）**，单栏编辑、边写边排版，交互参考本机 `/Applications/Typora.app`；保留源码模式切换、大纲、字数统计。
 2. 笔记页右侧新增 **「大纲 / 附件」栏**：
-   - 附件：自动解析正文中引用的加密图片 / 图标，展示缩略图、名称、大小，可插入、预览、复制 Markdown、下载、重命名、删除（删除同时移正文引用与密文 blob）。
+   - 附件：自动解析正文中引用的加密图片 / 图标，展示缩略图、名称、大小，可复制 Markdown、预览、下载、重命名、删除（删除同时移正文引用与密文 blob）。
    - 大纲：解析正文标题，点击滚动到对应位置。
 3. 图片链路保持不变：仍是 `encryptUploadBytes` 加密落盘 + `wst-img://`（Windows 为 `http://wst-img.localhost`）协议渲染，不产生明文图片文件。
 4. 桌面应用离线可用：Vditor 的 lute / highlight.js / i18n 等运行时资源从本地加载，不走 CDN。
@@ -88,7 +88,7 @@ Vditor 通过 `${cdn}/dist/js/...` 动态加载运行时资源，桌面端不能
 - `parseNoteAssets(markdown)`：同时支持 Markdown 图片语法与 `<img>` 标签；同一 URL 去重并记录 `occurrences`；返回 `{ raw, url, id, ext, dir, alt, start, end, occurrences }`。
   - Markdown 图片按括号配对扫描（而不是单个正则）：兼容老正文 URL 里未转义的平衡括号与 `title`（`"…"` / `'…'` / `(…)`）；遇到无法配对（目录名里只有半个括号）或收尾后紧跟 `%` 的残缺 URL 时整条跳过，避免删除/重命名改写坏正文。
   - 跳过 fenced code block（``` / ~~~）与行内代码（`` `…` ``）里的示例图片，代码内容不会被当成附件或被改写。
-- `noteAssetDisplayName / noteAssetFileName / noteAssetMarkdown`：展示名（alt 优先，缺省 `资源-<id8>.<ext>`）、解密用文件名（补扩展名）、插入用 Markdown。
+- `noteAssetDisplayName / noteAssetFileName / noteAssetMarkdown`：展示名（alt 优先，缺省 `资源-<id8>.<ext>`）、解密用文件名（补扩展名）、生成 `![](url)` 的 Markdown（复制用）。
 - `removeNoteAssetFromMarkdown / renameNoteAssetInMarkdown`：按 URL 与位置精确替换（不再全文正则），删除后收敛多余空行；重命名 Markdown 只改 alt，老式 `<img>` 只替换/补 alt 属性并保留 width/height/style 等。
 
 老笔记正文里图片本来就带 `dir`，因此不需要迁移，打开即生效。已知限制：老正文若把图片写成 `<img>` 标签，Vditor IR 会以 HTML 块形式展示源码而不渲染图片（正文不会丢失，附件栏仍能解析、预览、下载）；新插入的图片统一用 Markdown 语法。
@@ -99,7 +99,7 @@ Vditor 通过 `${cdn}/dist/js/...` 动态加载运行时资源，桌面端不能
 - 附件 tab：
   - 解析结果随 markdown 自动更新；
   - 卡片：缩略图（加载失败占位）、名称、大小（`statAttachment` 懒加载 + 缓存，失败显示「文件缺失」）；
-  - 操作：插入 / 预览大图 / 复制 Markdown / 下载（解密另存）/ 重命名（改 alt）/ 删除（确认后移除正文引用 + 删密文 blob，删除失败也移除引用）；
+  - 操作：复制 Markdown / 预览大图 / 下载（解密另存）/ 重命名（改 alt）/ 删除（确认后移除正文引用 + 删密文 blob，删除失败也移除引用）；
   - 上传资源：选择文件或拖入图片 → 加密上传 → 在光标处插入；
   - 空状态提示。
 - 大纲 tab：`parseNoteHeadings` 结果按层级缩进，点击 `scrollToHeading(index)`。
@@ -134,7 +134,7 @@ Vditor 通过 `${cdn}/dist/js/...` 动态加载运行时资源，桌面端不能
 1. `pnpm build`（vue-tsc + vite build）通过；`cargo check` 通过。
 2. 笔记页为单栏即时渲染：输入 `# 标题`、列表、加粗、表格、代码块、引用即时变样式；可切源码模式。
 3. 工具栏选图 / 粘贴图片 / 拖入图片 → 加密上传 → 正文出现图片、附件栏出现缩略图、名称、大小。
-4. 附件栏操作可用：插入、预览、复制、下载、重命名、删除；删除后正文引用与缩略图同步消失。
+4. 附件栏操作可用：复制、预览、下载、重命名、删除；删除后正文引用与缩略图同步消失。
 5. 大纲点击滚动到对应标题。
 6. 老笔记（正文里已有 `wst-img` 图片）打开即显示图片与附件卡片，无需迁移。
 7. 切换分组 / 项目、关闭 tab 不丢未落盘编辑。
