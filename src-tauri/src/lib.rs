@@ -327,22 +327,31 @@ fn toggle_quick_panel<R: Runtime>(app: &AppHandle<R>, rect: tauri::Rect) {
         return;
     }
 
-    // Rect 是逻辑坐标，先按当前缩放换成物理像素再算位置
+    // 面板尺寸用物理像素，和光标/显示器坐标保持同一坐标系
     let scale = window.scale_factor().unwrap_or(1.0);
+    let panel = window.outer_size().unwrap_or_else(|_| {
+        tauri::PhysicalSize::new(
+            (QUICK_PANEL_WIDTH * scale).round() as u32,
+            (QUICK_PANEL_HEIGHT * scale).round() as u32,
+        )
+    });
+
+    // macOS 上托盘事件里的 rect 是状态栏按钮的窗口局部坐标，当成屏幕坐标用会把
+    // 面板算到屏幕最左边（实测就偏了一大截）。点击托盘时鼠标一定落在图标上，
+    // 所以改用全局光标位置做锚点；拿不到光标时退回 rect 的中心点。
     let tray_pos = rect.position.to_physical::<i32>(scale);
     let tray_size = rect.size.to_physical::<u32>(scale);
-    let panel = window
-        .outer_size()
-        .unwrap_or_else(|_| {
-            tauri::PhysicalSize::new(
-                (QUICK_PANEL_WIDTH * scale).round() as u32,
-                (QUICK_PANEL_HEIGHT * scale).round() as u32,
-            )
-        });
+    let anchor = app.cursor_position().ok().map_or(
+        (
+            tray_pos.x + tray_size.width as i32 / 2,
+            tray_pos.y + tray_size.height as i32 / 2,
+        ),
+        |cursor| (cursor.x as i32, cursor.y as i32),
+    );
 
-    // 图标所在显示器的可用范围：多显示器/刘海屏/任务栏在屏幕上方时都要夹住
+    // 锚点所在显示器的可用范围：多显示器/刘海屏/任务栏在屏幕上方时都要夹住
     let monitor = app
-        .monitor_from_point(tray_pos.x as f64, tray_pos.y as f64)
+        .monitor_from_point(anchor.0 as f64, anchor.1 as f64)
         .ok()
         .flatten();
     let screen = monitor
@@ -358,10 +367,12 @@ fn toggle_quick_panel<R: Runtime>(app: &AppHandle<R>, rect: tauri::Rect) {
         })
         .unwrap_or((0, 0, 1920, 1080));
 
-    let (x, y) = panel_origin(
-        (tray_pos.x, tray_pos.y, tray_size.width, tray_size.height),
-        (panel.width, panel.height),
-        screen,
+    let (x, y) = panel_origin_at(anchor, (panel.width, panel.height), screen);
+
+    #[cfg(debug_assertions)]
+    eprintln!(
+        "[quick-panel] tray_pos={:?} tray_size={:?} anchor={:?} screen={:?} origin=({x},{y})",
+        tray_pos, tray_size, anchor, screen
     );
 
     let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
@@ -369,28 +380,38 @@ fn toggle_quick_panel<R: Runtime>(app: &AppHandle<R>, rect: tauri::Rect) {
     let _ = window.set_focus();
 }
 
+/// 面板与图标之间的间隙（物理像素）
+const QUICK_PANEL_GAP: i32 = 8;
+
+/// 托盘图标近似半边宽：右对齐时让面板右边沿落在图标右沿附近
+const TRAY_ICON_HALF_WIDTH: i32 = 18;
+
 /// 计算面板左上角（物理像素）。
 ///
-/// 纯函数，单测直接覆盖多显示器负坐标、任务栏在上/下、屏幕比面板还小这几种情况：
-/// 图标在屏幕上半部分（macOS 菜单栏 / 顶部任务栏）时面板朝下，否则朝上，
-/// 最后把结果夹进显示器范围，避免越界或被任务栏盖住。
-fn panel_origin(
-    tray: (i32, i32, u32, u32),
+/// 纯函数，单测覆盖菜单栏/底部任务栏、左右边缘夹取、多显示器负坐标、超小屏幕：
+/// - 锚点（图标中心）在屏幕上半部分（macOS 菜单栏 / 顶部任务栏）时面板朝下，否则朝上；
+/// - 图标在屏幕右半边时面板右对齐（像系统菜单一样从图标往左展开），否则左对齐；
+/// - 最后把结果夹进显示器范围，避免越界或被任务栏盖住。
+fn panel_origin_at(
+    anchor: (i32, i32),
     panel: (u32, u32),
     screen: (i32, i32, i32, i32),
 ) -> (i32, i32) {
     const MARGIN: i32 = 8;
-    let (tray_x, tray_y, tray_w, tray_h) = tray;
+    let (anchor_x, anchor_y) = anchor;
     let (panel_w, panel_h) = (panel.0 as i32, panel.1 as i32);
     let (screen_x, screen_y, screen_w, screen_h) = screen;
 
-    let tray_center_y = tray_y + tray_h as i32 / 2;
-    let below = tray_center_y < screen_y + screen_h / 2;
-    let mut x = tray_x + tray_w as i32 / 2 - panel_w / 2;
-    let mut y = if below {
-        tray_y + tray_h as i32 + 6
+    let below = anchor_y < screen_y + screen_h / 2;
+    let mut x = if anchor_x > screen_x + screen_w / 2 {
+        anchor_x + TRAY_ICON_HALF_WIDTH - panel_w
     } else {
-        tray_y - panel_h - 6
+        anchor_x - TRAY_ICON_HALF_WIDTH
+    };
+    let mut y = if below {
+        anchor_y + QUICK_PANEL_GAP
+    } else {
+        anchor_y - panel_h - QUICK_PANEL_GAP
     };
 
     // 屏幕比面板还小时 clamp 会 panic，先算出不会越界上限再夹
@@ -677,49 +698,61 @@ pub fn run() {
 
 #[cfg(test)]
 mod quick_panel_tests {
-    use super::{panel_origin, QUICK_PANEL_HEIGHT, QUICK_PANEL_WIDTH};
+    use super::{panel_origin_at, QUICK_PANEL_HEIGHT, QUICK_PANEL_WIDTH};
 
     const MENUBAR_SCREEN: (i32, i32, i32, i32) = (0, 0, 1920, 1080);
     const PANEL: (u32, u32) = (QUICK_PANEL_WIDTH as u32, QUICK_PANEL_HEIGHT as u32);
+    /// 图标中心（物理像素）落在屏幕右半边时，面板右沿对齐图标右沿
+    const ICON_HALF: i32 = 18;
+    const GAP: i32 = 8;
 
-    /// macOS 菜单栏图标：面板居中挂在图标下方，顶部留 6px
+    /// macOS 菜单栏图标：面板挂在图标下方，且往图标左侧展开（右对齐）
     #[test]
     fn opens_below_top_menubar_icon() {
-        let (x, y) = panel_origin((1000, 0, 30, 24), PANEL, MENUBAR_SCREEN);
-        assert_eq!(x, 1000 + 15 - PANEL.0 as i32 / 2);
-        assert_eq!(y, 24 + 6);
+        let (x, y) = panel_origin_at((1000, 10), PANEL, MENUBAR_SCREEN);
+        assert_eq!(x, 1000 + ICON_HALF - PANEL.0 as i32);
+        assert_eq!(y, 10 + GAP);
     }
 
-    /// Windows 底部任务栏图标：面板朝上，不能盖住任务栏
+    /// Windows 底部任务栏图标：面板朝上，不盖住任务栏
     #[test]
     fn opens_above_bottom_taskbar_icon() {
-        let (_, y) = panel_origin((1500, 1044, 30, 36), PANEL, MENUBAR_SCREEN);
-        assert_eq!(y, 1044 - PANEL.1 as i32 - 6);
+        let (x, y) = panel_origin_at((1500, 1044), PANEL, MENUBAR_SCREEN);
+        assert_eq!(x, 1500 + ICON_HALF - PANEL.0 as i32);
+        assert_eq!(y, 1044 - PANEL.1 as i32 - GAP);
     }
 
-    /// 贴左/右边缘的图标：x 必须夹进显示器，不能有一半跑到屏幕外
+    /// 图标在屏幕左半边（Windows 左侧任务栏/顶部靠左）：面板左对齐图标左沿
+    #[test]
+    fn left_side_icon_aligns_left_edge() {
+        let (x, y) = panel_origin_at((100, 10), PANEL, MENUBAR_SCREEN);
+        assert_eq!(x, 100 - ICON_HALF);
+        assert_eq!(y, 10 + GAP);
+    }
+
+    /// 贴近屏幕左右边缘：x 必须夹进显示器，不能有一半跑到屏幕外
     #[test]
     fn clamps_into_screen_edges() {
-        let (left_x, _) = panel_origin((0, 0, 20, 24), PANEL, MENUBAR_SCREEN);
+        let (left_x, _) = panel_origin_at((2, 10), PANEL, MENUBAR_SCREEN);
         assert_eq!(left_x, 8, "左边距不足时贴住 8px 安全边");
 
-        let (right_x, _) = panel_origin((1910, 0, 20, 24), PANEL, MENUBAR_SCREEN);
+        let (right_x, _) = panel_origin_at((1918, 10), PANEL, MENUBAR_SCREEN);
         assert_eq!(right_x, 1920 - PANEL.0 as i32 - 8);
     }
 
-    /// 多显示器：负坐标的副屏也要按它自己的范围夹，而不是按 0 点
+    /// 多显示器：负坐标的副屏按它自己的范围夹，而不是按 0 点
     #[test]
     fn handles_negative_monitor_coordinates() {
         let screen = (-1920, 0, 1920, 1080);
-        let (x, y) = panel_origin((-1000, 0, 30, 24), PANEL, screen);
-        assert_eq!(x, -1000 + 15 - PANEL.0 as i32 / 2);
-        assert_eq!(y, 30);
+        let (x, y) = panel_origin_at((-1000, 10), PANEL, screen);
+        assert_eq!(x, -1000 - ICON_HALF);
+        assert_eq!(y, 10 + GAP);
     }
 
     /// 显示器比面板还小时不能 panic，结果停在左上角安全边
     #[test]
     fn tiny_screen_does_not_panic() {
-        let (x, y) = panel_origin((100, 0, 20, 24), PANEL, (0, 0, 320, 300));
+        let (x, y) = panel_origin_at((100, 10), PANEL, (0, 0, 320, 300));
         assert_eq!(x, 8);
         assert_eq!(y, 8);
     }
