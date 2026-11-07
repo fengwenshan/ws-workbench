@@ -499,6 +499,26 @@ pub fn run() {
             commands::cleaner_memory_snapshot,
             commands::cleaner_quit_apps,
             commands::cleaner_deep_release,
+            // 「系统」页新增页签：屏幕休眠 / 开机自启 / 弹窗拦截 / 默认应用
+            commands::keepawake_status,
+            commands::keepawake_start,
+            commands::keepawake_stop,
+            commands::startup_list,
+            commands::startup_set_enabled,
+            commands::startup_app_autostart_get,
+            commands::startup_app_autostart_set,
+            commands::popup_status,
+            commands::popup_start,
+            commands::popup_stop,
+            commands::popup_recent,
+            commands::popup_clear,
+            commands::popup_dismiss,
+            commands::popup_ignore,
+            commands::defaultapps_list,
+            commands::defaultapps_candidates,
+            commands::defaultapps_set,
+            commands::defaultapps_reveal_settings,
+            commands::defaultapps_open_with,
             // 托盘快捷面板：隐藏 / 打开主窗口并切页
             commands::quick_panel_hide,
             commands::quick_panel_open_main,
@@ -545,7 +565,7 @@ pub fn run() {
             // 托盘：关掉窗口后应用仍在后台运行，从托盘菜单重新打开或退出
             let show = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
             // 页面入口：点一下把窗口唤到前台并切到对应页面
-            let nav_cleaner = MenuItem::with_id(app, "nav-cleaner", "清理", true, None::<&str>)?;
+            let nav_cleaner = MenuItem::with_id(app, "nav-cleaner", "系统", true, None::<&str>)?;
             let nav_proxy = MenuItem::with_id(app, "nav-proxy", "代理", true, None::<&str>)?;
             let nav_settings =
                 MenuItem::with_id(app, "nav-settings", "设置", true, None::<&str>)?;

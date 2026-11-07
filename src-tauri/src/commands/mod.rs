@@ -5,6 +5,10 @@
 
 mod attachments;
 mod cleaner;
+mod cleaner_defaultapps;
+mod cleaner_popup;
+mod cleaner_sleep;
+mod cleaner_startup;
 mod config;
 // `pub(crate)`：cleaner 模块要复用 openwith 里的图标提取（mac_icon / windows_icons）
 pub(crate) mod openwith;
@@ -14,6 +18,10 @@ mod system;
 
 pub use attachments::*;
 pub use cleaner::*;
+pub use cleaner_defaultapps::*;
+pub use cleaner_popup::*;
+pub use cleaner_sleep::*;
+pub use cleaner_startup::*;
 pub use config::*;
 pub use openwith::*;
 pub use project::*;
