@@ -16,6 +16,8 @@ mod platform;
 mod netinfo;
 mod process;
 mod winps;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod vpn;
 
 use tauri::{

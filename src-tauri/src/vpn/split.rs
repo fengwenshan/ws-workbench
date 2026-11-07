@@ -1647,8 +1647,8 @@ mod tests {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     #[test]
     fn forwarder_relays_upstream_answer() {
-        let dir = std::env::temp_dir().join(format!("ws-split-test-{}", std::process::id()));
-        let session = VpnSession::new(dir);
+        let dir = crate::test_support::TempDir::new("split-forwarder");
+        let session = VpnSession::new(dir.path().to_path_buf());
         let _ = session.ensure();
 
         let stub = UdpSocket::bind("127.0.0.1:0").expect("绑定测试转发器");

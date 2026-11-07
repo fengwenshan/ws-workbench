@@ -361,16 +361,37 @@ mod tests {
     use super::*;
     use crate::vpn::models::ConnectorKind;
 
-    fn temp_session(name: &str) -> VpnSession {
-        let dir = std::env::temp_dir().join(format!(
-            "ws-vpn-test-{}-{}",
-            name,
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&dir);
-        let session = VpnSession::new(dir);
+    /// 测试会话：离开作用域时连临时目录一起清掉。
+    ///
+    /// 以前测试末尾手动 `remove_dir_all`，断言一 panic 就漏清理，系统临时目录里
+    /// 会越堆越多 `ws-vpn-test-*`。这里交给 `TempDir` 的 Drop。
+    struct TempSession {
+        session: VpnSession,
+        _guard: crate::test_support::TempDir,
+    }
+
+    impl std::ops::Deref for TempSession {
+        type Target = VpnSession;
+
+        fn deref(&self) -> &Self::Target {
+            &self.session
+        }
+    }
+
+    impl std::ops::DerefMut for TempSession {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            &mut self.session
+        }
+    }
+
+    fn temp_session(name: &str) -> TempSession {
+        let dir = crate::test_support::TempDir::new(&format!("vpn-{name}"));
+        let session = VpnSession::new(dir.path().to_path_buf());
         session.ensure().unwrap();
-        session
+        TempSession {
+            session,
+            _guard: dir,
+        }
     }
 
     fn sample_request() -> VpnRequest {
@@ -413,7 +434,6 @@ mod tests {
         // 规则的 kind/policy 必须能被引擎解析，否则运行期会被静默丢弃
         assert!(crate::vpn::rule_engine::RuleKind::parse(&back.rules[0].kind).is_ok());
         assert!(crate::vpn::rule_engine::Policy::parse(&back.rules[0].policy).is_ok());
-        let _ = fs::remove_dir_all(&session.dir);
     }
 
     #[test]
@@ -426,7 +446,6 @@ mod tests {
         let back = session.read_status().unwrap();
         assert_eq!(back.phase, crate::vpn::models::VpnPhase::Connected);
         assert_eq!(back.vpn_ip, "198.51.100.39");
-        let _ = fs::remove_dir_all(&session.dir);
     }
 
     #[test]
@@ -437,7 +456,6 @@ mod tests {
         session.write_status(&status).unwrap();
         assert!(session.status_path().exists());
         assert!(!session.status_path().with_extension("tmp").exists());
-        let _ = fs::remove_dir_all(&session.dir);
     }
 
     #[test]
@@ -455,7 +473,6 @@ mod tests {
         // 没有新内容时不重复推送
         let (lines, _) = session.read_log(&cursor2);
         assert!(lines.is_empty());
-        let _ = fs::remove_dir_all(&session.dir);
     }
 
     #[test]
@@ -468,7 +485,6 @@ mod tests {
         // 文件比记录的偏移量短，应该从 0 重新读
         let (lines, _) = session.read_log(&cursor);
         assert_eq!(lines, vec!["新".to_string()]);
-        let _ = fs::remove_dir_all(&session.dir);
     }
 
     #[test]
@@ -486,7 +502,6 @@ mod tests {
 
         let (lines, _) = session.read_log(&cursor);
         assert_eq!(lines, vec!["新的".to_string()]);
-        let _ = fs::remove_dir_all(&session.dir);
     }
 
     #[test]
@@ -497,7 +512,6 @@ mod tests {
         assert!(!first.is_empty());
         session.prepare().unwrap();
         assert_ne!(first, session.run_id());
-        let _ = fs::remove_dir_all(&session.dir);
     }
 
     #[test]
@@ -508,7 +522,6 @@ mod tests {
         assert!(lines.is_empty());
         // 即使还没有日志文件，游标也要带上当前运行标识
         assert_eq!(cursor.run_id, session.run_id());
-        let _ = fs::remove_dir_all(&session.dir);
     }
 
     #[test]
@@ -521,7 +534,6 @@ mod tests {
         assert_eq!(tail, vec!["第 7 行", "第 8 行", "第 9 行"]);
         // 行数不足时全给
         assert_eq!(session.read_log_tail(99).len(), 10);
-        let _ = fs::remove_dir_all(&session.dir);
     }
 
     #[test]
@@ -532,7 +544,6 @@ mod tests {
         assert!(session.is_stop_requested());
         session.clear_stop();
         assert!(!session.is_stop_requested());
-        let _ = fs::remove_dir_all(&session.dir);
     }
 
     #[test]
@@ -545,7 +556,6 @@ mod tests {
         assert!(session.read_status().is_none());
         assert!(!session.is_stop_requested());
         assert!(session.script_dir().exists());
-        let _ = fs::remove_dir_all(&session.dir);
     }
 
     #[test]

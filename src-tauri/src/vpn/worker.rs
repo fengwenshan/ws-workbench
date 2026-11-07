@@ -1445,8 +1445,7 @@ mod tests {
     #[cfg(unix)]
     fn generated_script_gets_executable_bit() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("ws-worker-script-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = crate::test_support::TempDir::new("worker-script");
         let path = dir.join("vpnc-script.sh");
         write_script_file(&path, "#!/bin/sh\necho hi\n").unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
@@ -1487,9 +1486,8 @@ mod tests {
 
     #[test]
     fn ingest_script_log_reads_utf16_and_recovers_after_rotation() {
-        let dir = std::env::temp_dir().join("ws-worker-test-script-log-utf16");
-        let _ = std::fs::remove_dir_all(&dir);
-        let session = VpnSession::new(dir.clone());
+        let dir = crate::test_support::TempDir::new("worker-script-log-utf16");
+        let session = VpnSession::new(dir.path().to_path_buf());
         session.ensure().unwrap();
         let request = VpnRequest {
             conn_identity: String::new(),
@@ -1537,12 +1535,12 @@ mod tests {
         std::fs::write(worker.session.script_log_path(), &bytes).unwrap();
         worker.ingest_script_log();
         assert_eq!(worker.status.vpn_ip, "10.9.0.3");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn tail_summary_picks_error_lines() {
-        let session = VpnSession::new(std::env::temp_dir().join("ws-worker-test"));
+        let dir = crate::test_support::TempDir::new("worker-session");
+        let session = VpnSession::new(dir.path().to_path_buf());
         let request = VpnRequest {
             conn_identity: String::new(),
             proxy_mode: "rule".to_string(),
@@ -1571,7 +1569,8 @@ mod tests {
     fn single_stale_heartbeat_does_not_kill_the_tunnel() {
         // 现场：CSTP 刚连上，2 秒后 worker 就宣布「心跳已停止」把隧道收了。
         // 现在要求连续两次过期才判定，单次抖动不能误杀。
-        let session = VpnSession::new(std::env::temp_dir().join("ws-worker-test-alive"));
+        let dir = crate::test_support::TempDir::new("worker-session-alive");
+        let session = VpnSession::new(dir.path().to_path_buf());
         session.ensure().unwrap();
         session.touch_alive().unwrap();
         let request = VpnRequest {
@@ -1618,7 +1617,8 @@ mod tests {
     fn auth_failure_produces_actionable_hint() {
         // 现场日志：Login failed → 再问一次密码 → fgetws(stdin) EOF。
         // 提示必须说清「不是密码没送到」，否则下一个人还会往这个方向查。
-        let session = VpnSession::new(std::env::temp_dir().join("ws-worker-test-auth"));
+        let dir = crate::test_support::TempDir::new("worker-session-auth");
+        let session = VpnSession::new(dir.path().to_path_buf());
         let request = VpnRequest {
             conn_identity: String::new(),
             proxy_mode: "rule".to_string(),
@@ -1649,8 +1649,9 @@ mod tests {
         assert!(hint.contains("-v"), "提示里要写出看服务端原文的办法");
 
         // 不是认证失败时不能误报成认证问题
+        let clean_dir = crate::test_support::TempDir::new("worker-session-auth2");
         let mut clean = Worker::new(
-            VpnSession::new(std::env::temp_dir().join("ws-worker-test-auth2")),
+            VpnSession::new(clean_dir.path().to_path_buf()),
             {
                 let mut request = worker.request.clone();
                 request.profile_id = "p2".into();
@@ -1693,7 +1694,8 @@ mod tests {
 
     #[test]
     fn tunnel_ready_requires_ip_and_interface() {
-        let session = VpnSession::new(std::env::temp_dir().join("ws-worker-test2"));
+        let dir = crate::test_support::TempDir::new("worker-session-2");
+        let session = VpnSession::new(dir.path().to_path_buf());
         let request = VpnRequest {
             conn_identity: String::new(),
             proxy_mode: "rule".to_string(),
@@ -1725,7 +1727,8 @@ mod tests {
 
     #[test]
     fn tun_setup_failure_gets_actionable_hint() {
-        let session = VpnSession::new(std::env::temp_dir().join("ws-worker-test3"));
+        let dir = crate::test_support::TempDir::new("worker-session-3");
+        let session = VpnSession::new(dir.path().to_path_buf());
         let request = VpnRequest {
             conn_identity: String::new(),
             proxy_mode: "rule".to_string(),

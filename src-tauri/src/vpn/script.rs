@@ -608,8 +608,7 @@ mod tests {
 
     #[test]
     fn read_log_decodes_utf16le_with_bom() {
-        let dir = std::env::temp_dir().join("ws-script-log-utf16");
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::TempDir::new("script-log-utf16");
         let path = dir.join("script.log");
         let mut bytes = vec![0xFF, 0xFE];
         for unit in "A\n中文".encode_utf16() {
@@ -618,19 +617,16 @@ mod tests {
         std::fs::write(&path, bytes).unwrap();
         let text = read_log(&path).unwrap();
         assert_eq!(text, "A\n中文");
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
     fn read_log_keeps_ascii_markers_in_legacy_ansi_file() {
-        let dir = std::env::temp_dir().join("ws-script-log-ansi");
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::TempDir::new("script-log-ansi");
         let path = dir.join("script.log");
         // 旧版 FSO 写入的 GBK 字节 0xB2 0xE2（“测”），不能让整份文件读失败
         std::fs::write(&path, b"WS-WORKBENCH ip4=1.2.3.4\n\xB2\xE2\n").unwrap();
         let text = read_log(&path).unwrap();
         assert!(text.contains("WS-WORKBENCH ip4=1.2.3.4"));
-        let _ = std::fs::remove_file(&path);
     }
 
     #[cfg(target_os = "windows")]
@@ -639,8 +635,7 @@ mod tests {
         // 直接复现踩过的坑：脚本里只要混进一个非 ASCII 字节，cscript 就按系统
         // ANSI 代码页解码失败并退出 1，而 openconnect 只会把它曲解成
         // "Failed to spawn script"。所以这里真的把脚本交给 cscript 编译一遍。
-        let dir = std::env::temp_dir().join("ws-workbench-script-check");
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::TempDir::new("script-check");
         let path = dir.join("vpnc-script-win.js");
 
         std::fs::write(&path, windows_script(&ctx())).unwrap();
@@ -659,8 +654,6 @@ mod tests {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-
-        let _ = std::fs::remove_file(&path);
     }
 
     #[cfg(target_os = "windows")]
@@ -669,11 +662,10 @@ mod tests {
         // 真正用 cscript 跑一遍 connect 分支的「回报」部分：地址 / 网关 / MTU 全空，
         // 所以脚本不会执行任何 netsh / route，只会把服务端下发的范围写进 script.log
         // 和 stdout，动不到本机网络。
-        let dir = std::env::temp_dir().join("ws-workbench-script-split");
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::TempDir::new("script-split");
         let path = dir.join("vpnc-script-win.js");
         let ctx = ScriptContext {
-            session_dir: &dir,
+            session_dir: dir.path(),
             original_gateway: "192.168.1.1",
         };
         std::fs::write(&path, windows_script(&ctx)).unwrap();
@@ -717,9 +709,6 @@ mod tests {
         let log = read_log(&dir.join("script.log")).unwrap_or_default();
         assert!(log.contains("split=198.51.100.0/24"));
         assert!(log.contains("DONE reason=connect"));
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(dir.join("script.log"));
-        let _ = std::fs::remove_file(dir.join("script.prev.log"));
     }
 
     #[cfg(target_os = "windows")]
@@ -727,11 +716,10 @@ mod tests {
     fn windows_script_handles_chinese_session_dir_and_tundev() {
         // 两个现场都可能出现：中文用户目录 + 中文计算机名（Wintun 适配器名）。
         // 脚本本身必须仍是 ASCII，script.log 必须能被 read_log 完整读回。
-        let dir = std::env::temp_dir().join("ws-脚本-日志");
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::TempDir::new("script-chinese");
         let path = dir.join("vpnc-script-win.js");
         let ctx = ScriptContext {
-            session_dir: &dir,
+            session_dir: dir.path(),
             original_gateway: "192.168.1.1",
         };
         let script = windows_script(&ctx);
@@ -764,10 +752,6 @@ mod tests {
         );
         assert!(log.contains("TUNDEV=测试网卡"));
         assert!(log.contains("DONE reason=connect"));
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(dir.join("script.log"));
-        let _ = std::fs::remove_file(dir.join("script.prev.log"));
-        let _ = std::fs::remove_dir(&dir);
     }
 
     #[test]
