@@ -153,7 +153,6 @@ onUnmounted(() => {
           <span class="qp-dot" :class="keepAwake.active ? 'on' : 'off'" aria-hidden="true" />
         </button>
       </div>
-      <button type="button" class="qp-close" title="收起（Esc）" @click="hidePanel">×</button>
     </header>
 
     <div class="qp-body">
@@ -285,7 +284,7 @@ body,
   flex-direction: column;
   height: 100%;
   overflow: hidden;
-  border: 1px solid rgba(15, 23, 42, 0.1);
+  border: 1px solid var(--border-color);
   border-radius: 14px;
   background: var(--bg-primary);
   box-shadow:
@@ -302,9 +301,9 @@ body,
   align-items: center;
   gap: 8px;
   height: 46px;
-  padding: 0 8px 0 14px;
+  padding: 0 14px;
   border-bottom: 1px solid var(--border-color);
-  background: var(--bg-secondary);
+  background: var(--bg-primary);
   flex-shrink: 0;
 }
 
@@ -357,24 +356,6 @@ body,
   background: var(--success);
 }
 
-.qp-close {
-  display: grid;
-  place-items: center;
-  width: 26px;
-  height: 26px;
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--text-muted);
-  font-size: 18px;
-  line-height: 1;
-  cursor: pointer;
-}
-
-.qp-close:hover {
-  background: var(--bg-hover);
-  color: var(--text-primary);
-}
 
 /* ============================== 内容区 ============================== */
 
@@ -543,9 +524,9 @@ body,
   justify-content: space-between;
   gap: 8px;
   height: 44px;
-  padding: 0 12px;
+  padding: 0 14px;
   border-top: 1px solid var(--border-color);
-  background: var(--bg-secondary);
+  background: var(--bg-primary);
   flex-shrink: 0;
 }
 
