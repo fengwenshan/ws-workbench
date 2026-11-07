@@ -56,6 +56,9 @@ objc2-app-kit = { version = "0.3", features = [
     "NSApplication",
     "NSImage",
     "NSRunningApplication",
+    # 托盘面板定位要读 NSEvent::mouseLocation（逻辑点坐标）+ NSScreen 的菜单栏高度
+    "NSEvent",
+    "NSScreen",
     "libc",
 ] }
 objc2-foundation = { version = "0.3", features = ["NSData", "NSString"] }

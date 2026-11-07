@@ -327,18 +327,149 @@ fn toggle_quick_panel<R: Runtime>(app: &AppHandle<R>, rect: tauri::Rect) {
         return;
     }
 
-    // 面板尺寸用物理像素，和光标/显示器坐标保持同一坐标系
-    let scale = window.scale_factor().unwrap_or(1.0);
-    let panel = window.outer_size().unwrap_or_else(|_| {
-        tauri::PhysicalSize::new(
-            (QUICK_PANEL_WIDTH * scale).round() as u32,
-            (QUICK_PANEL_HEIGHT * scale).round() as u32,
-        )
+    let Some(placement) = quick_panel_placement(app, &window, rect)
+        .or_else(|| fallback_placement(app, &window, rect))
+    else {
+        // 连兜底都拿不到屏幕信息：保持窗口原位置直接弹，至少不会卡住交互
+        let _ = window.show();
+        let _ = window.set_focus();
+        return;
+    };
+    let (x, y) = panel_origin_at(placement.anchor, placement.panel, placement.screen);
+
+    #[cfg(debug_assertions)]
+    eprintln!(
+        "[quick-panel] logical={} anchor={:?} screen={:?} panel={:?} origin=({x},{y})",
+        placement.logical, placement.anchor, placement.screen, placement.panel
+    );
+
+    if placement.logical {
+        // macOS：x/y 是 AppKit 逻辑点，交给 tao 按窗口所在屏的缩放比换算
+        let _ = window.set_position(tauri::LogicalPosition::new(x as f64, y as f64));
+    } else {
+        let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+    }
+    let _ = window.show();
+    let _ = window.set_focus();
+}
+
+/// 面板落点：锚点 + 显示器范围 + 面板尺寸，三者单位一致（由 `logical` 说明）。
+struct PanelPlacement {
+    anchor: (i32, i32),
+    screen: (i32, i32, i32, i32),
+    panel: (u32, u32),
+    /// `true` = AppKit 逻辑点（macOS），`false` = 物理像素（Windows / 兜底路径）。
+    logical: bool,
+}
+
+/// macOS：直接用 AppKit / CoreGraphics 取「逻辑点」坐标。
+///
+/// 为什么不用 `AppHandle::cursor_position()` 加 `Monitor`：tao 0.35 在 macOS 上
+/// - `cursor_position()` 把 `CGDisplay::main().pixels_high()`（物理像素高）和
+///   `NSEvent::mouseLocation()`（逻辑点、主屏左下原点）混算再乘缩放比；
+/// - `Monitor::position/size` 把已经是逻辑点的 `CGDisplayBounds` 又乘了一遍
+///   backingScaleFactor，Retina 上等于放大 2 倍。
+///
+/// 结果就是锚点/屏幕范围全混了单位：Retina 上算出来的 x 会落在面板左边很远，
+/// 判断「图标在屏幕右半边」也会失效（屏幕宽度被算成两倍）。这里统一用逻辑点：
+/// `NSEvent::mouseLocation()` 取光标，`CGDisplayBounds`（同样是逻辑点、主屏左上
+/// 原点）找显示器范围，最后用 `set_position(LogicalPosition)`。
+#[cfg(target_os = "macos")]
+fn quick_panel_placement<R: Runtime>(
+    _app: &AppHandle<R>,
+    _window: &tauri::WebviewWindow<R>,
+    _rect: tauri::Rect,
+) -> Option<PanelPlacement> {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSEvent, NSScreen};
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct CGPoint {
+        x: f64,
+        y: f64,
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct CGSize {
+        width: f64,
+        height: f64,
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct CGRect {
+        origin: CGPoint,
+        size: CGSize,
+    }
+
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGMainDisplayID() -> u32;
+        fn CGDisplayBounds(display: u32) -> CGRect;
+        fn CGGetActiveDisplayList(max_displays: u32, displays: *mut u32, count: *mut u32) -> i32;
+    }
+
+    // AppKit 的鼠标位置只能主线程读；托盘点击回调本来就在主线程
+    let mtm = MainThreadMarker::new()?;
+
+    // 菜单栏高度：frame 减掉 visibleFrame（后者不含菜单栏/程序坞）
+    let menu_bar_height = NSScreen::mainScreen(mtm).map_or(0.0, |screen| {
+        let frame = screen.frame();
+        let visible = screen.visibleFrame();
+        (frame.size.height - (visible.origin.y + visible.size.height)).max(0.0)
     });
 
-    // macOS 上托盘事件里的 rect 是状态栏按钮的窗口局部坐标，当成屏幕坐标用会把
-    // 面板算到屏幕最左边（实测就偏了一大截）。点击托盘时鼠标一定落在图标上，
-    // 所以改用全局光标位置做锚点；拿不到光标时退回 rect 的中心点。
+    let mouse = NSEvent::mouseLocation();
+    let primary = unsafe { CGDisplayBounds(CGMainDisplayID()) };
+    // AppKit 的 y 以主屏底边为原点，翻成左上原点后与 CGDisplayBounds 同一套坐标
+    let cursor = (
+        mouse.x.round() as i32,
+        (primary.origin.y + primary.size.height - mouse.y).round() as i32,
+    );
+    // 托盘图标在菜单栏里：锚点压到菜单栏下沿，面板顶边才不会钻到菜单栏下面
+    let anchor = (
+        cursor.0,
+        cursor.1.max(menu_bar_height.round() as i32),
+    );
+
+    let mut ids = [0u32; 16];
+    let mut count = 0u32;
+    let status = unsafe { CGGetActiveDisplayList(ids.len() as u32, ids.as_mut_ptr(), &mut count) };
+    if status != 0 {
+        return None;
+    }
+    let screen = ids[..count as usize].iter().find_map(|display| {
+        let bounds = unsafe { CGDisplayBounds(*display) };
+        let (x, y) = (
+            bounds.origin.x.round() as i32,
+            bounds.origin.y.round() as i32,
+        );
+        let (w, h) = (
+            bounds.size.width.round() as i32,
+            bounds.size.height.round() as i32,
+        );
+        (anchor.0 >= x && anchor.0 < x + w && anchor.1 >= y && anchor.1 < y + h)
+            .then_some((x, y, w, h))
+    })?;
+
+    Some(PanelPlacement {
+        anchor,
+        screen,
+        panel: (QUICK_PANEL_WIDTH as u32, QUICK_PANEL_HEIGHT as u32),
+        logical: true,
+    })
+}
+
+/// Windows：托盘 rect / 光标 / 显示器都已经是物理像素，直接用。
+#[cfg(target_os = "windows")]
+fn quick_panel_placement<R: Runtime>(
+    app: &AppHandle<R>,
+    window: &tauri::WebviewWindow<R>,
+    rect: tauri::Rect,
+) -> Option<PanelPlacement> {
+    let scale = window.scale_factor().ok()?;
+    let panel = window.outer_size().ok()?;
+    // 光标一定落在图标上；拿不到光标时退回托盘 rect 的中心
     let tray_pos = rect.position.to_physical::<i32>(scale);
     let tray_size = rect.size.to_physical::<u32>(scale);
     let anchor = app.cursor_position().ok().map_or(
@@ -348,8 +479,6 @@ fn toggle_quick_panel<R: Runtime>(app: &AppHandle<R>, rect: tauri::Rect) {
         ),
         |cursor| (cursor.x as i32, cursor.y as i32),
     );
-
-    // 锚点所在显示器的可用范围：多显示器/刘海屏/任务栏在屏幕上方时都要夹住
     let monitor = app
         .monitor_from_point(anchor.0 as f64, anchor.1 as f64)
         .ok()
@@ -366,27 +495,76 @@ fn toggle_quick_panel<R: Runtime>(app: &AppHandle<R>, rect: tauri::Rect) {
             )
         })
         .unwrap_or((0, 0, 1920, 1080));
-
-    let (x, y) = panel_origin_at(anchor, (panel.width, panel.height), screen);
-
-    #[cfg(debug_assertions)]
-    eprintln!(
-        "[quick-panel] tray_pos={:?} tray_size={:?} anchor={:?} screen={:?} origin=({x},{y})",
-        tray_pos, tray_size, anchor, screen
-    );
-
-    let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
-    let _ = window.show();
-    let _ = window.set_focus();
+    Some(PanelPlacement {
+        anchor,
+        screen,
+        panel: (panel.width, panel.height),
+        logical: false,
+    })
 }
 
-/// 面板与图标之间的间隙（物理像素）
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn quick_panel_placement<R: Runtime>(
+    _app: &AppHandle<R>,
+    _window: &tauri::WebviewWindow<R>,
+    _rect: tauri::Rect,
+) -> Option<PanelPlacement> {
+    None
+}
+
+/// 兜底：平台坐标拿不到时退回 Tauri 的物理像素（Retina 上可能偏，但不至于不弹）。
+fn fallback_placement<R: Runtime>(
+    app: &AppHandle<R>,
+    window: &tauri::WebviewWindow<R>,
+    rect: tauri::Rect,
+) -> Option<PanelPlacement> {
+    let scale = window.scale_factor().ok()?;
+    let panel = window.outer_size().unwrap_or_else(|_| {
+        tauri::PhysicalSize::new(
+            (QUICK_PANEL_WIDTH * scale).round() as u32,
+            (QUICK_PANEL_HEIGHT * scale).round() as u32,
+        )
+    });
+    let tray_pos = rect.position.to_physical::<i32>(scale);
+    let tray_size = rect.size.to_physical::<u32>(scale);
+    let anchor = app.cursor_position().ok().map_or(
+        (
+            tray_pos.x + tray_size.width as i32 / 2,
+            tray_pos.y + tray_size.height as i32 / 2,
+        ),
+        |cursor| (cursor.x as i32, cursor.y as i32),
+    );
+    let monitor = app
+        .monitor_from_point(anchor.0 as f64, anchor.1 as f64)
+        .ok()
+        .flatten();
+    let screen = monitor
+        .map(|monitor| {
+            let position = monitor.position();
+            let size = monitor.size();
+            (
+                position.x,
+                position.y,
+                size.width as i32,
+                size.height as i32,
+            )
+        })
+        .unwrap_or((0, 0, 1920, 1080));
+    Some(PanelPlacement {
+        anchor,
+        screen,
+        panel: (panel.width, panel.height),
+        logical: false,
+    })
+}
+
+/// 面板与图标之间的间隙（与 `panel_origin_at` 的坐标单位一致：逻辑点或物理像素）
 const QUICK_PANEL_GAP: i32 = 8;
 
-/// 托盘图标近似半边宽：右对齐时让面板右边沿落在图标右沿附近
+/// 托盘图标近似半边宽：右对齐时让面板右边沿落在图标右沿附近（单位同上）
 const TRAY_ICON_HALF_WIDTH: i32 = 18;
 
-/// 计算面板左上角（物理像素）。
+/// 计算面板左上角（单位由调用方决定：macOS 是逻辑点，Windows 是物理像素）。
 ///
 /// 纯函数，单测覆盖菜单栏/底部任务栏、左右边缘夹取、多显示器负坐标、超小屏幕：
 /// - 锚点（图标中心）在屏幕上半部分（macOS 菜单栏 / 顶部任务栏）时面板朝下，否则朝上；
@@ -532,6 +710,7 @@ pub fn run() {
             create_main_window(app)?;
             // 托盘快捷面板：同样提前建好、默认隐藏，点托盘图标时再定位显示
             create_quick_panel(app)?;
+
 
             // dev 模式（裸二进制）Dock 会显示系统占位图标，这里补上真实图标
             #[cfg(target_os = "macos")]
