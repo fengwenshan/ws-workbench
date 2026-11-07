@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
-import type { PopupHit, PopupStatus } from '@/types/popup'
+import type { PopupHit, PopupSettings, PopupStatus } from '@/types/popup'
 
 /** 「弹窗拦截」页签的命令入口（仅 Windows 有真实实现） */
 
@@ -33,7 +33,20 @@ export function popupDismiss(id: number, action: 'close' | 'hide'): Promise<void
   return invoke('popup_dismiss', { id, action })
 }
 
-/** 按进程名加入 / 移出忽略名单，返回最新名单 */
+/**
+ * 按进程名加入 / 移出忽略名单，返回最新名单。
+ * （拦截模式不会处理名单里的进程）
+ */
 export function popupIgnore(process: string, ignored: boolean): Promise<string[]> {
   return invoke<string[]>('popup_ignore', { process, ignored })
+}
+
+/** 拦截模式设置 */
+export function popupSettingsGet(): Promise<PopupSettings> {
+  return invoke<PopupSettings>('popup_settings_get')
+}
+
+/** 保存拦截模式设置；后端会校验并返回收进安全范围后的值 */
+export function popupSettingsSet(settings: PopupSettings): Promise<PopupSettings> {
+  return invoke<PopupSettings>('popup_settings_set', { settings })
 }

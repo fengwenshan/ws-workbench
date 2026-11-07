@@ -48,6 +48,21 @@ async function handleDismiss(hit: PopupHit, action: 'close' | 'hide'): Promise<v
   }
 }
 
+async function toggleIntercept(): Promise<void> {
+  const ok = await popup.saveSettings({ intercept: !popup.settings.intercept })
+  if (!ok && popup.errorMessage) message.error(popup.errorMessage)
+}
+
+async function onActionChange(event: Event): Promise<void> {
+  const action = (event.target as HTMLSelectElement).value === 'hide' ? 'hide' : 'close'
+  await popup.saveSettings({ action })
+}
+
+async function onThresholdChange(event: Event): Promise<void> {
+  const value = Number((event.target as HTMLSelectElement).value)
+  if (Number.isFinite(value)) await popup.saveSettings({ min_score: value })
+}
+
 async function handleIgnore(hit: PopupHit): Promise<void> {
   const ok = await popup.ignore(hit.process, true)
   if (ok) message.success(`已忽略 ${hit.process} 的弹窗`)
@@ -74,10 +89,43 @@ async function handleIgnore(hit: PopupHit): Promise<void> {
         </span>
       </div>
       <div class="popup-toolbar-right">
+        <button
+          class="popup-switch"
+          :class="{ on: popup.settings.intercept }"
+          role="switch"
+          :aria-checked="popup.settings.intercept"
+          :disabled="popup.busy || !popup.running"
+          @click="toggleIntercept"
+        >
+          <span class="popup-switch-dot" />
+          拦截模式{{ popup.settings.intercept ? '开' : '关' }}
+        </button>
         <button class="btn btn-secondary" :disabled="popup.busy" @click="popup.clear()">
           清空
         </button>
       </div>
+    </div>
+
+    <div v-if="popup.settings.intercept" class="popup-intercept-bar">
+      <span class="popup-intercept-label">自动处理</span>
+      <select class="popup-select" :value="popup.settings.action" @change="onActionChange">
+        <option value="close">关闭窗口（WM_CLOSE）</option>
+        <option value="hide">隐藏窗口（SW_HIDE）</option>
+      </select>
+      <span class="popup-intercept-label">可疑分 ≥</span>
+      <select
+        class="popup-select"
+        :value="String(popup.settings.min_score)"
+        @change="onThresholdChange"
+      >
+        <option v-for="score in [6, 8, 10, 12]" :key="score" :value="String(score)">
+          {{ score }}
+        </option>
+      </select>
+      <span class="popup-intercept-hint">
+        系统进程/外壳窗口、忽略名单、同进程 5 秒冷却、每分钟上限
+        {{ popup.settings.max_per_minute }} 个，都由后端兜底
+      </span>
     </div>
 
     <p v-if="popup.errorMessage" class="popup-error">{{ popup.errorMessage }}</p>
@@ -103,7 +151,12 @@ async function handleIgnore(hit: PopupHit): Promise<void> {
         <span class="popup-process">{{ hit.process }}</span>
         <span class="popup-title">
           {{ hit.title || '（无标题）' }}
-          <span class="popup-class">{{ hit.class_name }} · {{ hit.width }}×{{ hit.height }}</span>
+          <span class="popup-class">
+            <span v-if="hit.auto_action" class="popup-auto-tag">
+              {{ hit.auto_action === 'hide' ? '已自动隐藏' : '已自动关闭' }}
+            </span>
+            {{ hit.class_name }} · {{ hit.width }}×{{ hit.height }}
+          </span>
         </span>
         <span class="popup-score">
           <span class="popup-score-value">{{ hit.score }}</span>
@@ -118,8 +171,9 @@ async function handleIgnore(hit: PopupHit): Promise<void> {
     </div>
 
     <p class="popup-note">
-      检测模式：窗口已经显示出来才会被记录（可能闪一下）；管理员权限窗口、UAC、锁屏和网页内嵌广告
-      看不到。本工具不注入进程、不装驱动、不结束进程，只在你点「关闭 / 隐藏」时才动对应窗口。
+      检测模式只记录，点「关闭 / 隐藏 / 忽略」才动手；拦截模式由后端闸门自动处理达标窗口，
+      随时可关。两种模式都只能处理「已经显示出来」的窗口（可能闪一下），管理员权限窗口、UAC、
+      锁屏和网页内嵌广告看不到。本工具不注入进程、不装驱动、不结束进程。
     </p>
   </div>
 </template>
@@ -203,6 +257,48 @@ async function handleIgnore(hit: PopupHit): Promise<void> {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.popup-intercept-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  flex-shrink: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+}
+
+.popup-intercept-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.popup-select {
+  height: 26px;
+  padding: 0 6px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.popup-intercept-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.popup-auto-tag {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 0 6px;
+  border-radius: 4px;
+  background: rgba(16, 185, 129, 0.12);
+  color: var(--success);
+  font-size: 11px;
 }
 
 .popup-error {

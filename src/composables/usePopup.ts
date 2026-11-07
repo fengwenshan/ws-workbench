@@ -6,11 +6,13 @@ import {
   popupDismiss,
   popupIgnore,
   popupRecent,
+  popupSettingsGet,
+  popupSettingsSet,
   popupStart,
   popupStatus,
   popupStop,
 } from '@/api/popup'
-import type { PopupHit, PopupStatus } from '@/types/popup'
+import type { PopupHit, PopupSettings, PopupStatus } from '@/types/popup'
 import { errorText } from '@/utils/error'
 
 /** 页签激活时补拉一次列表的间隔：事件已经实时推送，这里只做兜底 */
@@ -26,6 +28,13 @@ export function usePopup() {
   const status = ref<PopupStatus | null>(null)
   const hits = ref<PopupHit[]>([])
   const ignoredProcesses = ref<string[]>([])
+  /** 拦截模式设置；后端返回的才是最终值（会夹到安全范围） */
+  const settings = ref<PopupSettings>({
+    intercept: false,
+    action: 'close',
+    min_score: 8,
+    max_per_minute: 6,
+  })
   const loading = ref(false)
   const busy = ref(false)
   const errorMessage = ref('')
@@ -50,6 +59,14 @@ export function usePopup() {
       errorMessage.value = ''
     } catch (err) {
       errorMessage.value = errorText(err, '读取弹窗检测状态失败')
+    }
+  }
+
+  async function refreshSettings(): Promise<void> {
+    try {
+      settings.value = await popupSettingsGet()
+    } catch (err) {
+      errorMessage.value = errorText(err, '读取拦截设置失败')
     }
   }
 
@@ -117,6 +134,7 @@ export function usePopup() {
     try {
       await refreshStatus()
       if (supported.value) {
+        await refreshSettings()
         await refreshRecent()
         await subscribe()
       }
@@ -171,6 +189,19 @@ export function usePopup() {
     }
   }
 
+  /** 改拦截设置：只传要改的字段，其余沿用当前值；返回后端最终生效的设置 */
+  async function saveSettings(patch: Partial<PopupSettings>): Promise<boolean> {
+    errorMessage.value = ''
+    try {
+      settings.value = await popupSettingsSet({ ...settings.value, ...patch })
+      return true
+    } catch (err) {
+      errorMessage.value = errorText(err, '保存拦截设置失败')
+      await refreshSettings()
+      return false
+    }
+  }
+
   async function ignore(process: string, next: boolean): Promise<boolean> {
     errorMessage.value = ''
     try {
@@ -186,6 +217,7 @@ export function usePopup() {
     status,
     hits,
     ignoredProcesses,
+    settings,
     loading,
     busy,
     errorMessage,
@@ -198,6 +230,7 @@ export function usePopup() {
     clear,
     dismiss,
     ignore,
+    saveSettings,
   })
 }
 

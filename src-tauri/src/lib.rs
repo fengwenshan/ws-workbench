@@ -508,6 +508,8 @@ pub fn run() {
             commands::startup_app_autostart_get,
             commands::startup_app_autostart_set,
             commands::popup_status,
+            commands::popup_settings_get,
+            commands::popup_settings_set,
             commands::popup_start,
             commands::popup_stop,
             commands::popup_recent,

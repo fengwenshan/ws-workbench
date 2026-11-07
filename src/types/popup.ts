@@ -31,4 +31,26 @@ export interface PopupHit {
   score: number
   /** 命中原因，直接展示 */
   reasons: string[]
+  /**
+   * 拦截模式自动处理动作：`null` 表示只记录；
+   * `close` / `hide` 表示拦截模式已经自动处理过
+   */
+  auto_action: string | null
+}
+
+/**
+ * 拦截模式设置（后端 `cleaner::popup::PopupSettings`）。
+ *
+ * 默认全部关闭：只检测、不动手。打开后由后端闸门决定是否自动处理，
+ * 系统进程/外壳窗口、忽略名单、同进程 5 秒冷却、每分钟上限都在后端兜着。
+ */
+export interface PopupSettings {
+  /** 是否开启拦截模式 */
+  intercept: boolean
+  /** 自动处理动作 */
+  action: 'close' | 'hide'
+  /** 自动处理的最低可疑分（后端会收进 5–30） */
+  min_score: number
+  /** 每分钟最多自动处理几个窗口（后端会收进 1–30） */
+  max_per_minute: number
 }

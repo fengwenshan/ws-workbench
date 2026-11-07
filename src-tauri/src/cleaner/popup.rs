@@ -1,10 +1,13 @@
-//! 「弹窗拦截」页签（仅 Windows）：检测模式，实时列出可疑广告弹窗。
+//! 「弹窗拦截」页签（仅 Windows）：检测 + 可选拦截两种模式。
 //!
 //! 设计见 docs/superpowers/specs/2026-11-07-system-tools-design.md 4.3。
 //!
 //! 实现要点：
-//! - **只观察，不自动动手**：默认关闭，用户主动开启后也只记录 + 推事件；
-//!   关闭/隐藏必须由用户在列表里逐条点（同进程 5 秒限流）。
+//! - **检测模式（默认）**：只记录 + 推事件，关闭/隐藏必须由用户在列表里逐条点。
+//! - **拦截模式（可选，默认关）**：命中打分闸门后自动关闭/隐藏。闸门是纯函数
+//!   `should_intercept`：分数阈值、至少两条命中原因、进程/类名白名单（系统进程与
+//!   任务栏等硬保护）、忽略名单、同进程 5 秒冷却、每分钟自动处理上限（熔断）。
+//!   设置存 `<data_dir>/popup-settings.json`，界面上随时可关。
 //! - 检测用 `EnumWindows` 轮询（约 800ms 一轮，和火绒的定时器 + 枚举思路一致），
 //!   比 WinEvent hook 的 API 面小、不会被 UIPI 挡掉事件；代价是窗口会先闪一下。
 //! - 识别启发式：`WS_EX_TOOLWINDOW` / `WS_EX_NOACTIVATE` / `WS_EX_TOPMOST`、
@@ -16,7 +19,7 @@
 
 use std::sync::Mutex;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct PopupStatus {
@@ -36,6 +39,8 @@ pub struct PopupHit {
     pub height: i32,
     pub score: u32,
     pub reasons: Vec<String>,
+    /// 拦截模式自动处理动作：None 表示只记录；Some("close") / Some("hide") 表示已自动处理
+    pub auto_action: Option<String>,
 }
 
 /// 判定窗口「可疑」用的特征。抽成纯结构，方便单测打分逻辑。
@@ -66,6 +71,149 @@ impl WindowFeatures {
         }
         title
     }
+}
+
+/// 拦截模式设置（持久化到 `<data_dir>/popup-settings.json`）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PopupSettings {
+    /// 是否开启拦截模式（默认关：只检测不动手）
+    pub intercept: bool,
+    /// 自动处理动作：`close`（发 WM_CLOSE）或 `hide`（SW_HIDE）
+    pub action: String,
+    /// 自动处理的最低可疑分
+    pub min_score: u32,
+    /// 每分钟最多自动处理几个窗口（熔断，防止误杀连环触发）
+    pub max_per_minute: u32,
+}
+
+impl Default for PopupSettings {
+    fn default() -> Self {
+        Self {
+            intercept: false,
+            action: "close".into(),
+            min_score: 8,
+            max_per_minute: 6,
+        }
+    }
+}
+
+impl PopupSettings {
+    /// 把外部传进来的值收进安全范围（前端/手工改 JSON 都可能越界）
+    pub fn normalized(mut self) -> Self {
+        self.action = match self.action.as_str() {
+            "hide" => "hide".into(),
+            _ => "close".into(),
+        };
+        self.min_score = self.min_score.clamp(5, 30);
+        self.max_per_minute = self.max_per_minute.clamp(1, 30);
+        self
+    }
+}
+
+/// 永远不自动处理的进程：系统外壳 / 安全 / 输入法 / 本应用自己。
+/// 命中这些进程只会记录，绝不自动关闭。
+const PROTECTED_PROCESSES: [&str; 22] = [
+    "explorer.exe",
+    "dwm.exe",
+    "winlogon.exe",
+    "csrss.exe",
+    "smss.exe",
+    "lsass.exe",
+    "svchost.exe",
+    "consent.exe",
+    "taskmgr.exe",
+    "lockapp.exe",
+    "logonui.exe",
+    "searchhost.exe",
+    "shellexperiencehost.exe",
+    "startmenuexperiencehost.exe",
+    "textinputhost.exe",
+    "applicationframehost.exe",
+    "ctfmon.exe",
+    "sihost.exe",
+    "runtimebroker.exe",
+    "securityhealthsystray.exe",
+    "systemsettings.exe",
+    "ws-workbench.exe",
+];
+
+/// 永远不自动处理的窗口类：桌面 / 任务栏 / 托盘 / 开始菜单等外壳窗口。
+const PROTECTED_CLASSES: [&str; 8] = [
+    "progman",
+    "workerw",
+    "shell_traywnd",
+    "shell_secondarytraywnd",
+    "notifyiconoverflowwindow",
+    "trayclockwclass",
+    "tasklistthumbbar",
+    "windows.ui.core.corewindow",
+];
+
+fn is_protected_process(process: &str) -> bool {
+    let lower = process.to_ascii_lowercase();
+    if PROTECTED_PROCESSES
+        .iter()
+        .any(|protected| protected.eq_ignore_ascii_case(&lower))
+    {
+        return true;
+    }
+    // 本应用自己的进程名可能带平台后缀，按当前 exe 名兜底比较
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| path.file_name().map(|name| name.to_string_lossy().to_ascii_lowercase()))
+        .is_some_and(|own| own == lower)
+}
+
+fn is_protected_class(class_name: &str) -> bool {
+    let lower = class_name.to_ascii_lowercase();
+    PROTECTED_CLASSES
+        .iter()
+        .any(|protected| lower == *protected || lower.starts_with(protected))
+}
+
+/// 拦截模式的判定结果：要动窗口时带上动作，否则给不处理的原因（只用于调试/测试）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InterceptPlan {
+    Intercept(&'static str),
+    Skip(&'static str),
+}
+
+/// 拦截模式的纯逻辑闸门：设置开着、分数够、命中原因够多、没被保护、没被忽略、
+/// 没超过每分钟预算时，才允许自动处理。
+pub fn should_intercept(
+    features: &WindowFeatures,
+    score: u32,
+    reasons: &[String],
+    settings: &PopupSettings,
+    ignored_processes: &[String],
+    actions_this_minute: u32,
+) -> InterceptPlan {
+    if !settings.intercept {
+        return InterceptPlan::Skip("拦截模式未开启");
+    }
+    if score < settings.min_score {
+        return InterceptPlan::Skip("可疑分未达阈值");
+    }
+    if reasons.len() < 2 {
+        return InterceptPlan::Skip("命中原因不足两条");
+    }
+    if is_protected_process(&features.process) || is_protected_class(&features.class_name) {
+        return InterceptPlan::Skip("系统窗口或受保护进程");
+    }
+    if ignored_processes
+        .iter()
+        .any(|process| process.eq_ignore_ascii_case(&features.process))
+    {
+        return InterceptPlan::Skip("进程在忽略名单里");
+    }
+    if actions_this_minute >= settings.max_per_minute {
+        return InterceptPlan::Skip("已达每分钟自动处理上限");
+    }
+    InterceptPlan::Intercept(if settings.action == "hide" {
+        "hide"
+    } else {
+        "close"
+    })
 }
 
 /// 广告弹窗的类名/标题线索（命中加分，不是硬规则）
@@ -278,6 +426,57 @@ pub fn ignore(process: &str, ignored: bool) -> Result<Vec<String>, String> {
     Ok(list)
 }
 
+/// 读拦截模式设置：检测线程在跑就用线程里的那份，否则读磁盘（失败退回默认值）。
+pub fn settings_get() -> PopupSettings {
+    let manager = MANAGER.lock().unwrap_or_else(|poison| poison.into_inner());
+    #[cfg(target_os = "windows")]
+    if let Some(inner) = manager.inner.as_ref() {
+        return inner
+            .settings
+            .lock()
+            .map(|settings| settings.clone())
+            .unwrap_or_default();
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = &manager;
+    drop(manager);
+    load_settings().unwrap_or_default()
+}
+
+/// 写拦截模式设置：先落盘，再同步给正在跑的检测线程。
+pub fn settings_set(settings: PopupSettings) -> Result<PopupSettings, String> {
+    let normalized = settings.normalized();
+    save_settings(&normalized)?;
+    let manager = MANAGER.lock().unwrap_or_else(|poison| poison.into_inner());
+    #[cfg(target_os = "windows")]
+    if let Some(inner) = manager.inner.as_ref() {
+        if let Ok(mut current) = inner.settings.lock() {
+            *current = normalized.clone();
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = &manager;
+    Ok(normalized)
+}
+
+fn settings_path() -> Result<std::path::PathBuf, String> {
+    Ok(data_dir()?.join("popup-settings.json"))
+}
+
+fn load_settings() -> Result<PopupSettings, String> {
+    let path = settings_path()?;
+    let raw = std::fs::read_to_string(&path).map_err(|err| format!("读取弹窗设置失败：{err}"))?;
+    serde_json::from_str::<PopupSettings>(&raw)
+        .map(PopupSettings::normalized)
+        .map_err(|err| format!("解析弹窗设置失败：{err}"))
+}
+
+fn save_settings(settings: &PopupSettings) -> Result<(), String> {
+    let path = settings_path()?;
+    let raw = serde_json::to_string_pretty(settings).map_err(|err| format!("序列化弹窗设置失败：{err}"))?;
+    std::fs::write(&path, raw).map_err(|err| format!("写入弹窗设置失败：{err}"))
+}
+
 fn data_dir() -> Result<std::path::PathBuf, String> {
     let base = std::env::var_os("WS_WORKBENCH_DATA_DIR")
         .map(std::path::PathBuf::from)
@@ -330,6 +529,7 @@ mod imp {
         pub buffer: Arc<Mutex<VecDeque<PopupHit>>>,
         handles: Arc<Mutex<HashMap<u64, isize>>>,
         last_dismiss: Arc<Mutex<HashMap<String, std::time::Instant>>>,
+        pub settings: Arc<Mutex<PopupSettings>>,
     }
 
     impl Inner {
@@ -363,15 +563,20 @@ mod imp {
                 }
                 last.insert(process, std::time::Instant::now());
             }
-            let hwnd = HWND(handle as *mut _);
-            unsafe {
-                if action == "hide" {
-                    let _ = ShowWindow(hwnd, SW_HIDE);
-                } else {
-                    let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
-                }
-            }
+            apply_window_action(handle, action);
             Ok(())
+        }
+    }
+
+    /// 对窗口执行动作：close 走 WM_CLOSE（正常关闭流程），hide 只是 SW_HIDE
+    fn apply_window_action(handle: isize, action: &str) {
+        let hwnd = HWND(handle as *mut _);
+        unsafe {
+            if action == "hide" {
+                let _ = ShowWindow(hwnd, SW_HIDE);
+            } else {
+                let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+            }
         }
     }
 
@@ -384,19 +589,32 @@ mod imp {
         let stop = Arc::new(AtomicBool::new(false));
         let data_dir = super::data_dir()?;
         let ignore = Arc::new(Mutex::new(load_ignore(&data_dir)));
+        let settings = Arc::new(Mutex::new(super::load_settings().unwrap_or_default()));
 
         let thread_buffer = Arc::clone(&buffer);
         let thread_handles = Arc::clone(&handles);
         let thread_stop = Arc::clone(&stop);
         let thread_ignore = Arc::clone(&ignore);
+        let thread_settings = Arc::clone(&settings);
+        let thread_last_dismiss = Arc::clone(&last_dismiss);
         let join = std::thread::Builder::new()
             .name("popup-watch".into())
             .spawn(move || {
                 let mut next_id: u64 = 1;
                 let mut known: HashMap<isize, String> = HashMap::new();
+                let mut minute_start = std::time::Instant::now();
+                let mut minute_actions: u32 = 0;
                 while !thread_stop.load(Ordering::SeqCst) {
                     let foreground = unsafe { GetForegroundWindow() };
                     let ignored = thread_ignore.lock().map(|list| list.clone()).unwrap_or_default();
+                    let settings = thread_settings
+                        .lock()
+                        .map(|value| value.clone())
+                        .unwrap_or_default();
+                    if minute_start.elapsed() >= std::time::Duration::from_secs(60) {
+                        minute_start = std::time::Instant::now();
+                        minute_actions = 0;
+                    }
                     for (features, handle) in collect_windows(foreground) {
                         if ignored
                             .iter()
@@ -413,7 +631,7 @@ mod imp {
                             continue;
                         }
                         known.insert(handle, signature);
-                        let hit = PopupHit {
+                        let mut hit = PopupHit {
                             id: next_id,
                             at_ms: now_ms(),
                             process: features.process.clone(),
@@ -423,8 +641,36 @@ mod imp {
                             height: features.height,
                             score,
                             reasons,
+                            auto_action: None,
                         };
                         next_id += 1;
+
+                        // 拦截模式：闸门 + 同进程冷却 + 每分钟熔断（检测模式不会走到这里）
+                        let mut cooldown_ok = true;
+                        if let Ok(mut last) = thread_last_dismiss.lock() {
+                            if let Some(at) = last.get(&features.process) {
+                                if at.elapsed() < DISMISS_COOLDOWN {
+                                    cooldown_ok = false;
+                                }
+                            }
+                            if cooldown_ok {
+                                last.insert(features.process.clone(), std::time::Instant::now());
+                            }
+                        }
+                        if cooldown_ok {
+                            if let InterceptPlan::Intercept(action) = should_intercept(
+                                &features,
+                                hit.score,
+                                &hit.reasons,
+                                &settings,
+                                &ignored,
+                                minute_actions,
+                            ) {
+                                apply_window_action(handle, action);
+                                minute_actions += 1;
+                                hit.auto_action = Some(action.to_string());
+                            }
+                        }
                         if let Ok(mut buffer) = thread_buffer.lock() {
                             if buffer.len() >= BUFFER_LIMIT {
                                 buffer.pop_front();
@@ -447,6 +693,7 @@ mod imp {
             buffer,
             handles,
             last_dismiss,
+            settings,
         })
     }
 
@@ -623,6 +870,155 @@ mod tests {
         let (score, reasons) = score_window(&features);
         assert!(score >= 2);
         assert!(reasons.iter().any(|reason| reason.contains("尺寸")));
+    }
+
+    fn features_for_gate() -> WindowFeatures {
+        let mut features = base();
+        features.has_title = false;
+        features.is_tool_window = true;
+        features.is_foreground_process = false;
+        features.title = "限时活动弹窗".into();
+        features.class_name = "AdvertPopupWnd".into();
+        features.process = "PotPlayerMini64.exe".into();
+        features
+    }
+
+    fn intercept_settings() -> PopupSettings {
+        PopupSettings {
+            intercept: true,
+            action: "close".into(),
+            min_score: 8,
+            max_per_minute: 6,
+        }
+    }
+
+    #[test]
+    fn gate_is_closed_when_intercept_disabled() {
+        let features = features_for_gate();
+        let (score, reasons) = score_window(&features);
+        let mut settings = intercept_settings();
+        settings.intercept = false;
+        assert_eq!(
+            should_intercept(&features, score, &reasons, &settings, &[], 0),
+            InterceptPlan::Skip("拦截模式未开启")
+        );
+    }
+
+    #[test]
+    fn gate_opens_for_high_score_window() {
+        let features = features_for_gate();
+        let (score, reasons) = score_window(&features);
+        assert!(score >= 8, "score={score}");
+        assert_eq!(
+            should_intercept(&features, score, &reasons, &intercept_settings(), &[], 0),
+            InterceptPlan::Intercept("close")
+        );
+    }
+
+    #[test]
+    fn hide_action_is_reported() {
+        let features = features_for_gate();
+        let (score, reasons) = score_window(&features);
+        let mut settings = intercept_settings();
+        settings.action = "hide".into();
+        assert_eq!(
+            should_intercept(&features, score, &reasons, &settings, &[], 0),
+            InterceptPlan::Intercept("hide")
+        );
+    }
+
+    #[test]
+    fn gate_skips_low_score() {
+        let features = base();
+        let (score, reasons) = score_window(&features);
+        assert_eq!(
+            should_intercept(&features, score, &reasons, &intercept_settings(), &[], 0),
+            InterceptPlan::Skip("可疑分未达阈值")
+        );
+    }
+
+    #[test]
+    fn gate_skips_when_reasons_too_few() {
+        let features = features_for_gate();
+        assert_eq!(
+            should_intercept(&features, 20, &["只有一个原因".to_string()], &intercept_settings(), &[], 0),
+            InterceptPlan::Skip("命中原因不足两条")
+        );
+    }
+
+    #[test]
+    fn gate_protects_system_processes_and_shell_classes() {
+        let mut features = features_for_gate();
+        let (_, reasons) = score_window(&features);
+
+        features.process = "explorer.exe".into();
+        assert_eq!(
+            should_intercept(&features, 20, &reasons, &intercept_settings(), &[], 0),
+            InterceptPlan::Skip("系统窗口或受保护进程")
+        );
+
+        let mut shell = features_for_gate();
+        shell.process = "PotPlayerMini64.exe".into();
+        shell.class_name = "Shell_TrayWnd".into();
+        assert_eq!(
+            should_intercept(&shell, 20, &reasons, &intercept_settings(), &[], 0),
+            InterceptPlan::Skip("系统窗口或受保护进程")
+        );
+    }
+
+    #[test]
+    fn gate_respects_ignore_list_and_minute_budget() {
+        let features = features_for_gate();
+        let (score, reasons) = score_window(&features);
+        assert_eq!(
+            should_intercept(
+                &features,
+                score,
+                &reasons,
+                &intercept_settings(),
+                &["potplayermini64.exe".to_string()],
+                0
+            ),
+            InterceptPlan::Skip("进程在忽略名单里")
+        );
+        assert_eq!(
+            should_intercept(&features, score, &reasons, &intercept_settings(), &[], 6),
+            InterceptPlan::Skip("已达每分钟自动处理上限")
+        );
+    }
+
+    #[test]
+    fn settings_are_clamped_and_action_normalized() {
+        let settings = PopupSettings {
+            intercept: true,
+            action: "whatever".into(),
+            min_score: 0,
+            max_per_minute: 999,
+        }
+        .normalized();
+        assert_eq!(settings.action, "close");
+        assert_eq!(settings.min_score, 5);
+        assert_eq!(settings.max_per_minute, 30);
+
+        let settings = PopupSettings {
+            intercept: false,
+            action: "HIDE".into(),
+            min_score: 100,
+            max_per_minute: 0,
+        }
+        .normalized();
+        assert_eq!(settings.action, "close", "大小写不匹配时回退到 close");
+        assert_eq!(settings.min_score, 30);
+        assert_eq!(settings.max_per_minute, 1);
+    }
+
+    #[test]
+    fn default_settings_are_detection_only() {
+        let settings = PopupSettings::default();
+        assert!(!settings.intercept, "默认必须是只检测");
+        assert_eq!(settings.action, "close");
+        assert_eq!(settings.min_score, 8);
+        assert_eq!(settings.max_per_minute, 6);
     }
 
     #[test]
