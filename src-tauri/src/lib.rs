@@ -496,9 +496,6 @@ pub fn run() {
             commands::cleaner_uninstall_app,
             commands::cleaner_scan_leftovers,
             commands::cleaner_delete_leftovers,
-            commands::cleaner_memory_snapshot,
-            commands::cleaner_quit_apps,
-            commands::cleaner_deep_release,
             // 「系统」页新增页签：屏幕休眠 / 开机自启 / 弹窗拦截 / 默认应用
             commands::keepawake_status,
             commands::keepawake_start,

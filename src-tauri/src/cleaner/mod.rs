@@ -1,16 +1,14 @@
-//! 「系统清理」后端模块：已安装应用列表 / 卸载 / 残留扫描与删除 / 内存占用。
+//! 「系统清理」后端模块：已安装应用列表 / 卸载 / 残留扫描与删除。
 //!
 //! 文件划分（设计 7）：
 //! - `models`：对前端的数据契约；
 //! - `installer`：列表、卸载、残留的统一入口与缓存；
 //! - `installer_windows` / `installer_macos`：平台实现（`cfg` 拆文件）；
-//! - `memory` + `memory_windows` / `memory_macos`：内存采样、聚合、结束进程、深度释放；
 //! - `trash_guard`：删除白名单与废纸篓/提权删除。
 //!
 //! 这里只放平台无关的公共小工具与 `CleanerState`，避免平台文件互相引用。
 
 pub mod installer;
-pub mod memory;
 pub mod trash_guard;
 // 「系统」工具页新增页签，每个 tab 一个子模块（设计 2026-11-07 第 3 节）
 pub mod defaultapps;
@@ -23,12 +21,8 @@ pub mod startup;
 #[cfg(any(target_os = "windows", test))]
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub mod installer_windows;
-#[cfg(target_os = "windows")]
-pub mod memory_windows;
 #[cfg(target_os = "macos")]
 pub mod installer_macos;
-#[cfg(target_os = "macos")]
-pub mod memory_macos;
 
 // 实机冒烟：默认 #[ignore]，只在人工联调时跑（会真实写 ~/Applications 与废纸篓）
 #[cfg(all(test, target_os = "macos"))]

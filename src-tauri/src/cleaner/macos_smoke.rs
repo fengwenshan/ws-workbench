@@ -1,8 +1,7 @@
 //! macOS 实机冒烟测试（默认 `#[ignore]`）。
 //!
-//! 单测只覆盖纯逻辑（过滤/规则/解析），但「列表 → 卸载 → 残留扫描 → 删进废纸篓 →
-//! 内存采样」这条真实链路涉及 Info.plist 解析、sips 图标、`trash` crate、
-//! `NSRunningApplication`、`sysinfo` 等只有真机才能验证的行为。本文件把这条链路
+//! 单测只覆盖纯逻辑（过滤/规则/解析），但「列表 → 卸载 → 残留扫描 → 删进废纸篓」
+//! 这条真实链路涉及 Info.plist 解析、sips 图标、`trash` crate 等只有真机才能验证的行为。本文件把这条链路
 //! 跑一遍，且**所有写入都限定在测试自己创建的临时名字下**，结束（含失败）时清理。
 //!
 //! 手动执行：
@@ -85,7 +84,7 @@ fn check_trash(home: &Path, name: &str) {
 
 #[test]
 #[ignore = "实机冒烟：会真实写入 ~/Applications、~/Library 与废纸篓，需 CLEANER_SMOKE=1"]
-fn macos_uninstall_leftover_memory_smoke() {
+fn macos_uninstall_leftover_smoke() {
     if std::env::var("CLEANER_SMOKE").ok().as_deref() != Some("1") {
         eprintln!("未设置 CLEANER_SMOKE=1，跳过实机冒烟（这是有意的保护）");
         return;
@@ -203,36 +202,7 @@ fn macos_uninstall_leftover_memory_smoke() {
     check_trash(&home, &unique);
     eprintln!("[smoke] 卸载：{}", uninstall.command);
 
-    // 5) 内存采样：字段合理、应用按内存降序
-    let snapshot = super::memory::snapshot().expect("内存采样");
-    assert!(snapshot.total > 0, "total 应大于 0");
-    assert!(snapshot.used > 0, "used 应大于 0");
-    assert!(snapshot.used_percent > 0.0 && snapshot.used_percent <= 100.0);
-    assert!(!snapshot.apps.is_empty(), "应有按应用聚合的内存项");
-    assert!(
-        snapshot.apps.windows(2).all(|pair| pair[0].memory >= pair[1].memory),
-        "应用列表应按内存降序"
-    );
-    let grouped = snapshot
-        .apps
-        .iter()
-        .map(|app| app.memory)
-        .sum::<u64>();
-    assert!(
-        grouped <= snapshot.total,
-        "聚合后的 RSS 总和 {} 不应超过物理内存 {}",
-        grouped,
-        snapshot.total
-    );
-    assert!(snapshot.apps.iter().any(|app| app.process_count > 0));
-    eprintln!(
-        "[smoke] 内存：{} 应用 / used {:.1}% / 采样 {} 项",
-        snapshot.apps.len(),
-        snapshot.used_percent,
-        snapshot.apps.len()
-    );
-
-    // 6) 清理：废纸篓里本次测试的条目也只是我们造的，永久删掉
+    // 5) 清理：废纸篓里本次测试的条目也只是我们造的，永久删掉
     trash_prefixes.sort();
     trash_prefixes.dedup();
     purge_trash_prefixes(&home, &trash_prefixes);

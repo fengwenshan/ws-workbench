@@ -206,31 +206,6 @@ pub fn uninstall(
     emit: &dyn Fn(CleanerProgress),
 ) -> Result<UninstallOutcome, String> {
     let bundle = bundle_from_id(app_id)?;
-    emit(CleanerProgress::new(
-        "uninstall",
-        "waiting",
-        0,
-        1,
-        "正在退出运行中的应用…",
-    ));
-    if let Some(info) = read_bundle_info(&bundle) {
-        if let Some(bundle_id) = info.bundle_id {
-            let (_quit, _forced, failed) = super::memory_macos::end_running_apps(&[bundle_id], false);
-            if !failed.is_empty() {
-                // 退出请求失败不阻断卸载：trash 会给出真实原因（如 SIP）
-                emit(CleanerProgress::new(
-                    "uninstall",
-                    "waiting",
-                    0,
-                    1,
-                    "有应用实例未能退出，继续尝试移入废纸篓…",
-                ));
-            }
-        }
-    }
-    // 结束请求是异步的，给应用一点时间真正退出，否则 bundle 立刻被删会留下不完整的进程
-    std::thread::sleep(std::time::Duration::from_millis(800));
-
     if !is_uninstallable(&bundle) {
         return Err(format!(
             "{} 是系统应用（受 SIP 保护），不支持卸载",

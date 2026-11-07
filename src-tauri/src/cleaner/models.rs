@@ -77,61 +77,6 @@ pub struct DeleteFailure {
     pub error: String,
 }
 
-/// 按应用聚合后的内存占用
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct MemoryApp {
-    /// bundle id / 应用目录 / exe 路径
-    pub id: String,
-    pub name: String,
-    pub exe: String,
-    pub icon: Option<String>,
-    pub process_count: usize,
-    /// 该应用所有进程 RSS 之和（字节）
-    pub memory: u64,
-    pub pids: Vec<u32>,
-    /// "app" | "process"
-    pub kind: String,
-}
-
-/// 一次内存采样
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct MemorySnapshot {
-    pub total: u64,
-    pub used: u64,
-    pub available: u64,
-    pub used_percent: f32,
-    pub swap_total: u64,
-    pub swap_used: u64,
-    /// 按 memory 降序
-    pub apps: Vec<MemoryApp>,
-    /// epoch 毫秒
-    pub sampled_at: i64,
-}
-
-/// 结束进程的结果
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct QuitOutcome {
-    /// 成功发出优雅退出请求的数量
-    pub quit: usize,
-    /// 强制结束的数量
-    pub forced: usize,
-    /// 失败的进程标识（应用名 / pid）
-    pub failed: Vec<String>,
-}
-
-/// 深度释放的结果
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ReleaseOutcome {
-    pub ok: bool,
-    pub before_used: u64,
-    pub after_used: u64,
-    /// after 用系统重采样，不夸张
-    pub freed: u64,
-    pub message: String,
-    /// 原理说明，直接展示在 UI
-    pub note: String,
-}
-
 /// 扫描/卸载进度，经 `cleaner-progress` 事件推给前端
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CleanerProgress {
