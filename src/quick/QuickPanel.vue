@@ -4,21 +4,23 @@ import { invoke } from '@tauri-apps/api/core'
 import { useConfig } from '@/composables/useConfig'
 import { useVpn } from '@/composables/useVpn'
 import { useCleaner } from '@/composables/useCleaner'
+import { useKeepAwake } from '@/composables/useKeepAwake'
 import AppIcon from '@/components/cleaner/AppIcon.vue'
 import { formatMemory } from '@/components/cleaner/format'
 import type { VpnProxyMode } from '@/types/vpn'
 
 /**
  * 托盘快捷面板（独立窗口 /quick.html），布局参考腾讯柠檬的悬浮面板：
- * 顶部两个页签（内存 / VPN），下面是紧凑卡片，点面板外部或按 Esc 收起。
+ * 顶部三个页签（内存 / VPN / 休眠），下面是紧凑卡片，点面板外部或按 Esc 收起。
  *
  * 这里只做「快速查看 + 快速动作」：卸载、残留清理、规则编辑仍然回主窗口。
  */
 const { config, saveConfig } = useConfig()
 const vpn = useVpn(config, saveConfig)
 const cleaner = useCleaner()
+const keepAwake = useKeepAwake()
 
-type Tab = 'memory' | 'vpn'
+type Tab = 'memory' | 'vpn' | 'sleep'
 const tab = ref<Tab>('memory')
 
 // ============================== 内存 ==============================
@@ -80,9 +82,46 @@ watch(
   (value) => {
     if (value === 'memory') startMemory()
     else stopMemory()
+    if (value === 'sleep') keepAwake.startPolling()
+    else keepAwake.stopPolling()
   },
   { immediate: true },
 )
+
+// ============================== 休眠 ==============================
+
+/** 只在面板里用到的时长快捷项；主窗口页签还有 2 小时等更多选项 */
+const SLEEP_PRESETS: Array<{ label: string; seconds: number | null }> = [
+  { label: '15 分钟', seconds: 15 * 60 },
+  { label: '30 分钟', seconds: 30 * 60 },
+  { label: '1 小时', seconds: 60 * 60 },
+  { label: '不限', seconds: null },
+]
+
+const sleepPreset = ref<number | null>(15 * 60)
+const sleepBusy = computed(() => keepAwake.starting || keepAwake.stopping)
+
+/** 面板里只显示「大概还剩多久」，精确到分钟，避免每秒刷一遍 */
+const sleepRemaining = computed(() => {
+  const status = keepAwake.status
+  if (!status?.active) return ''
+  if (status.remaining_secs == null) return '不限时，到点手动停止'
+  const minutes = Math.max(1, Math.ceil(status.remaining_secs / 60))
+  return `剩余约 ${minutes} 分钟`
+})
+
+async function toggleSleep() {
+  if (keepAwake.active) {
+    await keepAwake.stop()
+  } else {
+    await keepAwake.start(sleepPreset.value, false)
+  }
+}
+
+function sleepHint(): string {
+  const hint = keepAwake.status?.platform_hint
+  return hint || '开启后系统不会因空闲睡眠，屏幕保持常亮。'
+}
 
 // ============================== VPN ==============================
 
@@ -152,6 +191,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   stopMemory()
+  keepAwake.stopPolling()
   window.removeEventListener('keydown', onKeydown)
 })
 </script>
@@ -181,6 +221,17 @@ onUnmounted(() => {
         >
           VPN
           <span class="qp-dot" :class="vpn.isConnected ? 'on' : 'off'" aria-hidden="true" />
+        </button>
+        <button
+          type="button"
+          class="qp-tab"
+          :class="{ active: tab === 'sleep' }"
+          role="tab"
+          :aria-selected="tab === 'sleep'"
+          @click="tab = 'sleep'"
+        >
+          休眠
+          <span class="qp-dot" :class="keepAwake.active ? 'on' : 'off'" aria-hidden="true" />
         </button>
       </div>
       <button type="button" class="qp-close" title="收起（Esc）" @click="hidePanel">×</button>
@@ -296,6 +347,57 @@ onUnmounted(() => {
 
         <button type="button" class="qp-more" @click="openMain('proxy')">
           打开代理页管理配置与规则 →
+        </button>
+      </section>
+
+      <!-- 休眠：一键保持唤醒 + 时长快捷项 -->
+      <section v-show="tab === 'sleep'" class="qp-pane">
+        <div class="vpn-card">
+          <span class="vpn-status-dot" :class="{ on: keepAwake.active }" aria-hidden="true" />
+          <div class="vpn-meta">
+            <strong>{{ keepAwake.active ? '保持唤醒中' : '未开启' }}</strong>
+            <p>{{ keepAwake.active ? sleepRemaining : '屏幕保持常亮，不做登录级保活' }}</p>
+          </div>
+          <button
+            type="button"
+            class="qp-conn"
+            :class="{ connected: keepAwake.active }"
+            :disabled="sleepBusy"
+            @click="toggleSleep"
+          >
+            {{ keepAwake.active ? '停止' : '开启' }}
+          </button>
+        </div>
+
+        <p v-if="keepAwake.statusError || keepAwake.actionError" class="qp-tip warn">
+          {{ keepAwake.statusError || keepAwake.actionError }}
+        </p>
+
+        <div class="qp-section">
+          <span>保持时长</span>
+          <span class="qp-muted">{{ keepAwake.active ? '停止后重新选' : '到点自动释放' }}</span>
+        </div>
+
+        <div class="mode-group" role="radiogroup" aria-label="保持唤醒时长">
+          <button
+            v-for="preset in SLEEP_PRESETS"
+            :key="preset.label"
+            type="button"
+            class="mode-btn"
+            :class="{ active: sleepPreset === preset.seconds }"
+            role="radio"
+            :aria-checked="sleepPreset === preset.seconds"
+            :disabled="keepAwake.active"
+            @click="sleepPreset = preset.seconds"
+          >
+            {{ preset.label }}
+          </button>
+        </div>
+
+        <p class="qp-tip">{{ sleepHint() }}</p>
+
+        <button type="button" class="qp-more" @click="openMain('cleaner')">
+          打开系统页管理休眠设置 →
         </button>
       </section>
     </div>
