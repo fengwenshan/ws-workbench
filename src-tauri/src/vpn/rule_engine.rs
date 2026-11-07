@@ -11,7 +11,7 @@
 pub enum RuleKind {
     /// 精确域名：`oa.example.com`
     Domain,
-    /// 域名后缀：`example.com`（含所有子域）
+    /// 域名后缀：`example.com`（DNS 上含子域；路由注入只解析字面域名本身）
     DomainSuffix,
     /// IPv4 网段：`198.51.100.0/24`
     IpCidr,

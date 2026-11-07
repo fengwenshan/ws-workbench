@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use crate::vpn::connector;
 use crate::vpn::models::{NetworkSnapshot, ProxyMode, VpnPhase, VpnRequest, VpnRule, VpnStatus};
-use crate::vpn::route::{self, RouteOutcome, RouteTarget};
+use crate::vpn::route;
 use crate::vpn::script;
 use crate::vpn::session::VpnSession;
 
@@ -26,33 +26,24 @@ const GUARD_INTERVAL: Duration = Duration::from_secs(15);
 const POLL_INTERVAL_MS: u64 = 200;
 /// 等待隧道就绪的最长时间
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(120);
-/// 引擎接管后观察捕获链路的时间窗口：窗口内一个包都没收到就撤掉捕获路由
 
 /// worker 退出码
 pub const EXIT_OK: i32 = 0;
 pub const EXIT_NO_REQUEST: i32 = 2;
 pub const EXIT_FAILED: i32 = 3;
 
-/// 我们主动加过的路由，断开时要逐条回收
-struct AppliedRouteRecord {
-    cidr: String,
-    target: RouteTarget,
-    outcome: RouteOutcome,
-}
-
 struct Worker {
     session: VpnSession,
     request: VpnRequest,
     status: VpnStatus,
     snapshot: NetworkSnapshot,
-    applied: Vec<AppliedRouteRecord>,
     /// 连接时解析出的 VPN 服务器 IP，用来清理脚本残留的防环主机路由
     vpn_server_ips: Vec<String>,
     /// 安全阀把接管放弃掉时的原因：隧道仍然连着，只是不劫持系统流量
     degraded_reason: Option<String>,
-    /// 路由注入式分流（规则模式，macOS）：不捕获、不抢默认路由
+    /// 路由注入式分流（规则模式）：不捕获、不抢默认路由
     split: Option<crate::vpn::split::SplitTunnel>,
-    /// 全局模式（macOS）：半默认路由 + 系统 DNS 都指向隧道
+    /// 全局模式：半默认路由 + DNS 都指向隧道
     full: Option<crate::vpn::fulltunnel::FullTunnel>,
     /// 服务端下发的 split-include 网段（「公司内网」最权威的覆盖范围）
     server_split_routes: Vec<String>,
@@ -62,6 +53,11 @@ struct Worker {
     tail: Vec<String>,
     /// script.log 已经读过的行数（脚本的 stdout 接不到管道，只能靠这个文件回传）
     script_log_lines: usize,
+    /// 读取失败只记一次，避免每 200ms 刷一行
+    script_log_error_logged: bool,
+    /// 脚本写完 `done=connect` 才代表接口地址/MTU 已配置完；否则路由可能
+    /// 装在一个还没地址的接口上。
+    script_done: bool,
     /// 当前生效的代理模式（可由主进程通过 mode 文件改）
     applied_mode: ProxyMode,
     /// 当前生效的规则与兜底走向（可由主进程通过 rules.json 改）
@@ -72,6 +68,8 @@ struct Worker {
     last_mode_check: Instant,
     last_rules_check: Instant,
     last_alive_check: Instant,
+    /// 连续几次看到心跳过期。见 `check_parent_alive`：一次过期不算数。
+    stale_alive_checks: u32,
     /// 心跳过期：主进程已经不在了，循环里看到就把隧道收掉
     parent_lost: bool,
 }
@@ -96,7 +94,6 @@ impl Worker {
             request,
             status,
             snapshot: NetworkSnapshot::default(),
-            applied: Vec::new(),
             vpn_server_ips: Vec::new(),
             degraded_reason: None,
             split: None,
@@ -105,6 +102,8 @@ impl Worker {
             server_def_domain: None,
             tail: Vec::new(),
             script_log_lines: 0,
+            script_log_error_logged: false,
+            script_done: false,
             applied_mode,
             current_rules,
             current_default_policy,
@@ -112,6 +111,7 @@ impl Worker {
             last_mode_check: Instant::now(),
             last_rules_check: Instant::now(),
             last_alive_check: Instant::now(),
+            stale_alive_checks: 0,
             parent_lost: false,
         }
     }
@@ -134,9 +134,61 @@ impl Worker {
     fn fail(&mut self, message: &str) -> i32 {
         self.status.error = message.to_string();
         self.set_phase(VpnPhase::Failed, message);
+        // 失败现场最重要：先抓一眼网卡/路由/NRPT，再清理。
+        #[cfg(target_os = "windows")]
+        self.dump_network_state("失败时");
         self.cleanup_routes();
         let _ = self.session.write_status(&self.status);
         EXIT_FAILED
+    }
+
+    /// Windows：把当前网卡、IP、路由、NRPT 状态写进 worker.log。
+    ///
+    /// 现场机器拿不到管理员 shell 时，这是唯一能远程判断「路由装没装、
+    /// NRPT 有没有生效」的证据。命令本身也会进 powershell.log。
+    #[cfg(target_os = "windows")]
+    fn dump_network_state(&mut self, label: &str) {
+        let idx = self.status.tun_index;
+        // 还没拿到 tunidx（认证失败、连接器不存在等）时也要留一份全局网络状态，
+        // 否则失败现场只剩 NRPT/Dnscache，最关键的网卡和默认路由反而没有。
+        let iface = if idx == 0 {
+            r#"'--- adapters ---';
+Get-NetAdapter | Format-Table Name,InterfaceDescription,Status,LinkSpeed,ifIndex -AutoSize | Out-String -Width 220;
+'--- ipv4 ---';
+Get-NetIPAddress -AddressFamily IPv4 | Format-Table IPAddress,PrefixLength,InterfaceIndex,InterfaceAlias -AutoSize | Out-String -Width 220;
+'--- routes ---';
+Get-NetRoute -AddressFamily IPv4 | Format-Table DestinationPrefix,NextHop,InterfaceIndex,RouteMetric -AutoSize | Out-String -Width 220;
+'--- dns ---';
+Get-DnsClientServerAddress | Format-Table InterfaceIndex,InterfaceAlias,AddressFamily,ServerAddresses -AutoSize | Out-String -Width 220;
+"#
+            .to_string()
+        } else {
+            format!(
+                r#"'--- adapter ---';
+Get-NetAdapter -InterfaceIndex {idx} | Format-List Name,InterfaceDescription,Status,LinkSpeed;
+'--- ipv4 ---';
+Get-NetIPAddress -InterfaceIndex {idx} -AddressFamily IPv4 | Format-List IPAddress,PrefixLength,PrefixOrigin;
+'--- routes ---';
+Get-NetRoute -InterfaceIndex {idx} -AddressFamily IPv4 | Format-Table DestinationPrefix,NextHop,RouteMetric -AutoSize | Out-String -Width 220;
+'--- dns ---';
+Get-DnsClientServerAddress -InterfaceIndex {idx} -AddressFamily IPv4 | Format-List ServerAddresses;
+"#,
+                idx = idx
+            )
+        };
+        let script = format!(
+            r#"$ErrorActionPreference='SilentlyContinue';
+{iface}'--- nrpt ---';
+Get-DnsClientNrptRule | Where-Object -Property DisplayName -Like 'ws-workbench:*' | Format-List DisplayName,Namespace,NameServers;
+'--- dnscache ---';
+Get-Service -Name Dnscache | Format-List Status,StartType
+"#,
+            iface = iface
+        );
+        match crate::winps::run(&script) {
+            Ok(text) => self.log(&format!("[诊断] {} 网络状态:\n{}", label, text.trim())),
+            Err(e) => self.log(&format!("[诊断] {} 读取网络状态失败：{}", label, e)),
+        }
     }
 
     /// 记录一行输出；同时从脚本回报里提取隧道参数
@@ -166,8 +218,24 @@ impl Worker {
                         .map(|s| s.to_string())
                         .collect();
                 }
-                "done" => {}
-                // 服务端下发的默认域名：给它写 /etc/resolver 就能覆盖整族子域，
+                "done" => {
+                    self.script_done = value.trim() == "connect";
+                    self.log(&format!(
+                        "[脚本] 配置阶段结束：{}（{}）",
+                        value,
+                        if self.script_done {
+                            "接口地址/MTU 已完成，可以装路由"
+                        } else {
+                            "非 connect，不触发接管"
+                        }
+                    ));
+                }
+                "error" => {
+                    // 脚本主动回报的致命错误；openconnect 随后会以非零退出，
+                    // 这里先原样打出来，方便没有 worker.log 时也能定位。
+                    self.log(&format!("[脚本] 脚本报告错误：{}", value));
+                }
+                // 服务端下发的默认域名：按域名分流解析就能覆盖整族子域，
                 // 不用用户把每个内网域名都列出来
                 "defdomain" => {
                     let domain = value.trim().trim_end_matches('.').to_ascii_lowercase();
@@ -189,7 +257,9 @@ impl Worker {
     }
 
     fn tunnel_ready(&self) -> bool {
-        !self.status.vpn_ip.is_empty() && (self.status.tun_index > 0 || !self.status.tun_dev.is_empty())
+        self.script_done
+            && !self.status.vpn_ip.is_empty()
+            && (self.status.tun_index > 0 || !self.status.tun_dev.is_empty())
     }
 
     /// 读取脚本自己写的 `script.log`，这是隧道参数的真正来源。
@@ -200,11 +270,37 @@ impl Worker {
     /// 由这里增量读取——不这么做 `tunnel_ready()` 永远不会为真，界面就会一直停在
     /// 「连接中」，直到 CONNECT_TIMEOUT（120s）才报超时。
     fn ingest_script_log(&mut self) {
-        let text = match std::fs::read_to_string(self.session.script_log_path()) {
+        let path = self.session.script_log_path();
+        // 文件还没出现是正常的启动瞬间，不要把它记成错误。
+        if !path.exists() {
+            return;
+        }
+        let text = match crate::vpn::script::read_log(&path) {
             Ok(text) => text,
-            Err(_) => return,
+            Err(e) => {
+                // 文件存在却读失败（被占用/权限）才值得记，且只记一次。
+                if !self.script_log_error_logged {
+                    self.script_log_error_logged = true;
+                    self.log(&format!("[脚本] 读取 script.log 失败：{}", e));
+                }
+                return;
+            }
         };
+        if self.script_log_error_logged {
+            self.script_log_error_logged = false;
+            self.log("[脚本] script.log 已可读取");
+        }
         let lines: Vec<&str> = text.lines().collect();
+        // 新脚本在 connect 时会把上一份日志改名成 script.prev.log，文件行数
+        // 可能比旧会话少；不重置游标就会永远读不到新文件里的 marker。
+        if lines.len() < self.script_log_lines {
+            self.log(&format!(
+                "[脚本] script.log 从 {} 行变为 {} 行（已重建/截断），从头读取",
+                self.script_log_lines,
+                lines.len()
+            ));
+            self.script_log_lines = 0;
+        }
         if lines.len() <= self.script_log_lines {
             return;
         }
@@ -313,46 +409,72 @@ impl Worker {
         Some(hint)
     }
 
-    // ======================= 分流路由 =======================
-
-    fn vpn_target(&self) -> RouteTarget {
-        #[cfg(target_os = "windows")]
-        {
-            RouteTarget::new(
-                self.status.tun_index,
-                &self.status.tun_dev,
-                &self.status.vpn_gateway,
-            )
+    /// 把「认证失败」翻译成下一步能做的事。
+    ///
+    /// AnyConnect 服务端拒绝账号密码时只说一句 `Login failed`，而 worker 是往 stdin
+    /// 写一次密码就关掉的，所以第二次提示密码时直接读到 EOF——那行
+    /// `Password:fgetws (stdin): No error` 就是 EOF 的产物，不是「程序把密码弄丢了」。
+    /// 光看日志很容易往「密码没传进去」的方向排查，其实是要先确认账号本身。
+    fn auth_hint(&self) -> Option<String> {
+        let text = self.tail.join("\n").to_lowercase();
+        let rejected = text.contains("login failed")
+            || text.contains("failed to complete authentication")
+            || text.contains("authentication failed")
+            || text.contains("invalid password")
+            || text.contains("username or password");
+        if !rejected {
+            return None;
         }
-        #[cfg(not(target_os = "windows"))]
-        {
-            RouteTarget::new(0, &self.status.tun_dev, "")
-        }
+        Some(String::from(
+            "服务端拒绝了这个账号或密码：openconnect 只尝试一次，第二次要密码时 stdin 已经结束，\
+             所以后面那句 `fgetws (stdin)` 不代表密码没送到。先确认这几件事：\
+             用官方 AnyConnect 客户端或网页登录同一个账号，确认密码没改、账号没被锁；\
+             账号属于非默认认证组时，在「额外参数」里加一行 `--authgroup=<组名>`；\
+             需要短信/令牌二次验证的账号要在密码后面追加一次动态码。\
+             想看服务端返回的原文，在「额外参数」里加一行 `-v` 再连一次。",
+        ))
     }
 
-    /// 把规则编译成规则集；连接与运行期热更新共用同一套校验
-    /// 心跳守卫：主进程被强杀时没人来收尾，心跳停了就自己走正常停止流程
+    // ======================= 心跳与守护 =======================
+
+    /// 心跳守卫：主进程被强杀时没人来收尾，心跳停了就自己走正常停止流程。
+    ///
+    /// 判据要宽松一点：心跳就是「每 2s 重写一个空文件」，被杀软短暂独占、
+    /// 或者系统卡一下，mtime 落后个几秒都很正常。真机现场出现过隧道刚建好
+    /// （CSTP connected）就被一次过期判定掐掉的情况——所以这里要求连续两次
+    /// （间隔 ≥1s）都过期，并且把实测的秒数写进日志，下次能一眼分辨是
+    /// 「主进程真没了」还是「心跳抖动」。
     fn check_parent_alive(&mut self) {
         if self.last_alive_check.elapsed() < Duration::from_secs(1) {
             return;
         }
         self.last_alive_check = Instant::now();
-        match self.session.alive_age() {
+        let stale = match self.session.alive_age() {
             // 心跳文件还没出现：给启动留 10s 宽限期
-            None => {
-                if elapsed_since(&self.status.started_at) > Duration::from_secs(10) {
-                    self.parent_lost = true;
-                }
-            }
-            Some(age) => {
-                if age > Duration::from_secs(8) {
-                    self.parent_lost = true;
-                }
-            }
+            None => elapsed_since(&self.status.started_at) > Duration::from_secs(10),
+            Some(age) => age > Duration::from_secs(10),
+        };
+        if !stale {
+            self.stale_alive_checks = 0;
+            return;
+        }
+        self.stale_alive_checks += 1;
+        if self.stale_alive_checks < 2 {
+            return;
         }
         if self.parent_lost {
-            self.log("[worker] 主进程心跳已停止，自动收尾并退出");
+            return;
         }
+        self.parent_lost = true;
+        let age = self
+            .session
+            .alive_age()
+            .map(|age| age.as_secs())
+            .unwrap_or(u64::MAX);
+        self.log(&format!(
+            "[worker] 主进程心跳已停止（{}s 未刷新），自动收尾并退出",
+            age
+        ));
     }
 
     /// 轮询 mode 文件：变化时只改判定开关，已建立的连接不受影响
@@ -418,56 +540,24 @@ impl Worker {
             full.guard();
             return;
         }
-        // 路由注入模式：守护的是「隧道路由 + resolver 文件」，不是旧式 CIDR 下发
+        // 规则模式：守护隧道路由 + 按域名解析配置
         if let Some(split) = self.split.as_ref() {
             split.guard();
-            return;
-        }
-        let target = self.vpn_target();
-        let checks: Vec<String> = self
-            .applied
-            .iter()
-            .filter(|record| record.outcome == RouteOutcome::Created)
-            .map(|record| record.cidr.clone())
-            .collect();
-        let mut repaired = 0usize;
-        for cidr in checks {
-            match route::route_exists(&cidr, &target) {
-                Ok(true) => {}
-                Ok(false) => {
-                    if route::add_route(&cidr, &target, 1).is_ok() {
-                        repaired += 1;
-                        self.log(&format!("[路由守护] {} 被改动，已重新下发", cidr));
-                    }
-                }
-                Err(_) => {}
-            }
-        }
-        if repaired > 0 {
-            let _ = self.session.write_status(&self.status);
         }
     }
 
-    // ======================= 路由注入式分流（规则模式，macOS） =======================
+    // ======================= 路由注入式分流（规则模式） =======================
 
     /// 规则模式的落地实现：不捕获、不抢默认路由、不改系统 DNS，只做两件事——
     ///
-    /// 1. 把命中「走 VPN」的域名写进 `/etc/resolver/<域名>`，让系统解析器把这些
-    ///    域名的查询交给本机 DNS 转发器；
-    /// 2. 转发器经隧道问 VPN DNS，拿到真实内网 IP 时给这些 IP 装 `/32` 隧道路由。
+    /// 1. 把命中「走 VPN」的域名交给 VPN DNS 解析：macOS 写 `/etc/resolver/<域名>`
+    ///    + 本机转发器，Windows 写 NRPT 规则（见 `split.rs` / `win_dns.rs`）；
+    /// 2. 把这些域名解析出来的内网 IP 装 `/32` 隧道路由（macOS 在转发时注入，
+    ///    Windows 由后台解析线程注入）。
     ///
     /// 默认路由和系统 DNS 一律不动，所以结构上不可能再出现「一连上就全网断」。
     /// 任何一步失败都只是「本次分流不生效」，隧道照旧，网络不受影响。
     fn start_split_rules(&mut self) -> Result<(), String> {
-        #[cfg(not(target_os = "macos"))]
-        {
-            // 路由注入依赖 `/etc/resolver`，目前只有 macOS 有；Windows 仍走捕获引擎。
-            self.degraded_reason =
-                Some("路由注入式分流目前只支持 macOS".to_string());
-            return Ok(());
-        }
-        #[cfg(target_os = "macos")]
-        {
         let mut plan = crate::vpn::split::plan(&self.current_rules, &self.current_default_policy);
         for note in &plan.notes {
             self.log(&format!("[分流] {}", note));
@@ -501,7 +591,8 @@ impl Worker {
         }
         if all_tunnel {
             self.log(
-                "[分流] 服务端下发的是全隧道（0.0.0.0/0）：路由注入模式不接管全隧道，                 要「全部走 VPN」请用全局模式",
+                "[分流] 服务端下发的是全隧道（0.0.0.0/0）：路由注入模式不接管全隧道，\
+                 要「全部走 VPN」请用全局模式",
             );
         }
         if pushed > 0 {
@@ -513,6 +604,10 @@ impl Worker {
         let tun_dev = self.status.tun_dev.clone();
         if tun_dev.is_empty() {
             return Err("隧道接口名未知，无法注入隧道路由".to_string());
+        }
+        #[cfg(target_os = "windows")]
+        if self.status.tun_index == 0 {
+            return Err("隧道接口索引未知，无法注入隧道路由".to_string());
         }
         // 断开时要回收脚本留下的「VPN 服务器防环主机路由」：断开走 SIGKILL，
         // 脚本的 disconnect 分支根本不会执行。分流模式不装捕获路由，但这一步照做。
@@ -529,7 +624,13 @@ impl Worker {
             "[分流] 路由注入模式：域名 {:?}，网段 {:?}，VPN DNS {:?}，隧道 {}",
             plan.domains, plan.cidrs, vpn_dns, tun_dev
         ));
-        match crate::vpn::split::SplitTunnel::apply(&self.session, &tun_dev, &vpn_dns, plan) {
+        match crate::vpn::split::SplitTunnel::apply(
+            &self.session,
+            &tun_dev,
+            self.status.tun_index,
+            &vpn_dns,
+            plan,
+        ) {
             Ok(split) => {
                 self.log(&format!(
                     "[分流] 路由注入分流已生效：{} 个域名走隧道 {}，{} 条固定隧道路由；\
@@ -552,65 +653,60 @@ impl Worker {
                 Ok(())
             }
         }
-        }
     }
 
-    /// 全局模式（macOS）：整机流量走隧道。
+    /// 全局模式：整机流量走隧道（详见 fulltunnel.rs 注释）。
     ///
-    /// 照抄系统标准 vpnc-script 在 Darwin 上的动作（见 fulltunnel.rs 注释）：
-    /// 半默认路由指向隧道 + 隧道服务/活动网络服务两处 DNS 都改成 VPN DNS，
-    /// 装完立刻验证解析器还能解析，不通就整段回滚。
+    /// 半默认路由指向隧道 + 系统 DNS 改成 VPN DNS，装完立刻验证解析器还能解析，
+    /// 不通就整段回滚。
     fn start_full_tunnel(&mut self) -> Result<(), String> {
-        #[cfg(not(target_os = "macos"))]
-        {
-            self.degraded_reason = Some("全隧道接管目前只实现了 macOS".to_string());
-            return Ok(());
+        let tun_dev = self.status.tun_dev.clone();
+        if tun_dev.is_empty() {
+            return Err("隧道接口名未知，无法接管默认路由".to_string());
         }
-        #[cfg(target_os = "macos")]
-        {
-            let tun_dev = self.status.tun_dev.clone();
-            if tun_dev.is_empty() {
-                return Err("隧道接口名未知，无法接管默认路由".to_string());
+        #[cfg(target_os = "windows")]
+        if self.status.tun_index == 0 {
+            return Err("隧道接口索引未知，无法接管默认路由".to_string());
+        }
+        // SIGKILL 时脚本的 disconnect 分支不执行，服务器防环路由要自己收
+        if self.vpn_server_ips.is_empty() {
+            self.vpn_server_ips = resolve_server_ips(&self.request.server);
+        }
+        let vpn_dns: Vec<std::net::Ipv4Addr> = self
+            .status
+            .dns
+            .iter()
+            .filter_map(|item| item.trim().parse().ok())
+            .collect();
+        self.log(&format!(
+            "[全局] 接管整机流量：0.0.0.0/1 + 128.0.0.0/1 → {}，DNS → {:?}，本地网段保持直连",
+            tun_dev, vpn_dns
+        ));
+        match crate::vpn::fulltunnel::FullTunnel::apply(
+            &self.session,
+            &tun_dev,
+            self.status.tun_index,
+            &self.status.vpn_ip,
+            &vpn_dns,
+        ) {
+            Ok(full) => {
+                self.log(&format!(
+                    "[全局] 全局模式已生效：{} 条半默认路由指向 {}，DNS 已指到 {:?}（断开时还原）",
+                    full.route_count(),
+                    full.tun_dev(),
+                    full.dns_servers()
+                ));
+                self.status.routes = full.routes_for_status();
+                self.full = Some(full);
+                Ok(())
             }
-            // SIGKILL 时脚本的 disconnect 分支不执行，服务器防环路由要自己收
-            if self.vpn_server_ips.is_empty() {
-                self.vpn_server_ips = resolve_server_ips(&self.request.server);
-            }
-            let vpn_dns: Vec<std::net::Ipv4Addr> = self
-                .status
-                .dns
-                .iter()
-                .filter_map(|item| item.trim().parse().ok())
-                .collect();
-            self.log(&format!(
-                "[全局] 接管整机流量：0.0.0.0/1 + 128.0.0.0/1 → {}，系统 DNS → {:?}，本地网段保持直连",
-                tun_dev, vpn_dns
-            ));
-            match crate::vpn::fulltunnel::FullTunnel::apply(
-                &self.session,
-                &tun_dev,
-                &self.status.vpn_ip,
-                &vpn_dns,
-            ) {
-                Ok(full) => {
-                    self.log(&format!(
-                        "[全局] 全局模式已生效：{} 条半默认路由指向 {}，DNS 已切到 {:?}（断开时还原）",
-                        full.route_count(),
-                        full.tun_dev(),
-                        full.dns_servers()
-                    ));
-                    self.status.routes = full.routes_for_status();
-                    self.full = Some(full);
-                    Ok(())
-                }
-                Err(e) => {
-                    self.degraded_reason = Some(format!("全局模式未能接管整机流量：{}", e));
-                    self.log(&format!(
-                        "[全局] 未能接管整机流量：{}（本次只建隧道，网络不受影响）",
-                        e
-                    ));
-                    Ok(())
-                }
+            Err(e) => {
+                self.degraded_reason = Some(format!("全局模式未能接管整机流量：{}", e));
+                self.log(&format!(
+                    "[全局] 未能接管整机流量：{}（本次只建隧道，网络不受影响）",
+                    e
+                ));
+                Ok(())
             }
         }
     }
@@ -629,7 +725,7 @@ impl Worker {
         }
         if let Some(mut full) = self.full.take() {
             full.teardown();
-            self.log("[模式] 已撤掉全局模式的布线（半默认路由与系统 DNS 已还原）");
+            self.log("[模式] 已撤掉全局模式的布线（半默认路由与 DNS 已还原）");
         }
         self.degraded_reason = None;
         self.status.routes.clear();
@@ -684,60 +780,40 @@ impl Worker {
         self.set_phase(VpnPhase::Connected, &message);
     }
 
-    // ======================= 规则分流引擎（macOS） =======================
+    // ======================= 按代理模式布线 =======================
 
-    /// 装配引擎：开捕获 TUN、抢半默认路由、给服务器打防环主机路由，
-    /// 再把 netstack + 出口 Router + 规则集 + 进程反查组装成 `Engine`。
+    /// 隧道就绪后按本次生效的代理模式布线。
     ///
-    /// 装配成功后过渡期的按 CIDR 下发路由全部作废（清空 `applied`），
-    /// 改由引擎在每条流建立时按规则注入。
+    /// 三种模式都是「本地布线」，不再开捕获网卡：
+    /// - 直连：隧道留着，什么都不改；
+    /// - 规则：按域名/网段的 DNS + 路由注入（`split.rs`），默认路由与系统 DNS 不动；
+    /// - 全局：两条半默认路由 + 系统 DNS 指向 VPN（`fulltunnel.rs`），带验证与回滚。
+    ///
+    /// 非 macOS / Windows 平台不在这里判：`SplitTunnel::apply` / `FullTunnel::apply`
+    /// 的第一步就会因为「没有该平台的路由实现」报错，走统一的降级分支（只建隧道）。
+    /// 这样三个平台都能编译，也不会在没验证过的平台上动路由表。
     fn start_engine(&mut self) -> Result<(), String> {
-        // 规则模式（macOS）不再捕获：抢半默认路由会让系统解析器彻底失效
-        // （见设计文档根因九），改成路由注入式分流。
-        // 直连模式：隧道留着就行，不需要捕获、也不需要注入任何路由
-        if self.applied_mode == ProxyMode::Direct {
-            self.log("[模式] 直连模式：隧道已建立，不接管任何流量");
-            return Ok(());
+        match self.applied_mode {
+            ProxyMode::Direct => {
+                self.log("[模式] 直连模式：隧道已建立，不接管任何流量");
+                Ok(())
+            }
+            ProxyMode::Rule => self.start_split_rules(),
+            ProxyMode::Global => self.start_full_tunnel(),
         }
-        #[cfg(target_os = "macos")]
-        if self.applied_mode == ProxyMode::Rule {
-            return self.start_split_rules();
-        }
-        // 全局模式：整机流量走隧道 —— 等价于裸跑 openconnect，见 fulltunnel.rs
-        #[cfg(target_os = "macos")]
-        if self.applied_mode == ProxyMode::Global {
-            return self.start_full_tunnel();
-        }
-        // 其它平台还没有路由注入实现：隧道建起来，但不接管任何流量。
-        // 宁可什么都不做，也不要在没验证过的平台上瞎改路由表。
-        self.degraded_reason = Some("路由注入式接管目前只实现了 macOS".to_string());
-        self.log("[模式] 当前平台还没有分流实现：隧道已建立，未接管任何流量");
-        Ok(())
     }
 
-    /// 回收本程序添加的路由，并把默认路由交还给连接前的物理网关
+    /// 回收本程序布下的分流通路（隧道路由、解析器配置、半默认路由与 DNS）
     fn cleanup_routes(&mut self) {
-        // 路由注入分流优先回收：resolver 文件、隧道路由、转发线程都得清干净，
-        // 否则断开后内网域名会继续被指向一个没人监听的 127.0.0.1:53。
         if let Some(mut full) = self.full.take() {
             full.teardown();
-            self.log("[清理] 全局模式已回收（半默认路由与系统 DNS 已还原）");
+            self.log("[清理] 全局模式已回收（半默认路由与 DNS 已还原）");
         }
         if let Some(mut split) = self.split.take() {
             split.teardown();
-            self.log("[清理] 路由注入分流已回收（resolver 文件、隧道路由、DNS 转发器）");
+            self.log("[清理] 路由注入分流已回收（解析器配置、隧道路由、后台解析线程）");
         }
         self.status.routes.clear();
-        let records: Vec<AppliedRouteRecord> = self.applied.drain(..).collect();
-        for record in records {
-            let result = match record.outcome {
-                RouteOutcome::Created => route::delete_route(&record.cidr, &record.target),
-                RouteOutcome::Updated => route::reset_route_metric(&record.cidr, &record.target, 256),
-            };
-            if let Err(e) = result {
-                self.log(&format!("[清理] {} 回收失败: {}", record.cidr, e));
-            }
-        }
         // 脚本给 VPN 服务器加的防环主机路由不在这份记录里，SIGKILL 停止时脚本的
         // disconnect 分支不会执行，它会一直残留并可能让下次连接选源失败，这里一并清掉。
         for ip in std::mem::take(&mut self.vpn_server_ips) {
@@ -745,7 +821,6 @@ impl Worker {
                 self.log(&format!("[清理] 服务器主机路由 {} 回收失败: {}", ip, e));
             }
         }
-        self.status.routes.clear();
     }
 
     // ======================= 网络快照 =======================
@@ -831,6 +906,22 @@ impl Worker {
 
     fn connect_openconnect(&mut self) -> Result<(Child, Vec<String>), String> {
         self.clear_stale_server_routes();
+        if !self.request.connector_path.is_empty() {
+            let (version_text, version_ok) = crate::process::run_with_timeout(
+                Path::new(&self.request.connector_path),
+                &["--version"],
+                Duration::from_secs(10),
+            );
+            if version_ok {
+                let first = version_text.lines().next().unwrap_or("").trim();
+                self.log(&format!("[隧道] openconnect 版本：{}", first));
+            } else {
+                self.log(&format!(
+                    "[隧道] 读取 openconnect 版本失败：{}",
+                    version_text.lines().next().unwrap_or("").trim()
+                ));
+            }
+        }
         let (file_name, content) = script::generate(&script::ScriptContext {
             session_dir: &self.session.dir,
             original_gateway: &self.snapshot.default_gateway,
@@ -841,6 +932,22 @@ impl Worker {
 
         let mut request = self.request.clone();
         request.script_path = script_path.to_string_lossy().to_string();
+        // 认证失败时最该先排除的是密码本身有没有问题，但密码又不能落进日志。
+        // 只打三个不泄密的特征：长度、是否全 ASCII、首尾有没有空白。
+        self.log(&format!(
+            "[诊断] 密码长度 {}，{}，{}",
+            request.password.chars().count(),
+            if request.password.is_ascii() {
+                "全 ASCII"
+            } else {
+                "含非 ASCII 字符（服务端与本地编码不一致时会被判错）"
+            },
+            if request.password.trim().len() == request.password.len() {
+                "首尾无空白"
+            } else {
+                "首尾有空白（会一并送进服务端）"
+            }
+        ));
         // 返回真正下发的那份参数：self.request.script_path 还是空的，
         // 拿它拼日志会打出一句 `--script= vpn.example.com:1218` 误导排查
         let args = connector::openconnect_args(&request);
@@ -857,8 +964,9 @@ impl Worker {
             Err(e) => return self.fail(&e),
         };
         self.log(&format!(
-            "[隧道] openconnect 已启动，pid {}，参数 {}",
+            "[隧道] openconnect 已启动，pid {}，程序 {}，参数 {}",
             child.id(),
+            self.request.connector_path,
             spawn_args.join(" ")
         ));
 
@@ -901,7 +1009,7 @@ impl Worker {
                     let reason = format!(
                         "路由脚本执行失败，隧道无法完成配置。openconnect 的原话：{}\n\
                          {}脚本本身由本程序生成，\
-                         如需排查请把会话目录里的 worker.log 与 script.log 一并提供。",
+                         如需排查请把会话目录里的 worker.log、script.log、powershell.log 一并提供。",
                         raw, hint
                     );
                     return self.fail(&reason);
@@ -916,6 +1024,8 @@ impl Worker {
                     let _ = child.wait();
                     return self.fail(&e);
                 }
+                #[cfg(target_os = "windows")]
+                self.dump_network_state("接管成功后");
                 match self.degraded_reason.clone() {
                     // 降级：隧道在建，但没有接管系统流量（例如当前平台还没有分流实现）
                     Some(reason) => {
@@ -973,6 +1083,11 @@ impl Worker {
                         );
                         // 驱动没装这类问题，光看 openconnect 的原文没人知道该干嘛
                         if let Some(hint) = self.tun_setup_hint() {
+                            reason.push('。');
+                            reason.push_str(&hint);
+                        }
+                        // 认证被拒同理：日志里只有一句 Login failed，看不出该改什么
+                        if let Some(hint) = self.auth_hint() {
                             reason.push('。');
                             reason.push_str(&hint);
                         }
@@ -1092,6 +1207,21 @@ fn now() -> String {
     crate::util::time::now_local_rfc3339()
 }
 
+/// 两个 exe 路径是否指同一个程序文件。
+///
+/// 只用于启动时的一致性告警：Windows 盘符/路径大小写不敏感，斜杠方向也可能
+/// 因来源不同而不一致；macOS/Linux 的路径大小写敏感，不能一律小写比较。
+fn same_program(a: &Path, b: &Path) -> bool {
+    if a.as_os_str().is_empty() || b.as_os_str().is_empty() {
+        return false;
+    }
+    #[cfg(target_os = "windows")]
+    let normalize = |path: &Path| path.to_string_lossy().replace('\\', "/").to_lowercase();
+    #[cfg(not(target_os = "windows"))]
+    let normalize = |path: &Path| path.to_string_lossy().to_string();
+    normalize(a) == normalize(b)
+}
+
 /// 从 RFC3339 时间戳算到现在过了多久
 fn elapsed_since(timestamp: &str) -> Duration {
     match chrono::DateTime::parse_from_rfc3339(timestamp) {
@@ -1113,6 +1243,27 @@ pub fn run(session_dir: &Path) -> i32 {
     }
 
     session.append_log(&format!("[worker] 启动，pid {}", std::process::id()));
+    session.append_log(&format!(
+        "[worker] 版本 {}，系统 {} {}，计算机 {}，用户 {}",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        std::env::var("COMPUTERNAME").unwrap_or_else(|_| "未知".to_string()),
+        std::env::var("USERNAME").unwrap_or_else(|_| "未知".to_string())
+    ));
+
+    // 先设好，才能把 cleanup_stale / restore_stale 里的 PowerShell 也记进
+    // powershell.log（这些清理命令失败是“内网域名全解析不了”的常见原因）。
+    #[cfg(target_os = "windows")]
+    {
+        let ps_log = session.dir.join("powershell.log");
+        std::env::set_var("WS_VPN_PS_LOG", &ps_log);
+        session.append_log(&format!(
+            "[worker] PowerShell 完整日志：{}；脚本完整日志：{}（UTF-16LE）",
+            ps_log.display(),
+            session.script_log_path().display()
+        ));
+    }
 
     let request = match session.read_request() {
         Ok(request) => request,
@@ -1122,29 +1273,66 @@ pub fn run(session_dir: &Path) -> i32 {
         }
     };
 
-    // 上一轮被 SIGKILL 时留下的 /etc/resolver 文件先清掉：
-    // 这些文件会把内网域名指向一个没人监听的 127.0.0.1:53，清不干净就是「内网域名全解析不了」。
+    // 上一轮被 SIGKILL 时留下的解析器配置先清掉：macOS 是 `/etc/resolver` 文件
+    // （会把内网域名指向一个没人监听的 127.0.0.1:53），Windows 是 NRPT 规则
+    // （会把内网域名指向已经断掉的 VPN DNS）。清不干净就是「内网域名全解析不了」。
     crate::vpn::split::cleanup_stale(&session);
-    // 全局模式崩溃现场：DNS 被改到 VPN DNS、标记文件还在 —— 先还原再连，
-    // 否则会把残留的 VPN DNS 当成「用户自己配的」快照下来，再也回不到 DHCP。
+    // 全局模式崩溃现场：macOS 的 DNS 被改到 VPN DNS、标记文件还在；Windows 的
+    // 半默认路由还挂在 VPN 网卡上。先还原再连，否则会把残留状态当成「用户自己配的」。
     crate::vpn::fulltunnel::restore_stale(&session);
     let mut worker = Worker::new(session, request);
+
+    // 权限问题排查的第一现场：日志里必须先能回答「这个 worker 到底提权了没有、
+    // 跑的是哪个 exe」。之前只有间接证据（Get-NetAdapter 报「拒绝访问」），
+    // 用户看到失败根本分不清是没提权、提权到了旧版本、还是别的原因。
+    //
+    // 现在把主进程的 exe 也一起打出来：便携版/安装版共用同一份会话目录时，
+    // 计划任务可能还指向另一个旧 exe，日志里两个路径一不一样立刻就能看出来。
+    let self_exe = std::env::current_exe().ok();
+    let main_exe = Path::new(&worker.request.hook_exe);
+    worker.log(&format!(
+        "[worker] 提权状态：{}，程序 {}，主程序 {}，会话目录 {}",
+        if crate::vpn::elevate::is_elevated() {
+            "管理员"
+        } else {
+            "非管理员（建隧道、改路由、写 DNS 都会失败）"
+        },
+        self_exe
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "未知".to_string()),
+        if main_exe.as_os_str().is_empty() {
+            "未知".to_string()
+        } else {
+            main_exe.display().to_string()
+        },
+        worker.session.dir.display()
+    ));
+    if let Some(self_exe) = self_exe.as_deref() {
+        if !main_exe.as_os_str().is_empty() && !same_program(self_exe, main_exe) {
+            worker.log(
+                "[worker] 警告：worker 与主进程不是同一个程序文件，计划任务很可能还指向旧版本。\
+                 本次会按这份 worker 的旧逻辑运行（心跳判定、分流行为都可能与主程序不一致），\
+                 请先在 VPN 页移除并重新注册免 UAC 计划任务。",
+            );
+        }
+    }
 
     if worker.request.connector_path.is_empty() {
         return worker.fail("没有可用的连接器，请先在 VPN 页确认连接器状态");
     }
 
+    // 先把阶段落成「准备中」。默认状态是 Disconnected，采集网络快照时会原样写盘，
+    // 主进程的心跳线程若正好读到这一份，会误以为会话已经结束而停止续命。
+    worker.set_phase(VpnPhase::Preparing, "正在准备连接");
+
     // 只剩 openconnect 一条通道，连接器路径一定是 openconnect 可执行文件
     let code = worker.run_openconnect();
 
-    // 兜底：任何路径退出前都确保路由被回收。
-    // 分流模式没有 applied 路由表，但它有 resolver 文件、隧道路由和转发线程要收，
-    // 所以这几个条件都要算上，否则异常退出会把 `/etc/resolver` 留在地上。
-    if !worker.applied.is_empty()
-        || worker.split.is_some()
-        || worker.full.is_some()
-        || !worker.vpn_server_ips.is_empty()
-    {
+    // 兜底：任何路径退出前都确保布线被回收。
+    // 规则模式没有「路由表账本」，但它有解析器配置、隧道路由和后台解析线程要收，
+    // 所以这几个条件都要算上，否则异常退出会把 `/etc/resolver` / NRPT 规则留在地上。
+    if worker.split.is_some() || worker.full.is_some() || !worker.vpn_server_ips.is_empty() {
         worker.cleanup_routes();
     }
     let _ = worker.session.write_status(&worker.status);
@@ -1298,6 +1486,61 @@ mod tests {
     }
 
     #[test]
+    fn ingest_script_log_reads_utf16_and_recovers_after_rotation() {
+        let dir = std::env::temp_dir().join("ws-worker-test-script-log-utf16");
+        let _ = std::fs::remove_dir_all(&dir);
+        let session = VpnSession::new(dir.clone());
+        session.ensure().unwrap();
+        let request = VpnRequest {
+            conn_identity: String::new(),
+            proxy_mode: "rule".to_string(),
+            profile_id: "p".into(),
+            profile_name: "n".into(),
+            server: "s".into(),
+            username: "u".into(),
+            password: "p".into(),
+            protocol: "anyconnect".into(),
+            connector: crate::vpn::models::ConnectorKind::Auto,
+            connector_path: "x".into(),
+            rules: vec![],
+            default_policy: "DIRECT".into(),
+            extra_args: vec![],
+            script_path: "s".into(),
+            hook_exe: "h".into(),
+            created_at: String::new(),
+        };
+        let mut worker = Worker::new(session, request);
+
+        let text = "WS-WORKBENCH ip4=10.10.0.2\n\
+                    WS-WORKBENCH tunidx=7\n\
+                    WS-WORKBENCH tundev=测试网卡\n\
+                    WS-WORKBENCH done=connect\n";
+        let mut bytes = vec![0xFF, 0xFE];
+        for unit in text.encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        std::fs::write(worker.session.script_log_path(), &bytes).unwrap();
+        worker.ingest_script_log();
+        assert_eq!(worker.status.vpn_ip, "10.10.0.2");
+        assert_eq!(worker.status.tun_index, 7);
+        assert_eq!(worker.status.tun_dev, "测试网卡");
+        assert!(worker.script_done);
+        assert!(worker.tunnel_ready());
+
+        // 模拟 connect 时脚本把旧日志改成 script.prev.log，新日志更短：
+        // 游标必须回退到 0，否则新文件的内容全被当成「已读」。
+        let shorter = "WS-WORKBENCH ip4=10.9.0.3\n";
+        let mut bytes = vec![0xFF, 0xFE];
+        for unit in shorter.encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        std::fs::write(worker.session.script_log_path(), &bytes).unwrap();
+        worker.ingest_script_log();
+        assert_eq!(worker.status.vpn_ip, "10.9.0.3");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn tail_summary_picks_error_lines() {
         let session = VpnSession::new(std::env::temp_dir().join("ws-worker-test"));
         let request = VpnRequest {
@@ -1322,6 +1565,100 @@ mod tests {
         worker.tail.push("CSTP connected".into());
         worker.tail.push("Login failed.".into());
         assert!(worker.tail_summary().contains("Login failed"));
+    }
+
+    #[test]
+    fn single_stale_heartbeat_does_not_kill_the_tunnel() {
+        // 现场：CSTP 刚连上，2 秒后 worker 就宣布「心跳已停止」把隧道收了。
+        // 现在要求连续两次过期才判定，单次抖动不能误杀。
+        let session = VpnSession::new(std::env::temp_dir().join("ws-worker-test-alive"));
+        session.ensure().unwrap();
+        session.touch_alive().unwrap();
+        let request = VpnRequest {
+            conn_identity: String::new(),
+            proxy_mode: "rule".to_string(),
+            profile_id: "p".into(),
+            profile_name: "n".into(),
+            server: "s".into(),
+            username: "u".into(),
+            password: "p".into(),
+            protocol: "anyconnect".into(),
+            connector: crate::vpn::models::ConnectorKind::Auto,
+            connector_path: "x".into(),
+            rules: vec![],
+            default_policy: "DIRECT".into(),
+            extra_args: vec![],
+            script_path: "s".into(),
+            hook_exe: "h".into(),
+            created_at: String::new(),
+        };
+        let mut worker = Worker::new(session.clone(), request);
+
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(30);
+        {
+            let file = std::fs::File::options()
+                .write(true)
+                .open(session.alive_path())
+                .unwrap();
+            file.set_modified(old).unwrap();
+        }
+
+        // Worker::new 里 last_alive_check 是「现在」，第一次调用会因为是刚检查过而跳过，
+        // 所以每次都把上次检查时间往回拨，模拟每秒一次的轮询。
+        worker.last_alive_check = std::time::Instant::now() - std::time::Duration::from_secs(2);
+        worker.check_parent_alive();
+        assert!(!worker.parent_lost, "第一次读到过期不能直接判定主进程没了");
+
+        worker.last_alive_check = std::time::Instant::now() - std::time::Duration::from_secs(2);
+        worker.check_parent_alive();
+        assert!(worker.parent_lost, "连续两次过期才算真的没了");
+    }
+
+    #[test]
+    fn auth_failure_produces_actionable_hint() {
+        // 现场日志：Login failed → 再问一次密码 → fgetws(stdin) EOF。
+        // 提示必须说清「不是密码没送到」，否则下一个人还会往这个方向查。
+        let session = VpnSession::new(std::env::temp_dir().join("ws-worker-test-auth"));
+        let request = VpnRequest {
+            conn_identity: String::new(),
+            proxy_mode: "rule".to_string(),
+            profile_id: "p".into(),
+            profile_name: "n".into(),
+            server: "s".into(),
+            username: "u".into(),
+            password: "12345678".into(),
+            protocol: "anyconnect".into(),
+            connector: crate::vpn::models::ConnectorKind::Auto,
+            connector_path: "x".into(),
+            rules: vec![],
+            default_policy: "DIRECT".into(),
+            extra_args: vec![],
+            script_path: "s".into(),
+            hook_exe: "h".into(),
+            created_at: String::new(),
+        };
+        let mut worker = Worker::new(session, request);
+        worker.tail.push("Please enter your password.".into());
+        worker.tail.push("Login failed.".into());
+        worker
+            .tail
+            .push("Password:fgetws (stdin): No error".into());
+        let hint = worker.auth_hint().expect("认证失败必须给出提示");
+        assert!(hint.contains("fgetws"));
+        assert!(hint.contains("--authgroup"), "提示里要写出可以试的参数");
+        assert!(hint.contains("-v"), "提示里要写出看服务端原文的办法");
+
+        // 不是认证失败时不能误报成认证问题
+        let mut clean = Worker::new(
+            VpnSession::new(std::env::temp_dir().join("ws-worker-test-auth2")),
+            {
+                let mut request = worker.request.clone();
+                request.profile_id = "p2".into();
+                request
+            },
+        );
+        clean.tail.push("CSTP connected".into());
+        assert!(clean.auth_hint().is_none());
     }
 
     #[test]
@@ -1380,6 +1717,9 @@ mod tests {
         worker.status.vpn_ip = "198.51.100.39".into();
         assert!(!worker.tunnel_ready());
         worker.status.tun_index = 21;
+        // 地址已经回报，但脚本还没写完 done：不能抢跑装路由
+        assert!(!worker.tunnel_ready());
+        worker.script_done = true;
         assert!(worker.tunnel_ready());
     }
 
@@ -1455,6 +1795,34 @@ mod tests {
             dir.join("vpnc-script.sh"),
             "不含空格的路径原样返回，不做无谓搬迁"
         );
+    }
+
+    #[test]
+    fn same_program_compares_paths_the_way_the_platform_does() {
+        #[cfg(target_os = "windows")]
+        {
+            assert!(same_program(
+                Path::new(r"D:\App\ws.exe"),
+                Path::new("d:/app/WS.EXE")
+            ));
+            assert!(!same_program(
+                Path::new(r"D:\App\ws.exe"),
+                Path::new(r"D:\App2\ws.exe")
+            ));
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            assert!(same_program(
+                Path::new("/opt/ws/ws-workbench"),
+                Path::new("/opt/ws/ws-workbench")
+            ));
+            // macOS/Linux 大小写敏感，不能把两个不同目录当成同一个
+            assert!(!same_program(
+                Path::new("/opt/ws/ws-workbench"),
+                Path::new("/opt/WS/ws-workbench")
+            ));
+        }
+        assert!(!same_program(Path::new(""), Path::new("x")));
     }
 
     #[test]

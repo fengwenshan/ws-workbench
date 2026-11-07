@@ -26,16 +26,7 @@ chrono = "0.4"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 tempfile = "3"
 libc = "0.2"
-smoltcp = { version = "0.11", default-features = false, features = [
-    "std",
-    "alloc",
-    "medium-ip",
-    "proto-ipv4",
-    "socket-tcp",
-    "socket-udp",
-] }
 nix = { version = "0.29", features = ["net", "ioctl", "socket", "fs"] }
-socket2 = "0.6"
 tauri-plugin-updater = "2.11.0"
 tauri-plugin-process = "2.3.1"
 base64 = "0.22"

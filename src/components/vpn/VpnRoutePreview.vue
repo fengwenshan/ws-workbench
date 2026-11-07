@@ -143,7 +143,7 @@ const hasRoutes = computed(() => props.status.routes.length > 0)
 .route-row {
   display: flex;
   gap: 8px;
-  padding: 5px 10px;
+  padding: 6px 10px;
   font-size: 12px;
   align-items: center;
 }
@@ -171,9 +171,9 @@ const hasRoutes = computed(() => props.status.routes.length > 0)
 }
 .via-tag {
   font-style: normal;
-  font-size: 11px;
+  font-size: 12px;
   border-radius: 8px;
-  padding: 1px 7px;
+  padding: 1px 8px;
 }
 .via-vpn {
   color: var(--primary);

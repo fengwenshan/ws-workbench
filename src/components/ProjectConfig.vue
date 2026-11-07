@@ -413,7 +413,7 @@ defineExpose({
   margin-top: 12px;
   padding: 10px 12px;
   border-radius: 6px;
-  font-size: 13px;
+  font-size: 14px;
   line-height: 1.5;
 }
 .type-tip-unknown {
@@ -427,7 +427,7 @@ defineExpose({
 .form-row label {
   display: block;
   margin-bottom: 6px;
-  font-size: 13px;
+  font-size: 14px;
   color: var(--text-secondary);
 }
 .form-input {
@@ -486,7 +486,7 @@ defineExpose({
   flex: none;
   padding: 2px 6px;
   border: 1px solid var(--border-color);
-  border-radius: 3px;
+  border-radius: 4px;
   background: transparent;
   color: var(--text-secondary);
   font: inherit;

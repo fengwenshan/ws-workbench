@@ -570,8 +570,8 @@ function toggleCollapse(groupId: string) {
   outline-offset: 0;
 }
 .group-chevron {
-  width: 11px;
-  height: 11px;
+  width: 12px;
+  height: 12px;
   fill: none;
   stroke: currentColor;
   stroke-width: 1.6;
@@ -610,7 +610,7 @@ function toggleCollapse(groupId: string) {
 .group-default-badge {
   flex-shrink: 0;
   height: 16px;
-  padding: 0 5px;
+  padding: 0 6px;
   border-radius: 4px;
   background: var(--bg-tag);
   color: var(--text-muted);
@@ -677,7 +677,7 @@ function toggleCollapse(groupId: string) {
   height: 30px;
   padding: 0 6px 0 16px;
   border-radius: 6px;
-  font-size: 13px;
+  font-size: 14px;
   color: var(--text-secondary);
   user-select: none;
   cursor: pointer;
@@ -788,7 +788,7 @@ function toggleCollapse(groupId: string) {
 
 /* 拖拽插入指示线 */
 .group-drop-indicator {
-  height: 3px;
+  height: 4px;
   background: var(--primary);
   border-radius: 2px;
   margin: 2px 4px;

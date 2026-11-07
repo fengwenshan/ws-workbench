@@ -1021,7 +1021,7 @@ async function handlePack(project: any, asZip: boolean = false) {
   flex-shrink: 0;
 }
 .app-name {
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 600;
   color: var(--text-primary);
   white-space: nowrap;
@@ -1066,8 +1066,8 @@ async function handlePack(project: any, asZip: boolean = false) {
   outline-offset: -2px;
 }
 .window-control svg {
-  width: 11px;
-  height: 11px;
+  width: 12px;
+  height: 12px;
   fill: none;
   stroke: currentColor;
   stroke-width: 1;
@@ -1108,7 +1108,7 @@ async function handlePack(project: any, asZip: boolean = false) {
 }
 .titlebar-search-hint {
   margin-left: auto;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-muted);
 }
 
@@ -1164,7 +1164,7 @@ async function handlePack(project: any, asZip: boolean = false) {
   left: -8px;
   top: 8px;
   bottom: 8px;
-  width: 3px;
+  width: 4px;
   border-radius: 0 2px 2px 0;
   background: var(--primary);
 }
@@ -1188,8 +1188,8 @@ async function handlePack(project: any, asZip: boolean = false) {
 }
 .rail-vpn-badge {
   position: absolute;
-  right: 3px;
-  bottom: 3px;
+  right: 4px;
+  bottom: 4px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1224,7 +1224,7 @@ async function handlePack(project: any, asZip: boolean = false) {
   outline-offset: -2px;
 }
 .resizer-tree {
-  width: 5px;
+  width: 6px;
   cursor: col-resize;
 }
 .resizer:hover {
@@ -1307,7 +1307,7 @@ async function handlePack(project: any, asZip: boolean = false) {
   border-bottom: 1px solid rgba(37, 99, 235, 0.25);
 }
 .update-banner-text {
-  font-size: 13px;
+  font-size: 14px;
   color: var(--text-primary);
 }
 .update-banner-text strong {

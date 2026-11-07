@@ -45,8 +45,8 @@ const classes = computed(() => [
   transition: background 0.15s, box-shadow 0.15s, opacity 0.15s;
 }
 .size-sm {
-  width: 7px;
-  height: 7px;
+  width: 8px;
+  height: 8px;
 }
 .size-md {
   width: 8px;
@@ -60,10 +60,10 @@ const classes = computed(() => [
   animation: vpn-dot-pulse 1s ease-in-out infinite;
 }
 .glow.is-on {
-  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.15);
+  box-shadow: 0 0 0 4px rgba(16, 185, 129, 0.15);
 }
 .glow.is-busy {
-  box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.16);
+  box-shadow: 0 0 0 4px rgba(245, 158, 11, 0.16);
 }
 @keyframes vpn-dot-pulse {
   0%,

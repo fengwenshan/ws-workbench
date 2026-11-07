@@ -11,7 +11,7 @@ use crate::vpn::guide;
 use crate::vpn::models::*;
 use crate::vpn::session::{LogCursor, VpnSession};
 use crate::vpn::models::ProxyMode;
-use crate::vpn::{detect, elevate};
+use crate::vpn::{detect, elevate, notify};
 
 /// 状态轮询间隔：既能让界面反应够快，也不会把磁盘打满
 const POLL_INTERVAL: Duration = Duration::from_millis(600);
@@ -59,6 +59,14 @@ static SESSION_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 /// 用户在界面上看到的会话目录来源，用于解释「为什么日志不在预期位置」
 static SESSION_DIR_ORIGIN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
+/// 启动时没能探测到可写会话目录的原因（成功时为空）。
+///
+/// 这种情况会退到临时目录，然后**一直用到重启**。以前失败原因只打在 stderr 上，
+/// GUI 用户看不到，最后只在点「连接」时看到一句
+/// 「创建会话目录失败 C:\...\Temp\ws-workbench-vpn: 拒绝访问」——
+/// 指向的临时目录只是受害者，真正的原因（用户目录当时不可写）被藏起来了。
+static SESSION_DIR_ERROR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
 pub fn session_dir(app: &AppHandle) -> Result<PathBuf, String> {
     if let Some(dir) = SESSION_DIR.get() {
         return Ok(dir.clone());
@@ -75,6 +83,24 @@ pub fn session_dir_origin() -> String {
         .get()
         .cloned()
         .unwrap_or_else(|| "应用数据目录".to_string())
+}
+
+/// 把「启动时探测会话目录失败」的上下文拼到错误信息后面（没失败过就返回空串）。
+fn session_dir_diagnosis() -> String {
+    let reason = SESSION_DIR_ERROR
+        .lock()
+        .ok()
+        .and_then(|slot| slot.clone())
+        .unwrap_or_default();
+    if reason.trim().is_empty() {
+        return String::new();
+    }
+    format!(
+        "\n应用启动时没能找到可写的会话目录，只能退到临时目录：{}。\
+         重启应用会重新探测；如果重启后仍然失败，\
+         请检查杀毒软件的「受控文件夹访问」或企业策略是否禁止本程序写入用户目录。",
+        reason
+    )
 }
 
 fn resolve_session_dir(app: &AppHandle) -> Result<(PathBuf, String), String> {
@@ -96,6 +122,14 @@ fn resolve_session_dir(app: &AppHandle) -> Result<(PathBuf, String), String> {
             ));
         }
     }
+    // 便携版、以及用户目录整个不可写的机器：可执行文件旁边一定是我们自己的目录，
+    // 不需要任何额外的用户目录权限。放在临时目录**之前**——临时目录会随时间被清理，
+    // 而且它自己也可能不可写（本机就遇到过 TEMP 的权限被改过、整个目录写不了的情况）。
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            candidates.push(("程序目录（可执行文件旁）".to_string(), parent.to_path_buf()));
+        }
+    }
     // 兜底：临时目录在当前用户 profile 下，权限最宽松
     candidates.push((
         "临时目录".to_string(),
@@ -104,30 +138,52 @@ fn resolve_session_dir(app: &AppHandle) -> Result<(PathBuf, String), String> {
 
     let mut tried: Vec<String> = Vec::new();
     for (label, base) in candidates {
-        if let Some(dir) = probe_writable(&base) {
-            return Ok((dir, label));
+        match probe_writable(&base) {
+            Some(dir) => {
+                if let Ok(mut slot) = SESSION_DIR_ERROR.lock() {
+                    *slot = None;
+                }
+                return Ok((dir, label));
+            }
+            None => tried.push(base.display().to_string()),
         }
-        tried.push(base.display().to_string());
     }
 
-    Err(format!(
+    let reason = format!(
         "找不到可写的会话目录，已依次尝试：{}。\
          请检查杀毒软件的受控文件夹访问或企业策略是否禁止本程序写入用户目录。",
         tried.join("、")
-    ))
+    );
+    if let Ok(mut slot) = SESSION_DIR_ERROR.lock() {
+        *slot = Some(format!("已依次尝试：{}", tried.join("、")));
+    }
+    Err(reason)
 }
 
 /// 目录能建出来不代表能写进去。
 ///
 /// `create_dir_all` 在目录已存在时会直接返回成功，把一个只读目录也伪装成可用，
 /// 所以必须真写一个探针文件才算数 —— 否则问题会推迟到连接时才爆发。
+///
+/// 探测失败会重试几次：杀毒软件/索引器短暂持有刚建的目录、或沙箱在切换策略的
+/// 一瞬间收紧权限，都会让一次探测假失败，进而把整个会话退到临时目录直到重启。
 fn probe_writable(base: &std::path::Path) -> Option<PathBuf> {
     let dir = base.join("vpn");
-    std::fs::create_dir_all(&dir).ok()?;
-    let probe = dir.join(".write-probe");
-    std::fs::write(&probe, b"ok").ok()?;
-    let _ = std::fs::remove_file(&probe);
-    Some(dir)
+    for attempt in 0..3 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(120));
+        }
+        if std::fs::create_dir_all(&dir).is_err() {
+            continue;
+        }
+        let probe = dir.join(".write-probe");
+        if std::fs::write(&probe, b"ok").is_err() {
+            continue;
+        }
+        let _ = std::fs::remove_file(&probe);
+        return Some(dir);
+    }
+    None
 }
 
 fn session_of(app: &AppHandle) -> Result<VpnSession, String> {
@@ -299,7 +355,9 @@ pub fn vpn_preview_rules(
 pub struct ElevationInfo {
     /// 当前进程是否已是管理员
     pub elevated: bool,
-    /// Windows 计划任务是否已注册（注册后连接不再弹 UAC）
+    /// 任务本身是否存在（可能指向旧程序/旧会话目录）
+    pub task_exists: bool,
+    /// Windows 计划任务是否已注册且指向当前程序（注册后连接不再弹 UAC）
     pub task_ready: bool,
     /// 平台
     pub platform: String,
@@ -315,22 +373,30 @@ pub fn vpn_elevation_info(app: AppHandle) -> ElevationInfo {
     let elevated = elevate::is_elevated();
     // 任务存在还不够：里面写死了会话目录，回退过就作废了，
     // 否则界面会显示「已注册免 UAC」，结果连接时又弹一次 UAC。
-    let task_ready = match session_of(&app) {
-        Ok(session) => {
+    let task_exists = elevate::worker_task_exists();
+    let task_ready = match (session_of(&app), std::env::current_exe()) {
+        (Ok(session), Ok(exe)) => {
             let recorded = recorded_task_dir(&app);
-            elevate::worker_task_exists()
-                && elevate::worker_task_matches(&session.dir, recorded.as_deref())
+            task_exists && elevate::worker_task_matches(&exe, &session.dir, recorded.as_deref())
         }
-        Err(_) => elevate::worker_task_exists(),
+        _ => task_exists,
     };
 
     let hint = if elevated {
         "当前已是管理员权限，无需额外提权".to_string()
     } else if Platform::is_windows(&Platform) {
         if task_ready {
-            "已注册免 UAC 计划任务，之后连接不再弹管理员确认".to_string()
+            "已注册免 UAC 计划任务，之后连接不再弹管理员确认；\
+             换新包时覆盖解压到同一个目录，升级后也不会再弹"
+                .to_string()
+        } else if task_exists {
+            "现有计划任务指向旧程序或旧目录：下次连接只弹一次 UAC，\
+             会在同一次里自动刷新到当前版本，之后不再弹"
+                .to_string()
         } else {
-            "尚未注册免 UAC 计划任务，首次连接会弹一次管理员确认".to_string()
+            "首次连接会弹一次管理员确认，并在同一次里自动注册免 UAC 任务；\
+             之后连接不再弹框"
+                .to_string()
         }
     } else if Platform::is_macos(&Platform) {
         "首次连接会弹出系统授权框（等价于 Windows 的 UAC）".to_string()
@@ -340,6 +406,7 @@ pub fn vpn_elevation_info(app: AppHandle) -> ElevationInfo {
 
     ElevationInfo {
         elevated,
+        task_exists,
         task_ready,
         platform: os.as_str().to_string(),
         hint,
@@ -351,12 +418,20 @@ pub fn vpn_elevation_info(app: AppHandle) -> ElevationInfo {
 pub fn vpn_setup_elevation(app: AppHandle) -> Result<String, String> {
     let session = session_of(&app)?;
     let exe = std::env::current_exe().map_err(|e| format!("取当前程序路径失败: {}", e))?;
-    session.ensure()?;
-    elevate::ensure_worker_task(&exe, &session)?;
-    if elevate::worker_task_exists() {
+    session
+        .ensure()
+        .map_err(|err| format!("{}{}", err, session_dir_diagnosis()))?;
+    let matched = elevate::ensure_worker_task(&exe, &session)?;
+    if matched {
         // 任务命令行里带着会话目录，记下来，下次连接就知道它还有没有效
         remember_task_dir(&app, &session.dir);
         Ok("计划任务已注册，之后连接不再弹 UAC".to_string())
+    } else if elevate::worker_task_exists() {
+        session.append_log(
+            "[elevate] 计划任务已存在，但任务定义没有指向当前程序或会话目录；\
+             请先移除任务后重试",
+        );
+        Err("计划任务已存在，但没有指向当前程序/会话目录，状态未生效。请先点“移除任务”，再重新注册。".to_string())
     } else {
         Err("计划任务注册后未查询到，可能被系统策略拦截".to_string())
     }
@@ -364,7 +439,23 @@ pub fn vpn_setup_elevation(app: AppHandle) -> Result<String, String> {
 
 #[tauri::command]
 pub fn vpn_remove_elevation(app: AppHandle) -> Result<String, String> {
-    elevate::delete_worker_task()?;
+    if elevate::worker_task_exists() {
+        if let Err(first) = elevate::delete_worker_task() {
+            // 任务以 HIGHEST 权限注册，普通权限删除可能被拒绝。以前这里直接
+            // 把错误抛给前端，但前端没有 catch，按钮看起来就是“没反应”。
+            let session = session_of(&app)?;
+            session.append_log(&format!(
+                "[elevate] 普通权限删除计划任务失败，改用 UAC 提权删除: {}",
+                first
+            ));
+            elevate::delete_worker_task_elevated(&session).map_err(|second| {
+                format!(
+                    "移除计划任务失败：{}；提权删除也失败：{}",
+                    first, second
+                )
+            })?;
+        }
+    }
     forget_task_dir(&app);
     Ok("已移除免 UAC 计划任务".to_string())
 }
@@ -449,11 +540,31 @@ pub fn vpn_push_rules(
         .unwrap_or_else(|| "DIRECT".to_string());
     let enabled: Vec<VpnRule> = rules.into_iter().filter(|r| r.enabled).collect();
     validate_rule_set(&enabled, &default_policy)?;
-    let runtime = state.0.lock().map_err(|_| "内部状态锁定失败".to_string())?;
-    if !session_is_active(&runtime.session) {
-        return Ok(());
-    }
-    runtime.session.write_rules(&enabled, &default_policy)
+    let enabled_count = enabled.len();
+    let (profile_name, session) = {
+        let runtime = state.0.lock().map_err(|_| "内部状态锁定失败".to_string())?;
+        if !session_is_active(&runtime.session) {
+            return Ok(());
+        }
+        let profile_name = runtime
+            .session
+            .read_status()
+            .map(|status| status.profile_name)
+            .unwrap_or_default();
+        runtime.session.write_rules(&enabled, &default_policy)?;
+        (profile_name, runtime.session.clone())
+    };
+    // 写进请求文件只代表 worker 会在 200ms 内读到；流水线上这就是「已生效」。
+    // 锁已经放开再发通知：PowerShell 要几十到几百毫秒，别占着状态锁。
+    spawn_notify(
+        &session,
+        "分流规则已生效",
+        &format!(
+            "{} 条规则已重新下发到隧道（{}）",
+            enabled_count, profile_name
+        ),
+    );
+    Ok(())
 }
 
 /// 同通道切换的三种结论
@@ -575,8 +686,17 @@ pub async fn vpn_connect(
     // 先落盘连接请求。持锁的部分只做文件操作，绝不跨过提权那一步。
     let session = {
         let mut runtime = state.0.lock().map_err(|_| "内部状态锁定失败".to_string())?;
+        // 启动时如果退到了临时目录，这里再探一次：用户目录当时可能只是被
+        // 杀毒/沙箱临时锁住，现在又好了。能探到就切回去，不必让用户重启。
+        if let Ok(dir) = session_dir(&app) {
+            if dir != runtime.session.dir {
+                runtime.session = VpnSession::new(dir);
+            }
+        }
         let session = runtime.session.clone();
-        session.prepare()?;
+        session
+            .prepare()
+            .map_err(|err| format!("{}{}", err, session_dir_diagnosis()))?;
         runtime.log_cursor = LogCursor::default();
         runtime.last_status = None;
         runtime.policy_profile_id = Some(profile.id.clone());
@@ -606,36 +726,58 @@ pub async fn vpn_connect(
 
     // 接下来可能弹出 UAC 并等用户点确认，这一步必须放开锁：
     // 否则状态轮询线程会被一起卡住，界面看上去就像死了。
+    //
+    // 这条日志先于任何提权动作落盘：如果 worker 根本没起来（现场 11:02 的
+    // worker.log 只有心跳行），至少要能证明主进程确实请求过启动、以及失败在哪。
+    session.append_log(&format!(
+        "[启动] 正在请求启动 worker：管理员={}，程序={}，会话目录={}",
+        elevate::is_elevated(),
+        exe.display(),
+        session.dir.display()
+    ));
     let elevation = if elevate::is_elevated() {
-        spawn_worker_directly(&exe, &session)?;
-        "直接启动（当前已是管理员）".to_string()
-    } else {
-        // 计划任务的命令行里写死了会话目录，所以「任务存在」不等于「任务可用」。
-        // 配置里记着上次注册时用的目录（见 remember_task_dir），比一下就知道。
-        let mut recorded = recorded_task_dir(&app);
-        let task_usable = elevate::worker_task_exists()
-            && elevate::worker_task_matches(&session.dir, recorded.as_deref());
-
-        if Platform::is_windows(&Platform) && !task_usable {
-            // 注册计划任务：首次会弹一次 UAC，之后免 UAC。
-            // 会话目录回退过的话，旧任务里写死的是旧路径，必须重新注册，
-            // 否则 worker 会往旧目录写、主进程在新目录等，连接必然失败。
-            match elevate::ensure_worker_task(&exe, &session) {
-                Ok(_) => {
-                    remember_task_dir(&app, &session.dir);
-                    // 任务已经指向当前目录了，别再拿旧记录去判断，
-                    // 否则刚注册完又会被当成「过期任务」而白白弹一次 UAC。
-                    recorded = Some(session.dir.to_string_lossy().to_string());
-                }
-                Err(e) => {
-                    session.append_log(&format!(
-                        "[elevate] 计划任务注册失败，将回退到 UAC 提权: {}",
-                        e
-                    ));
-                }
+        match spawn_worker_directly(&exe, &session) {
+            Ok(()) => "直接启动（当前已是管理员）".to_string(),
+            Err(e) => {
+                session.append_log(&format!("[启动] 直接启动 worker 失败: {}", e));
+                return Err(e);
             }
         }
-        elevate::start_worker(&exe, &session, recorded.as_deref())?
+    } else {
+        // 计划任务的命令行里写死了「exe 路径 + 会话目录」，所以「任务存在」
+        // 不等于「任务可用」：便携版/安装版共用同一份 AppData 会话目录时，
+        // 旧任务会一直拉起另一个位置的旧版本 worker。两者任一不一致都要重注册。
+        //
+        // 注意这里**不再单独预注册**：注册本身要过一次 UAC，而下面 start_worker
+        // 在任务不可用时会把「注册 + 启动」合并进同一次提权里做完，单独来一遍
+        // 只会让换新包后的第一次连接连弹两次 UAC（现场就是被这个坑到，
+        // 才变成每次都手点「注册免 UAC 任务」）。
+        let recorded = recorded_task_dir(&app);
+        let task_usable = elevate::worker_task_exists()
+            && elevate::worker_task_matches(&exe, &session.dir, recorded.as_deref());
+
+        if Platform::is_windows(&Platform) && !task_usable {
+            session.append_log(
+                "[启动] 免 UAC 任务不在当前程序/会话目录上：本次提权启动会顺带注册或刷新它\
+                 （只多这一次 UAC，之后连接不再弹框）",
+            );
+        }
+        match elevate::start_worker(&exe, &session, recorded.as_deref()) {
+            Ok(method) => {
+                // 任务确实修好了才记目录：记早了会让面板显示「已注册」却仍然弹 UAC
+                if Platform::is_windows(&Platform)
+                    && elevate::worker_task_matches(&exe, &session.dir, None)
+                {
+                    remember_task_dir(&app, &session.dir);
+                }
+                session.append_log(&format!("[启动] worker 启动请求已返回：{}", method));
+                method
+            }
+            Err(e) => {
+                session.append_log(&format!("[启动] worker 启动失败: {}", e));
+                return Err(e);
+            }
+        }
     };
 
     if let Ok(mut runtime) = state.0.lock() {
@@ -647,24 +789,52 @@ pub async fn vpn_connect(
     {
         let heartbeat = session.clone();
         std::thread::spawn(move || {
+            heartbeat.append_log("[心跳] 开始为 worker 续命");
             let started = Instant::now();
+            let mut failures = 0u32;
+            // 是否见过 worker 真正进入活动阶段。
+            // worker 启动时先落盘的那份状态可能还是默认的 Disconnected（例如
+            // 采集网络快照那一步），心跳如果把这当成「会话结束」就会提前停止续命，
+            // worker 随后误判主进程死亡、把刚建好的隧道收掉。见下方判定。
+            let mut seen_active = false;
             loop {
-                if heartbeat.touch_alive().is_err() {
-                    break;
+                if let Err(err) = heartbeat.touch_alive() {
+                    // 一次写失败绝不能当成「主进程死了」：真机现场出现过隧道刚
+                    // CSTP connected、两秒后就被 worker 判成心跳停止而掐掉的情况，
+                    // 而主进程其实好好的——这个文件每 2s 被重写一次，杀软扫描、
+                    // 磁盘瞬时占用都会让某一次写失败。
+                    failures += 1;
+                    if failures == 1 || failures % 15 == 0 {
+                        heartbeat.append_log(&format!(
+                            "[心跳] 第 {} 次刷新失败，继续重试: {}",
+                            failures, err
+                        ));
+                    }
+                    if failures >= 30 {
+                        // 连续一分钟都写不进去，认输：让 worker 的兜底生效
+                        heartbeat.append_log("[心跳] 连续刷新失败，停止续命");
+                        break;
+                    }
+                } else {
+                    failures = 0;
                 }
                 std::thread::sleep(Duration::from_secs(2));
                 match heartbeat.read_status() {
-                    Some(status)
-                        if matches!(
-                            status.phase,
-                            VpnPhase::Disconnected | VpnPhase::Failed
-                        ) =>
-                    {
-                        break;
+                    Some(status) => {
+                        if heartbeat_should_stop(seen_active, status.phase) {
+                            heartbeat.append_log("[心跳] 会话已结束，停止续命");
+                            break;
+                        }
+                        if !matches!(status.phase, VpnPhase::Disconnected | VpnPhase::Failed) {
+                            seen_active = true;
+                        }
                     }
                     // 启动阶段可能还读不到状态；超过两分钟仍读不到就放弃
-                    None if started.elapsed() > Duration::from_secs(120) => break,
-                    _ => {}
+                    None if started.elapsed() > Duration::from_secs(120) => {
+                        heartbeat.append_log("[心跳] 两分钟读不到状态，停止续命");
+                        break;
+                    }
+                    None => {}
                 }
             }
         });
@@ -675,6 +845,20 @@ pub async fn vpn_connect(
         connector_path: connector.path,
         elevation,
     })
+}
+
+/// 心跳线程是否该停止续命。
+///
+/// `Failed` 一定是本次会话的终点；`Disconnected` 则必须等 worker 真正进入过
+/// 活动阶段（准备中/连接中/配路由/已连接）才算数——否则启动早期那份默认状态
+/// 就会把心跳线程骗停，worker 再因为心跳过期拆掉隧道。这正是现场
+/// 「CSTP connected 之后几秒断开」的一类成因。
+fn heartbeat_should_stop(seen_active: bool, phase: VpnPhase) -> bool {
+    match phase {
+        VpnPhase::Failed => true,
+        VpnPhase::Disconnected => seen_active,
+        _ => false,
+    }
 }
 
 /// 当前进程已是管理员时，直接起 worker，省掉一次多余的系统授权
@@ -762,7 +946,10 @@ fn is_process_alive(pid: u32) -> bool {
         let (text, _) = crate::process::run_with_timeout(
             std::path::Path::new("tasklist.exe"),
             &["/FI", &format!("PID eq {}", pid), "/NH"],
-            Duration::from_secs(15),
+            // 退出流程会轮询这个检查；15 秒的超时会让“退出”看起来卡死。
+            // tasklist 正常是毫秒级，3 秒足够；超时就当作不可判定，不再
+            // 无限期拖住退出（主进程仍有托盘退出的看门狗兜底）。
+            Duration::from_secs(3),
         );
         text.contains(&pid.to_string())
     }
@@ -868,6 +1055,9 @@ pub fn start_status_poller(app: AppHandle) {
     std::thread::spawn(move || {
         let mut cursor = LogCursor::default();
         let mut last_status_json = String::new();
+        // 上一次已经比对过的状态：通知只在「跃迁」那一拍发，避免每轮写盘都弹一次
+        let mut notified = notify::Snapshot::default();
+        let mut notified_ready = false;
 
         loop {
             std::thread::sleep(POLL_INTERVAL);
@@ -878,7 +1068,7 @@ pub fn start_status_poller(app: AppHandle) {
                 None => return,
             };
 
-            let (status, elevation, lines, policy_owner) = {
+            let (status, elevation, lines, policy_owner, session) = {
                 let runtime = match state.0.lock() {
                     Ok(runtime) => runtime,
                     Err(_) => continue,
@@ -890,6 +1080,7 @@ pub fn start_status_poller(app: AppHandle) {
                     runtime.elevation.clone(),
                     lines,
                     runtime.policy_profile_id.clone(),
+                    runtime.session.clone(),
                 )
             };
 
@@ -908,6 +1099,38 @@ pub fn start_status_poller(app: AppHandle) {
                         },
                     );
                 }
+
+                // 系统通知由主进程发，而不是等 webview 回调：窗口收进托盘、webview
+                // 被销毁时也要能提示；同时避免前端两处状态同时到达时重复弹。
+                let current = notify::Snapshot::new(
+                    status.phase.as_str(),
+                    status.applied_mode.as_str(),
+                );
+                if notified_ready {
+                    for trigger in notify::triggers(&notified, &current) {
+                        let (title, body) = match trigger {
+                            notify::Trigger::Connected => (
+                                "VPN 已连接",
+                                format!("{} 已生效{}", status.profile_name, ip_suffix(&status.vpn_ip)),
+                            ),
+                            notify::Trigger::Disconnected => (
+                                "VPN 已断开",
+                                format!("{} 已断开，分流与路由已还原", status.profile_name),
+                            ),
+                            notify::Trigger::ModeSwitched => (
+                                "代理模式已切换",
+                                format!(
+                                    "当前：{}（{}）",
+                                    mode_label(&status.applied_mode),
+                                    status.profile_name
+                                ),
+                            ),
+                        };
+                        spawn_notify(&session, title, &body);
+                    }
+                }
+                notified = current;
+                notified_ready = true;
             }
 
             if !lines.is_empty() {
@@ -917,11 +1140,70 @@ pub fn start_status_poller(app: AppHandle) {
     });
 }
 
+/// 系统通知一律另起线程发，不能占着状态轮询线程或命令线程（起一次 PowerShell
+/// 要几百毫秒，占住了界面状态就不动了）。两条平台实现都在 `notify` 里：
+/// Windows 走 WinRT toast（发不出去时如实返回错误），macOS 走 `osascript`。
+///
+/// 失败也要在日志里留一行 —— 现场判断「为什么没弹」全靠它。
+fn spawn_notify(session: &VpnSession, title: &str, body: &str) {
+    let session = session.clone();
+    let title = title.to_string();
+    let body = body.to_string();
+    std::thread::spawn(move || {
+        match notify::notify(&title, &body) {
+            Ok(()) => session.append_log(&format!(
+                "[通知] 已向系统提交「{}」（是否显示取决于系统通知设置）",
+                title
+            )),
+            Err(err) => session.append_log(&format!(
+                "[通知] 系统通知「{}」发送失败：{}",
+                title,
+                first_line(&err)
+            )),
+        }
+    });
+}
+
+/// 错误文本里常有整段 PowerShell 的 CLIXML，日志里只留第一行有用信息
+fn first_line(text: &str) -> String {
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("未知错误")
+        .chars()
+        .take(200)
+        .collect()
+}
+
+/// 连接通知里附带的隧道地址；没有地址就什么都不加
+fn ip_suffix(vpn_ip: &str) -> String {
+    if vpn_ip.trim().is_empty() {
+        String::new()
+    } else {
+        format!("（{}）", vpn_ip.trim())
+    }
+}
+
+/// `applied_mode` 的中文名
+fn mode_label(mode: &str) -> &'static str {
+    match mode.trim().to_ascii_lowercase().as_str() {
+        "global" => "全局",
+        "direct" => "直连",
+        _ => "规则",
+    }
+}
+
 /// 应用退出前请求 worker 停止，避免留下无人回收的路由
 pub fn shutdown(app: &AppHandle) {
     if let Ok(session) = session_of(app) {
         if let Some(status) = session.read_status() {
-            if status.phase != VpnPhase::Disconnected && status.phase != VpnPhase::Failed {
+            // 即使状态已经写成 Disconnected/Failed，只要 worker 进程还活着，
+            // 也要发停止请求：它可能还在杀 openconnect、还原路由。
+            let worker_alive = status.pid != 0 && is_process_alive(status.pid);
+            if worker_alive
+                || (status.phase != VpnPhase::Disconnected
+                    && status.phase != VpnPhase::Failed)
+            {
                 elevate::stop_worker(&session);
             }
         }
@@ -930,9 +1212,72 @@ pub fn shutdown(app: &AppHandle) {
     }
 }
 
+/// Windows 托盘退出用：等 worker 收尾后再退出主进程。
+///
+/// 便携包是从解压目录直接运行的，worker 和 openconnect.exe 也在该目录下。
+/// 旧逻辑写完 stop.flag 立刻 `app.exit(0)`，用户马上删目录时 worker 还没
+/// 杀掉 openconnect，Windows 就会报“文件或文件夹已在另一程序打开”。
+/// 这里最多等 `timeout`，让 worker 先杀子进程、还原路由，再退出主程序。
+#[cfg(target_os = "windows")]
+pub fn shutdown_and_wait(app: &AppHandle, timeout: Duration) {
+    let Ok(session) = session_of(app) else {
+        return;
+    };
+    session.append_log("[退出] 收到托盘退出请求，开始收尾");
+    let status = session.read_status();
+    let pid = status.as_ref().map(|status| status.pid).unwrap_or(0);
+    let worker_alive = pid != 0 && is_process_alive(pid);
+    let active = status
+        .as_ref()
+        .map(|status| {
+            status.phase != VpnPhase::Disconnected && status.phase != VpnPhase::Failed
+        })
+        .unwrap_or(false);
+
+    if worker_alive || active {
+        session.append_log("[退出] 正在请求 worker 收尾，等待隧道和子进程退出");
+        elevate::stop_worker(&session);
+    } else {
+        session.append_log("[退出] 没有活动 worker，直接退出");
+    }
+
+    if worker_alive {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if !is_process_alive(pid) {
+                session.append_log("[退出] worker 已退出，主程序准备退出");
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        if is_process_alive(pid) {
+            session.append_log(&format!(
+                "[退出] worker 在 {}s 内未退出，主程序仍将退出；若目录被占用，请在任务管理器“详细信息”里结束 ws-workbench.exe / openconnect.exe",
+                timeout.as_secs()
+            ));
+        }
+    }
+
+    // 最后再清控制文件：先清 main.alive 会让 worker 提前判定主进程死亡，
+    // 但这里本来就是在请求退出，先写 stop、等它收尾更稳。
+    session.remove_control_files();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn heartbeat_ignores_the_startup_disconnected_status() {
+        // worker 一开始写的默认阶段是 Disconnected；心跳线程不能把这一份
+        // 当成「会话结束」，否则刚建好的隧道会被误杀。
+        assert!(!heartbeat_should_stop(false, VpnPhase::Disconnected));
+        // 已经见过活动阶段（连接中/已连接）之后再回到 Disconnected 才是真结束
+        assert!(heartbeat_should_stop(true, VpnPhase::Disconnected));
+        // 失败一定是终点，哪怕还没见过活动阶段
+        assert!(heartbeat_should_stop(false, VpnPhase::Failed));
+        assert!(!heartbeat_should_stop(false, VpnPhase::Connecting));
+    }
 
     #[test]
     fn validates_the_three_live_kinds() {

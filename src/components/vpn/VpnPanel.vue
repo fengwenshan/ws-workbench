@@ -61,8 +61,13 @@ const MODE_OPTIONS: Array<{
 
 // ============================ 连接操作 ============================
 
+const connectionBusy = computed(
+  () => vpn.connecting || vpn.disconnecting || vpn.phaseBusy,
+)
+
 const connectLabel = computed(() => {
-  if (vpn.phaseBusy) return '处理中…'
+  if (vpn.disconnecting) return '断开中…'
+  if (vpn.connecting || vpn.phaseBusy) return '处理中…'
   if (!vpn.isConnected) return '连接'
   if (isPolicyOwner.value) return '断开'
   return vpn.sharesTunnel(vpn.selectedProfile?.id) ? '切换到该配置' : '切换（需断开重连）'
@@ -100,7 +105,9 @@ const selectedDotState = computed<ProfileDotState>(() =>
   vpn.selectedProfile ? profileDotState(vpn.selectedProfile) : 'off',
 )
 
-const canConnect = computed(() => !!vpn.selectedProfile && !vpn.connecting)
+const canConnect = computed(
+  () => !!vpn.selectedProfile && !vpn.connecting && !vpn.disconnecting,
+)
 
 // ============================ 代理模式 ============================
 
@@ -138,10 +145,18 @@ const currentMode = computed(
   () => MODE_OPTIONS.find((item) => item.value === proxyMode.value) ?? MODE_OPTIONS[0],
 )
 const modeLocked = computed(
-  () => vpn.phaseBusy || vpn.connecting || (vpn.isConnected && !isPolicyOwner.value),
+  () =>
+    vpn.phaseBusy ||
+    vpn.connecting ||
+    vpn.disconnecting ||
+    vpn.modeSwitching ||
+    (vpn.isConnected && !isPolicyOwner.value),
 )
 
 const modeLockText = computed(() => {
+  // 切换中这里不再重复：卡片标题已经写着「正在切换到「X」，等待 worker 确认…」
+  if (vpn.modeSwitching) return ''
+  if (vpn.disconnecting) return '正在断开连接，暂时不能切换代理模式。'
   if (vpn.phaseBusy || vpn.connecting) return '正在连接中，暂时不能切换代理模式。'
   if (vpn.isConnected && !isPolicyOwner.value) {
     return '这份配置当前没有生效，切过去之后才能改它的代理模式。'
@@ -181,11 +196,14 @@ watch(
 /**
  * 切换成功后撤掉乐观值，让高亮交回真实状态。
  *
- * 不能立刻撤：已连接时高亮取 worker 回写的 applied_mode，它要等一次状态轮询
- * 才追上来，立刻撤会看到「闪回旧模式」。最多等 3 秒，等不到也交回真实状态。
+ * 不能立刻撤：已连接时高亮取 worker 回写的 applied_mode，它要等状态轮询
+ * 才追上来，立刻撤会看到「闪回旧模式」。全局模式要撤/装半默认路由和 DNS，
+ * 现场约 4 秒，3 秒超时会在 worker 回报前先把高亮交回旧模式，等下一轮状态
+ * 到了再跳回新模式——表现就是「切过去、又自动切回来、再切过去」。
+ * 这里放宽到 15 秒，并且只认真正匹配；超时只告警，不再假装已到达。
  */
 function settleOptimistic(mode: VpnProxyMode) {
-  const deadline = Date.now() + 3000
+  const deadline = Date.now() + 15_000
   const timer = window.setInterval(() => {
     if (optimisticMode.value !== mode) {
       // 用户又点了别的模式，这次不用管了
@@ -193,11 +211,18 @@ function settleOptimistic(mode: VpnProxyMode) {
       return
     }
     const reached = vpn.isConnected
-      ? appliedMode.value === mode || appliedMode.value === null
+      ? appliedMode.value === mode
       : vpn.selectedProfile?.proxy_mode === mode
-    if (reached || Date.now() > deadline) {
+    if (reached) {
       optimisticMode.value = null
       window.clearInterval(timer)
+      return
+    }
+    if (Date.now() > deadline) {
+      // 真实状态一直没追上：交回真实值，并在日志里留下一句，别无限高亮
+      optimisticMode.value = null
+      window.clearInterval(timer)
+      vpn.pushLog('warn', `模式切换后 15 秒内没有等到 worker 确认，已按实际状态显示`)
     }
   }, 120)
 }
@@ -205,6 +230,7 @@ function settleOptimistic(mode: VpnProxyMode) {
 // ============================ 交互 ============================
 
 async function handleConnect() {
+  if (vpn.connecting || vpn.disconnecting) return
   // 未连接或收尾中：走原来的连接/断开逻辑
   if (!vpn.isConnected || vpn.phaseBusy) {
     await vpn.toggleConnection()
@@ -306,7 +332,6 @@ watch(
   async (isActive) => {
     if (!isActive) return
     await vpn.refreshSnapshot()
-    await vpn.refreshElevation()
     await vpn.refreshConnectors()
   },
 )
@@ -363,28 +388,6 @@ watch(
             还没有配置，点上方「+ 新建」创建一个
           </div>
         </div>
-
-        <!-- 提权状态：固定在列表底部，不跟配置列表一起滚动 -->
-        <div v-if="vpn.elevation" class="elevation-box">
-          <div class="elevation-title">提权方式</div>
-          <p class="elevation-hint">{{ vpn.elevation.hint }}</p>
-          <div class="elevation-actions">
-            <button
-              v-if="vpn.elevation.platform === 'windows' && !vpn.elevation.task_ready && !vpn.elevation.elevated"
-              class="btn btn-secondary btn-xs"
-              @click="vpn.setupElevation()"
-            >
-              注册免 UAC 任务
-            </button>
-            <button
-              v-if="vpn.elevation.platform === 'windows' && vpn.elevation.task_ready"
-              class="btn btn-secondary btn-xs"
-              @click="vpn.removeElevation()"
-            >
-              移除任务
-            </button>
-          </div>
-        </div>
       </aside>
 
       <!-- 右侧：详情 -->
@@ -422,18 +425,25 @@ watch(
             <div class="status-actions">
               <button
                 class="btn"
-                :class="vpn.isConnected || vpn.phaseBusy ? 'btn-danger' : 'btn-primary'"
-                :disabled="!canConnect && !vpn.isConnected"
+                :class="[
+                  vpn.isConnected || vpn.phaseBusy ? 'btn-danger' : 'btn-primary',
+                  { 'is-loading': connectionBusy },
+                ]"
+                :disabled="vpn.disconnecting || (!canConnect && !vpn.isConnected)"
+                :aria-busy="connectionBusy"
                 @click="handleConnect"
               >
+                <span v-if="connectionBusy" class="btn-spinner" aria-hidden="true" />
                 {{ connectLabel }}
               </button>
               <button
                 class="btn btn-secondary"
-                :disabled="!vpn.selectedProfile"
+                :disabled="!vpn.selectedProfile || vpn.rulesApplying"
+                :aria-busy="vpn.rulesApplying"
                 @click="ruleDialogOpen = true"
               >
-                规则
+                <span v-if="vpn.rulesApplying" class="btn-spinner" aria-hidden="true" />
+                {{ vpn.rulesApplying ? '应用中…' : '规则' }}
               </button>
               <button
                 class="btn btn-secondary"
@@ -463,10 +473,20 @@ watch(
           <p v-if="importHint" class="import-hint">{{ importHint }}</p>
 
           <!-- 代理模式：和 Clash 一样在规则/全局/直连之间切换 -->
-          <section class="proxy-mode-card">
+          <section
+            class="proxy-mode-card"
+            :class="{ 'is-switching': vpn.modeSwitching }"
+            :aria-busy="vpn.modeSwitching"
+          >
             <div class="proxy-mode-head">
               <span class="proxy-mode-icon">
-                <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                <!-- 切换期间这里转圈：比一颗安静的小圆点更容易被看见 -->
+                <span
+                  v-if="vpn.modeSwitching"
+                  class="mode-spinner mode-spinner-lg"
+                  aria-hidden="true"
+                />
+                <svg v-else viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
                   <rect x="3" y="8" width="14" height="7" rx="2" />
                   <path d="M6 8V5.5h8V8M7 13h.01M10.5 13h.01" stroke-linecap="round" />
                   <path d="M16 4.5l1.5-1.5M17.5 4.5L16 3" stroke-linecap="round" />
@@ -474,7 +494,8 @@ watch(
               </span>
               <div class="proxy-mode-title">
                 <h4>代理模式</h4>
-                <p>{{ currentMode.description }}</p>
+                <p v-if="vpn.modeSwitching">正在切换到「{{ modeLabel(activeMode) }}」，等待 worker 确认…</p>
+                <p v-else>{{ currentMode.description }}</p>
               </div>
             </div>
 
@@ -505,7 +526,14 @@ watch(
                     <path d="M7 10l2 2 4-4" stroke-linecap="round" stroke-linejoin="round" />
                   </svg>
                 </span>
-                <span>{{ mode.label }}</span>
+                <span class="mode-label">
+                  <span
+                    v-if="vpn.modeSwitching && mode.value === activeMode"
+                    class="mode-spinner"
+                    aria-hidden="true"
+                  />
+                  {{ mode.label }}
+                </span>
               </button>
             </div>
 
@@ -533,7 +561,7 @@ watch(
       </section>
     </div>
 
-    <!-- 规则编辑：三个输入项 + 现有列表，和 Clash 一个思路 -->
+    <!-- 规则编辑：四个输入项 + 现有列表（可编辑），和 Clash 一个思路 -->
     <VpnRuleDialog v-if="ruleDialogOpen" :vpn="vpn" @close="ruleDialogOpen = false" />
 
     <!-- 实时日志抽屉：入口在动作栏「日志」 -->
@@ -552,8 +580,9 @@ watch(
       @cancel="reconnectTarget = null"
     >
       <p class="dialog-message">
-        「{{ reconnectTarget.name }}」与当前通道的连接参数不同（服务器、账号、连接器或 fake-ip
-        设置有变化），需要先断开当前连接，再重新建立隧道。
+        「{{ reconnectTarget.name }}」与当前通道的连接参数不同（服务器、账号、密码、协议、
+        连接器或额外参数有变化），需要先断开当前连接，再重新建立隧道。只是规则或代理模式
+        不同的话可以直接切，不用断开。
       </p>
     </Modal>
 
@@ -606,12 +635,12 @@ watch(
 .profile-identity {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 4px;
   min-width: 0;
 }
 .identity-name {
   min-width: 0;
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 600;
   color: var(--text-primary);
   overflow: hidden;
@@ -633,7 +662,7 @@ watch(
   height: 20px;
   padding: 0;
   border: none;
-  border-radius: 5px;
+  border-radius: 6px;
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
@@ -725,7 +754,7 @@ watch(
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 7px 8px 7px 10px;
+  padding: 8px 8px 8px 10px;
   margin-bottom: 2px;
   border-radius: 8px;
   color: var(--text-secondary);
@@ -763,7 +792,7 @@ watch(
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
-  column-gap: 7px;
+  column-gap: 8px;
   row-gap: 2px;
 }
 .item-dot {
@@ -835,44 +864,6 @@ watch(
   color: var(--text-muted);
   text-align: center;
 }
-/* 提权状态固定在列表底部，像一条状态栏而不是一块老式设置卡片 */
-.elevation-box {
-  flex-shrink: 0;
-  margin: 0;
-  padding: 12px 16px;
-  border-top: 1px solid var(--border-color);
-  background: var(--bg-primary);
-}
-.elevation-title {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-secondary);
-  margin-bottom: 6px;
-}
-.elevation-title::before {
-  content: '';
-  flex: none;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--warning);
-}
-.elevation-hint {
-  font-size: 12px;
-  line-height: 1.55;
-  color: var(--text-muted);
-}
-.elevation-actions {
-  margin-top: 10px;
-}
-.elevation-actions .btn {
-  height: 28px;
-  padding: 0 10px;
-  font-size: 12px;
-}
 
 .detail {
   flex: 1;
@@ -897,7 +888,7 @@ watch(
   border-radius: 8px;
   padding: 14px;
   text-align: center;
-  font-size: 13px;
+  font-size: 14px;
   color: var(--text-muted);
   background: var(--bg-primary);
 }
@@ -939,7 +930,7 @@ watch(
 }
 .proxy-mode-title p {
   margin: 0;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-muted);
 }
 .proxy-mode-options {
@@ -952,13 +943,13 @@ watch(
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 7px;
+  gap: 8px;
   height: 40px;
   border: 1px solid var(--border-color);
-  border-radius: 7px;
+  border-radius: 8px;
   background: var(--bg-secondary);
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: 14px;
   cursor: pointer;
 }
 .proxy-mode-option:hover:not(:disabled) {
@@ -981,9 +972,54 @@ watch(
   cursor: not-allowed;
   opacity: 0.72;
 }
+.proxy-mode-card.is-switching {
+  border-color: var(--primary);
+}
+.proxy-mode-card.is-switching .proxy-mode-icon {
+  opacity: 1;
+}
+.mode-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
 .mode-icon {
   display: grid;
   place-items: center;
+}
+
+/* 操作按钮的加载圈：原生 button 里也能和文字并排 */
+.btn-spinner,
+.mode-spinner {
+  display: inline-block;
+  flex: none;
+  width: 12px;
+  height: 12px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: ws-vpn-spin 0.7s linear infinite;
+  vertical-align: -2px;
+}
+.btn-spinner {
+  margin-right: 6px;
+}
+.mode-spinner {
+  width: 12px;
+  height: 12px;
+}
+/* 卡片标题旁那颗转圈：和 18px 的模式图标同尺寸占位 */
+.mode-spinner-lg {
+  width: 18px;
+  height: 18px;
+  border-width: 2px;
+  color: var(--primary);
+  vertical-align: 0;
+}
+@keyframes ws-vpn-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 .mode-icon svg {
   width: 18px;
@@ -992,12 +1028,12 @@ watch(
 }
 .proxy-mode-lock {
   margin: 6px 0 0;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--warning);
 }
 .proxy-mode-hint {
   margin: 6px 0 0;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-muted);
 }
 
@@ -1009,7 +1045,7 @@ watch(
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 13px;
+  font-size: 14px;
   color: var(--text-muted);
 }
 .detail-empty-create {
@@ -1018,7 +1054,7 @@ watch(
   text-align: center;
 }
 .empty-title {
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 600;
   color: var(--text-primary);
 }
