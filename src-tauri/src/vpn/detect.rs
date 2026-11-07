@@ -305,6 +305,9 @@ mod tests {
         assert!(found.iter().all(|item| item.kind == "openconnect"));
     }
 
+    // 内置 openconnect 只随 Windows 包分发、也只有 Windows 的 detect_all 会探测
+    // bundled；macOS 的 resources 目录里同样带着这些文件，用例若不加平台限制会误报。
+    #[cfg(target_os = "windows")]
     #[test]
     fn bundled_openconnect_is_probed_not_skipped() {
         // 内置副本默认不在 candidates 里，必须单独探测；否则「自动」模式会直接报
