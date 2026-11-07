@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onUnmounted, ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { useConfig } from '@/composables/useConfig'
 import { useVpn } from '@/composables/useVpn'
@@ -8,7 +8,7 @@ import type { VpnProxyMode } from '@/types/vpn'
 
 /**
  * 托盘快捷面板（独立窗口 /quick.html），布局参考腾讯柠檬的悬浮面板：
- * 顶部两个页签（VPN / 休眠），下面是紧凑卡片，点面板外部或按 Esc 收起。
+ * 顶部两个页签（VPN / 休眠），下面是紧凑卡片，点面板外部或再点一次托盘图标收起。
  *
  * 这里只做「快速查看 + 快速动作」：卸载、残留清理、规则编辑仍然回主窗口。
  */
@@ -62,12 +62,6 @@ const MODES: Array<{ value: VpnProxyMode; label: string }> = [
   { value: 'direct', label: '直连' },
 ]
 
-const MODE_HINT: Record<VpnProxyMode, string> = {
-  rule: '按规则列表分流，未命中的流量直连。',
-  global: '所有流量都走 VPN 隧道，规则不参与分流。',
-  direct: '只保持隧道连接，所有流量直连。',
-}
-
 const PHASE_TEXT: Record<string, string> = {
   disconnected: '未连接',
   preparing: '准备中…',
@@ -108,21 +102,8 @@ function openMain(target?: 'cleaner' | 'proxy' | 'settings') {
   void invoke('quick_panel_open_main', { target: target ?? null })
 }
 
-function hidePanel() {
-  void invoke('quick_panel_hide')
-}
-
-function onKeydown(event: KeyboardEvent) {
-  if (event.key === 'Escape') hidePanel()
-}
-
-onMounted(() => {
-  window.addEventListener('keydown', onKeydown)
-})
-
 onUnmounted(() => {
   keepAwake.stopPolling()
-  window.removeEventListener('keydown', onKeydown)
 })
 </script>
 
@@ -198,12 +179,7 @@ onUnmounted(() => {
           </button>
         </div>
 
-        <p class="qp-tip">{{ MODE_HINT[activeMode] }}</p>
         <p v-if="modeError" class="qp-tip warn">{{ modeError }}</p>
-
-        <button type="button" class="qp-more" @click="openMain('proxy')">
-          打开代理页管理配置与规则 →
-        </button>
       </section>
 
       <!-- 休眠：一键保持唤醒 + 时长快捷项 -->
@@ -260,8 +236,6 @@ onUnmounted(() => {
 
     <footer class="qp-foot">
       <button type="button" class="qp-foot-btn" @click="openMain()">打开主窗口</button>
-      <span class="qp-muted">Esc 收起</span>
-      <button type="button" class="qp-foot-btn" @click="hidePanel">隐藏</button>
     </footer>
   </div>
 </template>
@@ -402,21 +376,6 @@ body,
   font-weight: 600;
 }
 
-.qp-more {
-  margin-top: 4px;
-  padding: 7px 0;
-  border: 0;
-  border-top: 1px dashed var(--border-color);
-  background: transparent;
-  color: var(--text-active);
-  font-size: 12px;
-  text-align: left;
-  cursor: pointer;
-}
-
-.qp-more:hover {
-  color: var(--primary-hover);
-}
 
 /* ============================== VPN ============================== */
 
@@ -517,6 +476,22 @@ body,
 }
 
 /* ============================== 底部 ============================== */
+
+.qp-more {
+  margin-top: 4px;
+  padding: 7px 0;
+  border: 0;
+  border-top: 1px dashed var(--border-color);
+  background: transparent;
+  color: var(--text-active);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.qp-more:hover {
+  color: var(--primary-hover);
+}
 
 .qp-foot {
   display: flex;

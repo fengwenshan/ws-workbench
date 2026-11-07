@@ -8,7 +8,7 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::EVENT_NAV_TRAY;
 
-/// 隐藏面板（点「隐藏」、按 Esc、点面板外部时都会走到这里）
+/// 隐藏面板（点面板外部失焦、再点一次托盘图标时都会走到这里）
 #[tauri::command]
 pub fn quick_panel_hide(app: AppHandle) {
     if let Some(window) = app.get_webview_window(crate::QUICK_PANEL_LABEL) {

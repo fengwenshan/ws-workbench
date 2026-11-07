@@ -561,14 +561,12 @@ fn fallback_placement<R: Runtime>(
 /// 面板与图标之间的间隙（与 `panel_origin_at` 的坐标单位一致：逻辑点或物理像素）
 const QUICK_PANEL_GAP: i32 = 8;
 
-/// 托盘图标近似半边宽：右对齐时让面板右边沿落在图标右沿附近（单位同上）
-const TRAY_ICON_HALF_WIDTH: i32 = 18;
-
 /// 计算面板左上角（单位由调用方决定：macOS 是逻辑点，Windows 是物理像素）。
 ///
 /// 纯函数，单测覆盖菜单栏/底部任务栏、左右边缘夹取、多显示器负坐标、超小屏幕：
 /// - 锚点（图标中心）在屏幕上半部分（macOS 菜单栏 / 顶部任务栏）时面板朝下，否则朝上；
-/// - 图标在屏幕右半边时面板右对齐（像系统菜单一样从图标往左展开），否则左对齐；
+/// - 水平方向「居中于图标」（对齐 Lemon 那种托盘面板：图标悬在面板上方中间），
+///   靠边时再夹进显示器范围，所以贴右边缘时会退化成右对齐；
 /// - 最后把结果夹进显示器范围，避免越界或被任务栏盖住。
 fn panel_origin_at(
     anchor: (i32, i32),
@@ -581,11 +579,7 @@ fn panel_origin_at(
     let (screen_x, screen_y, screen_w, screen_h) = screen;
 
     let below = anchor_y < screen_y + screen_h / 2;
-    let mut x = if anchor_x > screen_x + screen_w / 2 {
-        anchor_x + TRAY_ICON_HALF_WIDTH - panel_w
-    } else {
-        anchor_x - TRAY_ICON_HALF_WIDTH
-    };
+    let mut x = anchor_x - panel_w / 2;
     let mut y = if below {
         anchor_y + QUICK_PANEL_GAP
     } else {
@@ -710,7 +704,6 @@ pub fn run() {
             create_main_window(app)?;
             // 托盘快捷面板：同样提前建好、默认隐藏，点托盘图标时再定位显示
             create_quick_panel(app)?;
-
 
             // dev 模式（裸二进制）Dock 会显示系统占位图标，这里补上真实图标
             #[cfg(target_os = "macos")]
@@ -905,35 +898,27 @@ mod quick_panel_tests {
 
     const MENUBAR_SCREEN: (i32, i32, i32, i32) = (0, 0, 1920, 1080);
     const PANEL: (u32, u32) = (QUICK_PANEL_WIDTH as u32, QUICK_PANEL_HEIGHT as u32);
-    /// 图标中心（物理像素）落在屏幕右半边时，面板右沿对齐图标右沿
-    const ICON_HALF: i32 = 18;
     const GAP: i32 = 8;
+    /// 居中时面板左边 = 图标中心 - 半个面板宽
+    const HALF_PANEL: i32 = QUICK_PANEL_WIDTH as i32 / 2;
 
-    /// macOS 菜单栏图标：面板挂在图标下方，且往图标左侧展开（右对齐）
+    /// macOS 菜单栏图标：面板挂在图标下方，水平居中于图标
     #[test]
-    fn opens_below_top_menubar_icon() {
+    fn centers_below_top_menubar_icon() {
         let (x, y) = panel_origin_at((1000, 10), PANEL, MENUBAR_SCREEN);
-        assert_eq!(x, 1000 + ICON_HALF - PANEL.0 as i32);
+        assert_eq!(x, 1000 - HALF_PANEL);
         assert_eq!(y, 10 + GAP);
     }
 
-    /// Windows 底部任务栏图标：面板朝上，不盖住任务栏
+    /// Windows 底部任务栏图标：面板朝上，同样水平居中
     #[test]
-    fn opens_above_bottom_taskbar_icon() {
+    fn centers_above_bottom_taskbar_icon() {
         let (x, y) = panel_origin_at((1500, 1044), PANEL, MENUBAR_SCREEN);
-        assert_eq!(x, 1500 + ICON_HALF - PANEL.0 as i32);
+        assert_eq!(x, 1500 - HALF_PANEL);
         assert_eq!(y, 1044 - PANEL.1 as i32 - GAP);
     }
 
-    /// 图标在屏幕左半边（Windows 左侧任务栏/顶部靠左）：面板左对齐图标左沿
-    #[test]
-    fn left_side_icon_aligns_left_edge() {
-        let (x, y) = panel_origin_at((100, 10), PANEL, MENUBAR_SCREEN);
-        assert_eq!(x, 100 - ICON_HALF);
-        assert_eq!(y, 10 + GAP);
-    }
-
-    /// 贴近屏幕左右边缘：x 必须夹进显示器，不能有一半跑到屏幕外
+    /// 贴近屏幕左右边缘：基准位置被夹进显示器，不能有一半跑到屏幕外
     #[test]
     fn clamps_into_screen_edges() {
         let (left_x, _) = panel_origin_at((2, 10), PANEL, MENUBAR_SCREEN);
@@ -948,7 +933,7 @@ mod quick_panel_tests {
     fn handles_negative_monitor_coordinates() {
         let screen = (-1920, 0, 1920, 1080);
         let (x, y) = panel_origin_at((-1000, 10), PANEL, screen);
-        assert_eq!(x, -1000 - ICON_HALF);
+        assert_eq!(x, -1000 - HALF_PANEL);
         assert_eq!(y, 10 + GAP);
     }
 
