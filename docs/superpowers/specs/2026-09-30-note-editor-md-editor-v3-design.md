@@ -34,7 +34,7 @@
 - 技术栈：Tauri 2.x + Vue 3.5 + Vite 6 + TypeScript + ant-design-vue 4.2.6。
 - `note`：`ProjectGroup.note` / `ProjectConfig.note`，随整份 `AppConfig` JSON 加密落盘。
 - 附件：`AttachmentMeta { id, name, size, ext, created_at, dir }`；密文 blob 路径 = `<dir>/<id>.wst`。
-- 现有命令：`resolve_upload_dir`、`encrypt_upload_file`（入参为磁盘 `src_path`）、`decrypt_export_file`、`decrypt_to_temp`、`remove_attachment_file`。
+- 现有命令：`resolve_upload_dir`、`encrypt_upload_file`（入参为磁盘 `src_path`）、`decrypt_export_file`、`remove_attachment_file`（`decrypt_to_temp` 已下线，预览改走 `wst-img` 协议）。
 - `tauri.conf.json`：`csp: null`（自定义协议图片不会被 CSP 拦截）；`dragDropEnabled: false`（HTML5 拖拽/粘贴事件直达 webview，正是 md-editor-v3 所依赖）。
 - 目前**未**注册任何自定义 URI scheme 协议。
 - 项目规则：凡写入本地磁盘的数据必须密文（Rust 侧 `crypto`/`filecrypto`，前端侧 `safeStorage`）；每次改完需重启应用验证。

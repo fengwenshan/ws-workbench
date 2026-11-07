@@ -19,7 +19,7 @@
 
 1. 数据模型扩展：`ProjectGroup` / `ProjectConfig` 各增 `note`、`upload_dir`、`attachments`；`AppConfig` 增全局兜底 `default_upload_dir`。
 2. 新增二进制流式加解密通道（`WST1` 容器），复用现有主密钥派生，无需新增密钥存储。
-3. 新增 4 个 Tauri 命令：上传加密、导出解密、预览解密到临时文件、删除附件文件。
+3. 新增 3 个 Tauri 命令：上传加密、导出解密、删除附件文件。（原「预览解密到临时文件」已移除：预览改为应用内走 `wst-img` 协议按需解密，见 §6.6）
 4. 前端：分组右侧视图 + 项目右侧三页签；笔记编辑器；附件面板（含上传位置设置、进度条）。
 5. 进度事件：上传/解密过程中通过 `app.emit` 推送进度。
 
@@ -193,18 +193,14 @@ pub fn decrypt_export_file(app: AppHandle, blob_dir: String, id: String, target_
     -> Result<(), String>;
 
 #[tauri::command]
-pub fn decrypt_to_temp(app: AppHandle, blob_dir: String, id: String, name: String)
-    -> Result<String, String>;
-
-#[tauri::command]
 pub fn remove_attachment_file(blob_dir: String, id: String) -> Result<(), String>;
 ```
 
 实现要点：
 - ① `create_dir_all` → `Uuid::new_v4()` → `encrypt_file_stream` 写 `<upload_dir>/<id>.wst.tmp` → `rename` 为 `<id>.wst` → 组装 `AttachmentMeta`。
 - ② 直接 `decrypt_file_stream(blob, target)`。
-- ③ 用 `tempfile` 建带原扩展名的临时文件，解密写入，返回绝对路径。
-- ④ `fs::remove_file`，`NotFound` 视为成功。
+- ③ `fs::remove_file`，`NotFound` 视为成功。
+- 解密到临时文件再交给系统程序打开的旧能力已下线，避免系统临时目录里堆明文文件。
 
 ### 5.3 进度事件
 

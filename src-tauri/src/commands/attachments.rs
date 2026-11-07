@@ -221,46 +221,6 @@ pub fn decrypt_export_file(
     filecrypto::decrypt_file_stream(&app, &blob, &target, &mut on_progress)
 }
 
-/// 解密到带原扩展名的临时文件，返回绝对路径（供系统默认程序打开预览）
-#[tauri::command]
-pub fn decrypt_to_temp(
-    app: AppHandle,
-    blob_dir: String,
-    id: String,
-    name: String,
-) -> Result<String, String> {
-    let blob = PathBuf::from(&blob_dir).join(format!("{}.wst", id));
-    if !blob.is_file() {
-        return Err(format!("附件文件不存在: {}", blob.display()));
-    }
-
-    let ext = Path::new(&name)
-        .extension()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
-    let suffix = if ext.is_empty() || ext.eq_ignore_ascii_case("wst") {
-        String::new()
-    } else {
-        format!(".{}", ext)
-    };
-
-    let named = tempfile::Builder::new()
-        .prefix("ws-workbench-")
-        .suffix(&suffix)
-        .tempfile()
-        .map_err(|e| format!("创建临时文件失败: {}", e))?;
-    let (_file, path) = named
-        .keep()
-        .map_err(|e| format!("创建临时文件失败: {}", e))?;
-
-    let mut on_progress = |done: u64, total: u64| {
-        emit_attachment_progress(&app, &id, done, total);
-    };
-    filecrypto::decrypt_file_stream(&app, &blob, &path, &mut on_progress)?;
-
-    Ok(path.to_string_lossy().to_string())
-}
-
 /// 删除附件密文文件；文件不存在视为成功
 #[tauri::command]
 pub fn remove_attachment_file(blob_dir: String, id: String) -> Result<(), String> {

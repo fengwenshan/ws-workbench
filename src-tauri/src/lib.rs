@@ -447,7 +447,6 @@ pub fn run() {
             commands::ensure_dir,
             commands::encrypt_upload_file,
             commands::decrypt_export_file,
-            commands::decrypt_to_temp,
             commands::remove_attachment_file,
             commands::stat_attachment,
             commands::encrypt_upload_bytes,
