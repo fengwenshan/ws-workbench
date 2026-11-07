@@ -185,10 +185,9 @@ openconnect 探测失败时，代理页给出按平台区分的安装引导：ma
 
 ### 系统
 
-左侧图标栏第四个工具（`⌘/Ctrl+4`，托盘菜单里也叫「系统」），六个页签（弹窗拦截仅 Windows 可见）：
+左侧图标栏第四个工具（`⌘/Ctrl+4`，托盘菜单里也叫「系统」），五个页签（弹窗拦截仅 Windows 可见）：
 
 - **软件卸载**：Windows 读注册表 `Uninstall` 键（HKLM 64/32 位、HKCU），macOS 扫 `/Applications` 与 `~/Applications`；支持按名称/发布者/位置搜索，按名称、大小、安装日期排序（顺序记在本地）。卸载执行 `UninstallString`（MSI 的 `/I` 自动换成 `/X`，需要时一次 UAC），macOS 直接把 `.app` 移入废纸篓；没有卸载命令的条目提供「强制移除」（Windows 删注册表项，macOS 结束进程后删除）。卸载后按 bundle id / 注册表键精确匹配文件与注册表残留，按「文件系统 / 注册表」分组、带置信度展示，勾选后删除。
-- **内存占用**：按应用聚合进程 RSS（Chromium/Electron 的 helper 归到宿主应用），显示总占用率、已用/总量/swap 与应用排行，2 秒轮询（页面不可见时暂停）。支持结束进程（先优雅退出，3 秒后仍在运行再确认强制结束）与「深度释放」（macOS 一次授权跑 `purge`；Windows 清进程工作集 + 系统待机列表，一次 UAC）。释放前后都用真实采样，展示差值，不夸大收益。
 - **弹窗拦截**（仅 Windows）：默认关闭，开启后后台线程每 800ms `EnumWindows` 扫可见顶层窗口，按「工具窗口 / 不抢焦点 / 始终置顶 / 无标题 / 尺寸异常 / 类名与标题广告线索 / 进程不在前台」打分，可疑窗口进列表并通过 `popup-detected` 事件实时推给界面。两档模式：**检测模式**（默认）只记录，每条由用户点「关闭 / 隐藏」，同进程 5 秒限流；**拦截模式**（可选，默认关）命中闸门后自动处理——分数达阈值、至少两条命中原因、不在系统进程/外壳窗口保护表、不在忽略名单、同进程冷却 5 秒、每分钟最多 6 个（熔断），设置存 `<data_dir>/popup-settings.json`。「忽略」按进程名记到同目录 `popup-ignore.json`。不注入、不装驱动、不杀进程。
 - **屏幕休眠**：阻止系统空闲睡眠（参考 Amphetamine 的公开电源断言方案），并支持「自动保持规则」（Triggers）：指定 App 运行时 / 接通电源时 / 连接外接显示器时自动保持，条件失效自动释放；手动开启优先，规则只释放自己开的会话。规则存 `<data_dir>/sleep-triggers.json`，后台 5 秒探测一次（`sysinfo` 进程列表、`pmset -g batt` / `GetSystemPowerStatus`、CoreGraphics 活动屏幕数 / `GetSystemMetrics(SM_CMONITORS)`），全部只读、不需要管理员权限。macOS 用 IOKit `IOPMAssertionCreateWithName`（`PreventUserIdleSystemSleep`，不勾「允许屏幕关闭」时再加 `PreventUserIdleDisplaySleep`，断言名 `ws-workbench Keep Awake`）；Windows 用专用线程持有 `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED [| ES_DISPLAY_REQUIRED])`。时长 15/30/60/120 分钟或无限，到点自动释放（状态查询还有一道惰性回收）；不需要 root / 管理员，也不做登录级保活。
 - **开机自启**：列出 Windows 的 `Run` 注册表项（HKLM/HKCU 64/32 位）与启动文件夹、macOS 的 LaunchAgents 与登录项；可启用/禁用，系统范围只读。Windows 禁用写标准的 `StartupApproved` 12 字节状态位（`02` 启用 / `03` + FILETIME 禁用），改前备份原值到应用数据目录，改失败就回滚；macOS 登录项（System Events）需要用户手动授权一次「自动化」，未授权时只展示不可改。本应用自己的登录启动也在这个页签里开关。
@@ -196,11 +195,10 @@ openconnect 探测失败时，代理页给出按平台区分的安装引导：ma
 
 安全约束：删除只进废纸篓（需 root 的条目走一次提权批处理）；所有路径过白名单校验，`/`、主目录、`/System`、`/usr`、`C:\Windows` 等硬拒绝；`pkgutil` 安装收据只读展示；系统应用（SIP / `com.apple.*`）不提供卸载。macOS 的废纸篓走 `NSFileManager` API，不会弹「控制 Finder」的自动化授权。弹窗拦截不做注入/驱动/进程结束；屏幕休眠不碰合盖与主动睡眠。
 
-已知限制：Windows 侧只做了交叉编译检查与验收清单，未实机跑卸载/UAC/深度释放/弹窗检测/自启切换；`purge` 只回收可缓存页，收益有限；残留按精确匹配，宁可漏报不误删；弹窗检测是「显示后处理」（弹窗会闪一下），UIPI 下关不掉管理员窗口，UAC / 锁屏 / 网页内嵌广告看不到；macOS 登录项在未授权「自动化」时只读。
+已知限制：Windows 侧只做了交叉编译检查与验收清单，未实机跑卸载/UAC/弹窗检测/自启切换；残留按精确匹配，宁可漏报不误删；弹窗检测是「显示后处理」（弹窗会闪一下），UIPI 下关不掉管理员窗口，UAC / 锁屏 / 网页内嵌广告看不到；macOS 登录项在未授权「自动化」时只读。
 
-**托盘快捷面板**：左键点菜单栏/任务栏图标弹出柠檬式的无边框小面板（`quick.html`，360×560，失焦或 Esc 自动收起），三个页签：
+**托盘快捷面板**：左键点菜单栏/任务栏图标弹出柠檬式的无边框小面板（`quick.html`，360×560，失焦或 Esc 自动收起），两个页签：
 
-- **内存**：占用率环 + 已用/总量/swap + 占用排行前 7 个应用，「释放」直接走深度释放（需要时弹一次系统授权），底部可跳主窗口看全部应用与卸载。
 - **VPN**：当前状态与配置名、「连接/断开」、规则/全局/直连三种代理模式即切，以及跳转代理页的入口。
 - **休眠**：一键保持唤醒 / 停止，15 分钟 / 30 分钟 / 1 小时 / 不限四档时长，状态点与剩余时间实时刷新（复用系统页「屏幕休眠」的同一套命令与 composable）。
 
@@ -218,7 +216,7 @@ openconnect 探测失败时，代理页给出按平台区分的安装引导：ma
 
 ### 托盘
 
-右键菜单：显示主窗口 / 清理 / 代理 / 设置 / 日志 / 连接 VPN / 断开 VPN / 退出。左键单击图标弹出快捷面板（内存 / VPN 两个页签，见上），菜单只在右键时出现。点「退出」会先请求 worker 收尾再结束进程，否则可能留下没人回收的路由。关闭主窗口只是隐藏，应用继续在托盘里运行。
+右键菜单：显示主窗口 / 清理 / 代理 / 设置 / 日志 / 连接 VPN / 断开 VPN / 退出。左键单击图标弹出快捷面板（VPN / 休眠两个页签，见上），菜单只在右键时出现。点「退出」会先请求 worker 收尾再结束进程，否则可能留下没人回收的路由。关闭主窗口只是隐藏，应用继续在托盘里运行。
 
 快捷面板是独立的透明无边框窗口：点面板外部（失焦）或按 Esc 收起；「打开主窗口」会把主窗口唤到前台并切到对应页面。macOS 的透明窗口依赖 Tauri 的 `macos-private-api` feature（`Cargo.toml` + `tauri.conf.json` 的 `macOSPrivateApi`），**直装/DMG 渠道没问题，但用不了 Mac App Store**。
 
@@ -373,7 +371,7 @@ VPN 会话目录同时被主进程和提权 worker 使用，因此不做路径�
 - Windows 上按域名解析出来的 `/32` 是后台轮询注入的，新地址最多晚约 15 秒生效；服务端下发的 split-include 网段不受影响（整段注入）
 - 规则与代理模式的改动都会热生效（worker 轮询 `rules.json` / `mode` 后重新布线），不需要断开重连
 - 系统清理的 Windows 运行时行为（注册表枚举、UAC 卸载、工作集/待机列表）只做了交叉编译检查，需按设计文档第 9 节的 Windows 清单实机验收
-- macOS 深度释放的 `purge` 只回收可缓存页，收益有限；`~/.Trash` 内容受 TCC 保护，删除结果以「原路径消失 + trash API 成功」为准
+- `~/.Trash` 内容受 TCC 保护，删除结果以「原路径消失 + trash API 成功」为准
 - 卸载残留只做精确匹配（bundle id / 注册表键 / 精确应用名），存在非标准目录的数据需要手动清理
 - 托盘快捷面板的原生弹出（真实点菜单栏图标）受 macOS 辅助功能/屏幕录制权限限制，自动化测试只覆盖了页面渲染、位置计算与 `cargo check`，首次使用请手动点一下确认弹窗位置与失焦收起
 - 快捷面板的透明圆角窗口在 macOS 上依赖 `macos-private-api`，因此不支持 Mac App Store 渠道
@@ -387,7 +385,7 @@ src-tauri/src/
     project.rs     打包、校验、项目类型与 VCS 识别
     system.rs      打开目录/终端/编辑器、平台与网络信息
     attachments.rs 附件加解密、上传目录解析、笔记内联图片
-    cleaner.rs     系统工具命令（列表/卸载/残留/内存）
+    cleaner.rs     系统工具命令（列表/卸载/残留）
     cleaner_sleep.rs / cleaner_startup.rs / cleaner_popup.rs / cleaner_defaultapps.rs
                    屏幕休眠 / 开机自启 / 弹窗拦截（仅 Windows）/ 默认应用的命令入口
     quick.rs       托盘快捷面板：隐藏、打开主窗口并切页
@@ -403,7 +401,7 @@ src-tauri/src/
   netinfo.rs       本机网卡 MAC / IP（Windows 走 PowerShell，macOS/Linux 走 getifaddrs）
   process.rs/winps.rs  进程管理与 PowerShell 调用
   apps/            外部应用定位（finder / registry）
-  cleaner/         系统工具：安装列表/卸载/残留扫描/内存占用 + 四个新页签的后端
+  cleaner/         系统工具：安装列表/卸载/残留扫描 + 四个新页签的后端
     sleep.rs       防休眠（macOS IOKit 断言 / Windows SetThreadExecutionState）
     startup.rs     启动项枚举与启停（Windows 注册表+StartupApproved / macOS launchctl）
     popup.rs       弹窗检测（仅 Windows：EnumWindows 轮询 + 启发式打分）
