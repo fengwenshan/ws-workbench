@@ -252,8 +252,8 @@ type Selection = { kind: 'group' | 'project'; id: string } | null
 自上而下：
 1. **上传位置行**：显示 4.2 解析出的实际路径 + 来源徽标（自定义 / 全局默认 / App 私有）；`[更改]` 选目录写入 `entity.upload_dir`；`[恢复默认]` 清空为 `None`。
 2. **上传区**：拖拽或 `[选择文件]` → `encrypt_upload_file` → push meta → `save_config` → 刷新。
-3. **附件列表**：名称 / 大小 / 时间 + 操作 `[打开][下载][重命名][删除]`。
-   - 打开：`decrypt_to_temp` → shell 打开系统默认程序。
+3. **附件列表**：名称 / 大小 / 时间 + 操作 `[预览][下载][重命名][删除]`。
+   - 预览：图像直接走 `wst-img` 协议在应用内按需解密渲染，不落临时文件；非图像给出下载提示。原「打开」（`decrypt_to_temp` → shell 打开系统默认程序）会在系统临时目录堆积明文文件，已移除。
    - 下载：dialog `save` 选目标 → `decrypt_export_file`。
    - 重命名：行内编辑 `meta.name` → `save_config`。
    - 删除：单次确认 → `remove_attachment_file` → 删 meta → `save_config`。（删除**实体**时的附件联动见 §7.5）
