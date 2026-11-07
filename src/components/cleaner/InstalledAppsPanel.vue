@@ -3,19 +3,13 @@ import { computed, onMounted, ref } from 'vue'
 import { Checkbox, Input, Modal, message } from 'ant-design-vue'
 import { SearchOutlined } from '@ant-design/icons-vue'
 import type { CleanerApi } from '@/composables/useCleaner'
-import type {
-  InstalledApp,
-  LeftoverItem,
-  MemoryApp,
-  UninstallOutcome,
-} from '@/types/cleaner'
+import type { InstalledApp, LeftoverItem, UninstallOutcome } from '@/types/cleaner'
 import { safeGet, safeSet } from '@/composables/safeStorage'
 import AppIcon from './AppIcon.vue'
 import {
   confidenceClass,
   confidenceLabel,
   formatBytes,
-  formatMemory,
   leftoverKindLabel,
 } from './format'
 
@@ -123,18 +117,6 @@ const emptyText = computed(() =>
 const uninstallTarget = ref<InstalledApp | null>(null)
 /** 没有 UninstallString 的条目走「强制移除」文案 */
 const isForce = ref(false)
-/** 默认勾选「先结束该应用进程」（设计 4.2） */
-const quitBeforeUninstall = ref(true)
-/** 当前应用正在运行的进程聚合（尽力匹配，找不到就为空） */
-const runningApps = ref<MemoryApp[]>([])
-
-const runningProcessCount = computed(() =>
-  runningApps.value.reduce((sum, app) => sum + app.process_count, 0),
-)
-const runningMemory = computed(() =>
-  runningApps.value.reduce((sum, app) => sum + app.memory, 0),
-)
-
 const commandText = computed(() => {
   const app = uninstallTarget.value
   if (!app) return ''
@@ -161,75 +143,21 @@ function normalizePath(value: string): string {
     .toLowerCase()
 }
 
-/**
- * 在内存快照里找「这个已安装应用」对应的运行进程。
- * 后端两边的 id 体系不同（安装列表是 win:注册表键 / mac:bundle 路径，内存是 app 目录 / exe 路径），
- * 这里按 bundle 路径、安装目录、名称逐级匹配，只用于给出「先结束进程」的提示，匹配不到就不显示。
- */
-function matchRunningApps(app: InstalledApp): MemoryApp[] {
-  const snapshot = cleaner.memory
-  if (!snapshot) return []
-  const bundlePath = normalizePath(
-    app.id.startsWith('mac:') ? app.id.slice('mac:'.length) : '',
-  )
-  const installPath = normalizePath(app.install_location)
-  const name = (app.name ?? '').trim().toLowerCase()
-  return snapshot.apps.filter((item) => {
-    const id = normalizePath(item.id)
-    const exe = normalizePath(item.exe)
-    if (
-      bundlePath &&
-      (id === bundlePath ||
-        id.startsWith(`${bundlePath}/`) ||
-        exe.startsWith(`${bundlePath}/`))
-    ) {
-      return true
-    }
-    if (
-      installPath.length > 1 &&
-      (id === installPath ||
-        id.startsWith(`${installPath}/`) ||
-        exe.startsWith(`${installPath}/`))
-    ) {
-      return true
-    }
-    return name.length > 0 && (item.name ?? '').trim().toLowerCase() === name
-  })
-}
-
-async function detectRunningApps(app: InstalledApp) {
-  // 内存快照第一次进入页面时可能还没有，这里补一次只读采样；失败不打扰用户
-  if (!cleaner.memory) await cleaner.sampleMemory()
-  if (uninstallTarget.value?.id !== app.id) return
-  runningApps.value = matchRunningApps(app)
-}
-
 async function openUninstall(app: InstalledApp) {
   uninstallTarget.value = app
   isForce.value = app.uninstall_kind === 'force'
-  quitBeforeUninstall.value = true
-  runningApps.value = []
   cleaner.resetUninstallOutcome()
-  void detectRunningApps(app)
 }
 
 function closeUninstall() {
   if (cleaner.uninstalling) return
   uninstallTarget.value = null
-  runningApps.value = []
   cleaner.resetUninstallOutcome()
 }
 
 async function confirmUninstall() {
   const app = uninstallTarget.value
   if (!app || cleaner.uninstalling) return
-  // 可选：先优雅结束该应用的进程（失败不阻断卸载）
-  if (quitBeforeUninstall.value && runningApps.value.length) {
-    await cleaner.quitApps(
-      runningApps.value.map((item) => item.id),
-      false,
-    )
-  }
   const outcome = await cleaner.uninstall(app.id)
   if (!outcome) {
     message.error(cleaner.actionError || '卸载失败')
@@ -238,7 +166,6 @@ async function confirmUninstall() {
   if (!outcome.ok) return // 失败结果留在弹窗里展示（命令 / 退出码 / 错误）
   message.success(`「${app.name}」已卸载`)
   uninstallTarget.value = null
-  runningApps.value = []
   cleaner.resetUninstallOutcome()
   // 设计 4.2：成功后自动进入残留扫描
   await openLeftovers(app, outcome)
@@ -577,23 +504,6 @@ function requestDeleteLeftovers() {
           <p class="dialog-hint">实际执行的命令与退出码会在完成后显示。</p>
           <p v-if="uninstallTarget.detail" class="dialog-hint">
             备注：{{ uninstallTarget.detail }}
-          </p>
-        </div>
-
-        <div class="dialog-block">
-          <Checkbox
-            v-model:checked="quitBeforeUninstall"
-            :disabled="cleaner.uninstalling || runningApps.length === 0"
-          >
-            先结束该应用的运行中进程
-          </Checkbox>
-          <p class="dialog-hint">
-            <template v-if="runningApps.length">
-              （{{ runningApps.length }} 个应用、{{ runningProcessCount }} 个进程、{{
-                formatMemory(runningMemory)
-              }}）
-            </template>
-            <template v-else>（未检测到正在运行的进程）</template>
           </p>
         </div>
 

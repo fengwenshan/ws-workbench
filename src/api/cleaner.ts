@@ -3,9 +3,6 @@ import type {
   DeleteOutcome,
   InstalledApp,
   LeftoverItem,
-  MemorySnapshot,
-  QuitOutcome,
-  ReleaseOutcome,
   UninstallOutcome,
 } from '@/types/cleaner'
 
@@ -38,19 +35,4 @@ export function deleteLeftovers(
   paths: string[],
 ): Promise<DeleteOutcome> {
   return invoke<DeleteOutcome>('cleaner_delete_leftovers', { appId, paths })
-}
-
-/** 单次内存采样（前端按 2 秒轮询） */
-export function memorySnapshot(): Promise<MemorySnapshot> {
-  return invoke<MemorySnapshot>('cleaner_memory_snapshot')
-}
-
-/** 结束进程：优雅退出优先；force=true 时直接强制结束 */
-export function quitApps(appIds: string[], force = false): Promise<QuitOutcome> {
-  return invoke<QuitOutcome>('cleaner_quit_apps', { appIds, force })
-}
-
-/** 深度释放（Windows 清工作集/待机列表，macOS 提权 purge） */
-export function deepRelease(): Promise<ReleaseOutcome> {
-  return invoke<ReleaseOutcome>('cleaner_deep_release')
 }

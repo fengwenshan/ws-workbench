@@ -39,9 +39,6 @@ export type LeftoverKind =
 /** 残留置信度：只有 high 默认勾选 */
 export type LeftoverConfidence = 'high' | 'medium' | 'low'
 
-/** 内存条目来源：按应用聚合 / 找不到应用归属的独立进程 */
-export type MemoryAppKind = 'app' | 'process'
-
 /** 已安装应用（Windows 读注册表，macOS 读 /Applications） */
 export interface InstalledApp {
   /** "win:{hive}|{key_path}" / "mac:{bundle_path}" */
@@ -98,54 +95,6 @@ export interface DeleteFailure {
 export interface DeleteOutcome {
   trashed: number
   failed: DeleteFailure[]
-}
-
-/** 按应用聚合的内存占用 */
-export interface MemoryApp {
-  /** bundle id / 应用目录 / exe 路径 */
-  id: string
-  name: string
-  exe: string
-  icon: string | null
-  process_count: number
-  /** 该应用所有进程 RSS 之和（字节） */
-  memory: number
-  pids: number[]
-  kind: MemoryAppKind | string
-}
-
-/** 一次内存采样快照 */
-export interface MemorySnapshot {
-  total: number
-  used: number
-  available: number
-  used_percent: number
-  swap_total: number
-  swap_used: number
-  /** 按 memory 降序 */
-  apps: MemoryApp[]
-  /** epoch 毫秒 */
-  sampled_at: number
-}
-
-/** 结束进程结果 */
-export interface QuitOutcome {
-  quit: number
-  forced: number
-  /** 未能结束的应用名/标识（后端原样回传） */
-  failed: string[]
-}
-
-/** 深度释放结果 */
-export interface ReleaseOutcome {
-  ok: boolean
-  before_used: number
-  after_used: number
-  /** after 用系统重采样，不夸张 */
-  freed: number
-  message: string
-  /** 原理说明，直接展示在 UI */
-  note: string
 }
 
 /** 残留扫描 / 卸载进度事件 `cleaner-progress` 的 payload */

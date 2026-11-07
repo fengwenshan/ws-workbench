@@ -3,7 +3,6 @@ import { computed, ref, watch } from 'vue'
 import { platform } from '@/platform'
 import { useCleaner } from '@/composables/useCleaner'
 import InstalledAppsPanel from './InstalledAppsPanel.vue'
-import MemoryPanel from './MemoryPanel.vue'
 import PopupPanel from './PopupPanel.vue'
 import SleepPanel from './SleepPanel.vue'
 import StartupPanel from './StartupPanel.vue'
@@ -21,7 +20,7 @@ const props = defineProps<{
   active: boolean
 }>()
 
-type TabKey = 'apps' | 'memory' | 'popup' | 'sleep' | 'startup' | 'defaultapps'
+type TabKey = 'apps' | 'popup' | 'sleep' | 'startup' | 'defaultapps'
 
 const isWindows = computed(() => platform.is_windows)
 
@@ -40,23 +39,16 @@ watch(
   { immediate: true },
 )
 
-const memoryTabActive = computed(() => props.active && tab.value === 'memory')
 const popupTabActive = computed(() => props.active && tab.value === 'popup')
 const sleepTabActive = computed(() => props.active && tab.value === 'sleep')
 const startupTabActive = computed(() => props.active && tab.value === 'startup')
 const defaultAppsTabActive = computed(() => props.active && tab.value === 'defaultapps')
-const rescanning = computed(() =>
-  tab.value === 'apps' ? cleaner.appsLoading : cleaner.sampling,
-)
+const rescanning = computed(() => cleaner.appsLoading)
 
-/** 「重新扫描」：软件卸载页重扫安装列表，内存页立即重新采样一次 */
+/** 「重新扫描」：重新枚举已安装应用（列表只在进页面时拉一次） */
 async function handleRescan() {
   if (rescanning.value) return
-  if (tab.value === 'apps') {
-    await cleaner.loadApps(true)
-  } else if (tab.value === 'memory') {
-    await cleaner.sampleMemory()
-  }
+  await cleaner.loadApps(true)
 }
 </script>
 
@@ -67,10 +59,10 @@ async function handleRescan() {
         <h3>系统</h3>
       </div>
       <button
-        v-if="tab === 'apps' || tab === 'memory'"
+        v-if="tab === 'apps'"
         class="btn btn-secondary"
         :disabled="rescanning"
-        :title="tab === 'apps' ? '重新枚举已安装应用' : '立即重新采样内存'"
+        title="重新枚举已安装应用"
         @click="handleRescan"
       >
         {{ rescanning ? '扫描中…' : '重新扫描' }}
@@ -88,16 +80,6 @@ async function handleRescan() {
       >
         软件卸载
         <span v-if="cleaner.apps.length" class="tab-count">{{ cleaner.apps.length }}</span>
-      </button>
-      <button
-        type="button"
-        class="cleaner-tab"
-        :class="{ active: tab === 'memory' }"
-        role="tab"
-        :aria-selected="tab === 'memory'"
-        @click="tab = 'memory'"
-      >
-        内存占用
       </button>
       <button
         v-if="isWindows"
@@ -144,9 +126,6 @@ async function handleRescan() {
 
     <div v-show="tab === 'apps'" class="cleaner-pane">
       <InstalledAppsPanel :cleaner="cleaner" />
-    </div>
-    <div v-show="tab === 'memory'" class="cleaner-pane">
-      <MemoryPanel :cleaner="cleaner" :active="memoryTabActive" />
     </div>
     <div v-if="isWindows" v-show="tab === 'popup'" class="cleaner-pane">
       <PopupPanel :active="popupTabActive" />

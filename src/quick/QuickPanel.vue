@@ -3,90 +3,21 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { useConfig } from '@/composables/useConfig'
 import { useVpn } from '@/composables/useVpn'
-import { useCleaner } from '@/composables/useCleaner'
 import { useKeepAwake } from '@/composables/useKeepAwake'
-import AppIcon from '@/components/cleaner/AppIcon.vue'
-import { formatMemory } from '@/components/cleaner/format'
 import type { VpnProxyMode } from '@/types/vpn'
 
 /**
  * 托盘快捷面板（独立窗口 /quick.html），布局参考腾讯柠檬的悬浮面板：
- * 顶部三个页签（内存 / VPN / 休眠），下面是紧凑卡片，点面板外部或按 Esc 收起。
+ * 顶部两个页签（VPN / 休眠），下面是紧凑卡片，点面板外部或按 Esc 收起。
  *
  * 这里只做「快速查看 + 快速动作」：卸载、残留清理、规则编辑仍然回主窗口。
  */
 const { config, saveConfig } = useConfig()
 const vpn = useVpn(config, saveConfig)
-const cleaner = useCleaner()
 const keepAwake = useKeepAwake()
 
-type Tab = 'memory' | 'vpn' | 'sleep'
-const tab = ref<Tab>('memory')
-
-// ============================== 内存 ==============================
-
-/** 占用率和主窗口一致：优先 used/total，拿不到再退回后端给的 used_percent */
-const usedPercent = computed(() => {
-  const snapshot = cleaner.memory
-  if (!snapshot) return 0
-  const raw =
-    snapshot.total > 0 && snapshot.used > 0
-      ? (snapshot.used / snapshot.total) * 100
-      : Number(snapshot.used_percent ?? 0)
-  if (!Number.isFinite(raw)) return 0
-  return Math.min(100, Math.max(0, raw))
-})
-
-const level = computed(() => {
-  if (usedPercent.value >= 80) return 'danger'
-  if (usedPercent.value >= 60) return 'warn'
-  return 'primary'
-})
-
-const topApps = computed(() => (cleaner.memory?.apps ?? []).slice(0, 7))
-const releaseTip = ref('')
-const releaseTipLevel = ref<'ok' | 'warn'>('ok')
-
-async function handleRelease() {
-  releaseTip.value = ''
-  const outcome = await cleaner.release()
-  if (!outcome) {
-    releaseTip.value = cleaner.actionError || '深度释放失败'
-    releaseTipLevel.value = 'warn'
-    return
-  }
-  if (!outcome.ok) {
-    // 用户点了「取消」也算正常路径，不当错误提示
-    releaseTip.value = outcome.message || '已取消授权'
-    releaseTipLevel.value = 'warn'
-    return
-  }
-  releaseTip.value =
-    outcome.freed > 0
-      ? `已回收 ${formatMemory(outcome.freed)}（${formatMemory(outcome.before_used)} → ${formatMemory(outcome.after_used)}）`
-      : '系统暂无可回收内存'
-  releaseTipLevel.value = 'ok'
-}
-
-function startMemory(): void {
-  cleaner.startMemoryPolling()
-}
-
-function stopMemory(): void {
-  cleaner.stopMemoryPolling()
-}
-
-// 页签切到内存才开始 2 秒采样；切走就停，面板隐藏时由 document.hidden 兜底
-watch(
-  tab,
-  (value) => {
-    if (value === 'memory') startMemory()
-    else stopMemory()
-    if (value === 'sleep') keepAwake.startPolling()
-    else keepAwake.stopPolling()
-  },
-  { immediate: true },
-)
+type Tab = 'vpn' | 'sleep'
+const tab = ref<Tab>('vpn')
 
 // ============================== 休眠 ==============================
 
@@ -190,7 +121,6 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
-  stopMemory()
   keepAwake.stopPolling()
   window.removeEventListener('keydown', onKeydown)
 })
@@ -200,17 +130,6 @@ onUnmounted(() => {
   <div class="qp">
     <header class="qp-head" data-tauri-drag-region>
       <div class="qp-tabs" role="tablist" aria-label="快捷面板">
-        <button
-          type="button"
-          class="qp-tab"
-          :class="{ active: tab === 'memory' }"
-          role="tab"
-          :aria-selected="tab === 'memory'"
-          @click="tab = 'memory'"
-        >
-          内存
-          <span class="qp-badge" :class="`level-${level}`">{{ Math.round(usedPercent) }}%</span>
-        </button>
         <button
           type="button"
           class="qp-tab"
@@ -238,68 +157,6 @@ onUnmounted(() => {
     </header>
 
     <div class="qp-body">
-      <!-- 内存：总览 + 占用排行 + 深度释放 -->
-      <section v-show="tab === 'memory'" class="qp-pane">
-        <div class="mem-hero">
-          <div class="mem-ring" :class="`level-${level}`">
-            <svg viewBox="0 0 64 64" aria-hidden="true">
-              <circle class="ring-bg" cx="32" cy="32" r="27" />
-              <circle
-                class="ring-fg"
-                cx="32"
-                cy="32"
-                r="27"
-                :stroke-dasharray="`${(usedPercent * 1.696).toFixed(1)} 999`"
-                transform="rotate(-90 32 32)"
-              />
-            </svg>
-            <span class="mem-pct">{{ Math.round(usedPercent) }}%</span>
-          </div>
-          <div class="mem-text">
-            <strong>内存占用</strong>
-            <p>
-              已用 {{ formatMemory(cleaner.memory?.used ?? 0) }} /
-              {{ formatMemory(cleaner.memory?.total ?? 0) }}
-            </p>
-            <p v-if="cleaner.memory?.swap_used" class="qp-muted">
-              交换 {{ formatMemory(cleaner.memory?.swap_used ?? 0) }}
-            </p>
-          </div>
-          <button
-            type="button"
-            class="qp-action"
-            :disabled="cleaner.releasing"
-            @click="handleRelease"
-          >
-            {{ cleaner.releasing ? '释放中…' : '释放' }}
-          </button>
-        </div>
-
-        <p v-if="releaseTip" class="qp-tip" :class="releaseTipLevel">{{ releaseTip }}</p>
-
-        <div class="qp-section">
-          <span>占用排行</span>
-          <span v-if="cleaner.memory" class="qp-muted">
-            {{ cleaner.memory.apps.length }} 个应用
-          </span>
-        </div>
-
-        <ul class="app-list">
-          <li v-for="app in topApps" :key="app.id" class="app-row">
-            <AppIcon :icon="app.icon" :name="app.name" :size="22" />
-            <span class="app-name" :title="app.name">{{ app.name }}</span>
-            <span class="app-mem">{{ formatMemory(app.memory) }}</span>
-          </li>
-          <li v-if="!topApps.length" class="app-empty">
-            {{ cleaner.memoryError || '正在采样…' }}
-          </li>
-        </ul>
-
-        <button type="button" class="qp-more" @click="openMain('cleaner')">
-          查看全部应用与卸载 →
-        </button>
-      </section>
-
       <!-- VPN：状态 + 连接/断开 + 规则/全局/直连 -->
       <section v-show="tab === 'vpn'" class="qp-pane">
         <div class="vpn-card">
@@ -489,26 +346,6 @@ body,
   background: var(--primary);
 }
 
-.qp-badge {
-  padding: 0 6px;
-  border-radius: 999px;
-  background: var(--bg-hover);
-  color: var(--text-secondary);
-  font-size: 11px;
-  font-weight: 500;
-  line-height: 17px;
-}
-
-.qp-badge.level-warn {
-  background: #fef3c7;
-  color: #b45309;
-}
-
-.qp-badge.level-danger {
-  background: #fee2e2;
-  color: #b91c1c;
-}
-
 .qp-dot {
   width: 7px;
   height: 7px;
@@ -554,93 +391,6 @@ body,
   gap: 10px;
 }
 
-.mem-hero {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-}
-
-.mem-ring {
-  position: relative;
-  width: 64px;
-  height: 64px;
-  flex-shrink: 0;
-}
-
-.mem-ring svg {
-  display: block;
-  width: 64px;
-  height: 64px;
-}
-
-.mem-ring .ring-bg {
-  fill: none;
-  stroke: var(--bg-hover);
-  stroke-width: 6;
-}
-
-.mem-ring .ring-fg {
-  fill: none;
-  stroke: var(--primary);
-  stroke-width: 6;
-  stroke-linecap: round;
-  transition: stroke-dasharray 0.4s ease;
-}
-
-.mem-ring.level-warn .ring-fg {
-  stroke: var(--warning);
-}
-
-.mem-ring.level-danger .ring-fg {
-  stroke: var(--danger);
-}
-
-.mem-pct {
-  position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  font-size: 15px;
-  font-weight: 700;
-}
-
-.mem-text {
-  flex: 1;
-  min-width: 0;
-}
-
-.mem-text strong {
-  display: block;
-  font-size: 14px;
-}
-
-.mem-text p {
-  margin: 3px 0 0;
-  color: var(--text-secondary);
-  font-size: 12px;
-}
-
-.qp-action {
-  flex-shrink: 0;
-  height: 30px;
-  padding: 0 14px;
-  border: 0;
-  border-radius: 8px;
-  background: var(--primary);
-  color: #fff;
-  font-size: 13px;
-  cursor: pointer;
-}
-
-.qp-action:hover:not(:disabled) {
-  background: var(--primary-hover);
-}
-
-.qp-action:disabled {
-  opacity: 0.6;
-  cursor: default;
-}
-
 .qp-tip {
   margin: 0;
   padding: 7px 10px;
@@ -669,51 +419,6 @@ body,
   color: var(--text-secondary);
   font-size: 12px;
   font-weight: 600;
-}
-
-/* ============================== 应用列表 ============================== */
-
-.app-list {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.app-row {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  height: 32px;
-  padding: 0 6px;
-  border-radius: 7px;
-}
-
-.app-row:hover {
-  background: var(--bg-hover);
-}
-
-.app-name {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.app-mem {
-  flex-shrink: 0;
-  color: var(--text-secondary);
-  font-variant-numeric: tabular-nums;
-  font-size: 12px;
-}
-
-.app-empty {
-  padding: 10px 6px;
-  color: var(--text-muted);
-  font-size: 12px;
 }
 
 .qp-more {

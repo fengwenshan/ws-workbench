@@ -9,12 +9,6 @@ export function formatBytes(bytes: number): string {
   return `${(bytes / 1024 ** 3).toFixed(2)} GB`
 }
 
-/** 内存数值：统一 GB/MB 两级，避免总览卡里出现 0.98 GB 这种读数 */
-export function formatMemory(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes <= 0) return '0 MB'
-  if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(0)} MB`
-  return `${(bytes / 1024 ** 3).toFixed(2)} GB`
-}
 
 const LEFTOVER_KIND_LABELS: Record<LeftoverKind, string> = {
   install_dir: '安装目录',
