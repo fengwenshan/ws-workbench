@@ -129,6 +129,22 @@ macOS：
 - Windows：`cargo xwin check` + 实机验收清单（启动项状态位、`powercfg /requests`、弹窗检测、OpenAs 对话框）。
 - 前端：`pnpm build` + Tabbit mock 渲染截图（四个新页签）。
 
+### 5.1 已执行（2026-11-07，macOS 14 真机）
+
+| 检查 | 命令 | 结果 |
+| --- | --- | --- |
+| Rust 全量单测 | `cargo test --lib` | 366 passed / 0 failed / 3 ignored（三个手动探针） |
+| 电源断言真实性 | `cargo test --lib cleaner::sleep::tests::manual_assertion_shows_in_pmset -- --ignored` | `pmset -g assertions` 里出现 `ws-workbench Keep Awake`，`PreventUserIdleSystemSleep` + `PreventUserIdleDisplaySleep` 各一条，停止后消失 |
+| 启动项枚举 | `... cleaner::startup::tests::manual_list_real_items --ignored` | 本机 22 条（用户 LaunchAgents 可切、`/Library` 只读带原因、禁用时间反解正常） |
+| 默认应用读取 | `... cleaner::defaultapps::tests::manual_list_real_defaults --ignored` | 14 种类型全为真实 handler；`.txt` 候选 18 个（含 `~/Applications`） |
+| macOS 编译 | `cargo check` | 通过，仅 3 条 vpn 既有 warning |
+| Windows 交叉编译 | `cargo xwin check --target x86_64-pc-windows-msvc` | 通过，0 error |
+| 前端构建 | `pnpm build` | 通过（vue-tsc + vite） |
+| 应用启动 | `pnpm tauri dev` | 正常启动，托盘快捷面板创建成功，无 panic |
+
+未做（环境限制）：Windows 实机验收；真实改动系统默认应用（避免动用户既有文件关联，只验证读与候选）；弹窗检测只在 Windows 有效，未实机跑；四页签的浏览器 mock 截图未做（改为真机启动 + 组件代码走查）。
+
+
 ## 6. 已知限制
 
 - 屏幕休眠：只防空闲睡眠/关屏；不拦屏保（macOS 屏幕断言会压制屏保）、合盖、主动睡眠。
