@@ -11,10 +11,8 @@
 pub mod installer;
 pub mod trash_guard;
 // 「系统」工具页新增页签，每个 tab 一个子模块（设计 2026-11-07 第 3 节）
-pub mod defaultapps;
 pub mod popup;
 pub mod sleep;
-pub mod startup;
 
 // 纯逻辑（过滤/去重/UninstallString 解析）在 test cfg 下也会编进 macOS 测试，
 // 此时 Windows 专用部分用不到，单独允许 dead_code 避免噪音警告

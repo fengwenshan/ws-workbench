@@ -668,7 +668,7 @@ pub fn run() {
             commands::cleaner_uninstall_app,
             commands::cleaner_scan_leftovers,
             commands::cleaner_delete_leftovers,
-            // 「系统」页新增页签：屏幕休眠 / 开机自启 / 弹窗拦截 / 默认应用
+            // 「系统」页新增页签：屏幕休眠 / 弹窗拦截（仅 Windows）
             commands::keepawake_status,
             commands::keepawake_start,
             commands::keepawake_stop,
@@ -677,10 +677,6 @@ pub fn run() {
             commands::sleep_triggers_add,
             commands::sleep_triggers_remove,
             commands::sleep_triggers_set_enabled,
-            commands::startup_list,
-            commands::startup_set_enabled,
-            commands::startup_app_autostart_get,
-            commands::startup_app_autostart_set,
             commands::popup_status,
             commands::popup_settings_get,
             commands::popup_settings_set,
@@ -690,11 +686,6 @@ pub fn run() {
             commands::popup_clear,
             commands::popup_dismiss,
             commands::popup_ignore,
-            commands::defaultapps_list,
-            commands::defaultapps_candidates,
-            commands::defaultapps_set,
-            commands::defaultapps_reveal_settings,
-            commands::defaultapps_open_with,
             // 托盘快捷面板：隐藏 / 打开主窗口并切页
             commands::quick_panel_hide,
             commands::quick_panel_open_main,
