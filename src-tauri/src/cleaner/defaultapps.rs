@@ -322,6 +322,28 @@ mod tests {
         assert_eq!(candidates[1].name, "Beta");
     }
 
+    /// 手动验证：真实读取本机默认应用（macOS 走 LaunchServices）。
+    /// 跑法：`cargo test --lib cleaner::defaultapps::tests::manual_list_real_defaults -- --ignored --nocapture`
+    #[test]
+    #[ignore = "依赖本机文件关联环境，默认不跑"]
+    fn manual_list_real_defaults() {
+        let entries = super::list().expect("读取默认应用失败");
+        println!("共 {} 种类型", entries.len());
+        for entry in entries.iter().take(20) {
+            println!(
+                "  {} -> {} ({}) can_change={} detail={}",
+                entry.extension, entry.current_app_name, entry.current_app_id, entry.can_change, entry.detail
+            );
+        }
+        assert!(!entries.is_empty(), "至少应有首批扩展名");
+
+        let candidates = super::candidates(".txt").expect("读取候选应用失败");
+        println!(".txt 候选应用 {} 个", candidates.len());
+        for candidate in candidates.iter().take(10) {
+            println!("  {} | {} | {}", candidate.name, candidate.app_id, candidate.path);
+        }
+    }
+
     #[test]
     fn dedupe_keeps_first_bundle_id_and_skips_empty() {
         let candidates = dedupe_candidates(vec![

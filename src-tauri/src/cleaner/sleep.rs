@@ -391,6 +391,32 @@ mod tests {
         stop().expect("stop");
     }
 
+    /// 手动验证：真实电源断言必须出现在 `pmset -g assertions` 里。
+    /// 跑法：`cargo test --lib cleaner::sleep::tests::manual_assertion_shows_in_pmset -- --ignored --nocapture`
+    #[test]
+    #[ignore = "需要真实系统电源断言，默认不跑"]
+    fn manual_assertion_shows_in_pmset() {
+        let _serial = serial();
+        let started = start(None, false).expect("start");
+        assert!(started.active);
+
+        let output = std::process::Command::new("pmset")
+            .args(["-g", "assertions"])
+            .output()
+            .expect("跑 pmset 失败");
+        let text = String::from_utf8_lossy(&output.stdout).to_string();
+        println!("{text}");
+
+        assert!(
+            text.contains("ws-workbench Keep Awake"),
+            "pmset 里应能看到断言名，实际输出：\n{text}"
+        );
+        assert!(text.contains("PreventUserIdleSystemSleep"));
+        assert!(text.contains("PreventUserIdleDisplaySleep"));
+        assert!(text.contains("PreventUserIdle"), "断言类型名应完整展示");
+        stop().expect("stop");
+    }
+
     #[test]
     fn hint_mentions_platform_limits() {
         let _serial = serial();

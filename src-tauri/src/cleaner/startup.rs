@@ -188,6 +188,31 @@ mod tests {
         assert!(error.contains("管理员权限"));
     }
 
+    /// 手动验证：真实枚举本机启动项并打印（macOS 会跑 launchctl / osascript）。
+    /// 跑法：`cargo test --lib cleaner::startup::tests::manual_list_real_items -- --ignored --nocapture`
+    #[test]
+    #[ignore = "依赖本机启动项环境，默认不跑"]
+    fn manual_list_real_items() {
+        match super::list() {
+            Ok(items) => {
+                println!("共 {} 条启动项", items.len());
+                for item in items.iter().take(20) {
+                    println!(
+                        "  [{}] {} | {} | scope={} toggle={} detail={}",
+                        if item.enabled { "on " } else { "off" },
+                        item.name,
+                        item.source,
+                        item.scope,
+                        item.can_toggle,
+                        item.detail
+                    );
+                }
+                assert!(!items.len() > 1000, "启动项数量异常");
+            }
+            Err(err) => panic!("枚举启动项失败：{err}"),
+        }
+    }
+
     #[test]
     fn unknown_ids_fall_through_to_platform() {
         // 登录项被移除后允许重新添加，所以「列表里找不到」不在这里报错
