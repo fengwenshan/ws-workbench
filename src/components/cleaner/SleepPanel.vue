@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch } from 'vue'
-import { Checkbox, Input, Select, Switch, message } from 'ant-design-vue'
+import { Input, InputNumber, Select, Switch, message } from 'ant-design-vue'
 import { useKeepAwake } from '@/composables/useKeepAwake'
 import { platform } from '@/platform'
-import type { KeepAwakeDurationMinutes, SleepTrigger, SleepTriggerKind } from '@/types/sleep'
+import type { SleepTrigger, SleepTriggerKind } from '@/types/sleep'
 
 /**
  * 屏幕休眠页签：开关「保持唤醒」+ 时长（15/30/60/120 分钟 / 无限）+
@@ -23,18 +23,19 @@ const keepAwake = useKeepAwake()
 
 // ============================ 表单状态 ============================
 
-/** 时长选择（分钟）；0 = 无限。开始后锁定，停止后保留上次选择 */
-const durationMinutes = ref<KeepAwakeDurationMinutes>(30)
 /** 是否允许屏幕关闭（默认关 = 屏幕保持常亮，与设计 4.1 一致） */
 const allowDisplaySleep = ref(false)
 
-const DURATION_OPTIONS: { value: KeepAwakeDurationMinutes; label: string }[] = [
-  { value: 15, label: '15 分钟' },
-  { value: 30, label: '30 分钟' },
-  { value: 60, label: '1 小时' },
-  { value: 120, label: '2 小时' },
-  { value: 0, label: '无限' },
-]
+/**
+ * 快捷时长分组，参考 Amphetamine「开启新会话 → 分钟 / 小时」的二级菜单：
+ * 点一个时长立刻开始一个会话，不用再点「开始」。
+ */
+const MINUTE_PRESETS = [5, 10, 15, 20, 25, 30, 45]
+const HOUR_PRESETS = [1, 2, 3, 4, 6, 8, 12]
+
+/** 自定义时长（小时 + 分钟）；都填 0 时按「无限期」开始 */
+const customHours = ref(1)
+const customMinutes = ref(0)
 
 /** 当前平台是否支持：后端在非 macOS / Windows 上返回「当前平台不支持」 */
 const supported = computed(() => !platform.is_linux)
@@ -246,13 +247,12 @@ async function handleRemoveTrigger(id: string): Promise<void> {
 
 // ============================ 动作 ============================
 
-async function handleStart(): Promise<void> {
+/** 开始一个新会话；`seconds = null` 表示无限期 */
+async function startSession(seconds: number | null): Promise<void> {
   if (active.value || keepAwake.starting || !supported.value) return
-  const durationSeconds = durationMinutes.value === 0 ? null : durationMinutes.value * 60
-  const ok = await keepAwake.start(durationSeconds, allowDisplaySleep.value)
+  const ok = await keepAwake.start(seconds, allowDisplaySleep.value)
   if (ok) {
-    const durationText =
-      durationMinutes.value === 0 ? '无限' : formatDuration(durationMinutes.value * 60)
+    const durationText = seconds == null ? '无限期' : formatDuration(seconds)
     message.success(
       `已开始保持唤醒（${durationText}）${
         allowDisplaySleep.value ? '，允许屏幕关闭' : '，屏幕保持常亮'
@@ -261,6 +261,14 @@ async function handleStart(): Promise<void> {
   } else {
     message.error(keepAwake.actionError || '开启保持唤醒失败')
   }
+}
+
+/** 自定义时长：小时/分钟都为 0 时等同于「无限期」 */
+async function startCustom(): Promise<void> {
+  const hours = Math.max(0, Math.round(customHours.value || 0))
+  const minutes = Math.max(0, Math.round(customMinutes.value || 0))
+  const total = hours * 3600 + minutes * 60
+  await startSession(total === 0 ? null : total)
 }
 
 async function handleStop(): Promise<void> {
@@ -273,8 +281,8 @@ async function handleStop(): Promise<void> {
 
 <template>
   <div class="sleep-panel">
-    <!-- 状态卡 -->
-    <section class="sleep-card">
+    <!-- 状态卡：当前会话一目了然 -->
+    <section class="sleep-card hero-card">
       <div class="card-head">
         <div class="card-titles">
           <span class="card-label">保持唤醒</span>
@@ -282,7 +290,7 @@ async function handleStop(): Promise<void> {
             {{
               active
                 ? '正在阻止系统空闲睡眠，定时到点会自动释放'
-                : '开启后系统不会因空闲进入睡眠'
+                : '阻止系统因空闲进入睡眠（参考 Amphetamine 的会话机制）'
             }}
           </span>
         </div>
@@ -296,29 +304,37 @@ async function handleStop(): Promise<void> {
         </button>
       </div>
 
-      <div class="status-main">
-        <span class="status-badge" :class="{ 'is-active': active }">
-          {{ active ? '保持唤醒中' : '未开启' }}
-        </span>
-        <span class="status-display">{{ displayLabel }}</span>
+      <div class="hero-body">
+        <div v-if="active" class="hero-left">
+          <span class="status-badge is-active">保持中</span>
+          <div class="hero-count">
+            <strong>{{ remainingLabel }}</strong>
+            <em>剩余</em>
+          </div>
+        </div>
+        <p v-else class="hero-idle">
+          当前没有保持唤醒会话：选一个时长立即开始，到点会自动释放。
+        </p>
+        <button
+          v-if="active"
+          type="button"
+          class="btn btn-danger-ghost hero-stop"
+          :disabled="keepAwake.stopping"
+          @click="handleStop"
+        >
+          {{ keepAwake.stopping ? '停止中…' : '停止保持' }}
+        </button>
+      </div>
+
+      <div v-if="active" class="status-facts">
+        <span class="fact">已保持 <strong>{{ elapsedLabel }}</strong></span>
+        <span class="fact">开始于 <strong>{{ startedLabel }}</strong></span>
+        <span class="fact">{{ displayLabel }}</span>
         <span v-if="activeTriggerLabel" class="status-trigger">
           自动规则：{{ activeTriggerLabel }}
         </span>
       </div>
-
-      <div class="status-facts">
-        <span class="fact">
-          已保持 <strong>{{ elapsedLabel }}</strong>
-        </span>
-        <span class="fact">
-          剩余 <strong>{{ remainingLabel }}</strong>
-        </span>
-        <span class="fact">
-          开始于 <strong>{{ startedLabel }}</strong>
-        </span>
-      </div>
-
-      <p class="platform-hint">{{ platformHint }}</p>
+      <p v-else class="platform-hint">{{ platformHint }}</p>
 
       <p v-if="!supported" class="warn-bar">
         当前平台不支持保持唤醒，仅 macOS / Windows 可用。
@@ -335,68 +351,111 @@ async function handleStop(): Promise<void> {
       </p>
     </section>
 
-    <!-- 控制卡 -->
+    <!-- 开启新会话：点时长即开始，和 Amphetamine 的菜单一个手感 -->
     <section class="sleep-card">
       <div class="card-head">
         <div class="card-titles">
-          <span class="card-label">开启设置</span>
-          <span class="card-sub">开始后如需调整，先停止再重新开启</span>
+          <span class="card-label">开启新会话</span>
+          <span class="card-sub">
+            {{
+              active
+                ? '已在进行中，先停止才能开始新的会话'
+                : '点一个时长立刻开始，也可以自定义小时 / 分钟'
+            }}
+          </span>
+        </div>
+        <div class="allow-sleep" :class="{ disabled: active || !supported }">
+          <span>允许屏幕关闭</span>
+          <Switch
+            size="small"
+            :checked="allowDisplaySleep"
+            :disabled="active || !supported"
+            @change="(checked) => (allowDisplaySleep = Boolean(checked))"
+          />
         </div>
       </div>
 
-      <div class="control-block">
-        <span class="control-label">保持时长</span>
-        <div class="duration-group" role="group" aria-label="保持唤醒时长">
+      <div class="preset-block">
+        <span class="preset-label">不限时</span>
+        <div class="preset-row">
           <button
-            v-for="option in DURATION_OPTIONS"
-            :key="option.value"
             type="button"
             class="duration-chip"
-            :class="{ active: durationMinutes === option.value }"
-            :disabled="active || !supported"
-            :aria-pressed="durationMinutes === option.value"
-            @click="durationMinutes = option.value"
+            :disabled="active || keepAwake.starting || !supported"
+            @click="startSession(null)"
           >
-            {{ option.label }}
+            无限期
           </button>
         </div>
       </div>
 
-      <label class="display-option" :class="{ disabled: active || !supported }">
-        <Checkbox
-          :checked="allowDisplaySleep"
-          :disabled="active || !supported"
-          @change="
-            (event) => {
-              allowDisplaySleep = event.target.checked ?? false
-            }
-          "
-        />
-        <span class="display-option-text">
-          允许屏幕关闭
-          <em>只阻止系统睡眠，屏幕仍按系统设置自动关闭</em>
-        </span>
-      </label>
-
-      <div class="action-buttons">
-        <button
-          type="button"
-          class="btn btn-primary"
-          :disabled="active || keepAwake.starting || !supported"
-          :title="active ? '已经在保持唤醒，先停止才能修改设置' : '立即阻止系统空闲睡眠'"
-          @click="handleStart"
-        >
-          {{ keepAwake.starting ? '开启中…' : active ? '保持唤醒中' : '开始保持唤醒' }}
-        </button>
-        <button
-          type="button"
-          class="btn btn-danger-ghost"
-          :disabled="!active || keepAwake.stopping"
-          @click="handleStop"
-        >
-          {{ keepAwake.stopping ? '停止中…' : '停止' }}
-        </button>
+      <div class="preset-block">
+        <span class="preset-label">分钟</span>
+        <div class="preset-row">
+          <button
+            v-for="minutes in MINUTE_PRESETS"
+            :key="minutes"
+            type="button"
+            class="duration-chip"
+            :disabled="active || keepAwake.starting || !supported"
+            @click="startSession(minutes * 60)"
+          >
+            {{ minutes }} 分钟
+          </button>
+        </div>
       </div>
+
+      <div class="preset-block">
+        <span class="preset-label">小时</span>
+        <div class="preset-row">
+          <button
+            v-for="hours in HOUR_PRESETS"
+            :key="hours"
+            type="button"
+            class="duration-chip"
+            :disabled="active || keepAwake.starting || !supported"
+            @click="startSession(hours * 3600)"
+          >
+            {{ hours }} 小时
+          </button>
+        </div>
+      </div>
+
+      <div class="preset-block custom-block">
+        <span class="preset-label">自定义</span>
+        <div class="preset-row">
+          <InputNumber
+            v-model:value="customHours"
+            :min="0"
+            :max="23"
+            size="small"
+            class="custom-input"
+            :disabled="active || !supported"
+          />
+          <span class="custom-unit">小时</span>
+          <InputNumber
+            v-model:value="customMinutes"
+            :min="0"
+            :max="59"
+            size="small"
+            class="custom-input"
+            :disabled="active || !supported"
+          />
+          <span class="custom-unit">分钟</span>
+          <button
+            type="button"
+            class="btn btn-primary btn-xs"
+            :disabled="active || keepAwake.starting || !supported"
+            @click="startCustom"
+          >
+            {{ keepAwake.starting ? '开启中…' : '开始' }}
+          </button>
+        </div>
+      </div>
+
+      <p class="section-hint">
+        「允许屏幕关闭」按开始时的开关生效：关着时系统睡眠和屏幕关闭都会被阻止。
+      </p>
     </section>
 
     <!-- 自动保持规则 -->
@@ -685,21 +744,6 @@ async function handleStop(): Promise<void> {
 }
 
 /* ===== 设置 ===== */
-.control-block {
-  margin-top: 14px;
-}
-.control-label {
-  display: block;
-  margin-bottom: 8px;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-secondary);
-}
-.duration-group {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
 .duration-chip {
   height: 28px;
   padding: 0 14px;
@@ -730,40 +774,109 @@ async function handleStop(): Promise<void> {
   outline-offset: 2px;
 }
 
-.display-option {
+/* ===== 状态英雄区 ===== */
+.hero-card {
+  background:
+    linear-gradient(180deg, rgba(59, 130, 246, 0.06), rgba(59, 130, 246, 0) 62%),
+    var(--bg-primary);
+}
+.hero-body {
   display: flex;
-  align-items: flex-start;
-  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
   margin-top: 14px;
-  cursor: pointer;
 }
-.display-option.disabled {
-  cursor: not-allowed;
-  opacity: 0.7;
+.hero-left {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  min-width: 0;
 }
-.display-option-text {
+.hero-count {
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: 2px;
+  min-width: 0;
+}
+.hero-count strong {
+  font-size: 26px;
+  line-height: 1.15;
+  font-weight: 600;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+.hero-count em {
+  font-style: normal;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.hero-idle {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+.hero-stop {
+  flex-shrink: 0;
+  height: 32px;
+  padding: 0 16px;
+  font-size: 12px;
+}
+
+/* ===== 开启新会话 ===== */
+.preset-block {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  margin-top: 12px;
+}
+.preset-label {
+  flex-shrink: 0;
+  width: 44px;
+  padding-top: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+.preset-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+.custom-block {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border-color);
+}
+.custom-input {
+  width: 72px;
+}
+.custom-unit {
+  align-self: center;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.allow-sleep {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
   font-size: 12px;
   color: var(--text-secondary);
 }
-.display-option-text em {
+.allow-sleep.disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+.section-hint {
+  margin: 10px 0 0;
   font-size: 11px;
-  font-style: normal;
   color: var(--text-muted);
 }
 
-.action-buttons {
-  display: flex;
-  gap: 8px;
-  margin-top: 16px;
-}
-.action-buttons .btn {
-  height: 30px;
-  padding: 0 14px;
-  font-size: 12px;
-}
 .btn-xs {
   padding: 4px 10px;
   font-size: 12px;
