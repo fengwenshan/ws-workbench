@@ -1,21 +1,29 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import { platform } from '@/platform'
 import { useCleaner } from '@/composables/useCleaner'
 import InstalledAppsPanel from './InstalledAppsPanel.vue'
 import MemoryPanel from './MemoryPanel.vue'
+import PopupPanel from './PopupPanel.vue'
+import SleepPanel from './SleepPanel.vue'
+import StartupPanel from './StartupPanel.vue'
+import DefaultAppsPanel from './DefaultAppsPanel.vue'
 
 /**
- * 「清理」工具页：页头 + 两个页签。
+ * 「系统」工具页：页头 + 页签。
  *
- * 两个页签用 v-show 保留各自状态（搜索词、排序、勾选的应用、弹窗），
- * 只有内存页签激活并且整个工具页可见时，内部才按 2 秒轮询采样。
+ * 页签顺序：软件卸载 / 内存占用 / 弹窗拦截（仅 Windows）/ 屏幕休眠 / 开机自启 / 默认应用。
+ * 各页签用 v-show 保留自己的状态；只有落在激活页签上才启动轮询或监听
+ * （垃圾弹窗检测线程由用户手动开关，不随页签切换停止）。
  */
 const props = defineProps<{
   /** 当前工具页是否激活（App.vue 的 view === 'cleaner'） */
   active: boolean
 }>()
 
-type TabKey = 'apps' | 'memory'
+type TabKey = 'apps' | 'memory' | 'popup' | 'sleep' | 'startup' | 'defaultapps'
+
+const isWindows = computed(() => platform.is_windows)
 
 const cleaner = useCleaner()
 const tab = ref<TabKey>('apps')
@@ -33,6 +41,10 @@ watch(
 )
 
 const memoryTabActive = computed(() => props.active && tab.value === 'memory')
+const popupTabActive = computed(() => props.active && tab.value === 'popup')
+const sleepTabActive = computed(() => props.active && tab.value === 'sleep')
+const startupTabActive = computed(() => props.active && tab.value === 'startup')
+const defaultAppsTabActive = computed(() => props.active && tab.value === 'defaultapps')
 const rescanning = computed(() =>
   tab.value === 'apps' ? cleaner.appsLoading : cleaner.sampling,
 )
@@ -42,7 +54,7 @@ async function handleRescan() {
   if (rescanning.value) return
   if (tab.value === 'apps') {
     await cleaner.loadApps(true)
-  } else {
+  } else if (tab.value === 'memory') {
     await cleaner.sampleMemory()
   }
 }
@@ -52,9 +64,10 @@ async function handleRescan() {
   <div class="cleaner">
     <div class="cleaner-head">
       <div class="cleaner-title">
-        <h3>系统清理</h3>
+        <h3>系统</h3>
       </div>
       <button
+        v-if="tab === 'apps' || tab === 'memory'"
         class="btn btn-secondary"
         :disabled="rescanning"
         :title="tab === 'apps' ? '重新枚举已安装应用' : '立即重新采样内存'"
@@ -64,7 +77,7 @@ async function handleRescan() {
       </button>
     </div>
 
-    <div class="cleaner-tabs" role="tablist" aria-label="清理工具页签">
+    <div class="cleaner-tabs" role="tablist" aria-label="系统工具页签">
       <button
         type="button"
         class="cleaner-tab"
@@ -86,6 +99,47 @@ async function handleRescan() {
       >
         内存占用
       </button>
+      <button
+        v-if="isWindows"
+        type="button"
+        class="cleaner-tab"
+        :class="{ active: tab === 'popup' }"
+        role="tab"
+        :aria-selected="tab === 'popup'"
+        @click="tab = 'popup'"
+      >
+        弹窗拦截
+      </button>
+      <button
+        type="button"
+        class="cleaner-tab"
+        :class="{ active: tab === 'sleep' }"
+        role="tab"
+        :aria-selected="tab === 'sleep'"
+        @click="tab = 'sleep'"
+      >
+        屏幕休眠
+      </button>
+      <button
+        type="button"
+        class="cleaner-tab"
+        :class="{ active: tab === 'startup' }"
+        role="tab"
+        :aria-selected="tab === 'startup'"
+        @click="tab = 'startup'"
+      >
+        开机自启
+      </button>
+      <button
+        type="button"
+        class="cleaner-tab"
+        :class="{ active: tab === 'defaultapps' }"
+        role="tab"
+        :aria-selected="tab === 'defaultapps'"
+        @click="tab = 'defaultapps'"
+      >
+        默认应用
+      </button>
     </div>
 
     <div v-show="tab === 'apps'" class="cleaner-pane">
@@ -93,6 +147,18 @@ async function handleRescan() {
     </div>
     <div v-show="tab === 'memory'" class="cleaner-pane">
       <MemoryPanel :cleaner="cleaner" :active="memoryTabActive" />
+    </div>
+    <div v-if="isWindows" v-show="tab === 'popup'" class="cleaner-pane">
+      <PopupPanel :active="popupTabActive" />
+    </div>
+    <div v-show="tab === 'sleep'" class="cleaner-pane">
+      <SleepPanel :active="sleepTabActive" />
+    </div>
+    <div v-show="tab === 'startup'" class="cleaner-pane">
+      <StartupPanel :active="startupTabActive" />
+    </div>
+    <div v-show="tab === 'defaultapps'" class="cleaner-pane">
+      <DefaultAppsPanel :active="defaultAppsTabActive" />
     </div>
   </div>
 </template>

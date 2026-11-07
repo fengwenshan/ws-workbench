@@ -670,8 +670,8 @@ async function handlePack(project: any, asZip: boolean = false) {
             class="rail-btn"
             :class="{ active: view === 'cleaner' }"
             :aria-current="view === 'cleaner' ? 'page' : undefined"
-            :title="shortcutTitle('清理', '4')"
-            aria-label="清理"
+            :title="shortcutTitle('系统', '4')"
+            aria-label="系统"
             @click="selectTool('cleaner')"
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
