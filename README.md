@@ -1,6 +1,6 @@
 # ws-workbench
 
-基于 Tauri 2 的桌面工作台，把交付日常收进一个窗口：分组/项目管理、Markdown 笔记与加密附件、Layui 项目打包、VPN 规则分流、运行环境自检。主页按「分组 → 项目」组织内容，代理 / 设置 / 日志从托盘进入；关闭窗口不退出应用，常驻系统托盘。
+基于 Tauri 2 的桌面工作台，把交付日常收进一个窗口：分组/项目管理、Markdown 笔记与加密附件、Layui 项目打包、VPN 规则分流、Hosts 在线编辑、运行环境自检；macOS 下还带一份加密落盘的剪贴板历史（文本 / 图片 / 图文）。主页按「分组 → 项目」组织内容，系统 / 代理 / 设置 / 日志从托盘进入；关闭窗口不退出应用，常驻系统托盘。
 
 ## 功能
 
@@ -185,21 +185,38 @@ openconnect 探测失败时，代理页给出按平台区分的安装引导：ma
 
 ### 系统
 
-左侧图标栏第四个工具（`⌘/Ctrl+4`，托盘菜单里也叫「系统」），三个页签（弹窗拦截仅 Windows 可见）：
+左侧图标栏第四个工具（`⌘/Ctrl+4`，托盘菜单里也叫「系统」），四个页签（弹窗拦截仅 Windows 可见）：
 
 - **软件卸载**：Windows 读注册表 `Uninstall` 键（HKLM 64/32 位、HKCU），macOS 扫 `/Applications` 与 `~/Applications`；支持按名称/发布者/位置搜索，按名称、大小、安装日期排序（顺序记在本地）。点「确认卸载」先只读检测应用是否在运行：不在运行直接卸载；在运行则弹二次确认（显示进程数与进程名），确认后先按平台正常退出（macOS `NSRunningApplication.terminate()`、Windows `CloseMainWindow()`），5 秒内退不干净就中止本次卸载并提示手动退出，不强制结束进程。卸载执行 `UninstallString`（MSI 的 `/I` 自动换成 `/X`，需要时一次 UAC），macOS 把 `.app` 移入废纸篓；没有卸载命令的条目提供「强制移除」（Windows 删注册表项）。卸载后按 bundle id / 注册表键匹配固定残留位，并对 macOS 用户目录做低置信度深扫（厂商二级目录、helper 容器、ByHost 等，最多 200 条、默认不勾选）；残留按「文件系统 / 注册表」分组、带置信度展示，勾选删除后自动重扫，已删条目从列表消失。
 - **弹窗拦截**（仅 Windows）：默认关闭，开启后后台线程每 800ms `EnumWindows` 扫可见顶层窗口，按「工具窗口 / 不抢焦点 / 始终置顶 / 无标题 / 尺寸异常 / 类名与标题广告线索 / 进程不在前台」打分，可疑窗口进列表并通过 `popup-detected` 事件实时推给界面。两档模式：**检测模式**（默认）只记录，每条由用户点「关闭 / 隐藏」，同进程 5 秒限流；**拦截模式**（可选，默认关）命中闸门后自动处理——分数达阈值、至少两条命中原因、不在系统进程/外壳窗口保护表、不在忽略名单、同进程冷却 5 秒、每分钟最多 6 个（熔断），设置存 `<data_dir>/popup-settings.json`。「忽略」按进程名记到同目录 `popup-ignore.json`。不注入、不装驱动、不杀进程。
 - **屏幕休眠**：阻止系统空闲睡眠（参考 Amphetamine 的公开电源断言方案），并支持「自动保持规则」（Triggers）：指定 App 运行时 / 接通电源时 / 连接外接显示器时自动保持，条件失效自动释放；手动开启优先，规则只释放自己开的会话。规则存 `<data_dir>/sleep-triggers.json`，后台 5 秒探测一次（`sysinfo` 进程列表、`pmset -g batt` / `GetSystemPowerStatus`、CoreGraphics 活动屏幕数 / `GetSystemMetrics(SM_CMONITORS)`），全部只读、不需要管理员权限。macOS 用 IOKit `IOPMAssertionCreateWithName`（`PreventUserIdleSystemSleep`，不勾「允许屏幕关闭」时再加 `PreventUserIdleDisplaySleep`，断言名 `ws-workbench Keep Awake`）；Windows 用专用线程持有 `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED [| ES_DISPLAY_REQUIRED])`。时长按会话式菜单选（参考 Amphetamine 的「开启新会话」）：不限时 / 5·10·15·20·25·30·45 分钟 / 1·2·3·4·6·8·12 小时，或自定义小时+分钟，点时长立即开始一个会话，到点自动释放（状态查询还有一道惰性回收）；不需要 root / 管理员，也不做登录级保活。
+- **Hosts**：把系统 hosts 的完整内容直接读进等宽编辑器，想加什么行就加什么行，`⌘/Ctrl+S` 保存整份文件（保存前自动备份 + 一次系统授权，取消不会改动文件）。路径固定：macOS `/etc/hosts`，Windows `%SystemRoot%\System32\drivers\etc\hosts`；「备份 N」可展开最近 30 份备份并还原（路径见「打开目录」按钮的提示）。编辑器按 hosts 格式高亮注释 / IPv4 / IPv6 / 主机名，非法地址标红；超过 32 KB 自动关闭高亮，避免大文件输入卡顿。非 UTF-8 的 hosts 会拒绝编辑，避免写坏原有内容；CRLF 文件会保持原来的换行风格。
 安全约束：普通删除只进废纸篓；需 root 的条目走一次提权批处理（`rm -rf` / `Remove-Item`，不经过废纸篓，删除前会明确提示）；所有路径过白名单校验，`/`、主目录、`/System`、`/usr`、`C:\Windows` 等硬拒绝；`pkgutil` 安装收据只读展示；系统应用（SIP / `com.apple.*`）不提供卸载。macOS 的废纸篓走 `NSFileManager` API，不会弹「控制 Finder」的自动化授权。弹窗拦截不做注入/驱动/进程结束；屏幕休眠不碰合盖与主动睡眠。
 
 已知限制：Windows 侧只做了交叉编译检查与验收清单，未实机跑卸载/UAC/弹窗检测；残留以精确匹配为主，深扫可能漏报（不认识的自定义目录名）也可能多报（通用名字的目录），所以 low 条目默认不勾选；托盘常驻应用可能拦截正常退出，此时卸载会中止并提示手动退出；弹窗检测是「显示后处理」（弹窗会闪一下），UIPI 下关不掉管理员窗口，UAC / 锁屏 / 网页内嵌广告看不到；macOS 登录项在未授权「自动化」时只读。
 
-**托盘快捷面板**：左键点菜单栏/任务栏图标弹出柠檬式的无边框小面板（`quick.html`，360×560，失焦或再点一次托盘图标收起），两个页签：
+**托盘快捷面板**：左键点菜单栏/任务栏图标弹出柠檬式的无边框小面板（`quick.html`，360 宽，高度随当前页签内容自动调整，失焦或再点一次托盘图标收起），两个页签：
 
 - **VPN**：当前状态与配置名、「连接/断开」、规则/全局/直连三种代理模式即切。
 - **休眠**：一键保持唤醒 / 停止，15 分钟 / 30 分钟 / 1 小时 / 不限四档时长，状态点与剩余时间实时刷新（复用系统页「屏幕休眠」的同一套命令与 composable）。
 
-面板只做快速查看与动作；卸载、残留清理、规则编辑仍在主窗口。窗口位置以点击时的全局光标为锚点计算（托盘事件里的 rect 是窗口局部坐标，不能当屏幕坐标用）：面板在菜单栏图标下方 / 任务栏图标上方，水平居中于图标（像 Lemon 那样图标悬在面板上方中间），贴边时夹进显示器范围；macOS 全程用 AppKit 逻辑点（`NSEvent::mouseLocation` + `CGDisplayBounds` + `NSScreen` 菜单栏高度），因为 tao 的 cursor/monitor 接口在 Retina 缩放下把物理像素和逻辑点混算了。逻辑在 `lib.rs::panel_origin_at`，有 5 个位置单测。
+面板只做快速查看与动作；卸载、残留清理、规则编辑仍在主窗口。窗口位置以点击时的全局光标为锚点计算（托盘事件里的 rect 是窗口局部坐标，不能当屏幕坐标用）：面板在菜单栏图标下方 / 任务栏图标上方，水平居中于图标（像 Lemon 那样图标悬在面板上方中间），贴边时夹进显示器范围；macOS 全程用 AppKit 逻辑点（`NSEvent::mouseLocation` + `CGDisplayBounds` + `NSScreen` 菜单栏高度），因为 tao 的 cursor/monitor 接口在 Retina 缩放下把物理像素和逻辑点混算了。逻辑在 `lib.rs::panel_origin_at`，有 8 个单测（位置夹取、展开方向、切换页签变高时顶边/底边不动）。
+
+### 剪贴板历史（macOS）
+
+日常复制的代码片段、链接、命令，截图，甚至「文字 + 图片」的富文本选区，都会进本地加密历史：macOS 下按 `Command+Shift+V`（`⌘⇧V`）随时呼出选择面板，点一条就写回系统剪贴板，再手动 `⌘V` 粘贴。
+
+- 采集由 `NSPasteboard.changeCount` 驱动（600ms 轮询，面板唤出时再强制补采一次），用 `arboard` 读 text / HTML / image，变了才读；启动时也把当前剪贴板收进来
+- 历史落 SQLite（`clipboard_items` / `clipboard_attachments`）：文本与 HTML 是 SM4-CBC + HMAC-SM3 密文信封，图片是 WST1 密文文件，放在 `<data_dir>/clipboard-attachments/<id>.wst`，缩略图为 `<id>.thumb.wst`；库表里只有时间、类型、哈希等元信息
+- HTML 里的 `data:image/...` 图片会被抽出来单独加密存，正文只留 `wsclip-img://<attachment_id>` 占位；回贴时还原成 data URI，尽量保留富文本。远程图片保留原 URL，不下载
+- 不设条数上限，面板与管理页滚动懒加载（首屏 20 条）；面板唤出时显示总条数，搜索由后端解密文本 / HTML 后匹配，最多返回 100 条
+- 按内容哈希去重：重复复制同一内容只会把记录置顶，不会新增；单条文本 ≤ 20 万字符、HTML ≤ 2MB、单图 ≤ 10MB、单条合计 ≤ 24MB，超限的复制直接跳过
+- 面板是独立透明无边框窗口（`clipboard.html`，380×480），出现位置在鼠标附近、贴边时自动夹进屏幕；`⌘⇧V` 只负责打开 / 聚焦（300ms 去抖，连按不会收起来），失焦、`Esc` 或选中复制后收起
+- 管理入口在「系统 → 剪贴板」页签：搜索、复制、删除单条、清空全部，图片可预览 / 复制单图 / 导出原图；删除与清空会级联删掉本地图片附件
+- 图片展示走自定义协议 `wsclip://localhost/img?id=<id>&variant=thumb|full`（Windows 形态为 `http://wsclip.localhost/...`），读时解密并带 `Cache-Control: no-store`
+- 只在 macOS 启用：Windows 自带的剪贴板历史 `Win+V` 已经够用，所以热键 / 采集线程 / 面板窗口在 Windows 上都不创建，管理页签显示说明
+
+已知取舍：`⌘⇧V` 在应用运行期间是全局注册的，会接管 Chrome / 编辑器里同款「粘贴为纯文本」快捷键。若和你的习惯冲突，改 `src-tauri/src/lib.rs` 里注册的 `"Command+Shift+V"` 即可（历史与面板逻辑不用动）。
 
 ### 设置
 
@@ -213,9 +230,9 @@ openconnect 探测失败时，代理页给出按平台区分的安装引导：ma
 
 ### 托盘
 
-右键菜单：显示主窗口 / 清理 / 代理 / 设置 / 日志 / 连接 VPN / 断开 VPN / 退出。左键单击图标弹出快捷面板（VPN / 休眠两个页签，见上），菜单只在右键时出现。点「退出」会先请求 worker 收尾再结束进程，否则可能留下没人回收的路由。关闭主窗口只是隐藏，应用继续在托盘里运行。
+右键菜单：显示主窗口 / 系统 / 代理 / 设置 / 日志 / 连接 VPN / 断开 VPN / 退出。左键单击图标弹出快捷面板（VPN / 休眠两个页签，见上），菜单只在右键时出现。点「退出」会先请求 worker 收尾再结束进程，否则可能留下没人回收的路由。关闭主窗口只是隐藏，应用继续在托盘里运行。
 
-快捷面板是独立的透明无边框窗口：点面板外部（失焦）或再点一次托盘图标收起，面板上没有关闭按钮、底部只有一个「打开主窗口」（把主窗口唤到前台并切到对应页面）。macOS 的透明窗口依赖 Tauri 的 `macos-private-api` feature（`Cargo.toml` + `tauri.conf.json` 的 `macOSPrivateApi`），**直装/DMG 渠道没问题，但用不了 Mac App Store**。
+快捷面板是独立的透明无边框窗口：点面板外部（失焦）或再点一次托盘图标收起，面板上没有关闭按钮，也没有底部操作栏（打开主窗口走托盘右键菜单）；窗口高度按当前页签内容自适应，切换 VPN / 休眠会重新量一次，不会留固定高度那种底部空白。macOS 的透明窗口依赖 Tauri 的 `macos-private-api` feature（`Cargo.toml` + `tauri.conf.json` 的 `macOSPrivateApi`），**直装/DMG 渠道没问题，但用不了 Mac App Store**。
 
 macOS 的应用菜单做了汉化，点 Dock 图标会把窗口重新显示出来。
 
@@ -228,7 +245,7 @@ macOS 的应用菜单做了汉化，点 Dock 图标会把窗口重新显示出�
 | 后端 | Rust edition 2021，库名 `ws_workbench_lib` |
 | 数据面 | 路由注入（隧道 /32 / 网段路由 + 按域名 DNS），不抓包 |
 | 存储加密 | SM4-CBC + HMAC-SM3；主密钥由 macOS 钥匙串 / Windows DPAPI 托管 |
-| 插件 | dialog、shell、store、updater、process |
+| 插件 | dialog、shell、store、updater、process；clipboard-manager（macOS 剪贴板历史）、global-shortcut（`⌘⇧V` 呼出） |
 | 关键 crate | `ignore`、`zip`、`chrono`、`uuid`、`tempfile`、`sm4`、`hmac`、`cbc`、`nix` |
 
 ## 环境要求
@@ -335,6 +352,8 @@ git push origin v1.0.16   # 只有推 tag 才会触发 GitHub 构建
 
 附件元信息随所属分组/项目一起加密保存；密文 blob 就在上传目录里，文件名为 `<uuid>.wst`。备份时复制 `ws-workbench.db`、`config.json` 与上传目录即可。
 
+Hosts 在线编辑直接改系统 hosts（`/etc/hosts` / `C:\Windows\System32\drivers\etc\hosts`），不再单独存环境配置；每次保存前把原内容备份到 `<data_dir>/hosts-backups/`（保留 30 份）。剪贴板历史的文本 / HTML 与其它配置一起加密存在 `ws-workbench.db` 里，图片附件在 `<data_dir>/clipboard-attachments/`（WST1 密文），备份时一起复制即可。
+
 VPN 会话目录同时被主进程和提权 worker 使用，因此不做路径拼接了事，而是带写入探测再逐级回退（受控文件夹访问、企业策略、受限令牌都可能让 `app_data_dir` 静默拒绝写入）。目录内文件：
 
 | 文件 | 用途 |
@@ -372,6 +391,8 @@ VPN 会话目录同时被主进程和提权 worker 使用，因此不做路径�
 - 卸载残留只做精确匹配（bundle id / 注册表键 / 精确应用名），存在非标准目录的数据需要手动清理
 - 托盘快捷面板的原生弹出（真实点菜单栏图标）受 macOS 辅助功能/屏幕录制权限限制，自动化测试只覆盖了页面渲染、位置计算与 `cargo check`，首次使用请手动点一下确认弹窗位置与失焦收起
 - 快捷面板的透明圆角窗口在 macOS 上依赖 `macos-private-api`，因此不支持 Mac App Store 渠道
+- 剪贴板历史只在 macOS 启用（Windows 用系统自带的 `Win+V`）；历史加密落 SQLite、图片附件单独密文存放，**不联网**；`⌘⇧V` 在应用运行期间全局生效，会占用其它 app 的「粘贴为纯文本」快捷键。富文本回贴是尽力而为：依赖 source app 是否写入 HTML、目标 app 是否接受 HTML，图片过多或过大时可能降级成纯文本
+- Hosts 在线编辑需要管理员授权；Windows 的提权写入 / UAC 取消 / DNS flush 只做了代码审查，需实机验收；非 UTF-8 的 hosts 文件会被拒绝编辑；没有语法校验，写错条目需自己负责（可随时从备份还原）
 
 ## 目录结构
 
@@ -385,7 +406,9 @@ src-tauri/src/
     cleaner.rs     系统工具命令（列表/卸载/残留）
     cleaner_sleep.rs / cleaner_popup.rs
                    屏幕休眠 / 弹窗拦截（仅 Windows）的命令入口
-    quick.rs       托盘快捷面板：隐藏、打开主窗口并切页
+    quick.rs       托盘快捷面板：隐藏、按页签内容调整高度
+    clipboard.rs   剪贴板历史：changeCount 采集 / 运行时状态 / 面板显隐（macOS）
+    hosts.rs       Hosts 在线编辑：读取 / 保存 / 备份列表 / 还原（整文件写入）
   util/            通用能力层
     fs.rs          目录创建、文本读写、可写性探测
     time.rs        本地 RFC3339 / UTC 毫秒时间戳
@@ -398,6 +421,9 @@ src-tauri/src/
   netinfo.rs       本机网卡 MAC / IP（Windows 走 PowerShell，macOS/Linux 走 getifaddrs）
   process.rs/winps.rs  进程管理与 PowerShell 调用
   apps/            外部应用定位（finder / registry）
+  clipboard.rs     剪贴板历史核心：changeCount 采集、内容分类、面板定位（纯逻辑带单测）
+  clipboard/       rich.rs（HTML 图文抽取 / 还原 / 哈希 / 缩略图）、store.rs（SQLite 读写与附件路径）
+  hosts/           Hosts 在线编辑：内容校验（mod.rs）、备份（store.rs）、提权写入（file.rs）
   cleaner/         系统工具：安装列表/卸载/残留扫描 + 屏幕休眠、弹窗拦截的后端
     running.rs     卸载前运行检测与优雅退出（sysinfo + NSRunningApplication / PowerShell CloseMainWindow）
     sleep.rs       防休眠（macOS IOKit 断言 / Windows SetThreadExecutionState）
@@ -429,15 +455,18 @@ src/
     settings/      SettingsPanel
     cleaner/       CleanerPanel / InstalledAppsPanel / MemoryPanel / AppIcon /
                    PopupPanel / SleepPanel / StartupPanel / DefaultAppsPanel
+    hosts/         HostsEditor（整文件在线编辑 + 备份还原）
+    clipboard/     ClipboardManager（「系统 → 剪贴板」管理页签）
   composables/     useConfig / usePack / useVpn / useCleaner / useApps / useLog / useUpdater /
                    useWorkbenchLayout / useEntitySelection / useProjectForm /
                    useDeleteConfirm / safeStorage / useKeepAwake / useStartup / usePopup /
-                   useDefaultApps
+                   useDefaultApps / useHosts / useClipboardHistory
   api/             后端命令的类型化封装（config / project / system / attachments / apps / cleaner /
-                   sleep / startup / popup / defaultapps）
+                   sleep / startup / popup / defaultapps / clipboard / hosts）
   utils/           通用小工具（time / dialog / path / error）
-  types/           前后端共享的数据结构（含 cleaner / sleep / startup / popup / defaultapps）
+  types/           前后端共享的数据结构（含 cleaner / sleep / startup / popup / defaultapps / hosts / clipboard）
   quick/           托盘快捷面板（独立入口：quick.html + main.ts + QuickPanel.vue）
+  clipboard/       剪贴板历史面板（独立入口：clipboard.html + main.ts + ClipboardPanel.vue）
 scripts/release.mjs  构建、上传、更新清单合并
 updates/latest.json  更新清单（由发布脚本生成并提交）
 ```
