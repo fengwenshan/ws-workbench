@@ -29,7 +29,12 @@ libc = "0.2"
 nix = { version = "0.29", features = ["net", "ioctl", "socket", "fs"] }
 tauri-plugin-updater = "2.11.0"
 tauri-plugin-process = "2.3.1"
+# 剪贴板历史：官方剪贴板读写 + 全局快捷键（Option+V）
+tauri-plugin-clipboard-manager = "2"
+tauri-plugin-global-shortcut = "2"
 base64 = "0.22"
+# 剪贴板图文：图片解码 / 缩略图生成
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 cbc = { version = "0.1", features = ["alloc"] }
 hmac = "0.12"
 rand = "0.8"
@@ -50,6 +55,8 @@ custom-protocol = ["tauri/custom-protocol"]
 # macOS：dev 下是裸二进制（不在 .app 里），Dock 图标只能运行时手动设
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
+# 剪贴板采集：读 text / html / image
+arboard = "3.7"
 # NSRunningApplication 用来优雅退出应用（设计 5.4）；它的按 pid 查应用方法
 # 在 objc2-app-kit 里由 `libc` 特性控制，必须一起打开
 objc2-app-kit = { version = "0.3", features = [
