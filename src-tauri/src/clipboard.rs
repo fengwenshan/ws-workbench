@@ -92,7 +92,7 @@ pub(crate) fn db_conn(app: &AppHandle) -> Result<rusqlite::Connection, String> {
     crate::db::open(&path)
 }
 
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_millis() as i64)

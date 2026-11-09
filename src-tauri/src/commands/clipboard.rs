@@ -111,6 +111,9 @@ pub async fn clipboard_copy(app: AppHandle, id: String) -> Result<(), String> {
             .ok_or_else(|| "这条剪贴板记录已经不存在了".to_string())?;
         write_item_to_clipboard(&app, &conn, &row)?;
         clipboard::note_self_write(&app);
+        // 复制后把这条置顶：下次打开面板 / 管理页就能在最上面找到
+        store::touch(&conn, &row.id, clipboard::now_ms())?;
+        let _ = app.emit(clipboard::EVENT_CHANGED, ());
         Ok(())
     })
     .await
@@ -130,6 +133,9 @@ pub async fn clipboard_copy_image(app: AppHandle, attachment_id: String) -> Resu
         let bytes = filecrypto::decrypt_bytes(&app, &blob)?;
         write_image_bytes(&app, &bytes)?;
         clipboard::note_self_write(&app);
+        // 复制单张图片同样把它所属的整条历史置顶
+        store::touch(&conn, &att.item_id, clipboard::now_ms())?;
+        let _ = app.emit(clipboard::EVENT_CHANGED, ());
         Ok(())
     })
     .await
