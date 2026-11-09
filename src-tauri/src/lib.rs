@@ -10,6 +10,10 @@ mod filecrypto;
 mod util;
 mod commands;
 mod cleaner;
+/// 剪贴板历史（macOS）
+mod clipboard;
+/// Hosts 在线编辑（macOS + Windows）
+mod hosts;
 mod packer;
 pub mod apps;
 mod platform;
@@ -33,9 +37,15 @@ pub const EVENT_NAV_TRAY: &str = "nav-tray";
 
 /// 托盘快捷面板的窗口 label（前端 `/quick.html`）
 pub const QUICK_PANEL_LABEL: &str = "quick-panel";
-/// 面板的逻辑尺寸，和 `QuickPanel.vue` 的布局保持一致
+/// 面板的逻辑尺寸，和 `QuickPanel.vue` 的布局保持一致。
+///
+/// 高度只是启动时的默认值：面板挂载后前端会按当前页签的内容调
+/// `quick_panel_resize`，VPN / 休眠两个页签各自贴合内容，不留大片空白。
 const QUICK_PANEL_WIDTH: f64 = 360.0;
-const QUICK_PANEL_HEIGHT: f64 = 560.0;
+const QUICK_PANEL_HEIGHT: f64 = 320.0;
+/// 自适应高度的上下限，避免内容异常时窗口被算得过小或铺满屏幕。
+const QUICK_PANEL_MIN_HEIGHT: f64 = 160.0;
+const QUICK_PANEL_MAX_HEIGHT: f64 = 480.0;
 
 /// Windows 上只允许一个 GUI 实例。
 ///
@@ -276,7 +286,7 @@ fn create_quick_panel(app: &mut tauri::App) -> tauri::Result<()> {
     .maximizable(false)
     .minimizable(false)
     .decorations(false)
-    // 透明窗口 + CSS 圆角/投影，才能做出柠檬那种悬浮卡片的样子
+    // 透明窗口 + CSS 圆角/描边，才能做出柠檬那种悬浮卡片的样子
     .transparent(true)
     .shadow(false)
     // macOS：第一次点击就落到面板上，不用先激活应用再点第二下
@@ -289,6 +299,41 @@ fn create_quick_panel(app: &mut tauri::App) -> tauri::Result<()> {
     #[cfg(debug_assertions)]
     eprintln!(
         "[quick-panel] created url={:?} size={:?} visible={:?}",
+        window.url().map(|url| url.to_string()),
+        window.outer_size(),
+        window.is_visible()
+    );
+    Ok(())
+}
+
+/// 创建剪贴板历史面板：无边框透明浮层，启动时建好、默认隐藏。
+///
+/// 只在 macOS 创建（Windows 系统自带 Win+V，本期不启用）。
+/// 显示位置 / 焦点在 `clipboard::show_panel` 里处理。
+#[cfg(target_os = "macos")]
+fn create_clipboard_panel(app: &mut tauri::App) -> tauri::Result<()> {
+    let window = tauri::WebviewWindowBuilder::new(
+        app.handle(),
+        clipboard::PANEL_LABEL,
+        tauri::WebviewUrl::App("clipboard.html".into()),
+    )
+    .title("ws-workbench")
+    .inner_size(clipboard::PANEL_WIDTH, clipboard::PANEL_HEIGHT)
+    .resizable(false)
+    .maximizable(false)
+    .minimizable(false)
+    .decorations(false)
+    // 透明窗口 + CSS 圆角/投影，和托盘快捷面板保持同一套观感
+    .transparent(true)
+    .shadow(false)
+    .accept_first_mouse(true)
+    .skip_taskbar(true)
+    .always_on_top(true)
+    .visible(false)
+    .build()?;
+    #[cfg(debug_assertions)]
+    eprintln!(
+        "[clipboard-panel] created url={:?} size={:?} visible={:?}",
         window.url().map(|url| url.to_string()),
         window.outer_size(),
         window.is_visible()
@@ -336,6 +381,10 @@ fn toggle_quick_panel<R: Runtime>(app: &AppHandle<R>, rect: tauri::Rect) {
         return;
     };
     let (x, y) = panel_origin_at(placement.anchor, placement.panel, placement.screen);
+    // 打开状态下前端会按当前页签内容改高度，记下锚点供重新定位
+    if let Ok(mut anchor) = QUICK_PANEL_ANCHOR.lock() {
+        *anchor = Some(placement);
+    }
 
     #[cfg(debug_assertions)]
     eprintln!(
@@ -354,12 +403,45 @@ fn toggle_quick_panel<R: Runtime>(app: &AppHandle<R>, rect: tauri::Rect) {
 }
 
 /// 面板落点：锚点 + 显示器范围 + 面板尺寸，三者单位一致（由 `logical` 说明）。
+#[derive(Clone, Copy)]
 struct PanelPlacement {
     anchor: (i32, i32),
     screen: (i32, i32, i32, i32),
     panel: (u32, u32),
     /// `true` = AppKit 逻辑点（macOS），`false` = 物理像素（Windows / 兜底路径）。
     logical: bool,
+}
+
+/// 面板最近一次弹出时的锚点（托盘图标中心 + 所在显示器范围）。
+///
+/// 面板打开状态下切换页签会改高度，需要按同一锚点重新计算位置：菜单栏下方
+/// 顶边不动、任务栏上方底边不动，否则窗口会顺着高度变化往上/往下长歪。
+static QUICK_PANEL_ANCHOR: std::sync::Mutex<Option<PanelPlacement>> =
+    std::sync::Mutex::new(None);
+
+impl PanelPlacement {
+    /// 面板是否朝下展开（锚点在屏幕上半部分：macOS 菜单栏 / 顶部任务栏）。
+    ///
+    /// 朝下时改高度只要让窗口从顶边往下长即可，不需要重算位置；朝上（底部
+    /// 任务栏）才需要按锚点重新定位，把底边固定在任务栏上方。
+    fn expands_below(&self) -> bool {
+        self.anchor.1 < self.screen.1 + self.screen.3 / 2
+    }
+}
+
+/// 面板当前的实际逻辑尺寸。
+///
+/// 高度会被前端改成当前页签内容的高度，所以定位不能用启动时的常量。
+#[cfg(target_os = "macos")]
+fn quick_panel_logical_size<R: Runtime>(
+    window: &tauri::WebviewWindow<R>,
+) -> Option<(u32, u32)> {
+    let scale = window.scale_factor().ok()?;
+    let size = window.inner_size().ok()?;
+    Some((
+        (size.width as f64 / scale).round() as u32,
+        (size.height as f64 / scale).round() as u32,
+    ))
 }
 
 /// macOS：直接用 AppKit / CoreGraphics 取「逻辑点」坐标。
@@ -377,7 +459,7 @@ struct PanelPlacement {
 #[cfg(target_os = "macos")]
 fn quick_panel_placement<R: Runtime>(
     _app: &AppHandle<R>,
-    _window: &tauri::WebviewWindow<R>,
+    window: &tauri::WebviewWindow<R>,
     _rect: tauri::Rect,
 ) -> Option<PanelPlacement> {
     use objc2::MainThreadMarker;
@@ -455,7 +537,8 @@ fn quick_panel_placement<R: Runtime>(
     Some(PanelPlacement {
         anchor,
         screen,
-        panel: (QUICK_PANEL_WIDTH as u32, QUICK_PANEL_HEIGHT as u32),
+        panel: quick_panel_logical_size(window)
+            .unwrap_or((QUICK_PANEL_WIDTH as u32, QUICK_PANEL_HEIGHT as u32)),
         logical: true,
     })
 }
@@ -607,11 +690,31 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        // 剪贴板历史：官方剪贴板读写插件 + 全局快捷键插件（Command+Shift+V）
+        .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, _shortcut, event| {
+                    // 只处理按下，松开不再触发；面板已显示时再按也不收起（用户会连按确认复制成功）
+                    if event.state() == tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                        clipboard::on_hotkey(app);
+                    }
+                })
+                .build(),
+        )
         .register_asynchronous_uri_scheme_protocol("wst-img", |ctx, request, responder| {
             let app = ctx.app_handle().clone();
             let uri = request.uri().clone();
             std::thread::spawn(move || {
                 let response = commands::serve_note_image(&app, &uri);
+                responder.respond(response);
+            });
+        })
+        .register_asynchronous_uri_scheme_protocol("wsclip", |ctx, request, responder| {
+            let app = ctx.app_handle().clone();
+            let uri = request.uri().clone();
+            std::thread::spawn(move || {
+                let response = commands::serve_clipboard_image(&app, &uri);
                 responder.respond(response);
             });
         })
@@ -687,15 +790,35 @@ pub fn run() {
             commands::popup_clear,
             commands::popup_dismiss,
             commands::popup_ignore,
-            // 托盘快捷面板：隐藏 / 打开主窗口并切页
+            // 托盘快捷面板：隐藏 / 随页签内容调整高度
             commands::quick_panel_hide,
-            commands::quick_panel_open_main,
+            commands::quick_panel_resize,
+            // 剪贴板历史（macOS）
+            commands::clipboard_page,
+            commands::clipboard_search,
+            commands::clipboard_stats,
+            commands::clipboard_copy,
+            commands::clipboard_copy_image,
+            commands::clipboard_delete,
+            commands::clipboard_clear,
+            commands::clipboard_export_image,
+            commands::clipboard_limits,
+            commands::clipboard_panel_hide,
+            // Hosts 在线编辑
+            commands::hosts_status,
+            commands::hosts_save,
+            commands::hosts_backups,
+            commands::hosts_restore,
+            commands::hosts_open_file_dir,
         ])
         .setup(|app| {
             // 先建主窗口：窗口配置在 tauri.conf.json 里，但 create: false 交给这里
             create_main_window(app)?;
             // 托盘快捷面板：同样提前建好、默认隐藏，点托盘图标时再定位显示
             create_quick_panel(app)?;
+            // 剪贴板面板：只在 macOS 启用（Windows 系统自带 Win+V），提前建好、默认隐藏
+            #[cfg(target_os = "macos")]
+            create_clipboard_panel(app)?;
 
             // dev 模式（裸二进制）Dock 会显示系统占位图标，这里补上真实图标
             #[cfg(target_os = "macos")]
@@ -726,6 +849,18 @@ pub fn run() {
 
             // 系统清理的列表缓存与扫描标记（设计 3.3）：只有进程内状态，无需落盘
             app.manage(cleaner::CleanerState::new());
+
+            // 剪贴板历史：运行时状态（changeCount / 采集锁）；采集线程只在 macOS 启用
+            app.manage(clipboard::ClipboardRuntime::new());
+            #[cfg(target_os = "macos")]
+            {
+                use tauri_plugin_global_shortcut::GlobalShortcutExt;
+                match app.global_shortcut().register(clipboard::HOTKEY_ACCELERATOR) {
+                    Ok(()) => eprintln!("[clipboard] 全局快捷键 Command+Shift+V 已注册"),
+                    Err(err) => eprintln!("[clipboard] 全局快捷键 Command+Shift+V 注册失败: {err}"),
+                }
+                clipboard::start_poller(app.handle().clone());
+            }
 
             // 轮询会话目录里的状态文件，把 VPN 状态与日志推给前端
             vpn::commands::start_status_poller(app.handle().clone());
@@ -840,6 +975,9 @@ pub fn run() {
                         std::sync::atomic::Ordering::Relaxed,
                     );
                 }
+                if window.label() == clipboard::PANEL_LABEL {
+                    let _ = window.hide();
+                }
             }
             // 点关闭只隐藏到后台，不退出应用
             if let WindowEvent::CloseRequested { api, .. } = event {
@@ -886,7 +1024,7 @@ pub fn run() {
 
 #[cfg(test)]
 mod quick_panel_tests {
-    use super::{panel_origin_at, QUICK_PANEL_HEIGHT, QUICK_PANEL_WIDTH};
+    use super::{panel_origin_at, PanelPlacement, QUICK_PANEL_HEIGHT, QUICK_PANEL_WIDTH};
 
     const MENUBAR_SCREEN: (i32, i32, i32, i32) = (0, 0, 1920, 1080);
     const PANEL: (u32, u32) = (QUICK_PANEL_WIDTH as u32, QUICK_PANEL_HEIGHT as u32);
@@ -908,6 +1046,53 @@ mod quick_panel_tests {
         let (x, y) = panel_origin_at((1500, 1044), PANEL, MENUBAR_SCREEN);
         assert_eq!(x, 1500 - HALF_PANEL);
         assert_eq!(y, 1044 - PANEL.1 as i32 - GAP);
+    }
+
+    /// 切换页签后内容变高：菜单栏下方是顶边贴着图标往下长，y 不变
+    #[test]
+    fn taller_panel_keeps_top_edge_below_menubar() {
+        // 214 / 256 是当前 VPN / 休眠页签的实测高度，这里当代表值用；
+        // 断言的是几何关系，不依赖具体高度
+        let short = (QUICK_PANEL_WIDTH as u32, 214);
+        let tall = (QUICK_PANEL_WIDTH as u32, 256);
+        let (_, short_y) = panel_origin_at((1000, 10), short, MENUBAR_SCREEN);
+        let (_, tall_y) = panel_origin_at((1000, 10), tall, MENUBAR_SCREEN);
+        assert_eq!(short_y, 10 + GAP);
+        assert_eq!(tall_y, 10 + GAP);
+    }
+
+    /// 切换页签后内容变高：底部任务栏上方是底边不动、往上长，不会压到任务栏
+    #[test]
+    fn taller_panel_keeps_bottom_edge_above_taskbar() {
+        // 214 / 256 是当前 VPN / 休眠页签的实测高度，这里当代表值用；
+        // 断言的是几何关系，不依赖具体高度
+        let short = (QUICK_PANEL_WIDTH as u32, 214);
+        let tall = (QUICK_PANEL_WIDTH as u32, 256);
+        let anchor = (1500, 1044);
+        let (_, short_y) = panel_origin_at(anchor, short, MENUBAR_SCREEN);
+        let (_, tall_y) = panel_origin_at(anchor, tall, MENUBAR_SCREEN);
+        assert_eq!(short_y + short.1 as i32 + GAP, anchor.1);
+        assert_eq!(tall_y + tall.1 as i32 + GAP, anchor.1);
+        assert_eq!(short_y - tall_y, tall.1 as i32 - short.1 as i32);
+    }
+
+    /// 菜单栏 / 底部任务栏：判断面板朝下还是朝上，决定改高度时要不要重新定位
+    #[test]
+    fn knows_which_side_panel_expands() {
+        let below = PanelPlacement {
+            anchor: (1000, 10),
+            screen: MENUBAR_SCREEN,
+            panel: PANEL,
+            logical: true,
+        };
+        let above = PanelPlacement {
+            anchor: (1500, 1044),
+            screen: MENUBAR_SCREEN,
+            panel: PANEL,
+            logical: false,
+        };
+        assert!(below.expands_below());
+        assert!(!above.expands_below());
     }
 
     /// 贴近屏幕左右边缘：基准位置被夹进显示器，不能有一半跑到屏幕外

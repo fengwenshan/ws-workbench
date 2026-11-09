@@ -1,39 +1,53 @@
-//! 剪贴板历史（macOS 一期）。
+//! 剪贴板历史（macOS）：文本 / 图片 / 图文采集。
 //!
 //! 关键约束：
-//! - 历史只存**内存**，最多 [`MAX_ITEMS`] 条，进程退出即清空（不落盘、不进日志）；
-//! - 采集用官方 `tauri-plugin-clipboard-manager`，后台线程每 [`POLL_INTERVAL`] 读一次文本；
-//! - 面板是独立窗口（label = [`PANEL_LABEL`]，页面 `clipboard.html`），由全局快捷键
-//!   `Command+Shift+V` 呼出。定位在鼠标附近，失焦或再按一次收起；
-//! - 选中历史只写回系统剪贴板，**不自动模拟 ⌘V**（不申请辅助功能授权）。
+//! - 历史落 SQLite（`clipboard_items`），正文与 HTML 为密文信封，图片 WST1 密文；
+//! - 采集用 `NSPasteboard.changeCount` 驱动：变了才读 text / html / image；
+//! - 面板是独立窗口（label = [`PANEL_LABEL`]，页面 `clipboard.html`），全局快捷键
+//!   [`HOTKEY_ACCELERATOR`] 只负责打开/聚焦，连按去抖、不收起；
+//! - 选中历史只写回系统剪贴板，**不自动模拟 ⌘V**（不申请辅助功能授权）；
+//! - 采集失败只记错误类型，绝不打印剪贴板内容。
 //!
 //! Windows 系统自带 Win+V，本期不启用：不采集、不注册热键、不建面板。
 
-mod rich;
-mod store;
+pub(crate) mod rich;
+pub(crate) mod store;
 
-use std::collections::VecDeque;
+use std::path::Path;
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
-use tauri_plugin_clipboard_manager::ClipboardExt;
 
 /// 呼出面板的全局快捷键（`lib.rs` 注册、单测校验可解析；面板徽标写 `⌘⇧V`）
 pub const HOTKEY_ACCELERATOR: &str = "Command+Shift+V";
 
 /// 面板窗口 label，与 `lib.rs` 创建窗口时一致
 pub const PANEL_LABEL: &str = "clipboard-panel";
-/// 历史变化时推给面板的事件
+/// 历史变化时推给面板 / 管理页的事件
 pub const EVENT_CHANGED: &str = "clipboard-changed";
 /// 面板显示时推给前端的事件（用来聚焦搜索框、刷新列表）
 pub const EVENT_SHOWN: &str = "clipboard-panel-shown";
 
-/// 最多保留的条数（内存中，超出丢最旧）
-pub const MAX_ITEMS: usize = 20;
-/// 单条文本字符上限；超出的复制不收录，避免剪贴板大文本把内存吃掉
+/// 快捷键去抖窗口：连按多次只处理第一次
+pub const HOTKEY_DEBOUNCE_MS: u64 = 300;
+/// 单条文本字符上限；超出的复制不收录
 pub const MAX_TEXT_CHARS: usize = 200_000;
+/// 单条 HTML 字节上限；超出则只按纯文本记录
+pub const MAX_HTML_BYTES: usize = 2 * 1024 * 1024;
+/// 单张图片字节上限
+pub const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
+/// 单条记录最多图片数
+pub const MAX_IMAGES_PER_ITEM: usize = 50;
+/// 单条记录（文本 + HTML + 图片）总量上限
+pub const MAX_ITEM_BYTES: usize = 24 * 1024 * 1024;
+/// 缩略图最长边
+pub const THUMB_MAX_EDGE: u32 = 320;
+/// 面板 / 管理页分页大小
+pub const PAGE_SIZE: usize = 20;
+/// 搜索结果上限
+pub const SEARCH_LIMIT: usize = 100;
 /// 轮询间隔：太快没必要，太慢会漏掉快速连续复制
 const POLL_INTERVAL: Duration = Duration::from_millis(600);
 
@@ -44,102 +58,76 @@ pub const PANEL_HEIGHT: f64 = 480.0;
 const PANEL_GAP: i32 = 12;
 const PANEL_MARGIN: i32 = 8;
 
-/// 一条剪贴板历史
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ClipboardItem {
-    /// uuid v4，前端列表的 key
-    pub id: String,
-    /// 原始文本（只做 CRLF → LF 归一，不 trim，保留用户复制的缩进）
-    pub text: String,
-    /// 粗分类：`url` / `code` / `text`
-    pub kind: String,
-    /// 收录时间（unix 毫秒）
-    pub created_at: i64,
+/// 剪贴板运行时状态：已见 changeCount、最近一次热键时间、采集锁。
+pub struct ClipboardRuntime {
+    pub(crate) last_change_count: AtomicI64,
+    pub(crate) last_hotkey_ms: AtomicU64,
+    pub(crate) capture_lock: Mutex<()>,
 }
 
-#[derive(Default)]
-struct Inner {
-    items: VecDeque<ClipboardItem>,
-    /// 上一次轮询读到的文本；和自己写回的内容比较，避免每 600ms 重复入栈
-    last_seen: Option<String>,
-}
-
-/// 剪贴板历史状态，注册给 Tauri 托管。
-#[derive(Default)]
-pub struct ClipboardHistory {
-    inner: Mutex<Inner>,
-}
-
-impl ClipboardHistory {
+impl ClipboardRuntime {
     pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn snapshot(&self) -> Vec<ClipboardItem> {
-        match self.inner.lock() {
-            Ok(inner) => inner.items.iter().cloned().collect(),
-            Err(_) => Vec::new(),
+        Self {
+            last_change_count: AtomicI64::new(-1),
+            last_hotkey_ms: AtomicU64::new(0),
+            capture_lock: Mutex::new(()),
         }
     }
+}
 
-    pub fn clear(&self) -> Vec<ClipboardItem> {
-        if let Ok(mut inner) = self.inner.lock() {
-            inner.items.clear();
-        }
-        Vec::new()
+impl Default for ClipboardRuntime {
+    fn default() -> Self {
+        Self::new()
     }
+}
 
-    /// 收到一段新文本：去重（相同文本移到最前）、裁到上限、跳过空白/超长。
-    /// 返回历史是否发生变化（调用方据此决定要不要发事件）。
-    pub fn push(&self, text: &str) -> bool {
-        let normalized = normalize(text);
-        if normalized.trim().is_empty() {
-            return false;
-        }
+/// 快捷键去抖：首次（last = 0）或间隔足够才放行。
+pub fn allow_hotkey(last_ms: u64, now_ms: u64) -> bool {
+    last_ms == 0 || now_ms.saturating_sub(last_ms) >= HOTKEY_DEBOUNCE_MS
+}
 
-        let mut inner = match self.inner.lock() {
-            Ok(inner) => inner,
-            Err(_) => return false,
-        };
+/// 打开剪贴板用数据库连接（路径沿用 `db::db_path`）
+pub(crate) fn db_conn(app: &AppHandle) -> Result<rusqlite::Connection, String> {
+    let path = crate::db::db_path(app)?;
+    crate::db::open(&path)
+}
 
-        // 超长文本不收录，但也记成「已看过」，否则每轮都会再判断一次
-        if normalized.chars().count() > MAX_TEXT_CHARS {
-            inner.last_seen = Some(normalized);
-            return false;
-        }
-        if inner.last_seen.as_deref() == Some(normalized.as_str()) {
-            return false;
-        }
-        inner.last_seen = Some(normalized.clone());
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as i64)
+        .unwrap_or(0)
+}
 
-        // 去重：相同文本已存在就移出，统一按「新条目」放到最前
-        if let Some(index) = inner.items.iter().position(|item| item.text == normalized) {
-            inner.items.remove(index);
-        }
+fn sm3_hex(bytes: &[u8]) -> String {
+    use sm3::{Digest, Sm3};
+    let mut hasher = Sm3::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
+}
 
-        inner.items.push_front(ClipboardItem {
-            id: uuid::Uuid::new_v4().to_string(),
-            text: normalized,
-            kind: classify(text).to_string(),
-            created_at: now_millis(),
-        });
-        while inner.items.len() > MAX_ITEMS {
-            inner.items.pop_back();
-        }
-        true
+fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, path)
+}
+
+fn cleanup_blobs(dir: &Path, attachments: &[store::NewAttachment]) {
+    for att in attachments {
+        let _ = std::fs::remove_file(store::blob_path(dir, &att.id));
+        let _ = std::fs::remove_file(store::thumb_path(dir, &att.id));
     }
+}
+
+/// 记录采集失败的类型（绝不包含剪贴板内容）
+fn log_capture_err(stage: &str, err: &str) {
+    eprintln!("[clipboard] capture failed ({stage}): {err}");
 }
 
 /// CRLF / CR 统一成 LF，其它内容保持原样
 fn normalize(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
-}
-
-fn now_millis() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_millis() as i64)
-        .unwrap_or(0)
 }
 
 /// 粗分类，只用于面板上的标签与视觉区分：
@@ -165,13 +153,15 @@ pub fn classify(text: &str) -> &'static str {
 
 fn looks_like_code(text: &str) -> bool {
     let has_newline = text.contains('\n');
-    let indented = text.lines().any(|line| line.starts_with("  ") || line.starts_with('\t'));
+    let indented = text
+        .lines()
+        .any(|line| line.starts_with("  ") || line.starts_with('\t'));
     let mut hits = 0usize;
     for needle in [
-        "=>", "->", "()", "{}", "};", "</", "/>", "#!/", "<?", "function ", "const ",
-        "let ", "var ", "def ", "class ", "import ", "return ", "#include", "SELECT ",
-        "INSERT ", "UPDATE ", "printf(", "console.", "public ", "private ", "async ",
-        "await ", "fn ", "impl ",
+        "=>", "->", "()", "{}", "};", "</", "/>", "#!/", "<?", "function ", "const ", "let ",
+        "var ", "def ", "class ", "import ", "return ", "#include", "SELECT ", "INSERT ",
+        "UPDATE ", "printf(", "console.", "public ", "private ", "async ", "await ", "fn ",
+        "impl ",
     ] {
         if text.contains(needle) {
             hits += 1;
@@ -191,50 +181,327 @@ fn looks_like_code(text: &str) -> bool {
 
 /// 起后台采集线程：先把当前剪贴板收进来，之后每 [`POLL_INTERVAL`] 检查一次。
 pub fn start_poller(app: AppHandle) {
-    std::thread::Builder::new()
-        .name("ws-clipboard-poller".to_string())
-        .spawn(move || {
-            // 启动时把当前剪贴板内容也收进来：它通常就是用户最近一次复制的东西
-            if let Ok(text) = app.clipboard().read_text() {
-                if let Some(history) = app.try_state::<ClipboardHistory>() {
-                    if history.push(&text) {
-                        let items = history.snapshot();
-                        drop(history);
-                        let _ = app.emit(EVENT_CHANGED, items);
+    #[cfg(target_os = "macos")]
+    {
+        std::thread::Builder::new()
+            .name("ws-clipboard-poller".to_string())
+            .spawn(move || {
+                // 启动时把当前剪贴板内容也收进来：它通常就是用户最近一次复制的东西
+                let _ = capture_once(&app, true);
+
+                loop {
+                    std::thread::sleep(POLL_INTERVAL);
+                    // 应用正在退出时 try_state 返回 None
+                    if app.try_state::<ClipboardRuntime>().is_none() {
+                        return;
+                    }
+                    let _ = capture_once(&app, false);
+                }
+            })
+            .ok();
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+    }
+}
+
+/// 当前系统剪贴板的 changeCount（macOS 专用；其它平台返回 None）
+#[cfg(target_os = "macos")]
+fn change_count() -> Option<i64> {
+    use objc2_app_kit::NSPasteboard;
+    Some(NSPasteboard::generalPasteboard().changeCount() as i64)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn change_count() -> Option<i64> {
+    None
+}
+
+/// 检查并在有变化时采集一次。`force` 用于启动 / 面板唤出。
+///
+/// 返回是否写入了新记录。
+#[cfg(target_os = "macos")]
+pub fn capture_once(app: &AppHandle, force: bool) -> bool {
+    let Some(runtime) = app.try_state::<ClipboardRuntime>() else {
+        return false;
+    };
+    let _guard = runtime
+        .capture_lock
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(count) = change_count() else {
+        return false;
+    };
+    if !force && count == runtime.last_change_count.load(Ordering::Relaxed) {
+        return false;
+    }
+    runtime.last_change_count.store(count, Ordering::Relaxed);
+    read_and_store(app)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn capture_once(_app: &AppHandle, _force: bool) -> bool {
+    false
+}
+
+#[cfg(target_os = "macos")]
+fn read_and_store(app: &AppHandle) -> bool {
+    let mut clipboard = match arboard::Clipboard::new() {
+        Ok(clipboard) => clipboard,
+        Err(err) => {
+            log_capture_err("init", &err.to_string());
+            return false;
+        }
+    };
+    let raw_text = clipboard.get().text().unwrap_or_default();
+    if raw_text.chars().count() > MAX_TEXT_CHARS {
+        return false;
+    }
+    let text = normalize(&raw_text);
+    let html = clipboard.get().html().unwrap_or_default();
+    let image = clipboard.get().image().ok();
+    if text.trim().is_empty() && html.is_empty() && image.is_none() {
+        return false;
+    }
+
+    let mut images = Vec::<rich::ExtractedImage>::new();
+    let mut stored_html = String::new();
+    if !html.is_empty() && html.len() <= MAX_HTML_BYTES {
+        let (rewritten, extracted) = rich::extract_inline_images(&html);
+        if !extracted.is_empty() {
+            stored_html = rewritten;
+            images = extracted
+                .into_iter()
+                .take(MAX_IMAGES_PER_ITEM)
+                .filter(|img| img.bytes.len() <= MAX_IMAGE_BYTES)
+                .collect();
+        }
+    }
+
+    let mut kind = if !images.is_empty() {
+        "rich".to_string()
+    } else if !text.trim().is_empty() {
+        classify(&text).to_string()
+    } else {
+        "image".to_string()
+    };
+
+    // 纯图片：RGBA → PNG
+    let mut image_item: Option<rich::ExtractedImage> = None;
+    if images.is_empty() && text.trim().is_empty() {
+        if let Some(img) = image {
+            match rich::encode_png_rgba(img.bytes.as_ref(), img.width as u32, img.height as u32) {
+                Some(png) => {
+                    if png.len() <= MAX_IMAGE_BYTES {
+                        image_item = Some(rich::ExtractedImage {
+                            mime: "image/png".into(),
+                            width: img.width as u32,
+                            height: img.height as u32,
+                            bytes: png,
+                            placeholder: String::new(),
+                        });
+                        kind = "image".into();
                     }
                 }
-            }
-
-            loop {
-                std::thread::sleep(POLL_INTERVAL);
-                // 应用正在退出时 try_state 返回 None
-                let Some(history) = app.try_state::<ClipboardHistory>() else {
-                    return;
-                };
-                let Ok(text) = app.clipboard().read_text() else {
-                    continue;
-                };
-                if history.push(&text) {
-                    let items = history.snapshot();
-                    drop(history);
-                    let _ = app.emit(EVENT_CHANGED, items);
+                None => {
+                    log_capture_err("png", "encode failed");
+                    return false;
                 }
             }
-        })
-        .ok();
+        }
+    }
+    if kind == "image" && image_item.is_none() {
+        return false;
+    }
+    if stored_html.is_empty() && text.trim().is_empty() && image_item.is_none() {
+        return false;
+    }
+
+    // 图片列表（含纯图片条目）
+    let mut all_images = images;
+    if let Some(img) = image_item {
+        all_images.push(img);
+    }
+    if all_images.is_empty() {
+        kind = classify(&text).to_string();
+    }
+
+    // 单条总量上限
+    let total = text.len()
+        + stored_html.len()
+        + all_images
+            .iter()
+            .map(|img| img.bytes.len())
+            .sum::<usize>();
+    if total > MAX_ITEM_BYTES {
+        return false;
+    }
+
+    let dir = match store::attachments_dir(app) {
+        Ok(dir) => dir,
+        Err(err) => {
+            log_capture_err("dir", &err);
+            return false;
+        }
+    };
+
+    let mut attachments = Vec::new();
+    let mut hashes = Vec::new();
+    for (seq, image) in all_images.iter().enumerate() {
+        let att_id = uuid::Uuid::new_v4().to_string();
+        let blob = match crate::filecrypto::encrypt_bytes(app, &image.bytes) {
+            Ok(blob) => blob,
+            Err(err) => {
+                log_capture_err("encrypt", &err);
+                cleanup_blobs(&dir, &attachments);
+                return false;
+            }
+        };
+        let Some(thumb) = rich::png_thumbnail(&image.bytes, THUMB_MAX_EDGE) else {
+            cleanup_blobs(&dir, &attachments);
+            return false;
+        };
+        let thumb_enc = match crate::filecrypto::encrypt_bytes(app, &thumb) {
+            Ok(enc) => enc,
+            Err(err) => {
+                log_capture_err("encrypt-thumb", &err);
+                cleanup_blobs(&dir, &attachments);
+                return false;
+            }
+        };
+        if write_atomic(&store::blob_path(&dir, &att_id), &blob).is_err()
+            || write_atomic(&store::thumb_path(&dir, &att_id), &thumb_enc).is_err()
+        {
+            cleanup_blobs(&dir, &attachments);
+            return false;
+        }
+        // 把抽取时的随机占位符换成真正的 attachment_id
+        if !image.placeholder.is_empty() {
+            stored_html = stored_html.replace(
+                &image.placeholder,
+                &format!("{}{att_id}", rich::PLACEHOLDER_PREFIX),
+            );
+        }
+        attachments.push(store::NewAttachment {
+            id: att_id,
+            item_id: String::new(),
+            seq: seq as i64,
+            mime: image.mime.clone(),
+            width: image.width as i64,
+            height: image.height as i64,
+            orig_size: image.bytes.len() as i64,
+            thumb_size: thumb.len() as i64,
+        });
+        hashes.push(sm3_hex(&image.bytes));
+    }
+
+    // 文本 / HTML 加密
+    let text_enc = if text.is_empty() {
+        String::new()
+    } else {
+        match crate::crypto::encrypt_str(app, &text) {
+            Ok(value) => value,
+            Err(err) => {
+                log_capture_err("encrypt-text", &err);
+                cleanup_blobs(&dir, &attachments);
+                return false;
+            }
+        }
+    };
+    let html_enc = if stored_html.is_empty() {
+        String::new()
+    } else {
+        match crate::crypto::encrypt_str(app, &stored_html) {
+            Ok(value) => value,
+            Err(err) => {
+                log_capture_err("encrypt-html", &err);
+                cleanup_blobs(&dir, &attachments);
+                return false;
+            }
+        }
+    };
+    let hash = rich::content_hash(&text, &stored_html, &hashes);
+
+    let conn = match db_conn(app) {
+        Ok(conn) => conn,
+        Err(err) => {
+            log_capture_err("db", &err);
+            cleanup_blobs(&dir, &attachments);
+            return false;
+        }
+    };
+    if let Ok(Some(existing)) = store::find_by_hash(&conn, &hash) {
+        let _ = store::touch(&conn, &existing.id, now_ms());
+        cleanup_blobs(&dir, &attachments);
+        let _ = app.emit(EVENT_CHANGED, ());
+        return true;
+    }
+
+    let item_id = uuid::Uuid::new_v4().to_string();
+    for att in &mut attachments {
+        att.item_id = item_id.clone();
+    }
+    let new_item = store::NewItem {
+        id: item_id,
+        kind,
+        created_at: now_ms(),
+        content_hash: hash,
+        text_enc,
+        html_enc,
+        image_count: attachments.len() as i64,
+        byte_size: (text.len() + stored_html.len()) as i64
+            + attachments.iter().map(|att| att.orig_size).sum::<i64>(),
+    };
+    if let Err(err) = store::insert_item(&conn, &new_item, &attachments) {
+        log_capture_err("insert", &err);
+        cleanup_blobs(&dir, &attachments);
+        return false;
+    }
+    let _ = app.emit(EVENT_CHANGED, ());
+    true
+}
+
+/// 自己写回剪贴板后调用：把已见 changeCount 同步到当前值，避免把自己写的内容再收一遍。
+pub fn note_self_write(app: &AppHandle) {
+    #[cfg(target_os = "macos")]
+    if let (Some(runtime), Some(count)) = (app.try_state::<ClipboardRuntime>(), change_count()) {
+        runtime.last_change_count.store(count, Ordering::Relaxed);
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = app;
 }
 
 // ============================== 面板显示 ==============================
 
-/// 呼出 / 收起面板。全局快捷键、面板里再按一次都走这里。
-pub fn toggle_panel(app: &AppHandle) {
+/// 快捷键处理：去抖 + 只负责显示/聚焦 + 异步补采一次剪贴板。
+///
+/// 面板已显示时再按也不收起（用户怕没复制上会连按）。
+pub fn on_hotkey(app: &AppHandle) {
+    let Some(runtime) = app.try_state::<ClipboardRuntime>() else {
+        return;
+    };
+    let now = now_ms() as u64;
+    let last = runtime.last_hotkey_ms.load(Ordering::Relaxed);
+    if !allow_hotkey(last, now) {
+        return;
+    }
+    runtime.last_hotkey_ms.store(now, Ordering::Relaxed);
+
+    show_panel(app);
+
+    // 采集可能较慢（加密大图），异步进行；采集完成会发 EVENT_CHANGED 让面板刷新
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let _ = capture_once(&app, true);
+    });
+}
+
+/// 显示并聚焦面板（不切换隐藏）
+pub fn show_panel(app: &AppHandle) {
     let Some(window) = app.get_webview_window(PANEL_LABEL) else {
         return;
     };
-    if window.is_visible().unwrap_or(false) {
-        let _ = window.hide();
-        return;
-    }
 
     // 应用可能在后台：先激活，否则窗口显示了也拿不到键盘焦点
     activate_app(app);
@@ -249,6 +516,13 @@ pub fn toggle_panel(app: &AppHandle) {
     let _ = window.show();
     let _ = window.set_focus();
     let _ = app.emit(EVENT_SHOWN, ());
+}
+
+/// 收起面板（Esc / 失焦 / 复制后由前端调用）
+pub fn hide_panel(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window(PANEL_LABEL) {
+        let _ = window.hide();
+    }
 }
 
 /// 面板显示位置：返回 `(x, y, 是否逻辑点)`。
@@ -316,11 +590,7 @@ fn panel_position(_app: &AppHandle, _window: &tauri::WebviewWindow) -> Option<(f
             .then_some((x, y, w, h))
     })?;
 
-    let (x, y) = panel_origin_at(
-        cursor,
-        (PANEL_WIDTH as u32, PANEL_HEIGHT as u32),
-        screen,
-    );
+    let (x, y) = panel_origin_at(cursor, (PANEL_WIDTH as u32, PANEL_HEIGHT as u32), screen);
     Some((x as f64, y as f64, true))
 }
 
@@ -328,10 +598,7 @@ fn panel_position(_app: &AppHandle, _window: &tauri::WebviewWindow) -> Option<(f
 fn panel_position(app: &AppHandle, window: &tauri::WebviewWindow) -> Option<(f64, f64, bool)> {
     let cursor = app.cursor_position().ok()?;
     let anchor = (cursor.x as i32, cursor.y as i32);
-    let monitor = app
-        .monitor_from_point(cursor.x, cursor.y)
-        .ok()
-        .flatten()?;
+    let monitor = app.monitor_from_point(cursor.x, cursor.y).ok().flatten()?;
     let position = monitor.position();
     let size = monitor.size();
     let screen = (
@@ -403,53 +670,6 @@ fn activate_app(_app: &AppHandle) {}
 mod tests {
     use super::*;
 
-    fn history() -> ClipboardHistory {
-        ClipboardHistory::new()
-    }
-
-    #[test]
-    fn keeps_newest_first_and_dedupes() {
-        let history = history();
-        assert!(history.push("one"));
-        assert!(history.push("two"));
-        assert!(history.push("one"));
-        let items = history.snapshot();
-        assert_eq!(items.len(), 2);
-        assert_eq!(items[0].text, "one");
-        assert_eq!(items[1].text, "two");
-        // 重复内容不应被当成新事件反复推送
-        assert!(!history.push("one"));
-    }
-
-    #[test]
-    fn caps_at_twenty_items() {
-        let history = history();
-        for index in 0..(MAX_ITEMS + 5) {
-            assert!(history.push(&format!("item-{index}")));
-        }
-        let items = history.snapshot();
-        assert_eq!(items.len(), MAX_ITEMS);
-        assert_eq!(items[0].text, format!("item-{}", MAX_ITEMS + 4));
-        assert_eq!(items[MAX_ITEMS - 1].text, "item-5");
-    }
-
-    #[test]
-    fn skips_blank_and_oversized_text() {
-        let history = history();
-        assert!(!history.push(""));
-        assert!(!history.push("   \n\t "));
-        let oversized = "x".repeat(MAX_TEXT_CHARS + 1);
-        assert!(!history.push(&oversized));
-        assert!(history.snapshot().is_empty());
-    }
-
-    #[test]
-    fn normalizes_crlf() {
-        let history = history();
-        assert!(history.push("a\r\nb\rc"));
-        assert_eq!(history.snapshot()[0].text, "a\nb\nc");
-    }
-
     #[test]
     fn classifies_url_code_and_text() {
         assert_eq!(classify("https://example.com/a?b=1"), "url");
@@ -465,6 +685,11 @@ mod tests {
     }
 
     #[test]
+    fn normalizes_crlf() {
+        assert_eq!(normalize("a\r\nb\rc"), "a\nb\nc");
+    }
+
+    #[test]
     fn hotkey_accelerator_is_command_shift_v() {
         use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut};
         let shortcut: Shortcut = HOTKEY_ACCELERATOR
@@ -476,6 +701,14 @@ mod tests {
     }
 
     #[test]
+    fn hotkey_debounce_allows_first_and_blocks_repeats() {
+        assert!(allow_hotkey(0, 1_000));
+        assert!(allow_hotkey(1_000, 1_400));
+        assert!(!allow_hotkey(1_000, 1_100));
+        assert!(!allow_hotkey(1_000, 1_000));
+    }
+
+    #[test]
     fn panel_centers_on_cursor_and_clamps() {
         let panel = (400, 300);
         let screen = (0, 0, 1920, 1080);
@@ -483,12 +716,21 @@ mod tests {
         // 左边缘：夹到 margin
         assert_eq!(panel_origin_at((10, 400), panel, screen).0, 8);
         // 右边缘：夹进屏幕
-        assert_eq!(panel_origin_at((1900, 400), panel, screen).0, 1920 - 400 - 8);
+        assert_eq!(
+            panel_origin_at((1900, 400), panel, screen).0,
+            1920 - 400 - 8
+        );
         // 底部：夹进屏幕
-        assert_eq!(panel_origin_at((800, 1070), panel, screen).1, 1080 - 300 - 8);
+        assert_eq!(
+            panel_origin_at((800, 1070), panel, screen).1,
+            1080 - 300 - 8
+        );
         // 多显示器负坐标
         let left_screen = (-1920, 0, 1920, 1080);
-        assert_eq!(panel_origin_at((-1000, 300), panel, left_screen), (-1200, 312));
+        assert_eq!(
+            panel_origin_at((-1000, 300), panel, left_screen),
+            (-1200, 312)
+        );
     }
 
     #[test]
