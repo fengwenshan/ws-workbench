@@ -108,6 +108,18 @@ function setupLazyLoad() {
   parentObserver.observe(sentinel.value)
 }
 
+/**
+ * 整行点击：只有点在空白处才复制。
+ * 文字要能选中、时间 / 缩略图 / 按钮各有自己的行为，都不能误触发复制。
+ */
+function onRowClick(item: ClipboardItemSummary, event: MouseEvent) {
+  const target = event.target as Element | null
+  if (target?.closest('.cm-text, .cm-time, .cm-thumb-btn, .cm-action')) return
+  // 拖选文字后松手也会冒泡一次 click，选中了就不复制
+  if ((window.getSelection()?.toString() ?? '').length > 0) return
+  void copyOne(item)
+}
+
 async function copyOne(item: ClipboardItemSummary) {
   try {
     await copyClipboardItem(item.id)
@@ -273,7 +285,7 @@ onUnmounted(() => {
           v-for="item in list"
           :key="item.id"
           class="cm-row"
-          @click="copyOne(item)"
+          @click="onRowClick(item, $event)"
         >
           <!-- 上半部分：内容 -->
           <div class="cm-row-main">
@@ -582,6 +594,8 @@ onUnmounted(() => {
 
 .cm-text {
   flex: 1;
+  cursor: text;
+  user-select: text;
   min-width: 0;
   display: -webkit-box;
   -webkit-box-orient: vertical;
