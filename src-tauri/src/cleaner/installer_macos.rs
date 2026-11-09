@@ -309,10 +309,15 @@ const HOME_NAME_MATCH_DIRS: &[(&str, &str, &str, &str)] = &[
 ///
 /// `bundle_id` 为空时只保留「按应用名精确匹配」的 medium 规则。
 pub fn mac_leftover_candidates(bundle_id: &str, name: &str) -> Vec<LeftoverItem> {
-    let mut candidates: Vec<Candidate> = Vec::new();
     let Some(home) = home_dir() else {
         return Vec::new();
     };
+    mac_leftover_candidates_in(&home, bundle_id, name)
+}
+
+/// 与 `mac_leftover_candidates` 相同，但 home 由调用方传入（单测用临时目录）。
+fn mac_leftover_candidates_in(home: &Path, bundle_id: &str, name: &str) -> Vec<LeftoverItem> {
+    let mut candidates: Vec<Candidate> = Vec::new();
     let id = bundle_id.trim();
     let name = name.trim();
 
@@ -321,7 +326,6 @@ pub fn mac_leftover_candidates(bundle_id: &str, name: &str) -> Vec<LeftoverItem>
         for (sub, kind, is_dir) in [
             ("Library/Caches", "cache", true),
             ("Library/Application Support", "app_data", true),
-            ("Library/Saved Application State", "app_data", true),
             ("Library/Containers", "container", true),
             ("Library/HTTPStorages", "cache", true),
             ("Library/WebKit", "cache", true),
@@ -335,6 +339,14 @@ pub fn mac_leftover_candidates(bundle_id: &str, name: &str) -> Vec<LeftoverItem>
                 is_dir,
             ));
         }
+        // Saved Application State 的实际目录名带 `.savedState` 后缀
+        candidates.push(Candidate::new(
+            home.join("Library/Saved Application State").join(format!("{}.savedState", id)),
+            "app_data",
+            "high",
+            false,
+            true,
+        ));
         candidates.push(Candidate::new(
             home.join("Library/Preferences").join(format!("{}.plist", id)),
             "preference",
@@ -342,6 +354,55 @@ pub fn mac_leftover_candidates(bundle_id: &str, name: &str) -> Vec<LeftoverItem>
             false,
             false,
         ));
+        // ByHost：`<bundleId>.<UUID>.plist`，也覆盖 `<bundleId>.ShipIt.<UUID>.plist`
+        if let Ok(entries) = std::fs::read_dir(home.join("Library/Preferences/ByHost")) {
+            for entry in entries.flatten() {
+                let file_name = entry.file_name().to_string_lossy().to_string();
+                if file_name.starts_with(&format!("{}.", id)) && file_name.ends_with(".plist") {
+                    candidates.push(Candidate::new(
+                        entry.path(),
+                        "preference",
+                        "high",
+                        false,
+                        false,
+                    ));
+                }
+            }
+        }
+        candidates.push(Candidate::new(
+            home.join("Library/HTTPStorages").join(format!("{}.binarycookies", id)),
+            "cache",
+            "high",
+            false,
+            false,
+        ));
+        candidates.push(Candidate::new(
+            home.join("Library/Cookies").join(format!("{}.binarycookies", id)),
+            "cache",
+            "medium",
+            false,
+            false,
+        ));
+        // 崩溃报告 / 诊断报告：文件名形如 `<应用名>_<UUID>.plist` 或 `<bundleId>_...`
+        for (dir, kind, confidence) in [
+            ("Library/Application Support/CrashReporter", "crash_report", "medium"),
+            ("Library/Logs/DiagnosticReports", "log", "medium"),
+        ] {
+            let dir = home.join(dir);
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let file_name = entry.file_name().to_string_lossy().to_string();
+                let hit = (!name.is_empty() && file_name.starts_with(&format!("{}_", name)))
+                    || file_name.starts_with(&format!("{}_", id));
+                if hit {
+                    let path = entry.path();
+                    let is_dir = path.is_dir();
+                    candidates.push(Candidate::new(path, kind, confidence, false, is_dir));
+                }
+            }
+        }
         candidates.push(Candidate::new(
             home.join("Library/LaunchAgents").join(format!("{}.plist", id)),
             "launch_agent",
@@ -489,6 +550,10 @@ pub fn mac_leftover_candidates(bundle_id: &str, name: &str) -> Vec<LeftoverItem>
         }
     }
 
+    // 低置信度深扫：固定规则覆盖不到的厂商目录 / helper 容器 / ByHost 变体。
+    // 放在固定候选之后，去重时保留前面的 high/medium 规则。
+    candidates.extend(deep_scan_candidates(home, id, name));
+
     // 去重（同一个路径可能同时被 high / medium 规则命中，保留高置信度那条）
     let mut seen: HashSet<PathBuf> = HashSet::new();
     let mut items: Vec<LeftoverItem> = Vec::new();
@@ -508,6 +573,93 @@ pub fn mac_leftover_candidates(bundle_id: &str, name: &str) -> Vec<LeftoverItem>
         });
     }
     items
+}
+
+/// 深扫根与深度：(相对 home 的目录, 最大深度, 残留类型)。
+///
+/// 深度 1 只扫目录自身的一层子项（如 `Containers/<id>.MiniProgram`），
+/// 深度 2/3 用来覆盖厂商自己的二级目录（如 `Caches/Google/Chrome`）。
+const DEEP_ROOTS: &[(&str, usize, &str)] = &[
+    ("Library/Caches", 2, "cache"),
+    ("Library/Application Support", 3, "app_data"),
+    ("Library/Containers", 1, "container"),
+    ("Library/Group Containers", 1, "container"),
+    ("Library/HTTPStorages", 1, "cache"),
+    ("Library/WebKit", 1, "cache"),
+    ("Library/Application Scripts", 1, "app_data"),
+    ("Library/Saved Application State", 1, "app_data"),
+    ("Library/Preferences", 1, "preference"),
+    ("Library/Preferences/ByHost", 1, "preference"),
+    ("Library/Logs", 2, "log"),
+];
+
+/// 深扫最多返回多少条：防止某个应用名太通用时一次扫出几千条把弹窗卡死。
+const DEEP_SCAN_LIMIT: usize = 200;
+
+/// 去掉 macOS 系统给残留文件名加的后缀，便于和 bundle id / 应用名比较。
+fn strip_known_suffix(name: &str) -> &str {
+    for suffix in [".savedState", ".binarycookies", ".plist"] {
+        if let Some(stripped) = name.strip_suffix(suffix) {
+            return stripped;
+        }
+    }
+    name
+}
+
+/// 深扫的名字匹配：bundle id 精确/前缀/后缀 + 应用名精确 + bundle id 末段精确。
+///
+/// 只做「名字等于 id / 以 `id.` 开头 / 以 `.id` 结尾」这类带边界的匹配，
+/// 不做 contains，避免把 `com.example.foobar` 误算成 `com.example.foo` 的残留。
+fn deep_name_match(candidate: &str, id: &str, app_name: &str, id_last: &str) -> bool {
+    let bare = strip_known_suffix(candidate);
+    let with_id = |value: &str| -> bool {
+        !id.is_empty()
+            && (value == id
+                || value.starts_with(&format!("{}.", id))
+                || value.ends_with(&format!(".{}", id)))
+    };
+    if with_id(candidate) || with_id(bare) {
+        return true;
+    }
+    if !app_name.is_empty() && (candidate == app_name || bare == app_name) {
+        return true;
+    }
+    // 末段太短时（如 `com.a.b` 的 `b`）容易误伤，只在 >= 4 个字符时启用
+    id_last.len() >= 4 && (candidate == id_last || bare == id_last)
+}
+
+/// 低置信度深扫：只生成候选，全部 `selected=false`，由用户自己判断。
+fn deep_scan_candidates(home: &Path, id: &str, name: &str) -> Vec<Candidate> {
+    let id_last = id.rsplit('.').next().unwrap_or("");
+    let mut out: Vec<Candidate> = Vec::new();
+    'roots: for (root, depth, kind) in DEEP_ROOTS {
+        let walker = walkdir::WalkDir::new(home.join(root))
+            .min_depth(1)
+            .max_depth(*depth)
+            .follow_links(false)
+            .into_iter()
+            // 隐藏目录（如 `Library/.hidden`）既不是残留也不该继续往下走
+            .filter_entry(|entry| !entry.file_name().to_string_lossy().starts_with('.'));
+        for entry in walker.filter_map(Result::ok) {
+            if out.len() >= DEEP_SCAN_LIMIT {
+                break 'roots;
+            }
+            let file_name = entry.file_name().to_string_lossy().to_string();
+            if !deep_name_match(&file_name, id, name, id_last) {
+                continue;
+            }
+            let is_dir = entry.file_type().is_dir();
+            out.push(Candidate {
+                path: entry.path().to_path_buf(),
+                kind,
+                confidence: "low",
+                requires_elevation: false,
+                is_dir,
+                selected: false,
+            });
+        }
+    }
+    out
 }
 
 /// 把候选列表变成「真实存在」的残留（填 exists/size/is_dir）
@@ -666,6 +818,182 @@ mod tests {
             .expect("应该有废纸篓候选");
         assert_eq!(trash_item.confidence, "low");
         assert!(!trash_item.selected);
+    }
+
+    #[test]
+    fn saved_state_uses_saved_state_suffix() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let paths = mac_leftover_candidates_in(home, "com.example.foo", "Foo");
+        let saved = paths
+            .iter()
+            .find(|item| item.path.contains("Saved Application State"))
+            .expect("应该有 savedState 候选");
+        assert_eq!(saved.kind, "app_data");
+        assert_eq!(saved.confidence, "high");
+        assert!(
+            saved.path.ends_with("Library/Saved Application State/com.example.foo.savedState"),
+            "实际路径 {}",
+            saved.path
+        );
+    }
+
+    #[test]
+    fn byhost_and_crash_report_rules_match_real_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        for rel in [
+            "Library/Preferences/ByHost",
+            "Library/Application Support/CrashReporter",
+            "Library/Logs/DiagnosticReports",
+        ] {
+            std::fs::create_dir_all(home.join(rel)).unwrap();
+        }
+        std::fs::write(
+            home.join("Library/Preferences/ByHost/com.example.foo.AAAA.plist"),
+            b"x",
+        )
+        .unwrap();
+        std::fs::write(
+            home.join("Library/Application Support/CrashReporter/Foo_AAAA.plist"),
+            b"x",
+        )
+        .unwrap();
+        std::fs::write(
+            home.join("Library/Logs/DiagnosticReports/Foo_2026-11-09.ips"),
+            b"x",
+        )
+        .unwrap();
+        std::fs::write(
+            home.join("Library/Logs/DiagnosticReports/com.example.foo_2026.ips"),
+            b"x",
+        )
+        .unwrap();
+
+        let paths = mac_leftover_candidates_in(home, "com.example.foo", "Foo");
+        assert!(paths
+            .iter()
+            .any(|item| item.path.ends_with("ByHost/com.example.foo.AAAA.plist")));
+        assert!(paths
+            .iter()
+            .any(|item| item.path.ends_with("CrashReporter/Foo_AAAA.plist")));
+        assert!(paths
+            .iter()
+            .any(|item| item.path.ends_with("DiagnosticReports/Foo_2026-11-09.ips")));
+        assert!(paths
+            .iter()
+            .any(|item| item.path.ends_with("DiagnosticReports/com.example.foo_2026.ips")));
+    }
+
+    #[test]
+    fn binarycookie_candidates_are_listed() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let paths = mac_leftover_candidates_in(home, "com.example.foo", "Foo");
+        assert!(paths
+            .iter()
+            .any(|item| item.path.ends_with("HTTPStorages/com.example.foo.binarycookies")));
+        assert!(paths
+            .iter()
+            .any(|item| item.path.ends_with("Cookies/com.example.foo.binarycookies")));
+    }
+
+    #[test]
+    fn deep_scan_finds_helper_containers_and_group_containers() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        for rel in [
+            "Library/Containers/com.example.foo.MiniProgram",
+            "Library/Group Containers/TEAM.com.example.foo",
+            "Library/Application Scripts/com.example.foo.MiniProgram",
+        ] {
+            std::fs::create_dir_all(home.join(rel)).unwrap();
+        }
+        let items = mac_leftover_candidates_in(home, "com.example.foo", "Foo");
+        for expected in [
+            "Library/Containers/com.example.foo.MiniProgram",
+            "Library/Group Containers/TEAM.com.example.foo",
+            "Library/Application Scripts/com.example.foo.MiniProgram",
+        ] {
+            let item = items
+                .iter()
+                .find(|item| item.path == home.join(expected).to_string_lossy())
+                .unwrap_or_else(|| panic!("深扫漏了 {}", expected));
+            // Group Containers 已有固定 high 规则；两个 helper 容器来自深扫
+            if expected.contains("Group Containers") {
+                assert_eq!(item.confidence, "high");
+            } else {
+                assert_eq!(item.confidence, "low");
+                assert!(!item.selected);
+            }
+        }
+    }
+
+    #[test]
+    fn deep_scan_finds_vendor_dirs_by_bundle_id_last_segment() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        for rel in [
+            "Library/Application Support/Google/Chrome",
+            "Library/Caches/Google/Chrome",
+        ] {
+            std::fs::create_dir_all(home.join(rel)).unwrap();
+        }
+        let items = mac_leftover_candidates_in(home, "com.google.Chrome", "Google Chrome");
+        for expected in [
+            "Library/Application Support/Google/Chrome",
+            "Library/Caches/Google/Chrome",
+        ] {
+            let item = items
+                .iter()
+                .find(|item| item.path == home.join(expected).to_string_lossy())
+                .unwrap_or_else(|| panic!("深扫漏了 {}", expected));
+            assert_eq!(item.confidence, "low");
+            assert!(!item.selected);
+        }
+    }
+
+    #[test]
+    fn deep_scan_skips_hidden_dirs_and_dedupes_fixed_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        std::fs::create_dir_all(home.join("Library/.hidden/com.example.foo")).unwrap();
+        std::fs::create_dir_all(home.join("Library/Preferences/ByHost")).unwrap();
+        std::fs::write(
+            home.join("Library/Preferences/ByHost/com.example.foo.ShipIt.AAAA.plist"),
+            b"x",
+        )
+        .unwrap();
+        let items = mac_leftover_candidates_in(home, "com.example.foo", "Foo");
+        assert!(!items.iter().any(|item| item.path.contains("/.hidden/")));
+        let shipit: Vec<&LeftoverItem> = items
+            .iter()
+            .filter(|item| item.path.ends_with("com.example.foo.ShipIt.AAAA.plist"))
+            .collect();
+        assert_eq!(shipit.len(), 1, "固定规则与深扫不应重复");
+        assert_eq!(shipit[0].confidence, "high");
+        assert!(shipit[0].selected);
+    }
+
+    #[test]
+    fn deep_scan_is_capped() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        for index in 0..250 {
+            std::fs::create_dir_all(
+                home.join("Library/Containers").join(format!("com.example.foo.ext{index}")),
+            )
+            .unwrap();
+        }
+        let items = mac_leftover_candidates_in(home, "com.example.foo", "Foo");
+        let deep = items
+            .iter()
+            .filter(|item| {
+                item.confidence == "low" && item.path.contains("Library/Containers/")
+            })
+            .count();
+        assert!(deep > 0, "应该扫到低置信度条目");
+        assert!(deep <= 200, "深扫应截断到 200 条，实际 {deep}");
     }
 
     #[test]
