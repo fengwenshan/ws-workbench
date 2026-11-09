@@ -287,27 +287,31 @@ onUnmounted(() => {
           class="cm-row"
           @click="copyOne(item)"
         >
-          <button
-            v-if="item.images.length"
-            type="button"
-            class="cm-thumb-btn"
-            :title="`预览图片 ${item.images[0].width}×${item.images[0].height}`"
-            @click.stop="openViewer(item, 0)"
-          >
-            <img
-              class="cm-thumb"
-              :src="clipboardImageUrl(item.images[0].id)"
-              alt="图片缩略图"
-              loading="lazy"
-              draggable="false"
-            />
-            <span v-if="item.images.length > 1" class="cm-thumb-count">
-              {{ item.images.length }}
-            </span>
-          </button>
-          <div class="cm-text" :class="{ mono: item.kind === 'code' }">{{ preview(item) }}</div>
-          <span class="cm-time">{{ absoluteTime(item.created_at) }}</span>
-          <div class="cm-actions">
+          <!-- 上半部分：内容 -->
+          <div class="cm-row-main">
+            <button
+              v-if="item.images.length"
+              type="button"
+              class="cm-thumb-btn"
+              :title="`预览图片 ${item.images[0].width}×${item.images[0].height}`"
+              @click.stop="openViewer(item, 0)"
+            >
+              <img
+                class="cm-thumb"
+                :src="clipboardImageUrl(item.images[0].id)"
+                alt="图片缩略图"
+                loading="lazy"
+                draggable="false"
+              />
+              <span v-if="item.images.length > 1" class="cm-thumb-count">
+                {{ item.images.length }}
+              </span>
+            </button>
+            <div class="cm-text" :class="{ mono: item.kind === 'code' }">{{ preview(item) }}</div>
+          </div>
+          <!-- 下半部分：右下角的时间与操作 -->
+          <div class="cm-row-foot">
+            <span class="cm-time">{{ absoluteTime(item.created_at) }}</span>
             <button type="button" class="cm-action copy" @click.stop="copyOne(item)">复制</button>
             <button type="button" class="cm-action delete" @click.stop="deleteOne(item)">删除</button>
           </div>
@@ -520,10 +524,11 @@ onUnmounted(() => {
   background: var(--bg-primary);
 }
 
+/* 单条：上下结构（内容在上、操作在右下角） */
 .cm-row {
   display: flex;
-  align-items: center;
-  gap: 10px;
+  flex-direction: column;
+  gap: 6px;
   padding: 8px 12px;
   border-bottom: 1px solid var(--border-color);
   background: var(--bg-primary);
@@ -536,6 +541,20 @@ onUnmounted(() => {
 
 .cm-row:hover {
   background: var(--bg-hover);
+}
+
+.cm-row-main {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
+}
+
+.cm-row-foot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
 }
 
 .cm-thumb-btn {
@@ -577,12 +596,15 @@ onUnmounted(() => {
 .cm-text {
   flex: 1;
   min-width: 0;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
   overflow: hidden;
   color: var(--text-primary);
   font-size: 13px;
   line-height: 1.5;
-  white-space: pre;
-  text-overflow: ellipsis;
+  white-space: pre-wrap;
+  word-break: break-all;
 }
 
 .cm-text.mono {
@@ -591,6 +613,7 @@ onUnmounted(() => {
 }
 
 .cm-time {
+  margin-right: 2px;
   flex-shrink: 0;
   color: var(--text-muted);
   font-size: 11px;
