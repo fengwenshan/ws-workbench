@@ -34,6 +34,7 @@ export type LeftoverKind =
   | 'launch_agent'
   | 'shortcut'
   | 'container'
+  | 'crash_report'
   | 'receipt'
 
 /** 残留置信度：只有 high 默认勾选 */
@@ -59,6 +60,15 @@ export interface InstalledApp {
   install_date: string
   /** 备注：安装日期、注册表键、bundle id 等 */
   detail: string
+}
+
+/** 应用运行状态（cleaner_app_running 返回值） */
+export interface RunningState {
+  running: boolean
+  /** 主进程 + helper 进程数（按 pid 去重） */
+  processes: number
+  /** 已去重的进程名，前端只展示前几个 */
+  names: string[]
 }
 
 /** 卸载执行结果 */

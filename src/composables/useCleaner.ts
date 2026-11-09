@@ -2,6 +2,7 @@ import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import {
   CLEANER_PROGRESS_EVENT,
+  appRunning as appRunningApi,
   deleteLeftovers as deleteLeftoversApi,
   listInstalledApps,
   scanLeftovers as scanLeftoversApi,
@@ -13,6 +14,7 @@ import type {
   DeleteOutcome,
   InstalledApp,
   LeftoverItem,
+  RunningState,
   UninstallOutcome,
 } from '@/types/cleaner'
 
@@ -38,6 +40,8 @@ export function useCleaner() {
 
   // ========== 卸载 ==========
   const uninstalling = ref(false)
+  /** 卸载前正在检测运行状态（按钮转「检查中…」） */
+  const checkingRunning = ref(false)
   const uninstallOutcome = ref<UninstallOutcome | null>(null)
 
   // ========== 残留 ==========
@@ -80,16 +84,34 @@ export function useCleaner() {
   }
 
   /**
+   * 检测应用是否在运行。检测失败按「未运行」处理（不阻断卸载），返回 null。
+   */
+  async function checkRunning(appId: string): Promise<RunningState | null> {
+    if (!appId || checkingRunning.value) return null
+    checkingRunning.value = true
+    try {
+      return await appRunningApi(appId)
+    } catch {
+      return null
+    } finally {
+      checkingRunning.value = false
+    }
+  }
+
+  /**
    * 执行卸载；失败不抛异常，统一塞进 UninstallOutcome.ok=false，
    * 让弹窗能同时展示「实际命令 + 退出码 + 错误」。
    */
-  async function uninstall(appId: string): Promise<UninstallOutcome | null> {
+  async function uninstall(
+    appId: string,
+    quitRunning = false,
+  ): Promise<UninstallOutcome | null> {
     if (!appId || uninstalling.value) return null
     uninstalling.value = true
     uninstallOutcome.value = null
     actionError.value = ''
     try {
-      const outcome = await uninstallAppApi(appId)
+      const outcome = await uninstallAppApi(appId, quitRunning)
       uninstallOutcome.value = outcome
       // 成功后本地先摘掉这一行，避免用户回到列表还看到已卸载的应用
       if (outcome.ok) {
@@ -196,7 +218,9 @@ export function useCleaner() {
     loadApps,
     // 卸载
     uninstalling,
+    checkingRunning,
     uninstallOutcome,
+    checkRunning,
     uninstall,
     resetUninstallOutcome,
     // 残留

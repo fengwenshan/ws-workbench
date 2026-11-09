@@ -20,6 +20,7 @@ const LEFTOVER_KIND_LABELS: Record<LeftoverKind, string> = {
   launch_agent: '启动项',
   shortcut: '快捷方式',
   container: '沙盒容器',
+  crash_report: '崩溃报告',
   receipt: '安装收据',
 }
 

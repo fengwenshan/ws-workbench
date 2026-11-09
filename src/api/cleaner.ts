@@ -3,6 +3,7 @@ import type {
   DeleteOutcome,
   InstalledApp,
   LeftoverItem,
+  RunningState,
   UninstallOutcome,
 } from '@/types/cleaner'
 
@@ -19,9 +20,20 @@ export function listInstalledApps(refresh = false): Promise<InstalledApp[]> {
   return invoke<InstalledApp[]>('cleaner_list_apps', { refresh })
 }
 
-/** 执行卸载（阻塞到卸载程序退出或 15 分钟超时） */
-export function uninstallApp(appId: string): Promise<UninstallOutcome> {
-  return invoke<UninstallOutcome>('cleaner_uninstall_app', { appId })
+/** 检测应用是否仍在运行（只读） */
+export function appRunning(appId: string): Promise<RunningState> {
+  return invoke<RunningState>('cleaner_app_running', { appId })
+}
+
+/**
+ * 执行卸载（阻塞到卸载程序退出或 15 分钟超时）。
+ * `quitRunning=true` 时后端先优雅退出应用；退不掉直接返回 ok=false。
+ */
+export function uninstallApp(
+  appId: string,
+  quitRunning = false,
+): Promise<UninstallOutcome> {
+  return invoke<UninstallOutcome>('cleaner_uninstall_app', { appId, quitRunning })
 }
 
 /** 扫描卸载残留；也允许对未卸载的应用做预览 */
