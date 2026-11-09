@@ -5,11 +5,12 @@ import { useCleaner } from '@/composables/useCleaner'
 import InstalledAppsPanel from './InstalledAppsPanel.vue'
 import PopupPanel from './PopupPanel.vue'
 import SleepPanel from './SleepPanel.vue'
+import HostsEditor from '@/components/hosts/HostsEditor.vue'
 
 /**
  * 「系统」工具页：页头 + 页签。
  *
- * 页签顺序：软件卸载 / 弹窗拦截（仅 Windows）/ 屏幕休眠。
+ * 页签顺序：软件卸载 / 弹窗拦截（仅 Windows）/ 屏幕休眠 / Hosts 在线编辑。
  * 各页签用 v-show 保留自己的状态；只有落在激活页签上才启动轮询或监听
  * （垃圾弹窗检测线程由用户手动开关，不随页签切换停止）。
  */
@@ -18,7 +19,7 @@ const props = defineProps<{
   active: boolean
 }>()
 
-type TabKey = 'apps' | 'popup' | 'sleep'
+type TabKey = 'apps' | 'popup' | 'sleep' | 'hosts'
 
 const isWindows = computed(() => platform.is_windows)
 
@@ -39,13 +40,7 @@ watch(
 
 const popupTabActive = computed(() => props.active && tab.value === 'popup')
 const sleepTabActive = computed(() => props.active && tab.value === 'sleep')
-const rescanning = computed(() => cleaner.appsLoading)
-
-/** 「重新扫描」：重新枚举已安装应用（列表只在进页面时拉一次） */
-async function handleRescan() {
-  if (rescanning.value) return
-  await cleaner.loadApps(true)
-}
+const hostsTabActive = computed(() => props.active && tab.value === 'hosts')
 </script>
 
 <template>
@@ -54,15 +49,6 @@ async function handleRescan() {
       <div class="cleaner-title">
         <h3>系统</h3>
       </div>
-      <button
-        v-if="tab === 'apps'"
-        class="btn btn-secondary"
-        :disabled="rescanning"
-        title="重新枚举已安装应用"
-        @click="handleRescan"
-      >
-        {{ rescanning ? '扫描中…' : '重新扫描' }}
-      </button>
     </div>
 
     <div class="cleaner-tabs" role="tablist" aria-label="系统工具页签">
@@ -98,6 +84,16 @@ async function handleRescan() {
       >
         屏幕休眠
       </button>
+      <button
+        type="button"
+        class="cleaner-tab"
+        :class="{ active: tab === 'hosts' }"
+        role="tab"
+        :aria-selected="tab === 'hosts'"
+        @click="tab = 'hosts'"
+      >
+        Hosts
+      </button>
     </div>
 
     <div v-show="tab === 'apps'" class="cleaner-pane">
@@ -108,6 +104,9 @@ async function handleRescan() {
     </div>
     <div v-show="tab === 'sleep'" class="cleaner-pane">
       <SleepPanel :active="sleepTabActive" />
+    </div>
+    <div v-show="tab === 'hosts'" class="cleaner-pane">
+      <HostsEditor :active="hostsTabActive" />
     </div>
   </div>
 </template>
@@ -121,7 +120,7 @@ async function handleRescan() {
   overflow: hidden;
 }
 
-/* 页头：标题 + 说明 + 重新扫描，和设置页同一套排版 */
+/* 页头：标题 + 说明，和设置页同一套排版 */
 .cleaner-head {
   flex-shrink: 0;
   display: flex;
@@ -139,13 +138,6 @@ async function handleRescan() {
   font-size: 12px;
   color: var(--text-muted);
 }
-.cleaner-head .btn {
-  flex-shrink: 0;
-  height: 28px;
-  padding: 0 12px;
-  font-size: 12px;
-}
-
 /* 页签：沿用 ProjectDetail 的 40px 标题栏高度与下划线激活态 */
 .cleaner-tabs {
   flex-shrink: 0;

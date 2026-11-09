@@ -64,6 +64,12 @@ function persistSort() {
   void safeSet(SORT_STORAGE_KEY, JSON.stringify(sort.value))
 }
 
+/** 「重新扫描」：重新枚举已安装应用（列表只在进页面时拉一次） */
+async function rescanApps() {
+  if (cleaner.appsLoading) return
+  await cleaner.loadApps(true)
+}
+
 /** 同一列再点一次切升降序；换列时名称升序、大小/日期降序（先看最大的） */
 function toggleSort(by: SortBy) {
   if (sort.value.by === by) {
@@ -444,6 +450,15 @@ function requestDeleteLeftovers() {
           / {{ cleaner.apps.length }}</template
         >
       </span>
+      <button
+        type="button"
+        class="btn btn-primary apps-rescan"
+        :disabled="cleaner.appsLoading"
+        title="重新枚举已安装应用"
+        @click="rescanApps"
+      >
+        {{ cleaner.appsLoading ? '扫描中…' : '重新扫描' }}
+      </button>
     </div>
 
     <!-- 扫描进行中：文字 + 细进度条 -->
@@ -900,6 +915,21 @@ function requestDeleteLeftovers() {
   flex-shrink: 0;
   font-size: 12px;
   color: var(--text-muted);
+}
+/* 「重新扫描」放在数量右侧并做高亮：主色实心 + 轻投影，扫描时禁用 */
+.apps-rescan {
+  flex-shrink: 0;
+  height: 32px;
+  padding: 0 14px;
+  border-radius: 6px;
+  font-size: 12px;
+  transition:
+    background-color 0.15s ease,
+    box-shadow 0.15s ease;
+  box-shadow: 0 2px 6px rgba(59, 130, 246, 0.28);
+}
+.apps-rescan:hover:not(:disabled) {
+  box-shadow: 0 3px 10px rgba(59, 130, 246, 0.38);
 }
 
 /* 扫描进度 */
