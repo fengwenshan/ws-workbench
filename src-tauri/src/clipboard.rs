@@ -10,6 +10,7 @@
 //! Windows 系统自带 Win+V，本期不启用：不采集、不注册热键、不建面板。
 
 mod rich;
+mod store;
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
