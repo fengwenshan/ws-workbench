@@ -195,6 +195,8 @@ async function runUninstall(
   if (!outcome.ok) return false // 失败结果留在弹窗里展示（命令 / 退出码 / 错误）
   message.success(`「${app.name}」已卸载`)
   uninstallTarget.value = null
+  // 先收起二次确认弹窗，避免残留扫描期间它还盖在最上层
+  runningPrompt.value = null
   cleaner.resetUninstallOutcome()
   // 设计 4.2：成功后自动进入残留扫描
   await openLeftovers(app, outcome)
