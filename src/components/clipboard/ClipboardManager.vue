@@ -309,11 +309,11 @@ onUnmounted(() => {
             </button>
             <div class="cm-text" :class="{ mono: item.kind === 'code' }">{{ preview(item) }}</div>
           </div>
-          <!-- 下半部分：右下角的时间与操作 -->
+          <!-- 下半部分：右下角的文本按钮，时间跟在按钮后面 -->
           <div class="cm-row-foot">
-            <span class="cm-time">{{ absoluteTime(item.created_at) }}</span>
             <button type="button" class="cm-action copy" @click.stop="copyOne(item)">复制</button>
             <button type="button" class="cm-action delete" @click.stop="deleteOne(item)">删除</button>
+            <span class="cm-time">{{ absoluteTime(item.created_at) }}</span>
           </div>
         </div>
 
@@ -613,7 +613,6 @@ onUnmounted(() => {
 }
 
 .cm-time {
-  margin-right: 2px;
   flex-shrink: 0;
   color: var(--text-muted);
   font-size: 11px;
@@ -627,30 +626,31 @@ onUnmounted(() => {
   flex-shrink: 0;
 }
 
+/* 文本按钮：无底色，只保留绿 / 红文字 */
 .cm-action {
-  height: 24px;
-  padding: 0 10px;
+  height: 22px;
+  padding: 0 6px;
   border: 0;
-  border-radius: 6px;
-  color: #fff;
+  border-radius: 4px;
+  background: transparent;
   font-size: 12px;
   cursor: pointer;
 }
 
 .cm-action.copy {
-  background: #16a34a;
+  color: #16a34a;
 }
 
 .cm-action.copy:hover {
-  background: #15803d;
+  background: rgba(22, 163, 74, 0.1);
 }
 
 .cm-action.delete {
-  background: #dc2626;
+  color: #dc2626;
 }
 
 .cm-action.delete:hover {
-  background: #b91c1c;
+  background: rgba(220, 38, 38, 0.1);
 }
 
 .cm-empty {
