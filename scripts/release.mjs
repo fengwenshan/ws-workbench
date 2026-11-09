@@ -108,12 +108,22 @@ function resolvePlatform(product) {
   const isWindowsTarget = TARGET.includes('windows') || process.platform === 'win32'
   const archRaw = TARGET
     ? TARGET.split('-')[0] // x86_64 / aarch64 / i686
-    : process.arch === 'arm64'
-      ? 'aarch64'
-      : process.arch
+    : process.arch
+
+  // Tauri 更新清单的键用 Rust 目标三元组里的架构名（windows-x86_64、darwin-aarch64），
+  // 而 Node 的 process.arch 是 x64 / arm64 / ia32，先统一映射一次，
+  // 否则原生构建会写出 windows-x64 这种客户端认不出来的键。
+  const RUST_ARCH = {
+    x64: 'x86_64',
+    arm64: 'aarch64',
+    ia32: 'i686',
+    x86_64: 'x86_64',
+    aarch64: 'aarch64',
+    i686: 'i686',
+  }
+  const arch = RUST_ARCH[archRaw] || archRaw
 
   if (isWindowsTarget) {
-    const arch = archRaw === 'arm64' ? 'aarch64' : archRaw
     return {
       key: `windows-${arch}`,
       bundleSubdir: 'nsis',
@@ -127,7 +137,6 @@ function resolvePlatform(product) {
     }
   }
   if (process.platform === 'darwin' || TARGET.includes('apple')) {
-    const arch = archRaw === 'x86_64' ? 'x86_64' : 'aarch64'
     return {
       key: `darwin-${arch}`,
       bundleSubdir: 'macos',
@@ -182,7 +191,7 @@ function createDmg(platform, version) {
 
   const arch = platform.key.replace('darwin-', '')
   // 产物目录跟着 target 走：交叉编 Intel 版时不能写进 host 的 target/release
-  const outDir = join(dirname(dirname(dir)), 'dmg')
+  const outDir = join(dirname(dir), 'dmg')
   mkdirSync(outDir, { recursive: true })
   const outBase = join(outDir, `${product}_${version}_${arch}`)
 
