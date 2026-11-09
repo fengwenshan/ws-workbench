@@ -1,6 +1,6 @@
 # ws-workbench
 
-基于 Tauri 2 的桌面工作台，把交付日常收进一个窗口：分组/项目管理、Markdown 笔记与加密附件、Layui 项目打包、VPN 规则分流、Hosts 在线编辑、运行环境自检；macOS 下还带一份加密落盘的剪贴板历史（文本 / 图片 / 图文）。主页按「分组 → 项目」组织内容，系统 / 代理 / 设置从托盘进入；关闭窗口不退出应用，常驻系统托盘。
+基于 Tauri 2 的桌面工作台，把交付日常收进一个窗口：分组/项目管理、Markdown 笔记与加密附件、Layui 项目打包、VPN 规则分流、Hosts 在线编辑、运行环境自检；还带一份加密落盘的剪贴板历史（文本 / 图片 / 图文，macOS / Windows）。主页按「分组 → 项目」组织内容，系统 / 代理 / 设置从托盘进入；关闭窗口不退出应用，常驻系统托盘。
 
 ## 功能
 
@@ -202,21 +202,24 @@ openconnect 探测失败时，代理页给出按平台区分的安装引导：ma
 
 面板只做快速查看与动作；卸载、残留清理、规则编辑仍在主窗口。窗口位置以点击时的全局光标为锚点计算（托盘事件里的 rect 是窗口局部坐标，不能当屏幕坐标用）：面板在菜单栏图标下方 / 任务栏图标上方，水平居中于图标（像 Lemon 那样图标悬在面板上方中间），贴边时夹进显示器范围；macOS 全程用 AppKit 逻辑点（`NSEvent::mouseLocation` + `CGDisplayBounds` + `NSScreen` 菜单栏高度），因为 tao 的 cursor/monitor 接口在 Retina 缩放下把物理像素和逻辑点混算了。逻辑在 `lib.rs::panel_origin_at`，有 8 个单测（位置夹取、展开方向、切换页签变高时顶边/底边不动）。
 
-### 剪贴板历史（macOS）
+### 剪贴板历史（macOS / Windows）
 
-日常复制的代码片段、链接、命令，截图，甚至「文字 + 图片」的富文本选区，都会进本地加密历史：macOS 下按 `Command+Shift+V`（`⌘⇧V`）随时呼出选择面板，点一条就写回系统剪贴板，再手动 `⌘V` 粘贴。
+日常复制的代码片段、链接、命令，截图，甚至「文字 + 图片」的富文本选区，都会进本地加密历史：默认按 `⌘⇧V`（Windows 为 `Ctrl+Shift+V`）随时呼出选择面板，点文字条目就写回系统剪贴板，点缩略图看大图（不触发复制）；面板收起后焦点回到呼出前的 App（主窗口不会被一起带到前台），再手动 `⌘V` / `Ctrl+V` 粘贴。
 
-- 采集由 `NSPasteboard.changeCount` 驱动（600ms 轮询，面板唤出时再强制补采一次），用 `arboard` 读 text / HTML / image，变了才读；启动时也把当前剪贴板收进来
+- 采集由系统剪贴板的变化序列号驱动（macOS `NSPasteboard.changeCount`、Windows `GetClipboardSequenceNumber`；600ms 轮询，面板唤出时再强制补采一次），用 `arboard` 读 text / HTML / image，变了才读；启动时也把当前剪贴板收进来
 - 历史落 SQLite（`clipboard_items` / `clipboard_attachments`）：文本与 HTML 是 SM4-CBC + HMAC-SM3 密文信封，图片是 WST1 密文文件，放在 `<data_dir>/clipboard-attachments/<id>.wst`，缩略图为 `<id>.thumb.wst`；库表里只有时间、类型、哈希等元信息
 - HTML 里的 `data:image/...` 图片会被抽出来单独加密存，正文只留 `wsclip-img://<attachment_id>` 占位；回贴时还原成 data URI，尽量保留富文本。远程图片保留原 URL，不下载
-- 不设条数上限，面板与管理页滚动懒加载（首屏 20 条）；面板唤出时显示总条数，搜索由后端解密文本 / HTML 后匹配，最多返回 100 条
+- 不设条数上限，面板与管理页滚动懒加载（首屏 20 条）；搜索由后端解密文本 / HTML 后匹配，最多返回 100 条
 - 按内容哈希去重：重复复制同一内容只会把记录置顶，不会新增；单条文本 ≤ 20 万字符、HTML ≤ 2MB、单图 ≤ 10MB、单条合计 ≤ 24MB，超限的复制直接跳过
 - 面板是独立透明无边框窗口（`clipboard.html`，380×480），出现位置在鼠标附近、贴边时自动夹进屏幕；`⌘⇧V` 只负责打开 / 聚焦（300ms 去抖，连按不会收起来），失焦、`Esc` 或选中复制后收起
+- 图文条目写回剪贴板时，除了 HTML + 纯文本，还会原样带上来源应用的富文本私有表示（例如钉钉的 `com.dingtalk.richTextAttributedString`）：在钉钉里复制图文再粘回钉钉，能一次贴出文字+图片；不认这些表示的应用（微信等）仍按 HTML / 纯文本得到文字，图片可用大图里的「复制图片」单独贴
+- 面板右上角三个图标：刷新、置顶、关闭。点「置顶」后失焦、复制都不再收起面板（可以连续复制给不同窗口用），`Esc` 或 `×` 收起；收起 / 关闭后置顶自动失效，下次呼出要重新点
 - 管理入口在「系统 → 剪贴板」页签：搜索、复制、删除单条、清空全部，图片可预览 / 复制单图 / 导出原图；删除与清空会级联删掉本地图片附件
 - 图片展示走自定义协议 `wsclip://localhost/img?id=<id>&variant=thumb|full`（Windows 形态为 `http://wsclip.localhost/...`），读时解密并带 `Cache-Control: no-store`
-- 只在 macOS 启用：Windows 自带的剪贴板历史 `Win+V` 已经够用，所以热键 / 采集线程 / 面板窗口在 Windows 上都不创建，管理页签显示说明
+- macOS 与 Windows 都启用；Linux 不启用（不采集、不注册热键、不建面板）
+- 快捷键可在「系统 → 剪贴板」工具栏的齿轮里按组合键重新录制，默认 `CommandOrControl+Shift+V`；保存时后端先尝试注册，被别的应用占用会报错并保留原来的组合。也可以点「清空」（录制时按退格同样清空），清空后不注册任何全局快捷键，面板要改回组合才能再呼出。设置存在 `config.json` 的 `clipboard_shortcut`（空字符串 = 已清空），启动时按这个值注册或跳过
 
-已知取舍：`⌘⇧V` 在应用运行期间是全局注册的，会接管 Chrome / 编辑器里同款「粘贴为纯文本」快捷键。若和你的习惯冲突，改 `src-tauri/src/lib.rs` 里注册的 `"Command+Shift+V"` 即可（历史与面板逻辑不用动）。
+已知取舍：默认组合在应用运行期间是全局注册的，会接管 Chrome / 编辑器里同款「粘贴为纯文本」快捷键。若和你的习惯冲突，在「系统 → 剪贴板」齿轮里换一个即可（历史与面板逻辑不用动）。
 
 ### 设置
 
@@ -245,7 +248,7 @@ macOS 的应用菜单做了汉化，点 Dock 图标会把窗口重新显示出�
 | 后端 | Rust edition 2021，库名 `ws_workbench_lib` |
 | 数据面 | 路由注入（隧道 /32 / 网段路由 + 按域名 DNS），不抓包 |
 | 存储加密 | SM4-CBC + HMAC-SM3；主密钥由 macOS 钥匙串 / Windows DPAPI 托管 |
-| 插件 | dialog、shell、store、updater、process；clipboard-manager（macOS 剪贴板历史）、global-shortcut（`⌘⇧V` 呼出） |
+| 插件 | dialog、shell、store、updater、process；clipboard-manager（剪贴板历史）、global-shortcut（默认 `⌘⇧V` 呼出，可在管理页改） |
 | 关键 crate | `ignore`、`zip`、`chrono`、`uuid`、`tempfile`、`sm4`、`hmac`、`cbc`、`nix` |
 
 ## 环境要求
@@ -391,7 +394,7 @@ VPN 会话目录同时被主进程和提权 worker 使用，因此不做路径�
 - 卸载残留只做精确匹配（bundle id / 注册表键 / 精确应用名），存在非标准目录的数据需要手动清理
 - 托盘快捷面板的原生弹出（真实点菜单栏图标）受 macOS 辅助功能/屏幕录制权限限制，自动化测试只覆盖了页面渲染、位置计算与 `cargo check`，首次使用请手动点一下确认弹窗位置与失焦收起
 - 快捷面板的透明圆角窗口在 macOS 上依赖 `macos-private-api`，因此不支持 Mac App Store 渠道
-- 剪贴板历史只在 macOS 启用（Windows 用系统自带的 `Win+V`）；历史加密落 SQLite、图片附件单独密文存放，**不联网**；`⌘⇧V` 在应用运行期间全局生效，会占用其它 app 的「粘贴为纯文本」快捷键。富文本回贴是尽力而为：依赖 source app 是否写入 HTML、目标 app 是否接受 HTML，图片过多或过大时可能降级成纯文本
+- 剪贴板历史在 macOS / Windows 启用（Linux 不启用）；历史加密落 SQLite、图片附件单独密文存放，**不联网**；默认快捷键在应用运行期间全局生效，会占用其它 app 的同款组合，可在「系统 → 剪贴板」齿轮里改。富文本回贴是尽力而为：依赖 source app 是否写入 HTML、目标 app 是否接受 HTML，图片过多或过大时可能降级成纯文本
 - Hosts 在线编辑需要管理员授权；Windows 的提权写入 / UAC 取消 / DNS flush 只做了代码审查，需实机验收；非 UTF-8 的 hosts 文件会被拒绝编辑；没有语法校验，写错条目需自己负责（可随时从备份还原）
 
 ## 目录结构

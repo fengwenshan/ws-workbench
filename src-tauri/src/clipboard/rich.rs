@@ -172,18 +172,44 @@ pub fn strip_tags(html: &str) -> String {
 }
 
 /// 内容哈希：文本 + HTML + 各图片哈希，用于去重。
+///
+/// HTML 里的 `wsclip-img://<随机 id>` 占位符（抽取时是 uuid、入库后是附件 id）
+/// 每次复制都不一样，算哈希前要先抹掉，否则同一份图文反复复制会被当成新内容。
 pub fn content_hash(text: &str, html: &str, image_hashes: &[String]) -> String {
     let mut hasher = Sm3::new();
     hasher.update(b"v1\n");
     hasher.update(text.as_bytes());
     hasher.update(b"\n");
-    hasher.update(html.as_bytes());
+    hasher.update(normalize_placeholders(html).as_bytes());
     hasher.update(b"\n");
     for hash in image_hashes {
         hasher.update(hash.as_bytes());
         hasher.update(b"\n");
     }
     format!("{:x}", hasher.finalize())
+}
+
+/// 把 `wsclip-img://<id>` 的 id 抹掉，只留前缀，供内容哈希用。
+fn normalize_placeholders(html: &str) -> String {
+    if !html.contains(PLACEHOLDER_PREFIX) {
+        return html.to_string();
+    }
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(pos) = rest.find(PLACEHOLDER_PREFIX) {
+        let head_end = pos + PLACEHOLDER_PREFIX.len();
+        out.push_str(&rest[..head_end]);
+        let tail = &rest[head_end..];
+        // 占位符后面是 id，遇到引号 / 空白 / 标签边界就结束
+        let id_end = tail
+            .find(|ch: char| {
+                ch == '"' || ch == '\'' || ch == '>' || ch == '<' || ch.is_whitespace()
+            })
+            .unwrap_or(tail.len());
+        rest = &tail[id_end..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// 解码任意支持格式 → 最长边 max_edge 的 PNG 缩略图。
@@ -207,9 +233,49 @@ pub fn encode_png_rgba(rgba: &[u8], width: u32, height: u32) -> Option<Vec<u8>> 
     Some(out)
 }
 
+/// 任意支持格式 → PNG 字节（写回时给粘贴板补一份原生图片表示用）。
+pub fn to_png(bytes: &[u8]) -> Option<Vec<u8>> {
+    let decoded = image::load_from_memory(bytes).ok()?;
+    let mut out = Vec::new();
+    decoded
+        .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+        .ok()?;
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn content_hash_ignores_placeholder_ids() {
+        let a = content_hash(
+            "文字",
+            r#"<p>文字</p><img src="wsclip-img://aaaaaaaa-1111">"#,
+            &["h1".to_string()],
+        );
+        let b = content_hash(
+            "文字",
+            r#"<p>文字</p><img src="wsclip-img://bbbbbbbb-2222">"#,
+            &["h1".to_string()],
+        );
+        assert_eq!(a, b, "占位符 id 不参与哈希，同一份图文应判为相同");
+        let c = content_hash(
+            "文字",
+            r#"<p>文字</p><img src="wsclip-img://bbbbbbbb-2222">"#,
+            &["h2".to_string()],
+        );
+        assert_ne!(a, c, "图片内容不同应判为不同");
+    }
+
+    #[test]
+    fn normalizes_placeholders_in_various_contexts() {
+        assert_eq!(
+            normalize_placeholders(r#"<img src="wsclip-img://x1"><p>wsclip-img://y2</p>"#),
+            r#"<img src="wsclip-img://"><p>wsclip-img://</p>"#
+        );
+        assert_eq!(normalize_placeholders("没有占位符"), "没有占位符");
+    }
 
     #[test]
     fn extracts_data_uri_image_and_rewrites_src() {

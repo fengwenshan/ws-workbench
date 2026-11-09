@@ -1,30 +1,44 @@
-//! 剪贴板历史（macOS）：文本 / 图片 / 图文采集。
+//! 剪贴板历史（macOS / Windows）：文本 / 图片 / 图文采集。
 //!
 //! 关键约束：
 //! - 历史落 SQLite（`clipboard_items`），正文与 HTML 为密文信封，图片 WST1 密文；
-//! - 采集用 `NSPasteboard.changeCount` 驱动：变了才读 text / html / image；
+//! - 采集用系统剪贴板的变化序列号驱动（macOS `NSPasteboard.changeCount`、
+//!   Windows `GetClipboardSequenceNumber`），变了才读 text / html / image；
 //! - 面板是独立窗口（label = [`PANEL_LABEL`]，页面 `clipboard.html`），全局快捷键
-//!   [`HOTKEY_ACCELERATOR`] 只负责打开/聚焦，连按去抖、不收起；
-//! - 选中历史只写回系统剪贴板，**不自动模拟 ⌘V**（不申请辅助功能授权）；
+//!   （默认 [`DEFAULT_ACCELERATOR`]，管理页可改）只负责打开/聚焦，连按去抖、不收起；
+//! - 选中历史只写回系统剪贴板，**不自动模拟 ⌘V / Ctrl+V**（不申请辅助功能授权）；
 //! - 采集失败只记错误类型，绝不打印剪贴板内容。
 //!
-//! Windows 系统自带 Win+V，本期不启用：不采集、不注册热键、不建面板。
+//! Linux 维持不启用：不采集、不注册热键、不建面板。
 
 pub(crate) mod rich;
 pub(crate) mod store;
 
 use std::path::Path;
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
 use tauri::{AppHandle, Emitter, Manager};
+use tauri_plugin_store::StoreExt;
 
-/// 呼出面板的全局快捷键（`lib.rs` 注册、单测校验可解析；面板徽标写 `⌘⇧V`）
-pub const HOTKEY_ACCELERATOR: &str = "Command+Shift+V";
+/// 默认呼出面板的全局快捷键：mac 上是 ⌘⇧V，Windows 上是 Ctrl+Shift+V
+pub const DEFAULT_ACCELERATOR: &str = "CommandOrControl+Shift+V";
+
+/// 快捷键存在 config.json（store）里的键名
+pub const SHORTCUT_STORE_KEY: &str = "clipboard_shortcut";
+/// 和设置页共用的 store 文件名
+const CONFIG_STORE_FILE: &str = "config.json";
 
 /// 面板窗口 label，与 `lib.rs` 创建窗口时一致
 pub const PANEL_LABEL: &str = "clipboard-panel";
+
+/// 呼出面板前最前面的窗口（macOS 存 pid、Windows 存 HWND 原始值，排除自己）：
+/// 复制完把焦点还回去，也用来判断「这次是从别的 App 呼出的」，
+/// 避免激活应用时把主窗口一并带到前台。
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+static PANEL_PREVIOUS_APP: Mutex<Option<isize>> = Mutex::new(None);
+
 /// 历史变化时推给面板 / 管理页的事件
 pub const EVENT_CHANGED: &str = "clipboard-changed";
 /// 面板显示时推给前端的事件（用来聚焦搜索框、刷新列表）
@@ -51,6 +65,9 @@ pub const SEARCH_LIMIT: usize = 100;
 /// 轮询间隔：太快没必要，太慢会漏掉快速连续复制
 const POLL_INTERVAL: Duration = Duration::from_millis(600);
 
+/// 同一份内容在这么短时间内重复复制（按住 ⌘C 连按）就不再重复入库 / 置顶 / 推刷新
+const RECOPY_DEDUPE_MS: i64 = 2_000;
+
 /// 面板逻辑尺寸（与 `lib.rs` 创建窗口时的 inner_size 保持一致）
 pub const PANEL_WIDTH: f64 = 380.0;
 pub const PANEL_HEIGHT: f64 = 480.0;
@@ -58,11 +75,17 @@ pub const PANEL_HEIGHT: f64 = 480.0;
 const PANEL_GAP: i32 = 12;
 const PANEL_MARGIN: i32 = 8;
 
-/// 剪贴板运行时状态：已见 changeCount、最近一次热键时间、采集锁。
+/// 剪贴板运行时状态：已见变化序列号、最近一次热键时间、采集锁、当前快捷键。
 pub struct ClipboardRuntime {
     pub(crate) last_change_count: AtomicI64,
     pub(crate) last_hotkey_ms: AtomicU64,
     pub(crate) capture_lock: Mutex<()>,
+    /// 当前生效的全局快捷键（`CommandOrControl+Shift+V` 这类加速键字符串）
+    pub(crate) shortcut: Mutex<String>,
+    /// 面板是否「贴到屏幕上」：置顶后失焦、复制都不收起，关闭面板即失效
+    pub(crate) pinned: AtomicBool,
+    /// 最近一次采集到的内容哈希与时间：连按 ⌘C 时用来去重
+    pub(crate) last_capture: Mutex<Option<(String, i64)>>,
 }
 
 impl ClipboardRuntime {
@@ -71,6 +94,9 @@ impl ClipboardRuntime {
             last_change_count: AtomicI64::new(-1),
             last_hotkey_ms: AtomicU64::new(0),
             capture_lock: Mutex::new(()),
+            shortcut: Mutex::new(DEFAULT_ACCELERATOR.to_string()),
+            pinned: AtomicBool::new(false),
+            last_capture: Mutex::new(None),
         }
     }
 }
@@ -177,11 +203,152 @@ fn looks_like_code(text: &str) -> bool {
     false
 }
 
+// ============================== 额外表示 ==============================
+
+/// 来源应用的富文本私有表示（例如钉钉的 `com.dingtalk.richTextAttributedString`）。
+///
+/// 只写 HTML 时，钉钉这类应用粘贴「文字+图片」只会贴出文字：它们的输入框认自己的
+/// 私有格式（里面带图片路径 / 样式），所以把除文本、HTML、图片之外的表示原样留着，
+/// 粘贴时再写回去。
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StoredFlavor {
+    t: String,
+    #[serde(default)]
+    d: String,
+}
+
+/// 单个额外表示的大小上限（原样存，别让私有格式把库撑大）
+const MAX_EXTRA_FLAVOR_BYTES: usize = 256 * 1024;
+/// 一条剪贴板记录里所有额外表示的总上限
+const MAX_EXTRA_FLAVORS_BYTES: usize = 512 * 1024;
+/// 最多留几个额外表示
+const MAX_EXTRA_FLAVORS: usize = 8;
+
+fn encode_extra_flavors(flavors: &[(String, Vec<u8>)]) -> String {
+    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+
+    if flavors.is_empty() {
+        return String::new();
+    }
+    let stored: Vec<StoredFlavor> = flavors
+        .iter()
+        .map(|(name, bytes)| StoredFlavor {
+            t: name.clone(),
+            d: B64.encode(bytes),
+        })
+        .collect();
+    serde_json::to_string(&stored).unwrap_or_default()
+}
+
+fn decode_extra_flavors(json: &str) -> Vec<(String, Vec<u8>)> {
+    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+
+    if json.is_empty() {
+        return Vec::new();
+    }
+    let Ok(stored) = serde_json::from_str::<Vec<StoredFlavor>>(json) else {
+        return Vec::new();
+    };
+    stored
+        .into_iter()
+        .filter_map(|flavor| B64.decode(flavor.d).ok().map(|bytes| (flavor.t, bytes)))
+        .collect()
+}
+
+/// 解出某条记录的额外表示（密文 → `(类型名, 原始字节)`）
+pub fn stored_extra_flavors(app: &AppHandle, extra_enc: &str) -> Vec<(String, Vec<u8>)> {
+    if extra_enc.is_empty() {
+        return Vec::new();
+    }
+    match crate::crypto::decrypt_str(app, extra_enc) {
+        Ok(json) => decode_extra_flavors(&json),
+        Err(err) => {
+            log_capture_err("extra", &err);
+            Vec::new()
+        }
+    }
+}
+
+/// 采集时把剪贴板里除文本 / HTML / 图片之外的表示读出来（macOS）。
+#[cfg(target_os = "macos")]
+fn collect_extra_flavors() -> Vec<(String, Vec<u8>)> {
+    use objc2_app_kit::NSPasteboard;
+
+    // 自己已经处理的表示、图片 / 文件 / 临时表示都不留
+    const SKIP_TYPES: &[&str] = &[
+        "public.html",
+        "Apple HTML pasteboard type",
+        "public.utf8-plain-text",
+        "public.utf16-plain-text",
+        "public.utf16-external-plain-text",
+        "NSStringPboardType",
+        "public.png",
+        "public.tiff",
+        "public.jpeg",
+        "public.heic",
+        "Apple PNG pasteboard type",
+        "NeXT TIFF v4.0 pasteboard type",
+        "com.compuserve.gif",
+        "public.file-url",
+        "NSFilenamesPboardType",
+        "public.url",
+        "com.apple.webarchive",
+        "Apple Web Archive pasteboard type",
+        "com.apple.flat-rtfd",
+        "org.nspasteboard.ConcealedType",
+        "org.nspasteboard.TransientType",
+        "org.nspasteboard.AutoGeneratedType",
+    ];
+
+    let pasteboard = NSPasteboard::generalPasteboard();
+    let Some(items) = pasteboard.pasteboardItems() else {
+        return Vec::new();
+    };
+
+    let mut out: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut total = 0usize;
+    for item in items.to_vec() {
+        let types = item.types();
+        for pasteboard_type in types.to_vec() {
+            let name = pasteboard_type.to_string();
+            if name.starts_with("dyn.")
+                || name.starts_with("com.apple.pasteboard.promised")
+                || SKIP_TYPES.contains(&name.as_str())
+                || out.iter().any(|(existing, _)| existing == &name)
+            {
+                continue;
+            }
+            let Some(data) = item.dataForType(&pasteboard_type) else {
+                continue;
+            };
+            let bytes = data.to_vec();
+            if bytes.is_empty()
+                || bytes.len() > MAX_EXTRA_FLAVOR_BYTES
+                || total + bytes.len() > MAX_EXTRA_FLAVORS_BYTES
+                || out.len() >= MAX_EXTRA_FLAVORS
+            {
+                continue;
+            }
+            total += bytes.len();
+            out.push((name, bytes));
+        }
+        if out.len() >= MAX_EXTRA_FLAVORS {
+            break;
+        }
+    }
+    out
+}
+
+#[cfg(not(target_os = "macos"))]
+fn collect_extra_flavors() -> Vec<(String, Vec<u8>)> {
+    Vec::new()
+}
+
 // ============================== 采集线程 ==============================
 
 /// 起后台采集线程：先把当前剪贴板收进来，之后每 [`POLL_INTERVAL`] 检查一次。
 pub fn start_poller(app: AppHandle) {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
         std::thread::Builder::new()
             .name("ws-clipboard-poller".to_string())
@@ -200,20 +367,29 @@ pub fn start_poller(app: AppHandle) {
             })
             .ok();
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let _ = app;
     }
 }
 
-/// 当前系统剪贴板的 changeCount（macOS 专用；其它平台返回 None）
+/// 当前系统剪贴板的变化序列号（macOS / Windows；其它平台返回 None）
 #[cfg(target_os = "macos")]
 fn change_count() -> Option<i64> {
     use objc2_app_kit::NSPasteboard;
     Some(NSPasteboard::generalPasteboard().changeCount() as i64)
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Windows：`GetClipboardSequenceNumber` 每次内容变化都会递增；
+/// 返回 0 表示当前拿不到剪贴板（例如被别的进程独占），本次跳过。
+#[cfg(target_os = "windows")]
+fn change_count() -> Option<i64> {
+    use windows::Win32::System::DataExchange::GetClipboardSequenceNumber;
+    let sequence = unsafe { GetClipboardSequenceNumber() };
+    (sequence != 0).then_some(sequence as i64)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn change_count() -> Option<i64> {
     None
 }
@@ -221,7 +397,7 @@ fn change_count() -> Option<i64> {
 /// 检查并在有变化时采集一次。`force` 用于启动 / 面板唤出。
 ///
 /// 返回是否写入了新记录。
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub fn capture_once(app: &AppHandle, force: bool) -> bool {
     let Some(runtime) = app.try_state::<ClipboardRuntime>() else {
         return false;
@@ -240,12 +416,12 @@ pub fn capture_once(app: &AppHandle, force: bool) -> bool {
     read_and_store(app)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn capture_once(_app: &AppHandle, _force: bool) -> bool {
     false
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn read_and_store(app: &AppHandle) -> bool {
     let mut clipboard = match arboard::Clipboard::new() {
         Ok(clipboard) => clipboard,
@@ -329,13 +505,17 @@ fn read_and_store(app: &AppHandle) -> bool {
         kind = classify(&text).to_string();
     }
 
+    // 来源应用的富文本私有表示（钉钉等）：粘贴时原样写回才能贴出图文
+    let extras = collect_extra_flavors();
+
     // 单条总量上限
     let total = text.len()
         + stored_html.len()
         + all_images
             .iter()
             .map(|img| img.bytes.len())
-            .sum::<usize>();
+            .sum::<usize>()
+        + extras.iter().map(|(name, bytes)| name.len() + bytes.len()).sum::<usize>();
     if total > MAX_ITEM_BYTES {
         return false;
     }
@@ -361,6 +541,7 @@ fn read_and_store(app: &AppHandle) -> bool {
             }
         };
         let Some(thumb) = rich::png_thumbnail(&image.bytes, THUMB_MAX_EDGE) else {
+            log_capture_err("thumb", "生成缩略图失败");
             cleanup_blobs(&dir, &attachments);
             return false;
         };
@@ -375,6 +556,7 @@ fn read_and_store(app: &AppHandle) -> bool {
         if write_atomic(&store::blob_path(&dir, &att_id), &blob).is_err()
             || write_atomic(&store::thumb_path(&dir, &att_id), &thumb_enc).is_err()
         {
+            log_capture_err("write", "写入图片附件失败");
             cleanup_blobs(&dir, &attachments);
             return false;
         }
@@ -423,7 +605,36 @@ fn read_and_store(app: &AppHandle) -> bool {
             }
         }
     };
+    // 额外表示是可选增强：存不下就退化成只写 HTML / 纯文本
+    let extra_enc = if extras.is_empty() {
+        String::new()
+    } else {
+        let encoded = encode_extra_flavors(&extras);
+        match crate::crypto::encrypt_str(app, &encoded) {
+            Ok(value) => value,
+            Err(err) => {
+                log_capture_err("encrypt-extra", &err);
+                String::new()
+            }
+        }
+    };
     let hash = rich::content_hash(&text, &stored_html, &hashes);
+
+    // 按住 ⌘C 连按 / 反复复制同一份内容：直接跳过，不重复入库、不置顶、不推刷新事件
+    if let Some(runtime) = app.try_state::<ClipboardRuntime>() {
+        let mut last = runtime
+            .last_capture
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let now = now_ms();
+        if let Some((previous, at)) = last.as_ref() {
+            if previous == &hash && now - *at < RECOPY_DEDUPE_MS {
+                cleanup_blobs(&dir, &attachments);
+                return true;
+            }
+        }
+        *last = Some((hash.clone(), now));
+    }
 
     let conn = match db_conn(app) {
         Ok(conn) => conn,
@@ -434,6 +645,11 @@ fn read_and_store(app: &AppHandle) -> bool {
         }
     };
     if let Ok(Some(existing)) = store::find_by_hash(&conn, &hash) {
+        // 同一内容再复制一次时可能才带来来源应用的富文本表示（例如先复制文字、
+        // 再复制图文），补到已有记录上，粘贴时就能用上
+        if existing.extra_enc.is_empty() && !extra_enc.is_empty() {
+            let _ = store::set_extra_enc(&conn, &existing.id, &extra_enc);
+        }
         let _ = store::touch(&conn, &existing.id, now_ms());
         cleanup_blobs(&dir, &attachments);
         let _ = app.emit(EVENT_CHANGED, ());
@@ -454,6 +670,7 @@ fn read_and_store(app: &AppHandle) -> bool {
         image_count: attachments.len() as i64,
         byte_size: (text.len() + stored_html.len()) as i64
             + attachments.iter().map(|att| att.orig_size).sum::<i64>(),
+        extra_enc,
     };
     if let Err(err) = store::insert_item(&conn, &new_item, &attachments) {
         log_capture_err("insert", &err);
@@ -464,14 +681,141 @@ fn read_and_store(app: &AppHandle) -> bool {
     true
 }
 
-/// 自己写回剪贴板后调用：把已见 changeCount 同步到当前值，避免把自己写的内容再收一遍。
+/// 自己写回剪贴板后调用：把已见序列号同步到当前值，避免把自己写的内容再收一遍。
 pub fn note_self_write(app: &AppHandle) {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     if let (Some(runtime), Some(count)) = (app.try_state::<ClipboardRuntime>(), change_count()) {
         runtime.last_change_count.store(count, Ordering::Relaxed);
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let _ = app;
+}
+
+// ============================== 全局快捷键 ==============================
+
+/// 两个加速键字符串是否指向同一个热键（`Command` / `CommandOrControl` 这类别名）。
+///
+/// 字符串不同但解析结果相同时不能再注册一次，系统会报「已被占用」。
+fn parses_to_same_hotkey(a: &str, b: &str) -> bool {
+    let parse = |value: &str| value.parse::<tauri_plugin_global_shortcut::Shortcut>().ok();
+    match (parse(a), parse(b)) {
+        (Some(next), Some(prev)) => next == prev,
+        _ => false,
+    }
+}
+
+/// 当前生效的加速键字符串（管理页 / 面板徽标读这个）。
+pub fn current_accelerator(app: &AppHandle) -> String {
+    app.try_state::<ClipboardRuntime>()
+        .map(|runtime| runtime.shortcut.lock().unwrap().clone())
+        .unwrap_or_else(|| DEFAULT_ACCELERATOR.to_string())
+}
+
+fn set_current_accelerator(app: &AppHandle, accelerator: &str) {
+    if let Some(runtime) = app.try_state::<ClipboardRuntime>() {
+        *runtime.shortcut.lock().unwrap() = accelerator.to_string();
+    }
+}
+
+/// 从 config.json 读用户保存过的快捷键
+/// 读用户保存的快捷键。
+///
+/// `None` = 从没设置过（用默认组合）；`Some("")` = 用户主动清空过，不注册任何快捷键。
+fn stored_accelerator(app: &AppHandle) -> Option<String> {
+    let store = app.store(CONFIG_STORE_FILE).ok()?;
+    Some(store.get(SHORTCUT_STORE_KEY)?.as_str()?.trim().to_string())
+}
+
+fn save_accelerator(app: &AppHandle, accelerator: &str) -> Result<(), String> {
+    let store = app
+        .store(CONFIG_STORE_FILE)
+        .map_err(|err| format!("保存快捷键失败: {err}"))?;
+    store.set(SHORTCUT_STORE_KEY, accelerator.to_string());
+    store.save().map_err(|err| format!("保存快捷键失败: {err}"))
+}
+
+/// 启动时注册快捷键：优先用户保存的组合，不可用再退回默认值。
+pub fn register_saved_shortcut(app: &AppHandle) {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+
+    let saved = match stored_accelerator(app) {
+        // 用户主动清空过：不注册快捷键，面板只能从主窗口改回组合后再用
+        Some(accelerator) if accelerator.is_empty() => {
+            set_current_accelerator(app, "");
+            eprintln!("[clipboard] 未设置全局快捷键，跳过注册");
+            return;
+        }
+        Some(accelerator) => accelerator,
+        None => DEFAULT_ACCELERATOR.to_string(),
+    };
+    let shortcuts = app.global_shortcut();
+    match shortcuts.register(saved.as_str()) {
+        Ok(()) => {
+            set_current_accelerator(app, &saved);
+            eprintln!("[clipboard] 全局快捷键 {saved} 已注册");
+        }
+        Err(err) => {
+            eprintln!("[clipboard] 全局快捷键 {saved} 注册失败: {err}");
+            if saved != DEFAULT_ACCELERATOR && shortcuts.register(DEFAULT_ACCELERATOR).is_ok() {
+                set_current_accelerator(app, DEFAULT_ACCELERATOR);
+                eprintln!("[clipboard] 已回退到默认快捷键 {DEFAULT_ACCELERATOR}");
+            }
+        }
+    }
+}
+
+/// 修改快捷键：先注册新的（被占用 / 格式不对就直接报错，旧快捷键保持可用），
+/// 再注销旧的、写回 config.json。
+pub fn apply_shortcut(app: &AppHandle, accelerator: &str) -> Result<String, String> {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+
+    let accelerator = accelerator.trim();
+    let old = current_accelerator(app);
+
+    // 清空快捷键：先落盘，成功后再注销当前组合；失败时原组合继续可用
+    if accelerator.is_empty() {
+        save_accelerator(app, "")?;
+        if !old.is_empty() {
+            let _ = app.global_shortcut().unregister(old.as_str());
+        }
+        set_current_accelerator(app, "");
+        eprintln!("[clipboard] 全局快捷键已清空");
+        return Ok(String::new());
+    }
+    if accelerator == old || parses_to_same_hotkey(accelerator, &old) {
+        save_accelerator(app, accelerator)?;
+        set_current_accelerator(app, accelerator);
+        return Ok(accelerator.to_string());
+    }
+
+    let shortcuts = app.global_shortcut();
+    shortcuts
+        .register(accelerator)
+        .map_err(|err| format!("快捷键不可用: {err}"))?;
+    if let Err(err) = save_accelerator(app, accelerator) {
+        // 存不下就回滚，避免「这次能用、重启就丢」
+        let _ = shortcuts.unregister(accelerator);
+        return Err(err);
+    }
+    let _ = shortcuts.unregister(old.as_str());
+    set_current_accelerator(app, accelerator);
+    Ok(accelerator.to_string())
+}
+
+/// 面板是否被置顶（贴屏幕）。置顶后失焦、复制都不收起。
+pub fn is_pinned(app: &AppHandle) -> bool {
+    app.try_state::<ClipboardRuntime>()
+        .map(|runtime| runtime.pinned.load(Ordering::Relaxed))
+        .unwrap_or(false)
+}
+
+/// 设置面板置顶状态，返回设置后的值。
+pub fn set_pinned(app: &AppHandle, pinned: bool) -> bool {
+    if let Some(runtime) = app.try_state::<ClipboardRuntime>() {
+        runtime.pinned.store(pinned, Ordering::Relaxed);
+        return pinned;
+    }
+    false
 }
 
 // ============================== 面板显示 ==============================
@@ -505,6 +849,19 @@ pub fn show_panel(app: &AppHandle) {
         return;
     };
 
+    // 只记第一次呼出时最前面的窗口：连按热键时前台已经变成自己，再记就丢了目标
+    let already_open = window.is_visible().unwrap_or(false);
+    // 上次关掉时置顶已经失效，重新打开一律从「不置顶」开始
+    if !already_open {
+        set_pinned(app, false);
+    }
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    if !already_open {
+        remember_frontmost_app();
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let _ = already_open;
+
     // 应用可能在后台：先激活，否则窗口显示了也拿不到键盘焦点
     activate_app(app);
 
@@ -517,14 +874,31 @@ pub fn show_panel(app: &AppHandle) {
     }
     let _ = window.show();
     let _ = window.set_focus();
-    let _ = app.emit(EVENT_SHOWN, ());
+
+    // 激活会把主窗口一起带到前台：从别的 App 呼出时把主窗口压回后面，
+    // 别让面板收起后主窗口顶掉用户正在用的 App
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    if !already_open {
+        send_main_window_to_back(app);
+    }
+
+    let _ = app.emit(EVENT_SHOWN, is_pinned(app));
 }
 
 /// 收起面板（Esc / 失焦 / 复制后由前端调用）
 pub fn hide_panel(app: &AppHandle) {
+    // 收起面板就清掉置顶，下次呼出重新点「置顶」才生效
+    set_pinned(app, false);
+    // Windows：必须在面板还握着前台时把前台让给目标应用；先隐藏再抢前台会被系统拒绝
+    #[cfg(target_os = "windows")]
+    restore_frontmost_app(app);
     if let Some(window) = app.get_webview_window(PANEL_LABEL) {
         let _ = window.hide();
     }
+    // 复制 / 取消后把焦点还给呼出面板前的 App，用户直接按 ⌘V / Ctrl+V 就能粘贴。
+    // 失焦收起走 lib.rs 里的窗口事件，那条路径不抢焦点。
+    #[cfg(target_os = "macos")]
+    restore_frontmost_app(app);
 }
 
 /// 面板显示位置：返回 `(x, y, 是否逻辑点)`。
@@ -668,9 +1042,287 @@ fn activate_app(app: &AppHandle) {
 #[cfg(not(target_os = "macos"))]
 fn activate_app(_app: &AppHandle) {}
 
+/// macOS：记住呼出面板前最前面的 App（排除自己）。
+#[cfg(target_os = "macos")]
+fn remember_frontmost_app() {
+    use objc2_app_kit::NSWorkspace;
+
+    let front = NSWorkspace::sharedWorkspace().frontmostApplication();
+    let pid = front.map(|app| app.processIdentifier() as i32);
+    *PANEL_PREVIOUS_APP.lock().unwrap() = pid
+        .filter(|pid| *pid != std::process::id() as i32)
+        .map(|pid| pid as isize);
+}
+
+/// macOS：把焦点还给呼出面板前的 App，用户直接按 ⌘V 就能粘贴。
+#[cfg(target_os = "macos")]
+fn restore_frontmost_app(app: &AppHandle) {
+    let Some(pid) = PANEL_PREVIOUS_APP.lock().unwrap().take() else {
+        return;
+    };
+    let pid = pid as i32;
+    if objc2::MainThreadMarker::new().is_some() {
+        activate_pid(pid);
+    } else {
+        let _ = app.run_on_main_thread(move || activate_pid(pid));
+    }
+}
+
+/// macOS：激活指定进程的 App（macOS 14 起 ignoringOtherApps 已无副作用，
+/// 保留它是为了兼容 10.15，和 `activate_app` 的处理一致）。
+#[cfg(target_os = "macos")]
+fn activate_pid(pid: i32) {
+    use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication};
+
+    if let Some(previous) = NSRunningApplication::runningApplicationWithProcessIdentifier(pid) {
+        #[allow(deprecated)]
+        previous.activateWithOptions(NSApplicationActivationOptions::ActivateIgnoringOtherApps);
+    }
+}
+
+/// macOS：激活应用会把主窗口一起带到前台（主窗口开着、或应用被 ⌘H 藏起来时最明显）。
+/// 面板只是浮层，把主窗口压回所有窗口后面，别让它顶掉用户正在用的 App。
+#[cfg(target_os = "macos")]
+fn send_main_window_to_back(app: &AppHandle) {
+    // 从主窗口自己呼出时保持原样，只有「从别的 App 呼出」才压下去
+    if PANEL_PREVIOUS_APP.lock().unwrap().is_none() {
+        return;
+    }
+    let Some(main) = app.get_webview_window("main") else {
+        return;
+    };
+    if !main.is_visible().unwrap_or(false) {
+        return;
+    }
+    let Ok(ptr) = main.ns_window() else {
+        return;
+    };
+    if ptr.is_null() {
+        return;
+    }
+
+    // 原生指针不是 Send：转成 usize 再在闭包里还原
+    let ptr = ptr as usize;
+    let order_back = move || unsafe {
+        let window = &*(ptr as *const objc2_app_kit::NSWindow);
+        window.orderBack(None);
+    };
+    if objc2::MainThreadMarker::new().is_some() {
+        order_back();
+    } else {
+        let _ = app.run_on_main_thread(order_back);
+    }
+}
+
+/// Windows：记录呼出面板前最前面的窗口（HWND），自己家的窗口不算。
+#[cfg(target_os = "windows")]
+fn remember_frontmost_app() {
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+
+    let hwnd = unsafe { GetForegroundWindow() };
+    if hwnd.0.is_null() {
+        *PANEL_PREVIOUS_APP.lock().unwrap() = None;
+        return;
+    }
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+    *PANEL_PREVIOUS_APP.lock().unwrap() = (pid != std::process::id()).then_some(hwnd.0 as isize);
+}
+
+/// Windows：把前台窗口还给呼出面板前的应用，用户直接按 Ctrl+V 就能粘贴。
+#[cfg(target_os = "windows")]
+fn restore_frontmost_app(_app: &AppHandle) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
+
+    let Some(raw) = PANEL_PREVIOUS_APP.lock().unwrap().take() else {
+        return;
+    };
+    // 前台窗口句柄只是拿来还原焦点，不是借用，转成裸指针交回系统
+    unsafe {
+        let _ = SetForegroundWindow(HWND(raw as *mut core::ffi::c_void));
+    }
+}
+
+/// Windows：呼出面板会把整个应用带到前台，主窗口可能跟着顶上来。
+/// 和 macOS 的 `orderBack` 对应：从别的应用呼出时把主窗口压到所有窗口后面。
+#[cfg(target_os = "windows")]
+fn send_main_window_to_back(app: &AppHandle) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SetWindowPos, HWND_BOTTOM, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    };
+
+    // 从主窗口自己呼出时保持原样，只有「从别的 App 呼出」才压下去
+    if PANEL_PREVIOUS_APP.lock().unwrap().is_none() {
+        return;
+    }
+    let Some(main) = app.get_webview_window("main") else {
+        return;
+    };
+    if !main.is_visible().unwrap_or(false) {
+        return;
+    }
+    let Ok(hwnd) = main.hwnd() else {
+        return;
+    };
+    // tauri 用的是另一个 minor 版本的 windows crate，HWND 都是裸指针包一层，
+    // 取指针转成本 crate 依赖的句柄类型即可（ABI 一致）
+    let hwnd = windows::Win32::Foundation::HWND(hwnd.0 as *mut core::ffi::c_void);
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd,
+            Some(HWND_BOTTOM),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
+        );
+    }
+}
+
+/// 写回系统剪贴板：HTML（可选）+ 纯文本 + 图片（可选）+ 来源应用的额外表示。
+///
+/// - 图文混排：HTML + 纯文本 + 额外表示（钉钉的私有富文本等，能一次贴出文字+图片）；
+///   聊天输入框没有富文本表示时会回落到文字，图片用大图里的「复制图片」单独贴
+/// - 纯图片：PNG + TIFF
+pub fn write_pasteboard(
+    app: &AppHandle,
+    html: Option<&str>,
+    text: &str,
+    png: Option<Vec<u8>>,
+    extras: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let payload = (
+            html.map(str::to_string),
+            text.to_string(),
+            png,
+            extras.to_vec(),
+        );
+        // AppKit 的粘贴板按主线程用；命令在阻塞线程里跑，就转过去再等结果
+        if objc2::MainThreadMarker::new().is_some() {
+            return write_pasteboard_now(&payload.0, &payload.1, payload.2.as_deref(), &payload.3);
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.run_on_main_thread(move || {
+            let _ = tx.send(write_pasteboard_now(
+                &payload.0,
+                &payload.1,
+                payload.2.as_deref(),
+                &payload.3,
+            ));
+        })
+        .map_err(|e| format!("写回剪贴板失败: {e}"))?;
+        rx.recv_timeout(Duration::from_secs(5))
+            .map_err(|_| "写回剪贴板超时".to_string())?
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        use tauri_plugin_clipboard_manager::ClipboardExt;
+
+        // Windows 的剪贴板格式是数字 ID，私有表示没法按名字还原，只用 HTML / 图片 / 文本
+        let _ = extras;
+        if let Some(html) = html {
+            return app
+                .clipboard()
+                .write_html(html.to_string(), Some(text.to_string()))
+                .map_err(|e| format!("写回剪贴板失败: {e}"));
+        }
+        if let Some(png) = png {
+            let image = image::load_from_memory(&png).map_err(|e| format!("图片解码失败: {e}"))?;
+            let rgba = image.to_rgba8();
+            let image =
+                tauri::image::Image::new_owned(rgba.as_raw().clone(), rgba.width(), rgba.height());
+            return app
+                .clipboard()
+                .write_image(&image)
+                .map_err(|e| format!("写回剪贴板失败: {e}"));
+        }
+        app.clipboard()
+            .write_text(text.to_string())
+            .map_err(|e| format!("写回剪贴板失败: {e}"))
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn write_pasteboard_now(
+    html: &Option<String>,
+    text: &str,
+    png: Option<&[u8]>,
+    extras: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    use objc2::AnyThread;
+    use objc2_app_kit::{
+        NSImage, NSPasteboard, NSPasteboardTypeHTML, NSPasteboardTypePNG, NSPasteboardTypeString,
+        NSPasteboardTypeTIFF,
+    };
+    use objc2_foundation::{NSData, NSString};
+
+    let pasteboard = NSPasteboard::generalPasteboard();
+    pasteboard.clearContents();
+
+    if let Some(html) = html {
+        // 和 arboard 的 write_html 一样包一层 UTF-8 meta：片段 HTML 直接写进去，
+        // 有的编辑器会按 Latin-1 解，中文就乱了
+        let wrapped = format!(
+            r#"<html><head><meta http-equiv="content-type" content="text/html; charset=utf-8"></head><body>{html}</body></html>"#
+        );
+        let html_ns = NSString::from_str(&wrapped);
+        // SAFETY: NSPasteboardType 是 AppKit 运行时初始化的常量，只读引用
+        let wrote = unsafe { pasteboard.setString_forType(&html_ns, NSPasteboardTypeHTML) };
+        if !wrote {
+            return Err("写回剪贴板失败（HTML）".to_string());
+        }
+    }
+    if !text.is_empty() {
+        let text_ns = NSString::from_str(text);
+        let _ = unsafe { pasteboard.setString_forType(&text_ns, NSPasteboardTypeString) };
+    }
+    if let Some(bytes) = png {
+        let data = NSData::with_bytes(bytes);
+        let mut wrote = false;
+        // SAFETY: NSPasteboardType 是 AppKit 运行时初始化的常量，只读引用
+        unsafe {
+            wrote |= pasteboard.setData_forType(Some(&data), NSPasteboardTypePNG);
+            // TIFF 是 AppKit 最通用的图片表示，部分应用（钉钉）只认它
+            if let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) {
+                if let Some(tiff) = image.TIFFRepresentation() {
+                    wrote |= pasteboard.setData_forType(Some(&tiff), NSPasteboardTypeTIFF);
+                }
+            }
+        }
+        if !wrote {
+            return Err("写回剪贴板失败（图片）".to_string());
+        }
+    }
+    // 原样写回来源应用的富文本私有表示（钉钉粘贴图文要靠它）
+    for (name, bytes) in extras {
+        let type_ns = NSString::from_str(name);
+        let data = NSData::with_bytes(bytes);
+        let _ = pasteboard.setData_forType(Some(&data), &type_ns);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encodes_and_decodes_extra_flavors() {
+        let flavors = vec![(
+            "com.dingtalk.richTextAttributedString".to_string(),
+            br#"{"contents":[]}"#.to_vec(),
+        )];
+        let encoded = encode_extra_flavors(&flavors);
+        assert!(encoded.starts_with('['));
+        assert_eq!(decode_extra_flavors(&encoded), flavors);
+        assert!(encode_extra_flavors(&[]).is_empty());
+        assert!(decode_extra_flavors("").is_empty());
+        assert!(decode_extra_flavors("not json").is_empty());
+    }
 
     #[test]
     fn classifies_url_code_and_text() {
@@ -692,12 +1344,16 @@ mod tests {
     }
 
     #[test]
-    fn hotkey_accelerator_is_command_shift_v() {
+    fn default_accelerator_is_parseable() {
         use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut};
-        let shortcut: Shortcut = HOTKEY_ACCELERATOR
+        let shortcut: Shortcut = DEFAULT_ACCELERATOR
             .parse()
             .expect("accelerator 应能被 global-hotkey 解析");
+        // macOS 上 CommandOrControl 落到 SUPER，Windows 上落到 CONTROL
+        #[cfg(target_os = "macos")]
         assert!(shortcut.mods.contains(Modifiers::SUPER), "应为 Command");
+        #[cfg(not(target_os = "macos"))]
+        assert!(shortcut.mods.contains(Modifiers::CONTROL), "应为 Control");
         assert!(shortcut.mods.contains(Modifiers::SHIFT), "应为 Shift");
         assert_eq!(shortcut.key, Code::KeyV);
     }
@@ -733,6 +1389,23 @@ mod tests {
             panel_origin_at((-1000, 300), panel, left_screen),
             (-1200, 312)
         );
+    }
+
+    #[test]
+    fn parses_aliases_to_same_hotkey() {
+        #[cfg(target_os = "macos")]
+        assert!(parses_to_same_hotkey(
+            "CommandOrControl+Shift+V",
+            "Command+Shift+V"
+        ));
+        #[cfg(target_os = "windows")]
+        assert!(parses_to_same_hotkey(
+            "CommandOrControl+Shift+V",
+            "Control+Shift+V"
+        ));
+        assert!(parses_to_same_hotkey("Alt+Shift+V", "Alt+Shift+V"));
+        assert!(!parses_to_same_hotkey("Alt+Shift+V", "Shift+V"));
+        assert!(!parses_to_same_hotkey("Alt+Shift+V", "not-a-key"));
     }
 
     #[test]

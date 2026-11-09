@@ -38,6 +38,7 @@ export interface ClipboardClearResult {
 }
 
 export interface ClipboardLimits {
+  /** 呼出面板的加速键字符串（`CommandOrControl+Shift+V`），显示前按平台格式化 */
   shortcut: string
   max_text_chars: number
 }

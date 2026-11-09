@@ -8,9 +8,11 @@ import {
   copyClipboardImage,
   copyClipboardItem,
   exportClipboardImage,
+  getClipboardLimits,
 } from '@/api/clipboard'
 import { useClipboardHistory } from '@/composables/useClipboardHistory'
-import { platform } from '@/platform'
+import { formatShortcut } from '@/clipboard/shortcut'
+import ShortcutSettingsDialog from '@/components/clipboard/ShortcutSettingsDialog.vue'
 import type {
   ClipboardImageMeta,
   ClipboardItemSummary,
@@ -20,7 +22,7 @@ import type {
  * 「系统 → 剪贴板」管理页：历史列表 + 搜索 + 复制 / 删除 / 清空 + 图片预览导出。
  *
  * 数据与面板共用 `useClipboardHistory`；删除 / 清空由 Rust 侧级联删掉本地图片附件。
- * Windows 不采集剪贴板，这里只显示说明。
+ * 工具栏的齿轮用来改呼出面板的全局快捷键。
  */
 
 const props = defineProps<{
@@ -28,7 +30,12 @@ const props = defineProps<{
   active: boolean
 }>()
 
-const isMacos = computed(() => platform.is_macos)
+const shortcutOpen = ref(false)
+/** 呼出面板的加速键字符串，弹窗里录制 / 保存也改它 */
+const shortcutAccel = ref('')
+const shortcutLabel = computed(() =>
+  shortcutAccel.value ? formatShortcut(shortcutAccel.value) : '',
+)
 
 const {
   query,
@@ -234,7 +241,24 @@ function onViewerKeydown(event: KeyboardEvent) {
 onMounted(() => {
   void nextTick(() => setupLazyLoad())
   window.addEventListener('keydown', onViewerKeydown)
+  getClipboardLimits()
+    .then((limits) => {
+      shortcutAccel.value = limits.shortcut
+    })
+    .catch(() => {
+      // 老后端没有这个命令时保持默认，打开弹窗时再试
+    })
 })
+
+/** 打开快捷键设置：先拿一次当前值，避免显示的是上次缓存的旧组合 */
+async function openShortcutSettings() {
+  try {
+    shortcutAccel.value = (await getClipboardLimits()).shortcut
+  } catch {
+    // 读不到就用已有值
+  }
+  shortcutOpen.value = true
+}
 
 onUnmounted(() => {
   parentObserver?.disconnect()
@@ -244,13 +268,7 @@ onUnmounted(() => {
 
 <template>
   <div class="cm">
-    <div v-if="!isMacos" class="cm-blocked">
-      <p class="cm-blocked-title">剪贴板历史仅在 macOS 启用</p>
-      <p class="cm-blocked-sub">Windows 请使用系统自带的 <kbd>Win</kbd> + <kbd>V</kbd>。</p>
-    </div>
-
-    <template v-else>
-      <div class="cm-toolbar">
+    <div class="cm-toolbar">
         <div class="cm-search">
           <svg class="cm-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
             <circle cx="11" cy="11" r="7" />
@@ -266,14 +284,37 @@ onUnmounted(() => {
           />
         </div>
         <span class="cm-summary">{{ summaryText }}</span>
-        <button
-          class="cm-clear"
-          type="button"
-          :disabled="stats.items === 0"
-          @click="confirmClear"
-        >
-          清空历史
-        </button>
+        <div class="cm-toolbar-actions">
+          <button
+            class="cm-refresh"
+            type="button"
+            :disabled="loading"
+            title="重新读取剪贴板历史"
+            @click="refresh"
+          >
+            {{ loading ? '刷新中…' : '刷新' }}
+          </button>
+          <button
+            class="cm-clear"
+            type="button"
+            :disabled="stats.items === 0"
+            @click="confirmClear"
+          >
+            清空历史
+          </button>
+          <button
+            class="cm-icon-btn"
+            type="button"
+            title="快捷键设置"
+            aria-label="快捷键设置"
+            @click="openShortcutSettings"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+              <circle cx="12" cy="12" r="3.2" />
+              <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.03 1.56V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1.11-1.56 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.56-1.03H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.56-1.11 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34H9a1.7 1.7 0 0 0 1.03-1.56V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1.03 1.56 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87V9a1.7 1.7 0 0 0 1.56 1.03H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.56 1.03z" />
+            </svg>
+          </button>
+        </div>
       </div>
 
       <div v-if="searchingMode" class="cm-result-hint">
@@ -322,7 +363,7 @@ onUnmounted(() => {
           没有匹配「{{ query.trim() }}」的记录
         </div>
         <div v-else-if="!searchingMode && list.length === 0" class="cm-empty">
-          还没有剪贴板记录；在 macOS 上复制内容后再按 ⌘⇧V 呼出面板看看。
+          还没有剪贴板记录<template v-if="shortcutLabel">；复制内容后再按 {{ shortcutLabel }} 呼出面板看看</template>。
         </div>
 
         <div v-if="loadingMore" class="cm-more">加载中…</div>
@@ -386,7 +427,12 @@ onUnmounted(() => {
           </div>
         </div>
       </Modal>
-    </template>
+
+    <ShortcutSettingsDialog
+      v-model:open="shortcutOpen"
+      :shortcut="shortcutAccel"
+      @saved="shortcutAccel = $event"
+    />
   </div>
 </template>
 
@@ -400,39 +446,6 @@ onUnmounted(() => {
   /* 与 Hosts / 屏幕休眠等页签一致的内容区边距 */
   padding: 10px 20px 16px;
   overflow: hidden;
-}
-
-/* ============================== Windows 说明 ============================== */
-
-.cm-blocked {
-  margin: 24px 0;
-  padding: 32px 24px;
-  border: 1px dashed var(--border-color);
-  border-radius: 10px;
-  background: var(--bg-secondary);
-  text-align: center;
-}
-
-.cm-blocked-title {
-  margin: 0 0 6px;
-  color: var(--text-primary);
-  font-size: 14px;
-  font-weight: 600;
-}
-
-.cm-blocked-sub {
-  margin: 0;
-  color: var(--text-muted);
-  font-size: 12px;
-}
-
-.cm-blocked kbd {
-  padding: 1px 5px;
-  border: 1px solid var(--border-color);
-  border-radius: 4px;
-  background: var(--bg-primary);
-  font-size: 11px;
-  font-family: inherit;
 }
 
 /* ============================== 工具栏 ============================== */
@@ -483,16 +496,65 @@ onUnmounted(() => {
   white-space: nowrap;
 }
 
-.cm-clear {
+.cm-toolbar-actions {
   margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cm-refresh,
+.cm-clear,
+.cm-icon-btn {
   height: 32px;
-  padding: 0 14px;
   border: 1px solid var(--border-color);
   border-radius: 8px;
   background: transparent;
-  color: var(--danger);
   font-size: 12px;
   cursor: pointer;
+}
+
+.cm-refresh,
+.cm-clear {
+  padding: 0 14px;
+}
+
+.cm-icon-btn {
+  width: 32px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+}
+
+.cm-icon-btn:hover {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
+.cm-icon-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+.cm-refresh {
+  color: var(--text-secondary);
+}
+
+.cm-refresh:hover:not(:disabled) {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
+.cm-refresh:disabled {
+  color: var(--text-muted);
+  cursor: default;
+  opacity: 0.6;
+}
+
+.cm-clear {
+  color: var(--danger);
 }
 
 .cm-clear:hover:not(:disabled) {
@@ -593,7 +655,9 @@ onUnmounted(() => {
 }
 
 .cm-text {
-  flex: 1;
+  /* 宽度跟着文字走：行尾空白留给整行点击复制，不要整行都是文本光标 */
+  flex: 0 1 auto;
+  max-width: 100%;
   cursor: text;
   user-select: text;
   min-width: 0;

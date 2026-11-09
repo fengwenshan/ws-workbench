@@ -131,7 +131,11 @@ pub async fn clipboard_copy_image(app: AppHandle, attachment_id: String) -> Resu
         let blob = std::fs::read(store::blob_path(&dir, &att.id))
             .map_err(|e| format!("读取图片附件失败: {e}"))?;
         let bytes = filecrypto::decrypt_bytes(&app, &blob)?;
-        write_image_bytes(&app, &bytes)?;
+        // 单独复制一张图：只写图片表示，不带来源应用的富文本
+        if let Err(err) = write_image_bytes(&app, &bytes, &[]) {
+            eprintln!("[clipboard] copy image failed: {err}");
+            return Err(err);
+        }
         clipboard::note_self_write(&app);
         // 复制单张图片同样把它所属的整条历史置顶
         store::touch(&conn, &att.item_id, clipboard::now_ms())?;
@@ -224,22 +228,33 @@ pub async fn clipboard_export_image(
     .map_err(|e| e.to_string())?
 }
 
+/// 面板 / 管理页需要的限制与当前快捷键。
+///
+/// `shortcut` 是加速键字符串（`CommandOrControl+Shift+V`），显示格式交给前端按平台渲染。
 #[tauri::command]
-pub fn clipboard_limits() -> ClipboardLimits {
+pub fn clipboard_limits(app: AppHandle) -> ClipboardLimits {
     ClipboardLimits {
-        shortcut: if cfg!(target_os = "macos") {
-            "⌘⇧V".to_string()
-        } else {
-            "—".to_string()
-        },
+        shortcut: clipboard::current_accelerator(&app),
         max_text_chars: clipboard::MAX_TEXT_CHARS,
     }
+}
+
+/// 修改全局快捷键：先注册新的（不可用会报错并保留旧的），再落盘。
+#[tauri::command]
+pub fn clipboard_set_shortcut(app: AppHandle, accelerator: String) -> Result<String, String> {
+    clipboard::apply_shortcut(&app, &accelerator)
 }
 
 /// 收起面板（Esc / 点击外部后的兜底）
 #[tauri::command]
 pub fn clipboard_panel_hide(app: AppHandle) {
     clipboard::hide_panel(&app);
+}
+
+/// 面板置顶（贴到屏幕上）：置顶后失焦、复制都不收起，收起面板后自动失效
+#[tauri::command]
+pub fn clipboard_set_pinned(app: AppHandle, pinned: bool) -> bool {
+    clipboard::set_pinned(&app, pinned)
 }
 
 // ---------------- 内部工具 ----------------
@@ -346,6 +361,8 @@ fn write_item_to_clipboard(
     row: &store::ItemRow,
 ) -> Result<(), String> {
     let dir = store::attachments_dir(app)?;
+    // 来源应用的富文本私有表示（钉钉等）：有的话一起写回，聊天框才能一次贴出图文
+    let extras = clipboard::stored_extra_flavors(app, &row.extra_enc);
     match row.kind.as_str() {
         "image" => {
             let att = store::attachments(conn, &row.id)?
@@ -355,7 +372,7 @@ fn write_item_to_clipboard(
             let blob = std::fs::read(store::blob_path(&dir, &att.id))
                 .map_err(|e| format!("读取图片附件失败: {e}"))?;
             let bytes = filecrypto::decrypt_bytes(app, &blob)?;
-            write_image_bytes(app, &bytes)?;
+            write_image_bytes(app, &bytes, &extras)?;
         }
         "rich" => {
             let html = if row.html_enc.is_empty() {
@@ -378,33 +395,48 @@ fn write_item_to_clipboard(
                 }
             }
             let restored = rich::restore_html(&html, &blobs);
-            if app
-                .clipboard()
-                .write_html(restored, Some(text.clone()))
-                .is_err()
-            {
-                app.clipboard()
-                    .write_text(text)
-                    .map_err(|e| format!("写回剪贴板失败: {e}"))?;
-            }
+            // 图文混排：HTML + 纯文本 + 来源应用的富文本私有表示（钉钉等）。
+            // 不写原生图片表示：微信 / 钉钉有图片表示就只贴图片、文字丢掉；
+            // 只有「没有文字的富文本」（纯图片）才补一份图片表示，否则粘过去是空的。
+            let png = if text.trim().is_empty() {
+                first_png(&blobs)
+            } else {
+                None
+            };
+            clipboard::write_pasteboard(app, Some(&restored), &text, png, &extras)?;
         }
         _ => {
             let text = crypto::decrypt_str(app, &row.text_enc)?;
-            app.clipboard()
-                .write_text(text)
-                .map_err(|e| format!("写回剪贴板失败: {e}"))?;
+            clipboard::write_pasteboard(app, None, &text, None, &extras)?;
         }
     }
     Ok(())
 }
 
-fn write_image_bytes(app: &AppHandle, bytes: &[u8]) -> Result<(), String> {
-    let image = image::load_from_memory(bytes).map_err(|e| format!("图片解码失败: {e}"))?;
-    let rgba = image.to_rgba8();
-    let image = tauri::image::Image::new_owned(rgba.as_raw().clone(), rgba.width(), rgba.height());
-    app.clipboard()
-        .write_image(&image)
-        .map_err(|e| format!("写回剪贴板失败: {e}"))
+fn write_image_bytes(
+    app: &AppHandle,
+    bytes: &[u8],
+    extras: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    // 统一转成 PNG：附件里可能是 HTML 内嵌的 jpeg / webp，写回时统一成
+    // PNG + TIFF 两种表示，微信 / 钉钉才能稳定贴出图片
+    let png = if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+        bytes.to_vec()
+    } else {
+        rich::to_png(bytes).ok_or_else(|| "图片解码失败".to_string())?
+    };
+    clipboard::write_pasteboard(app, None, "", Some(png), extras)
+}
+
+/// 富文本条目里的首张图片（转成 PNG），给「没有文字的富文本」补图片表示用
+fn first_png(blobs: &[(String, String, Vec<u8>)]) -> Option<Vec<u8>> {
+    blobs.first().and_then(|(_, mime, bytes)| {
+        if mime.eq_ignore_ascii_case("image/png") {
+            Some(bytes.clone())
+        } else {
+            rich::to_png(bytes)
+        }
+    })
 }
 
 /// `wsclip` 自定义协议：给面板 / 管理页读图片缩略图与原图。

@@ -20,7 +20,7 @@ use crate::vpn::models::{VpnProfile, VpnRuleSet};
 pub const DB_FILE: &str = "ws-workbench.db";
 
 /// 表结构版本
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 /// v1：分组 / 项目 / VPN 配置 / 规则集
 const SCHEMA_SQL_V1: &str = r#"
@@ -49,6 +49,11 @@ CREATE TABLE IF NOT EXISTS vpn_rule_sets (
   sort_order INTEGER NOT NULL,
   payload    TEXT NOT NULL
 );
+"#;
+
+/// v3：剪贴板条目额外保存来源应用的富文本私有表示（钉钉 `richTextAttributedString` 等）
+const SCHEMA_SQL_V3: &str = r#"
+ALTER TABLE clipboard_items ADD COLUMN extra_enc TEXT NOT NULL DEFAULT '';
 "#;
 
 /// v2：剪贴板历史（正文/HTML 为密文信封，图片走独立 WST1 附件目录）
@@ -95,6 +100,14 @@ fn resolve_storage_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Err("没有可写的本地存储目录".to_string())
 }
 
+/// 数据文件目录（数据库、剪贴板图片附件等都放这里）。
+///
+/// 不能直接用 `app_data_dir()`：目录不可写时会回退到别的候选目录，附件必须跟着数据库走，
+/// 否则数据库写成功、图片写失败，图文条目就会被整条跳过。
+pub(crate) fn storage_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    resolve_storage_dir(app)
+}
+
 /// 数据库文件的绝对路径
 pub fn db_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(resolve_storage_dir(app)?.join(DB_FILE))
@@ -126,6 +139,10 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
     if version < 2 {
         conn.execute_batch(SCHEMA_SQL_V2)
             .map_err(|e| format!("创建剪贴板表失败: {}", e))?;
+    }
+    if version < 3 {
+        conn.execute_batch(SCHEMA_SQL_V3)
+            .map_err(|e| format!("增加剪贴板富文本列失败: {}", e))?;
     }
     if version < SCHEMA_VERSION {
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -463,7 +480,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
         let count: i64 = conn
             .query_row(
                 "SELECT count(*) FROM sqlite_master WHERE type = 'table' \
@@ -477,7 +494,7 @@ mod tests {
     }
 
     #[test]
-    fn migrates_v1_db_to_v2_and_creates_clipboard_tables() {
+    fn migrates_v1_db_to_v3_and_creates_clipboard_tables() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("v1.db");
         {
@@ -490,7 +507,16 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
+        // v3 给剪贴板条目加了富文本私有表示列
+        let has_extra: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('clipboard_items') WHERE name = 'extra_enc'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_extra, 1);
         for table in ["clipboard_items", "clipboard_attachments"] {
             let count: i64 = conn
                 .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0))
@@ -500,9 +526,41 @@ mod tests {
     }
 
     #[test]
+    fn migrates_v2_db_to_v3_keeps_existing_items() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("v2.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(SCHEMA_SQL_V2).unwrap();
+            conn.execute(
+                "INSERT INTO clipboard_items
+                 (id, kind, created_at, content_hash, text_enc, html_enc, image_count, byte_size)
+                 VALUES ('old', 'text', 1, 'hash', '', '', 0, 0)",
+                [],
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 2i64).unwrap();
+        }
+
+        let conn = open(&path).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 3);
+        let extra: String = conn
+            .query_row(
+                "SELECT extra_enc FROM clipboard_items WHERE id = 'old'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(extra.is_empty(), "旧记录迁移后 extra_enc 应为空");
+    }
+
+    #[test]
     fn init_schema_rejects_newer_version() {
         let conn = memory_conn();
-        conn.pragma_update(None, "user_version", 3i64).unwrap();
+        conn.pragma_update(None, "user_version", 4i64).unwrap();
         let err = init_schema(&conn).unwrap_err();
         assert!(err.contains("版本过新"), "实际错误：{}", err);
     }

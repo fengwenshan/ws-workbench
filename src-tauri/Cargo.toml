@@ -66,6 +66,12 @@ objc2-app-kit = { version = "0.3", features = [
     # 托盘面板定位要读 NSEvent::mouseLocation（逻辑点坐标）+ NSScreen 的菜单栏高度
     "NSEvent",
     "NSScreen",
+    # 剪贴板面板：呼出前记前台 App（NSWorkspace）、收起后把焦点还给原来的 App，
+    # 并把被激活带上来的主窗口压回后面（NSWindow::orderBack）
+    "NSWorkspace",
+    "NSWindow",
+    # 图文写回：HTML + 纯文本 + PNG/TIFF 一起放上粘贴板（钉钉只认图片类型）
+    "NSPasteboard",
     "libc",
 ] }
 objc2-foundation = { version = "0.3", features = ["NSData", "NSString"] }
@@ -75,6 +81,7 @@ objc2-foundation = { version = "0.3", features = ["NSData", "NSString"] }
 winreg = "0.55"
 windows = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_System_DataExchange",
     "Win32_System_Memory",
     "Win32_System_Power",
     "Win32_System_ProcessStatus",

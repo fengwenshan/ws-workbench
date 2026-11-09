@@ -3,12 +3,15 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import {
   clipboardImageUrl,
+  copyClipboardImage,
   copyClipboardItem,
   getClipboardLimits,
   hideClipboardPanel,
+  setClipboardPinned,
 } from '@/api/clipboard'
 import { useClipboardHistory } from '@/composables/useClipboardHistory'
-import type { ClipboardItemSummary, ClipboardKind, ClipboardLimits } from '@/types/clipboard'
+import { formatShortcut } from '@/clipboard/shortcut'
+import type { ClipboardImageMeta, ClipboardItemSummary, ClipboardLimits } from '@/types/clipboard'
 
 /**
  * 剪贴板历史面板（独立窗口 /clipboard.html）。
@@ -25,56 +28,45 @@ const {
   searching,
   searchingMode,
   hasMore,
-  stats,
   loadMore,
   refresh,
 } = useClipboardHistory()
 
-const limits = ref<ClipboardLimits>({ shortcut: '⌘⇧V', max_text_chars: 200000 })
+const limits = ref<ClipboardLimits>({
+  shortcut: 'CommandOrControl+Shift+V',
+  max_text_chars: 200000,
+})
+/** 快捷键显示成平台习惯的写法：mac ⌘⇧V / Windows Ctrl+Shift+V */
+const shortcutLabel = computed(() => formatShortcut(limits.value.shortcut))
+/** 置顶（贴屏幕）：置顶后点外面、复制都不收起，面板一关就失效 */
+const pinned = ref(false)
 const selected = ref(0)
-/** 每分钟刷新一次「刚刚 / N 分钟前」，否则时间会停在打开那一刻 */
-const clock = ref(Date.now())
 const searchInput = ref<HTMLInputElement | null>(null)
 const listEl = ref<HTMLElement | null>(null)
 const sentinel = ref<HTMLElement | null>(null)
-let clockTimer: ReturnType<typeof setInterval> | null = null
+/** 点缩略图查看原图，不触发复制 */
+const viewer = ref<{ item: ClipboardItemSummary; index: number } | null>(null)
+const viewerImages = computed<ClipboardImageMeta[]>(() => viewer.value?.item.images ?? [])
+const viewerImage = computed(() =>
+  viewer.value ? viewerImages.value[viewer.value.index] ?? null : null,
+)
 let unlistenShown: UnlistenFn | null = null
 let observer: IntersectionObserver | null = null
 
-const kindLabels: Record<ClipboardKind, string> = {
-  text: '文本',
-  url: '链接',
-  code: '代码',
-  image: '图片',
-  rich: '图文',
-}
-
-function kindLabel(kind: ClipboardKind): string {
-  return kindLabels[kind] ?? '文本'
-}
-
 function preview(item: ClipboardItemSummary): string {
-  const text = item.text_preview
-  if (text) return text
-  if (item.kind === 'image') return `${item.image_count} 张图片`
-  return '（空内容）'
+  // 纯图片条目只留缩略图，不再用文字说明
+  return item.text_preview
 }
 
-function thumbnails(item: ClipboardItemSummary) {
-  // 纯图片用首图做封面，图文最多展示 3 张
-  return item.kind === 'image' ? item.images.slice(0, 1) : item.images.slice(0, 3)
+function openViewer(item: ClipboardItemSummary, index: number) {
+  if (item.images.length === 0) return
+  viewer.value = { item, index: Math.min(Math.max(0, index), item.images.length - 1) }
 }
 
-function relativeTime(timestamp: number): string {
-  const diff = Math.max(0, clock.value - timestamp)
-  if (diff < 60_000) return '刚刚'
-  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} 分钟前`
-  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} 小时前`
-  const date = new Date(timestamp)
-  const sameYear = date.getFullYear() === new Date(clock.value).getFullYear()
-  const pad = (value: number) => String(value).padStart(2, '0')
-  const md = `${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
-  return sameYear ? md : `${date.getFullYear()}-${md}`
+function closeViewer() {
+  viewer.value = null
+  // 关掉大图后焦点回到搜索框，键盘操作不中断
+  searchInput.value?.focus()
 }
 
 function clampSelection() {
@@ -112,20 +104,89 @@ function moveSelection(delta: number) {
 async function copyItem(item: ClipboardItemSummary) {
   try {
     await copyClipboardItem(item.id)
-    await hideClipboardPanel()
+    // 置顶时不收起，方便连续复制
+    if (!pinned.value) await hideClipboardPanel()
   } catch {
     // 写回失败（剪贴板被占用等）时保持面板打开，让用户可以再选一次
   }
 }
 
+async function togglePin() {
+  try {
+    pinned.value = await setClipboardPinned(!pinned.value)
+  } catch {
+    // 设置失败时保持原状态
+  }
+}
+
+function refreshPanel() {
+  void refresh()
+}
+
+async function closePanel() {
+  pinned.value = false
+  await hideClipboardPanel()
+}
+
+/** 图文条目按「文字优先」贴，需要单独发图时在大图里复制这一张 */
+async function copyViewerImage() {
+  const image = viewerImage.value
+  if (!image) return
+  try {
+    await copyClipboardImage(image.id)
+    viewer.value = null
+    if (!pinned.value) await hideClipboardPanel()
+  } catch {
+    // 图片读不出来时保持大图，让用户可以再试
+  }
+}
+
+function stepViewer(delta: number) {
+  if (!viewer.value) return
+  const total = viewerImages.value.length
+  if (total <= 1) return
+  viewer.value = {
+    ...viewer.value,
+    index: (viewer.value.index + delta + total) % total,
+  }
+}
+
+/**
+ * 整行点击：只有点在空白处才复制。
+ * 文字要能选中、缩略图点开大图，都不能误触发复制（和主窗口列表一致）。
+ */
+function onRowClick(item: ClipboardItemSummary, event: MouseEvent) {
+  const target = event.target as Element | null
+  if (target?.closest('.cp-text, .cp-thumb-btn')) return
+  // 拖选文字后松手也会冒泡一次 click，选中了就不复制
+  if ((window.getSelection()?.toString() ?? '').length > 0) return
+  void copyItem(item)
+}
+
 function onKeydown(event: KeyboardEvent) {
+  // 大图打开时只响应 Esc 与左右切换，避免方向键/回车误操作后面的列表
+  if (viewer.value && !['Escape', 'ArrowLeft', 'ArrowRight'].includes(event.key)) return
+  if (viewer.value && event.key === 'ArrowLeft') {
+    event.preventDefault()
+    stepViewer(-1)
+    return
+  }
+  if (viewer.value && event.key === 'ArrowRight') {
+    event.preventDefault()
+    stepViewer(1)
+    return
+  }
   if (event.key === 'Escape') {
     event.preventDefault()
+    if (viewer.value) {
+      closeViewer()
+      return
+    }
     if (query.value) {
       query.value = ''
       return
     }
-    void hideClipboardPanel()
+    void closePanel()
     return
   }
   if (event.key === 'ArrowDown') {
@@ -165,9 +226,17 @@ onMounted(async () => {
   }
   await focusSearch()
 
-  unlistenShown = await listen('clipboard-panel-shown', async () => {
+  unlistenShown = await listen<boolean>('clipboard-panel-shown', async (event) => {
     query.value = ''
     selected.value = 0
+    viewer.value = null
+    pinned.value = event.payload === true
+    // 管理页可能刚改过快捷键，每次呼出都重新读一次
+    try {
+      limits.value = await getClipboardLimits()
+    } catch {
+      // 读不到就继续用上一次的值
+    }
     await refresh()
     await focusSearch()
   })
@@ -183,27 +252,60 @@ onMounted(async () => {
   }
 
   window.addEventListener('keydown', onKeydown)
-  clockTimer = setInterval(() => {
-    clock.value = Date.now()
-  }, 30_000)
 })
 
 onUnmounted(() => {
   window.removeEventListener('keydown', onKeydown)
   unlistenShown?.()
   observer?.disconnect()
-  if (clockTimer) clearInterval(clockTimer)
 })
 </script>
 
 <template>
   <div class="cp">
     <header class="cp-head" data-tauri-drag-region>
-      <div class="cp-title">
-        剪贴板历史
-        <span v-if="stats.items > 0" class="cp-count">{{ stats.items }}</span>
+      <div class="cp-title">剪贴板历史</div>
+      <div class="cp-head-actions">
+        <button
+          class="cp-icon-btn"
+          type="button"
+          title="刷新"
+          aria-label="刷新"
+          :disabled="loading"
+          @click="refreshPanel"
+        >
+          <svg
+            :class="{ spinning: loading }"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.8"
+            aria-hidden="true"
+          >
+            <path d="M21 12a9 9 0 1 1-2.64-6.36" stroke-linecap="round" />
+            <path d="M21 3v6h-6" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+        </button>
+        <button
+          class="cp-icon-btn"
+          :class="{ active: pinned }"
+          type="button"
+          :title="pinned ? '取消置顶' : '置顶'"
+          :aria-pressed="pinned"
+          aria-label="置顶"
+          @click="togglePin"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+            <path d="M9 3h6l-1 7 3 3v2H7v-2l3-3-1-7z" stroke-linejoin="round" />
+            <path d="M12 15v6" stroke-linecap="round" />
+          </svg>
+        </button>
+        <button class="cp-icon-btn" type="button" title="关闭" aria-label="关闭" @click="closePanel">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+            <path d="M6 6l12 12M18 6L6 18" stroke-linecap="round" />
+          </svg>
+        </button>
       </div>
-      <span class="cp-kbd" :title="`全局快捷键 ${limits.shortcut}`">{{ limits.shortcut }}</span>
     </header>
 
     <div class="cp-search">
@@ -237,38 +339,38 @@ onUnmounted(() => {
     </div>
 
     <div ref="listEl" class="cp-list">
-      <button
+      <div
         v-for="(item, index) in list"
         :key="item.id"
-        type="button"
         class="cp-row"
         :class="{ selected: index === selected }"
-        :title="item.text_preview"
         @mouseenter="selected = index"
-        @click="copyItem(item)"
+        @click="onRowClick(item, $event)"
       >
-        <div class="cp-row-top">
-          <span class="cp-kind" :class="'kind-' + item.kind">{{ kindLabel(item.kind) }}</span>
-          <span v-if="item.kind === 'rich'" class="cp-image-count">
-            {{ item.images.length }} 张图
-          </span>
-          <span class="cp-time">{{ relativeTime(item.created_at) }}</span>
-        </div>
-        <div class="cp-row-body">
-          <div class="cp-text" :class="{ mono: item.kind === 'code' }">{{ preview(item) }}</div>
-          <div v-if="thumbnails(item).length" class="cp-thumbs" :class="{ cover: item.kind === 'image' }">
+        <div class="cp-row-main">
+          <button
+            v-if="item.images.length"
+            type="button"
+            class="cp-thumb-btn"
+            :title="`预览图片 ${item.images[0].width}×${item.images[0].height}`"
+            @click.stop="openViewer(item, 0)"
+          >
             <img
-              v-for="image in thumbnails(item)"
-              :key="image.id"
               class="cp-thumb"
-              :src="clipboardImageUrl(image.id)"
-              :alt="`图片附件 ${image.width}×${image.height}`"
+              :src="clipboardImageUrl(item.images[0].id)"
+              :alt="`图片附件 ${item.images[0].width}×${item.images[0].height}`"
               loading="lazy"
               draggable="false"
             />
+            <span v-if="item.images.length > 1" class="cp-thumb-count">
+              {{ item.images.length }}
+            </span>
+          </button>
+          <div v-if="preview(item)" class="cp-text" :class="{ mono: item.kind === 'code' }">
+            {{ preview(item) }}
           </div>
         </div>
-      </button>
+      </div>
 
       <div v-if="loading && list.length === 0" class="cp-empty">
         <p>正在读取历史…</p>
@@ -280,24 +382,52 @@ onUnmounted(() => {
 
       <div v-else-if="!searchingMode && list.length === 0" class="cp-empty">
         <p>还没有剪贴板记录</p>
-        <p class="cp-empty-sub">
-          复制一段文字、图片或带图文的选区，再按 <kbd>{{ limits.shortcut }}</kbd> 呼出面板。
+        <p v-if="shortcutLabel" class="cp-empty-sub">
+          复制一段文字、图片或带图文的选区，再按 <kbd>{{ shortcutLabel }}</kbd> 呼出面板。
         </p>
       </div>
 
       <div v-if="loadingMore" class="cp-more">加载中…</div>
-      <div v-else-if="!hasMore && !searchingMode && list.length > 0" class="cp-more">没有更多了</div>
       <div ref="sentinel" class="cp-sentinel" aria-hidden="true"></div>
     </div>
 
-    <footer class="cp-foot">
-      <span class="cp-hint">↑↓ 选择 · ↵ 复制 · Esc 关闭</span>
-    </footer>
+    <!-- 图片预览：点缩略图打开，点空白处关闭；这里可以单独复制这张图 -->
+    <div v-if="viewerImage" class="cp-viewer" @click="closeViewer">
+      <img
+        class="cp-viewer-image"
+        :src="clipboardImageUrl(viewerImage.id, 'full')"
+        :alt="`图片 ${viewerImage.width}×${viewerImage.height}`"
+        draggable="false"
+      />
+      <template v-if="viewerImages.length > 1">
+        <button
+          class="cp-viewer-nav prev"
+          type="button"
+          aria-label="上一张"
+          @click.stop="stepViewer(-1)"
+        >
+          ‹
+        </button>
+        <button
+          class="cp-viewer-nav next"
+          type="button"
+          aria-label="下一张"
+          @click.stop="stepViewer(1)"
+        >
+          ›
+        </button>
+      </template>
+      <button class="cp-viewer-copy" type="button" @click.stop="copyViewerImage">
+        复制图片
+      </button>
+    </div>
   </div>
 </template>
 
 <style>
-/* 窗口透明，圆角、边框与投影都画在卡片这一层（和托盘快捷面板一致） */
+/* 窗口透明，圆角与描边都画在卡片这一层（和托盘快捷面板一致）。
+   这里不能加外投影：窗口正好和卡片一样大，投影会被窗口矩形裁掉，只在
+   四个圆角外侧留下一圈灰色直角。 */
 html,
 body,
 #clipboard-app {
@@ -310,6 +440,7 @@ body,
 }
 
 .cp {
+  position: relative;
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -317,9 +448,6 @@ body,
   border: 1px solid var(--border-color);
   border-radius: 14px;
   background: var(--bg-primary);
-  box-shadow:
-    0 18px 42px rgba(15, 23, 42, 0.22),
-    0 2px 8px rgba(15, 23, 42, 0.08);
   color: var(--text-primary);
   font-size: 13px;
 }
@@ -345,24 +473,54 @@ body,
   font-weight: 600;
 }
 
-.cp-count {
-  padding: 0 7px;
-  border-radius: 999px;
-  background: var(--bg-tag);
-  color: var(--text-tag);
-  font-size: 11px;
-  font-weight: 500;
-  line-height: 18px;
+.cp-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
 }
 
-.cp-kbd {
-  padding: 2px 8px;
+.cp-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
   border-radius: 6px;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border-color);
+  background: transparent;
   color: var(--text-muted);
-  font-size: 11px;
-  white-space: nowrap;
+  cursor: pointer;
+}
+
+.cp-icon-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+}
+
+.cp-icon-btn:disabled {
+  cursor: default;
+}
+
+.cp-icon-btn.active {
+  background: var(--bg-secondary);
+  color: var(--primary);
+}
+
+.cp-icon-btn svg {
+  width: 15px;
+  height: 15px;
+}
+
+.cp-icon-btn svg.spinning {
+  animation: cp-spin 0.8s linear infinite;
+}
+
+@keyframes cp-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 /* ============================== 搜索 ============================== */
@@ -441,17 +599,11 @@ body,
 }
 
 .cp-row {
-  display: block;
-  width: 100%;
   margin-bottom: 2px;
-  padding: 8px 10px;
+  padding: 8px 12px;
   border: 1px solid transparent;
   border-radius: 8px;
-  background: transparent;
-  color: inherit;
-  text-align: left;
   cursor: pointer;
-  font: inherit;
 }
 
 .cp-row:hover {
@@ -463,71 +615,64 @@ body,
   border-color: rgba(59, 130, 246, 0.35);
 }
 
-.cp-row-top {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 3px;
-}
-
-.cp-kind {
-  padding: 0 6px;
-  border-radius: 999px;
-  font-size: 11px;
-  line-height: 17px;
-  background: var(--bg-tag);
-  color: var(--text-tag);
-  flex-shrink: 0;
-}
-
-.cp-kind.kind-url {
-  background: #eff6ff;
-  color: #1d4ed8;
-}
-
-.cp-kind.kind-code {
-  background: #f5f3ff;
-  color: #6d28d9;
-}
-
-.cp-kind.kind-image {
-  background: #ecfdf5;
-  color: #047857;
-}
-
-.cp-kind.kind-rich {
-  background: #fef3c7;
-  color: #b45309;
-}
-
-.cp-image-count {
-  color: var(--text-muted);
-  font-size: 11px;
-}
-
-.cp-time {
-  margin-left: auto;
-  color: var(--text-muted);
-  font-size: 11px;
-  white-space: nowrap;
-}
-
-.cp-row-body {
+/* 和主窗口一致：首图在左、文字在右 */
+.cp-row-main {
   display: flex;
   align-items: flex-start;
-  gap: 8px;
+  gap: 10px;
+  min-width: 0;
+}
+
+.cp-thumb-btn {
+  position: relative;
+  flex-shrink: 0;
+  padding: 0;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-primary);
+  line-height: 0;
+  cursor: zoom-in;
+  overflow: hidden;
+}
+
+.cp-thumb-btn:hover {
+  border-color: var(--primary);
+}
+
+.cp-thumb {
+  width: 44px;
+  height: 44px;
+  object-fit: cover;
+  display: block;
+}
+
+.cp-thumb-count {
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.7);
+  color: #fff;
+  font-size: 10px;
+  line-height: 14px;
+  pointer-events: none;
 }
 
 .cp-text {
-  flex: 1;
+  /* 宽度跟着文字走：行尾空白留给整行点击复制，不要整行都是文本光标 */
+  flex: 0 1 auto;
+  max-width: 100%;
+  cursor: text;
+  user-select: text;
   min-width: 0;
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
   overflow: hidden;
-  color: var(--text-secondary);
-  font-size: 12.5px;
-  line-height: 1.45;
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-all;
 }
@@ -535,31 +680,6 @@ body,
 .cp-text.mono {
   font-family: 'SF Mono', Menlo, Consolas, monospace;
   font-size: 12px;
-}
-
-.cp-thumbs {
-  display: flex;
-  gap: 4px;
-  flex-shrink: 0;
-}
-
-.cp-thumb {
-  width: 44px;
-  height: 44px;
-  border-radius: 6px;
-  border: 1px solid var(--border-color);
-  object-fit: cover;
-  background: var(--bg-secondary);
-}
-
-.cp-thumbs.cover .cp-thumb {
-  width: 56px;
-  height: 56px;
-}
-
-.cp-thumbs.cover + .cp-text,
-.cp-row-body:has(.cp-thumbs.cover) .cp-text {
-  -webkit-line-clamp: 2;
 }
 
 .cp-empty {
@@ -599,24 +719,63 @@ body,
   height: 1px;
 }
 
-/* ============================== 底部 ============================== */
+/* ============================== 图片预览 ============================== */
 
-.cp-foot {
+.cp-viewer {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
   display: flex;
   align-items: center;
   justify-content: center;
-  height: 38px;
-  padding: 0 14px;
-  border-top: 1px solid var(--border-color);
-  background: var(--bg-secondary);
-  flex-shrink: 0;
+  padding: 16px;
+  background: rgba(15, 23, 42, 0.55);
+  cursor: zoom-out;
 }
 
-.cp-hint {
-  color: var(--text-muted);
-  font-size: 11px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+.cp-viewer-image {
+  max-width: 100%;
+  max-height: 100%;
+  border-radius: 8px;
+  background: var(--bg-primary);
+  object-fit: contain;
+}
+
+.cp-viewer-nav {
+  position: absolute;
+  top: 50%;
+  width: 30px;
+  height: 30px;
+  margin-top: -15px;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.9);
+  color: var(--text-secondary);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.cp-viewer-nav.prev {
+  left: 10px;
+}
+
+.cp-viewer-nav.next {
+  right: 10px;
+}
+
+.cp-viewer-copy {
+  position: absolute;
+  bottom: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  height: 30px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--primary);
+  color: #fff;
+  font-size: 12px;
+  cursor: pointer;
 }
 </style>

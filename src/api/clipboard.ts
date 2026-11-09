@@ -65,8 +65,18 @@ export function hideClipboardPanel(): Promise<void> {
   return invoke<void>('clipboard_panel_hide')
 }
 
+/** 面板置顶（贴屏幕）：置顶后失焦、复制都不收起，收起面板后自动失效 */
+export function setClipboardPinned(pinned: boolean): Promise<boolean> {
+  return invoke<boolean>('clipboard_set_pinned', { pinned })
+}
+
 export function getClipboardLimits(): Promise<ClipboardLimits> {
   return invoke<ClipboardLimits>('clipboard_limits')
+}
+
+/** 修改呼出面板的全局快捷键；返回保存后的加速键字符串 */
+export function setClipboardShortcut(accelerator: string): Promise<string> {
+  return invoke<string>('clipboard_set_shortcut', { accelerator })
 }
 
 /** 缩略图 / 原图的协议地址（macOS 用自定义 scheme，Windows 用 localhost 映射） */

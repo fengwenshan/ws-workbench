@@ -17,6 +17,8 @@ pub struct NewItem {
     pub html_enc: String,
     pub image_count: i64,
     pub byte_size: i64,
+    /// 来源应用富文本私有表示的密文信封（见 `clipboard::stored_extra_flavors`）
+    pub extra_enc: String,
 }
 
 #[derive(Debug, Clone)]
@@ -41,6 +43,8 @@ pub struct ItemRow {
     pub html_enc: String,
     pub image_count: i64,
     pub byte_size: i64,
+    /// 来源应用富文本私有表示的密文信封（见 `clipboard::stored_extra_flavors`）
+    pub extra_enc: String,
 }
 
 #[derive(Debug, Clone)]
@@ -65,8 +69,9 @@ pub fn insert_item(
         .map_err(|e| format!("开始事务失败: {e}"))?;
     tx.execute(
         "INSERT INTO clipboard_items
-         (id, kind, created_at, content_hash, text_enc, html_enc, image_count, byte_size)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+         (id, kind, created_at, content_hash, text_enc, html_enc, image_count, byte_size,
+          extra_enc)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             item.id,
             item.kind,
@@ -75,7 +80,8 @@ pub fn insert_item(
             item.text_enc,
             item.html_enc,
             item.image_count,
-            item.byte_size
+            item.byte_size,
+            item.extra_enc
         ],
     )
     .map_err(|e| format!("写入剪贴板记录失败: {e}"))?;
@@ -102,7 +108,7 @@ pub fn insert_item(
 
 pub fn find_by_hash(conn: &Connection, hash: &str) -> Result<Option<ItemRow>, String> {
     conn.query_row(
-        "SELECT id, kind, created_at, content_hash, text_enc, html_enc, image_count, byte_size
+        "SELECT id, kind, created_at, content_hash, text_enc, html_enc, image_count, byte_size, extra_enc
          FROM clipboard_items WHERE content_hash = ?1 LIMIT 1",
         params![hash],
         row_to_item,
@@ -119,7 +125,7 @@ pub fn find_by_hash(conn: &Connection, hash: &str) -> Result<Option<ItemRow>, St
 
 pub fn find_by_id(conn: &Connection, id: &str) -> Result<Option<ItemRow>, String> {
     conn.query_row(
-        "SELECT id, kind, created_at, content_hash, text_enc, html_enc, image_count, byte_size
+        "SELECT id, kind, created_at, content_hash, text_enc, html_enc, image_count, byte_size, extra_enc
          FROM clipboard_items WHERE id = ?1 LIMIT 1",
         params![id],
         row_to_item,
@@ -144,7 +150,18 @@ fn row_to_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<ItemRow> {
         html_enc: row.get(5)?,
         image_count: row.get(6)?,
         byte_size: row.get(7)?,
+        extra_enc: row.get(8)?,
     })
+}
+
+/// 给已有记录补上来源应用的富文本私有表示（同样内容再次复制时可能才带上）
+pub fn set_extra_enc(conn: &Connection, id: &str, extra_enc: &str) -> Result<(), String> {
+    conn.execute(
+        "UPDATE clipboard_items SET extra_enc = ?2 WHERE id = ?1",
+        params![id, extra_enc],
+    )
+    .map(|_| ())
+    .map_err(|e| format!("更新富文本表示失败: {e}"))
 }
 
 pub fn touch(conn: &Connection, id: &str, created_at: i64) -> Result<(), String> {
@@ -167,7 +184,7 @@ pub fn page(
         Some((created, id)) => {
             let mut stmt = conn
                 .prepare(
-                    "SELECT id, kind, created_at, content_hash, text_enc, html_enc, image_count, byte_size
+                    "SELECT id, kind, created_at, content_hash, text_enc, html_enc, image_count, byte_size, extra_enc
                      FROM clipboard_items
                      WHERE (created_at < ?1) OR (created_at = ?1 AND id < ?2)
                      ORDER BY created_at DESC, id DESC LIMIT ?3",
@@ -183,7 +200,7 @@ pub fn page(
         None => {
             let mut stmt = conn
                 .prepare(
-                    "SELECT id, kind, created_at, content_hash, text_enc, html_enc, image_count, byte_size
+                    "SELECT id, kind, created_at, content_hash, text_enc, html_enc, image_count, byte_size, extra_enc
                      FROM clipboard_items ORDER BY created_at DESC, id DESC LIMIT ?1",
                 )
                 .map_err(|e| e.to_string())?;
@@ -207,7 +224,7 @@ pub fn for_each_newest(
 ) -> Result<(), String> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, kind, created_at, content_hash, text_enc, html_enc, image_count, byte_size
+            "SELECT id, kind, created_at, content_hash, text_enc, html_enc, image_count, byte_size, extra_enc
              FROM clipboard_items ORDER BY created_at DESC, id DESC",
         )
         .map_err(|e| e.to_string())?;
@@ -319,12 +336,9 @@ pub fn all_attachments(conn: &Connection) -> Result<Vec<AttachmentRow>, String> 
 }
 
 pub fn attachments_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    use tauri::Manager;
-    let base = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("获取应用数据目录失败: {e}"))?;
-    let dir = base.join(ATTACHMENTS_DIR);
+    // 和数据库同一个目录（`app_data_dir` 不可写时会回退到其它候选目录，
+    // 这里跟着走，避免数据库写成功而图片写失败导致图文条目被丢弃）
+    let dir = crate::db::storage_dir(app)?.join(ATTACHMENTS_DIR);
     crate::util::fs::create_dir_all(&dir)?;
     Ok(dir)
 }
@@ -359,6 +373,7 @@ mod tests {
             html_enc: String::new(),
             image_count: 0,
             byte_size: 3,
+            extra_enc: String::new(),
         }
     }
 
