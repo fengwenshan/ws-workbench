@@ -91,7 +91,7 @@ function formatBytes(bytes: number): string {
 }
 
 const summaryText = computed(
-  () => `共 ${stats.value.items} 条 · ${stats.value.images} 张图片 · ${formatBytes(stats.value.bytes)}`,
+  () => `共 ${stats.value.items} 条 · ${stats.value.images} 张图片`,
 )
 
 async function ensureStarted() {
