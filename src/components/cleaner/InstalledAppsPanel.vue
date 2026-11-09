@@ -355,7 +355,7 @@ function requestDeleteLeftovers() {
     title: `删除 ${paths.length} 项残留`,
     content:
       elevation > 0
-        ? `将把 ${paths.length} 项移入废纸篓，其中 ${elevation} 项需要一次系统授权（取消授权时这些条目不会执行），不会永久删除。`
+        ? `将把 ${paths.length} 项移入废纸篓；其中 ${elevation} 项需要一次系统授权，提权删除不经过废纸篓（永久删除），取消授权时这些条目不会执行。`
         : `将把 ${paths.length} 项移入废纸篓，不会永久删除。确定继续？`,
     okText: '移入废纸篓',
     okType: 'danger',
@@ -695,7 +695,7 @@ function requestDeleteLeftovers() {
           <div class="leftover-head-main">
             <span class="leftover-app-name">{{ leftoversTarget?.name }}</span>
             <p class="leftover-sub">
-              勾选要清理的残留条目，所有删除都会移入废纸篓；提权条目会合并成一次系统授权。
+              勾选要清理的残留条目：普通条目移入废纸篓，提权条目会合并成一次系统授权（不经过废纸篓）。
             </p>
           </div>
           <button
