@@ -1,11 +1,11 @@
 {
   "version": "1.0.16",
   "notes": "ws-workbench v1.0.16",
-  "pub_date": "2026-11-09T08:17:06Z",
+  "pub_date": "2026-11-09T08:20:35Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVE0rL3NzZVMwblBtOUFvYm5Bd2FaSEpadDV5U213U2F0RHRITFBYUmR1U0FCamFaNXU2MEZQNHlxQmRDZHpOK2FVdnVPZFY1OEFXQlFkOHY4M1hWcDRBbTBSQkt5Q1EwPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg5NjU4ODI1CWZpbGU6cmlzZW4tdG9vbHNfMS4wLjE0X3g2NC1zZXR1cC5leGUKcXdSYVhuVGdqN3FTSDFHSm44Q0xibWRpZmpaK1RBMnI1TktuZkdQV2VGK3RzWXAweVNNOWIyeTE4OTVpMXF4cjA4SjU4eWNnSjA5S25xZ09uR2o5RGc9PQo=",
-      "url": "https://gitee.com/feng_wenshan/ws-tools/releases/download/v1.0.14/demo-tools-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVE0rL3NzZVMwbkJtNFd2TTRiVU1tcmlNTXZGT3pBUmVlL2tIWnlsTEdMWmw1SHJjUHJXTTdIdTFOak1FSThhdGR2eG5qRU4vaWZjSjFZRHRMdzFxS3Q2ZzNpd3RmRUFNPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0MjEyNDMyCWZpbGU6d3Mtd29ya2JlbmNoXzEuMC4xNl94NjQtc2V0dXAuZXhlCXZlcnNpb246MS4wLjE2ClV0MWNieC9QeEY4UDFwcW1SV2wvV2grUGx0aFh3Z29ZeHRDTExtckNiekFkYkFEQ2NvZ3NBRlpvMUNneEMzUjZET2UwaHVFVFBOQ2ZtSWFYYitXd0NnPT0K",
+      "url": "https://github.com/fengwenshan/ws-workbench/releases/download/v1.0.16/ws-workbench-setup.exe"
     },
     "darwin-aarch64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVE0rL3NzZVMwbk9YWVJmZm0yM1NrNDJQTUpzMjRjcmpGV3BRSVBNc2JVNEVFSGwzZDdpcUpSaHkxZklYdG9uZ3ZoOVlxcWJmTFlMeGhhS2FFbkYvdkZ3NkhqZmJKRlFBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0MjEyMjE5CWZpbGU6d3Mtd29ya2JlbmNoLmFwcC50YXIuZ3oJdmVyc2lvbjoxLjAuMTYKMHM2TVJrNkU1VlVaWTdDOFFjNVRCbDJpWTczeGM1blF6eHl2bHJONVcreng0N1JXODBtdktTeGt5Wm42WFU5OWFxeFlzZ1dGRllXK040cGhSNTB2QVE9PQo=",
