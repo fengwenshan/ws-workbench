@@ -246,6 +246,8 @@ pub struct CleanerProgress {
 
 ### 4.2 卸载流程
 
+> 2026-11-09 增补：运行中检测与二次确认已实现（不再用「可选勾选」），详见 `2026-11-09-cleaner-runtime-guard-and-deep-scan-design.md`。
+
 1. 用户点某行「卸载」→ 确认弹窗展示：应用名、版本、将执行的命令（`UninstallString` 或「移入废纸篓」）、是否提权
 2. 可选勾选「先结束该应用进程」（默认勾选；按 exe 路径/bundle id 匹配运行中进程，优雅退出）
 3. 执行：
@@ -255,6 +257,8 @@ pub struct CleanerProgress {
 5. 失败或条目没有 `UninstallString` 时，弹窗提供「强制移除」（见 4.5）；被占用文件删除失败只报错，不做重启延迟删除（非目标）
 
 ### 4.3 残留规则
+
+> 2026-11-09 增补：本节的精确规则仍是主规则；新增 ByHost / CrashReporter / DiagnosticReports / binarycookies 与低置信度深扫，详见 `2026-11-09-cleaner-runtime-guard-and-deep-scan-design.md`。
 
 **Windows**（每条带置信度）
 

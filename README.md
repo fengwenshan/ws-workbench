@@ -187,12 +187,12 @@ openconnect 探测失败时，代理页给出按平台区分的安装引导：ma
 
 左侧图标栏第四个工具（`⌘/Ctrl+4`，托盘菜单里也叫「系统」），三个页签（弹窗拦截仅 Windows 可见）：
 
-- **软件卸载**：Windows 读注册表 `Uninstall` 键（HKLM 64/32 位、HKCU），macOS 扫 `/Applications` 与 `~/Applications`；支持按名称/发布者/位置搜索，按名称、大小、安装日期排序（顺序记在本地）。卸载执行 `UninstallString`（MSI 的 `/I` 自动换成 `/X`，需要时一次 UAC），macOS 直接把 `.app` 移入废纸篓；没有卸载命令的条目提供「强制移除」（Windows 删注册表项，macOS 结束进程后删除）。卸载后按 bundle id / 注册表键精确匹配文件与注册表残留，按「文件系统 / 注册表」分组、带置信度展示，勾选后删除。
+- **软件卸载**：Windows 读注册表 `Uninstall` 键（HKLM 64/32 位、HKCU），macOS 扫 `/Applications` 与 `~/Applications`；支持按名称/发布者/位置搜索，按名称、大小、安装日期排序（顺序记在本地）。点「确认卸载」先只读检测应用是否在运行：不在运行直接卸载；在运行则弹二次确认（显示进程数与进程名），确认后先按平台正常退出（macOS `NSRunningApplication.terminate()`、Windows `CloseMainWindow()`），5 秒内退不干净就中止本次卸载并提示手动退出，不强制结束进程。卸载执行 `UninstallString`（MSI 的 `/I` 自动换成 `/X`，需要时一次 UAC），macOS 把 `.app` 移入废纸篓；没有卸载命令的条目提供「强制移除」（Windows 删注册表项）。卸载后按 bundle id / 注册表键匹配固定残留位，并对 macOS 用户目录做低置信度深扫（厂商二级目录、helper 容器、ByHost 等，最多 200 条、默认不勾选）；残留按「文件系统 / 注册表」分组、带置信度展示，勾选删除后自动重扫，已删条目从列表消失。
 - **弹窗拦截**（仅 Windows）：默认关闭，开启后后台线程每 800ms `EnumWindows` 扫可见顶层窗口，按「工具窗口 / 不抢焦点 / 始终置顶 / 无标题 / 尺寸异常 / 类名与标题广告线索 / 进程不在前台」打分，可疑窗口进列表并通过 `popup-detected` 事件实时推给界面。两档模式：**检测模式**（默认）只记录，每条由用户点「关闭 / 隐藏」，同进程 5 秒限流；**拦截模式**（可选，默认关）命中闸门后自动处理——分数达阈值、至少两条命中原因、不在系统进程/外壳窗口保护表、不在忽略名单、同进程冷却 5 秒、每分钟最多 6 个（熔断），设置存 `<data_dir>/popup-settings.json`。「忽略」按进程名记到同目录 `popup-ignore.json`。不注入、不装驱动、不杀进程。
 - **屏幕休眠**：阻止系统空闲睡眠（参考 Amphetamine 的公开电源断言方案），并支持「自动保持规则」（Triggers）：指定 App 运行时 / 接通电源时 / 连接外接显示器时自动保持，条件失效自动释放；手动开启优先，规则只释放自己开的会话。规则存 `<data_dir>/sleep-triggers.json`，后台 5 秒探测一次（`sysinfo` 进程列表、`pmset -g batt` / `GetSystemPowerStatus`、CoreGraphics 活动屏幕数 / `GetSystemMetrics(SM_CMONITORS)`），全部只读、不需要管理员权限。macOS 用 IOKit `IOPMAssertionCreateWithName`（`PreventUserIdleSystemSleep`，不勾「允许屏幕关闭」时再加 `PreventUserIdleDisplaySleep`，断言名 `ws-workbench Keep Awake`）；Windows 用专用线程持有 `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED [| ES_DISPLAY_REQUIRED])`。时长按会话式菜单选（参考 Amphetamine 的「开启新会话」）：不限时 / 5·10·15·20·25·30·45 分钟 / 1·2·3·4·6·8·12 小时，或自定义小时+分钟，点时长立即开始一个会话，到点自动释放（状态查询还有一道惰性回收）；不需要 root / 管理员，也不做登录级保活。
-安全约束：删除只进废纸篓（需 root 的条目走一次提权批处理）；所有路径过白名单校验，`/`、主目录、`/System`、`/usr`、`C:\Windows` 等硬拒绝；`pkgutil` 安装收据只读展示；系统应用（SIP / `com.apple.*`）不提供卸载。macOS 的废纸篓走 `NSFileManager` API，不会弹「控制 Finder」的自动化授权。弹窗拦截不做注入/驱动/进程结束；屏幕休眠不碰合盖与主动睡眠。
+安全约束：普通删除只进废纸篓；需 root 的条目走一次提权批处理（`rm -rf` / `Remove-Item`，不经过废纸篓，删除前会明确提示）；所有路径过白名单校验，`/`、主目录、`/System`、`/usr`、`C:\Windows` 等硬拒绝；`pkgutil` 安装收据只读展示；系统应用（SIP / `com.apple.*`）不提供卸载。macOS 的废纸篓走 `NSFileManager` API，不会弹「控制 Finder」的自动化授权。弹窗拦截不做注入/驱动/进程结束；屏幕休眠不碰合盖与主动睡眠。
 
-已知限制：Windows 侧只做了交叉编译检查与验收清单，未实机跑卸载/UAC/弹窗检测；残留按精确匹配，宁可漏报不误删；弹窗检测是「显示后处理」（弹窗会闪一下），UIPI 下关不掉管理员窗口，UAC / 锁屏 / 网页内嵌广告看不到；macOS 登录项在未授权「自动化」时只读。
+已知限制：Windows 侧只做了交叉编译检查与验收清单，未实机跑卸载/UAC/弹窗检测；残留以精确匹配为主，深扫可能漏报（不认识的自定义目录名）也可能多报（通用名字的目录），所以 low 条目默认不勾选；托盘常驻应用可能拦截正常退出，此时卸载会中止并提示手动退出；弹窗检测是「显示后处理」（弹窗会闪一下），UIPI 下关不掉管理员窗口，UAC / 锁屏 / 网页内嵌广告看不到；macOS 登录项在未授权「自动化」时只读。
 
 **托盘快捷面板**：左键点菜单栏/任务栏图标弹出柠檬式的无边框小面板（`quick.html`，360×560，失焦或再点一次托盘图标收起），两个页签：
 
@@ -399,6 +399,7 @@ src-tauri/src/
   process.rs/winps.rs  进程管理与 PowerShell 调用
   apps/            外部应用定位（finder / registry）
   cleaner/         系统工具：安装列表/卸载/残留扫描 + 屏幕休眠、弹窗拦截的后端
+    running.rs     卸载前运行检测与优雅退出（sysinfo + NSRunningApplication / PowerShell CloseMainWindow）
     sleep.rs       防休眠（macOS IOKit 断言 / Windows SetThreadExecutionState）
     popup.rs       弹窗检测（仅 Windows：EnumWindows 轮询 + 启发式打分）
     *_macos.rs / *_windows.rs  平台实现，按 cfg 拆文件
