@@ -49,8 +49,10 @@ concurrency:
 jobs:
   macos:
     # 公开仓库使用标准 GitHub 托管 runner 免费（官方计费文档：
-    # "free for public repositories that use standard GitHub-hosted runners"）
-    runs-on: macos-14
+    # "free for public repositories that use standard GitHub-hosted runners"）。
+    # 注意别写死 macos-14：该镜像已下线，job 会在启动时被直接取消；
+    # macos-latest 目前是 macos-26-arm64，构建产物仍是 darwin-aarch64。
+    runs-on: macos-latest
     steps:
       # 放在最前面：密钥没配就直接退出，避免白等几分钟工具链安装。
       # 只打印长度、不打印内容，不会泄漏密钥。
@@ -132,7 +134,8 @@ jobs:
           retention-days: 14
 
   windows:
-    runs-on: macos-14
+    # 与 macos job 同理，用 macos-latest（当前 arm64 镜像）做交叉编译
+    runs-on: macos-latest
     steps:
       - name: 预检（仓库密钥是否已配置）
         env:
