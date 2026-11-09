@@ -1,7 +1,15 @@
 name: Release
 
-# 创建 tag（vX.Y.Z）才触发发版：校验 tag → 构建 macOS 与 Windows 安装包
-# → 上传到 GitHub 发行版 → 把更新清单提交回 main。直接 push main 不会触发构建。
+# 创建 tag（vX.Y.Z）才触发发版：校验 tag → 构建安装包 → 上传到 GitHub 发行版
+# → 把更新清单提交回 main。直接 push main 不会触发构建。
+#
+# 产出：
+#   macOS（Intel + Apple Silicon 各一份）
+#     - <product>_<arch>.app.tar.gz + .sig           更新载荷（自动更新用）
+#     - <product>_<version>_<arch>.dmg               手工安装包
+#   Windows（x64）
+#     - ws-workbench-setup.exe + .sig                更新载荷（自动更新用，NSIS）
+#     - <product>_<version>_x64_en-US.msi            手工安装包
 #
 # ─────────────────────────────────────────────────────────────
 # 一次性配置（必须做完，否则跑不起来）
@@ -11,7 +19,7 @@ name: Release
 #                                 （即本机 ~/.tauri/ws-workbench.key 的全文）
 #
 # 2) 版本号规则
-#    tag 名就是版本号：打 v1.0.16 就发布 1.0.16，通过 tauri build --config
+#    tag 名就是版本号：打 v1.0.17 就发布 1.0.17，通过 tauri build --config
 #    注入，不改动源文件，因此不会产生提交回环。
 #    tag 必须是 vX.Y.Z 形式，否则预检直接失败。
 #
@@ -23,12 +31,14 @@ name: Release
 # 关于提交回环：CI 提交更新清单时带上 [skip ci]，且本工作流只由 tag 触发，
 # 推回 main 的提交不会再次触发构建。
 #
-# 为什么拆成两个并行 job：
-#   两边构建互不依赖，串行跑纯属白等；拆开后墙钟时间约等于较慢的那个。
-#   Windows 侧仍是交叉编译（cargo-xwin + nsis + llvm），那条链路已验证可用。
-#   代价是两个 job 会同时改 updates/latest.json —— 脚本里用
-#   「快进到远端最新 → 以远端为基线合并本平台条目 → 推送被拒就撤销重试」
-#   来保证谁先谁后都不会互相顶掉（已用双克隆确定性复现并验证）。
+# 为什么是三个 job（mac 两个架构 + windows）：
+#   * macOS 的 Intel 版在 arm64 runner 上交叉编译（--target x86_64-apple-darwin），
+#     不用等 Intel runner —— macos-14 镜像已下线，写死会直接被取消。
+#   * Windows 的 MSI 由 WiX 生成，WiX 只有 Windows 版，所以 Windows 安装包
+#     必须放在 windows-latest（原生 x64）上构建；之前用 cargo-xwin 交叉编译
+#     拿不到 msi。
+#   三个 job 并行，共同改 updates/latest.json —— 脚本里用「快进到远端最新 →
+#   以远端为基线合并本平台条目 → 推送被拒就撤销重试」保证互不顶掉。
 #
 # ─────────────────────────────────────────────────────────────
 
@@ -51,11 +61,109 @@ jobs:
     # 公开仓库使用标准 GitHub 托管 runner 免费（官方计费文档：
     # "free for public repositories that use standard GitHub-hosted runners"）。
     # 注意别写死 macos-14：该镜像已下线，job 会在启动时被直接取消；
-    # macos-latest 目前是 macos-26-arm64，构建产物仍是 darwin-aarch64。
+    # macos-latest 目前是 macos-26-arm64，Intel 版靠 --target 交叉编译。
     runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            target: aarch64-apple-darwin
+          - arch: x86_64
+            target: x86_64-apple-darwin
     steps:
       # 放在最前面：密钥没配就直接退出，避免白等几分钟工具链安装。
       # 只打印长度、不打印内容，不会泄漏密钥。
+      - name: 预检（仓库密钥是否已配置）
+        env:
+          SIGN_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "$SIGN_KEY" ]; then
+            echo "::error::缺少仓库密钥 TAURI_SIGNING_PRIVATE_KEY（Settings → Secrets and variables → Actions）"
+            exit 1
+          fi
+          echo "TAURI_SIGNING_PRIVATE_KEY 已配置：${#SIGN_KEY} 字节"
+
+      - name: 拉取代码（需要完整历史来生成 Changelog）
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 安装 pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: 安装 Rust（含目标架构）
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: 缓存 Rust 构建产物
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: macos-${{ matrix.arch }}
+
+      - name: 安装前端依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 校验 tag 并计算版本号
+        id: version
+        run: |
+          REF="${GITHUB_REF_NAME}"
+          if ! printf '%s' "$REF" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::tag 必须是 vX.Y.Z 形式（例如 v1.0.17），当前: $REF"
+            exit 1
+          fi
+          VERSION="${REF#v}"
+          echo "value=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "本次发布版本：$VERSION"
+
+      - name: 配置清单提交身份
+        # 推送认证沿用 actions/checkout 写进 git config 的 extraheader（GITHUB_TOKEN），
+        # 这里只需要补上提交者身份。
+        run: |
+          git config user.name "冯文山"
+          git config user.email "fengwenshan@example.com"
+
+      - name: 构建并发布 macOS（${{ matrix.arch }}，含 dmg）
+        # TAURI_BUNDLES=app 跳过 Tauri 自带的 bundle_dmg.sh，改用 --dmg 的
+        # hdiutil makehybrid 路径（本地已实测通过）。
+        # 若想用 Tauri 原生 dmg（带"拖入应用程序"美化背景），
+        # 去掉 TAURI_BUNDLES 与 --dmg 两个参数即可。
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAURI_BUNDLES=app node scripts/release.mjs --dmg \
+            --target "${{ matrix.target }}" \
+            --version "${{ steps.version.outputs.value }}"
+
+      - name: 保存产物供人工检查
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installers-macos-${{ matrix.arch }}-${{ steps.version.outputs.value }}
+          path: release/*
+          if-no-files-found: warn
+          retention-days: 14
+
+  windows:
+    # Windows 安装包必须原生构建：Tauri 的 MSI 打包依赖 WiX Toolset（只有
+    # Windows 可执行文件），在 macOS 上用 cargo-xwin 交叉编译拿不到 msi。
+    # windows-latest 是 x64，正好对应 windows-x86_64 更新通道。
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
       - name: 预检（仓库密钥是否已配置）
         env:
           SIGN_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -89,7 +197,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
-          key: macos
+          key: windows-x64
 
       - name: 安装前端依赖
         run: pnpm install --frozen-lockfile
@@ -99,7 +207,7 @@ jobs:
         run: |
           REF="${GITHUB_REF_NAME}"
           if ! printf '%s' "$REF" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "::error::tag 必须是 vX.Y.Z 形式（例如 v1.0.16），当前: $REF"
+            echo "::error::tag 必须是 vX.Y.Z 形式（例如 v1.0.17），当前: $REF"
             exit 1
           fi
           VERSION="${REF#v}"
@@ -113,108 +221,18 @@ jobs:
           git config user.name "冯文山"
           git config user.email "fengwenshan@example.com"
 
-      - name: 构建并发布 macOS（含 dmg）
-        # TAURI_BUNDLES=app 跳过 Tauri 自带的 bundle_dmg.sh，改用 --dmg 的
-        # hdiutil makehybrid 路径（本地已实测通过）。
-        # 若想用 Tauri 原生 dmg（带"拖入应用程序"美化背景），
-        # 去掉 TAURI_BUNDLES 与 --dmg 两个参数即可。
+      - name: 构建并发布 Windows（exe + msi）
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAURI_BUNDLES=app node scripts/release.mjs --dmg --version "${{ steps.version.outputs.value }}"
+          node scripts/release.mjs --version "${{ steps.version.outputs.value }}"
 
       - name: 保存产物供人工检查
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: installers-macos-${{ steps.version.outputs.value }}
-          path: release/*
-          if-no-files-found: warn
-          retention-days: 14
-
-  windows:
-    # 与 macos job 同理，用 macos-latest（当前 arm64 镜像）做交叉编译
-    runs-on: macos-latest
-    steps:
-      - name: 预检（仓库密钥是否已配置）
-        env:
-          SIGN_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-        run: |
-          if [ -z "$SIGN_KEY" ]; then
-            echo "::error::缺少仓库密钥 TAURI_SIGNING_PRIVATE_KEY（Settings → Secrets and variables → Actions）"
-            exit 1
-          fi
-          echo "TAURI_SIGNING_PRIVATE_KEY 已配置：${#SIGN_KEY} 字节"
-
-      - name: 拉取代码（需要完整历史来生成 Changelog）
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: 安装 pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 10
-
-      - name: 安装 Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-
-      - name: 安装 Rust（含 Windows 交叉编译目标）
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-pc-windows-msvc
-
-      - name: 安装交叉编译依赖
-        # nsis 提供 makensis（打 Windows 安装包），llvm 提供 llvm-rc（编译资源文件）；
-        # 两者都只在这个 job 里需要，macOS job 不必等它们。
-        run: |
-          brew install nsis llvm
-          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
-          cargo install --locked cargo-xwin
-
-      - name: 缓存 Rust 构建产物
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri
-          key: windows
-
-      - name: 安装前端依赖
-        run: pnpm install --frozen-lockfile
-
-      - name: 校验 tag 并计算版本号
-        id: version
-        run: |
-          REF="${GITHUB_REF_NAME}"
-          if ! printf '%s' "$REF" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "::error::tag 必须是 vX.Y.Z 形式（例如 v1.0.16），当前: $REF"
-            exit 1
-          fi
-          VERSION="${REF#v}"
-          echo "value=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "本次发布版本：$VERSION"
-
-      - name: 配置清单提交身份
-        # 推送认证沿用 actions/checkout 写进 git config 的 extraheader（GITHUB_TOKEN），
-        # 这里只需要补上提交者身份。
-        run: |
-          git config user.name "冯文山"
-          git config user.email "fengwenshan@example.com"
-
-      - name: 构建并发布 Windows（交叉编译）
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: node scripts/release.mjs --target x86_64-pc-windows-msvc --version "${{ steps.version.outputs.value }}"
-
-      - name: 保存产物供人工检查
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: installers-windows-${{ steps.version.outputs.value }}
+          name: installers-windows-x64-${{ steps.version.outputs.value }}
           path: release/*
           if-no-files-found: warn
           retention-days: 14

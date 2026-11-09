@@ -5,8 +5,13 @@
  * 用法：
  *   node scripts/release.mjs                 # 构建当前平台 + 发布
  *   node scripts/release.mjs --no-publish    # 只构建，产物落在 release/
- *   node scripts/release.mjs --dmg           # macOS 额外生成 dmg
- *   node scripts/release.mjs --target x86_64-pc-windows-msvc   # 交叉编译 Windows
+ *   node scripts/release.mjs --dmg           # macOS 额外生成 dmg（Intel / Apple Silicon 各一份）
+ *   node scripts/release.mjs --target x86_64-apple-darwin     # 在 Apple Silicon 上交叉编 Intel 版
+ *   node scripts/release.mjs --target aarch64-apple-darwin    # Apple Silicon 版
+ *
+ * Windows 的安装包（NSIS 的 exe + MSI）必须在 Windows 主机上构建：Tauri 打 MSI
+ * 依赖 WiX，跨平台交叉编译拿不到；脚本会自动把 exe 作为更新载荷、MSI 作为
+ * 手工安装包一起上传。
  *
  * 环境变量：
  *   TAURI_BUNDLES=app  只打 app、跳过 Tauri 的 dmg 打包脚本
@@ -38,6 +43,7 @@ import {
 import { join, dirname } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
+import { createRequire } from 'node:module'
 import { request as httpsRequest } from 'node:https'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -60,6 +66,14 @@ const GITHUB_TOKEN = process.env.GITHUB_TOKEN || ''
 const GITHUB_API = 'https://api.github.com'
 /** GitHub 的资产上传走独立域名 */
 const GITHUB_UPLOAD = 'https://uploads.github.com'
+
+const require = createRequire(import.meta.url)
+/**
+ * Tauri CLI 的 JS 入口：用 `node <entry> build ...` 调用。
+ * 不走 `pnpm exec tauri`——Windows 上 pnpm 是 .cmd 包一层，execFileSync 直接
+ * 起不来；本机 / CI（macOS、Windows）都装了 Node，这条路两边通用。
+ */
+const TAURI_CLI = require.resolve('@tauri-apps/cli/tauri.js')
 
 const KEY_PATH =
   process.env.TAURI_SIGNING_PRIVATE_KEY_PATH || join(process.env.HOME || '', '.tauri/ws-workbench.key')
@@ -119,7 +133,8 @@ function resolvePlatform(product) {
       bundleSubdir: 'macos',
       matchBundle: (f) => f.startsWith(product) && f.endsWith('.app.tar.gz'),
       matchSig: (f) => f.startsWith(product) && f.endsWith('.app.tar.gz.sig'),
-      assetFile: 'ws-workbench.app.tar.gz',
+      // 两个架构各发一份，文件名带架构；更新清单里按 darwin-<arch> 分键
+      assetFile: `ws-workbench_${arch}.app.tar.gz`,
       // macOS 额外提供 dmg 作为人工安装包（更新载荷用的是 .app.tar.gz）
       installerSubdir: 'dmg',
       matchInstaller: (f) => f.startsWith(product) && f.endsWith('.dmg'),
@@ -166,7 +181,8 @@ function createDmg(platform, version) {
   }
 
   const arch = platform.key.replace('darwin-', '')
-  const outDir = join(TAURI_DIR, 'target/release/bundle/dmg')
+  // 产物目录跟着 target 走：交叉编 Intel 版时不能写进 host 的 target/release
+  const outDir = join(dirname(dirname(dir)), 'dmg')
   mkdirSync(outDir, { recursive: true })
   const outBase = join(outDir, `${product}_${version}_${arch}`)
 
@@ -225,7 +241,7 @@ function build() {
   // 必须带 exec：package.json 里有个同名的 "tauri" 脚本（值为 "tauri dev"），
   // 直接 `pnpm tauri build` 会被解析成 `tauri dev build` —— 那是 dev 模式，
   // 起来后永不退出，CI 会一直挂在构建步骤上、出不了安装包。
-  const args = ['exec', 'tauri', 'build']
+  const args = ['build']
   if (TARGET) args.push('--target', TARGET)
   // 版本覆盖（合并到默认配置里，不改动源文件）
   if (VERSION_OVERRIDE) args.push('--config', JSON.stringify({ version: VERSION_OVERRIDE }))
@@ -237,7 +253,7 @@ function build() {
     args.push('--runner', 'cargo-xwin')
   }
 
-  log(`开始构建: pnpm ${args.join(' ')}`)
+  log(`开始构建: tauri ${args.join(' ')}`)
 
   const env = { ...process.env, TAURI_SIGNING_PRIVATE_KEY: privateKey }
 
@@ -254,7 +270,7 @@ function build() {
     log(`已补充 PATH: ${extra.join(', ')}`)
   }
 
-  execFileSync('pnpm', args, { cwd: ROOT, stdio: 'inherit', env })
+  execFileSync(process.execPath, [TAURI_CLI, ...args], { cwd: ROOT, stdio: 'inherit', env })
 }
 
 function findArtifacts(platform) {
@@ -324,6 +340,17 @@ function buildChangelog(tag) {
 /** 本次要上传到发行版的附件 */
 function collectAssets(platform) {
   const assets = [{ name: platform.assetFile, path: join(OUT_DIR, platform.assetFile) }]
+  // Windows 额外上传 MSI（手工安装包；更新载荷用 NSIS 的 exe）
+  if (platform.key.startsWith('windows-')) {
+    const dir = bundleDir({ ...platform, bundleSubdir: 'msi' })
+    if (existsSync(dir)) {
+      const product = readConf().productName
+      const f = readdirSync(dir).find(
+        (name) => name.startsWith(product) && name.endsWith('.msi')
+      )
+      if (f) assets.push({ name: f, path: join(dir, f) })
+    }
+  }
   // macOS 额外上传 dmg（人工安装包；更新载荷用的是 .app.tar.gz）
   if (platform.installerSubdir) {
     const dir = bundleDir({ ...platform, bundleSubdir: platform.installerSubdir })

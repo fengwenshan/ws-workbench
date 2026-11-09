@@ -293,9 +293,13 @@ pnpm build                                  # vue-tsc --noEmit + vite build
 pnpm exec tauri build                       # 打当前平台安装包
 node scripts/release.mjs                    # 构建 + 发布
 node scripts/release.mjs --no-publish       # 只构建，产物落在 release/
-node scripts/release.mjs --dmg              # macOS 额外生成 dmg
-node scripts/release.mjs --target x86_64-pc-windows-msvc   # 交叉编译 Windows
+node scripts/release.mjs --dmg              # macOS 额外生成 dmg（Intel / Apple Silicon 各一份）
+node scripts/release.mjs --target aarch64-apple-darwin --dmg   # Apple Silicon 版
+node scripts/release.mjs --target x86_64-apple-darwin --dmg    # 在 Apple Silicon 上交叉编 Intel 版
+node scripts/release.mjs                    # Windows 版直接在 Windows 主机上跑，产出 exe + msi
 ```
+
+Windows 安装包（NSIS 的 `exe` 与 WiX 的 `msi`）必须在 Windows 主机上构建：Tauri 打 MSI 依赖 WiX Toolset，而 WiX 只有 Windows 可执行文件，交叉编译拿不到。
 
 发布脚本用到的环境变量：
 
@@ -314,7 +318,15 @@ git push origin v1.0.16   # 只有推 tag 才会触发 GitHub 构建
 
 ### CI
 
-`.github/workflows/release.yml` 只在推送 `v*` tag 时触发（直接 push `main` 不会构建），macOS 与 Windows 两个 job 并行，都跑在 `macos-14` 上；Windows 侧是交叉编译（`cargo-xwin` + `nsis` + `llvm`）。版本号直接从 tag 解析，因此 tag 必须是 `vX.Y.Z` 形式，否则第一个预检步骤就会失败。
+`.github/workflows/release.yml` 只在推送 `v*` tag 时触发（直接 push `main` 不会构建），三个 job 并行，产出：
+
+| 平台 | 自动更新载荷（带签名） | 手工安装包 |
+| --- | --- | --- |
+| macOS Apple Silicon | `ws-workbench_aarch64.app.tar.gz` | `ws-workbench_<ver>_aarch64.dmg` |
+| macOS Intel | `ws-workbench_x86_64.app.tar.gz` | `ws-workbench_<ver>_x64.dmg` |
+| Windows x64 | `ws-workbench-setup.exe`（NSIS） | `ws-workbench_<ver>_x64_en-US.msi` |
+
+macOS 两个架构都在 `macos-latest`（arm64）上跑，Intel 版用 `--target x86_64-apple-darwin` 交叉编译；Windows 在 `windows-latest` 上原生构建（MSI 需要 WiX）。版本号直接从 tag 解析，因此 tag 必须是 `vX.Y.Z` 形式，否则第一个预检步骤就会失败。
 
 跑之前必须配一个仓库密钥：`TAURI_SIGNING_PRIVATE_KEY`（本机 `~/.tauri/ws-workbench.key` 的全文），没配会在预检步骤直接退出。
 
@@ -328,12 +340,13 @@ git push origin v1.0.16   # 只有推 tag 才会触发 GitHub 构建
 
 ```json
 {
-  "version": "1.0.14",
-  "notes": "ws-workbench v1.0.14",
-  "pub_date": "2026-09-17T15:38:15Z",
+  "version": "1.0.17",
+  "notes": "ws-workbench v1.0.17",
+  "pub_date": "2026-11-09T08:20:35Z",
   "platforms": {
-    "windows-x86_64": { "signature": "...", "url": "https://github.com/fengwenshan/ws-workbench/releases/download/v1.0.16/ws-workbench-setup.exe" },
-    "darwin-aarch64": { "signature": "...", "url": "https://github.com/fengwenshan/ws-workbench/releases/download/v1.0.16/ws-workbench.app.tar.gz" }
+    "windows-x86_64": { "signature": "...", "url": "https://github.com/fengwenshan/ws-workbench/releases/download/v1.0.17/ws-workbench-setup.exe" },
+    "darwin-aarch64": { "signature": "...", "url": "https://github.com/fengwenshan/ws-workbench/releases/download/v1.0.17/ws-workbench_aarch64.app.tar.gz" },
+    "darwin-x86_64": { "signature": "...", "url": "https://github.com/fengwenshan/ws-workbench/releases/download/v1.0.17/ws-workbench_x86_64.app.tar.gz" }
   }
 }
 ```

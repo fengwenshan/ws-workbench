@@ -38,7 +38,6 @@ pub struct ItemRow {
     pub id: String,
     pub kind: String,
     pub created_at: i64,
-    pub content_hash: String,
     pub text_enc: String,
     pub html_enc: String,
     pub image_count: i64,
@@ -51,12 +50,10 @@ pub struct ItemRow {
 pub struct AttachmentRow {
     pub id: String,
     pub item_id: String,
-    pub seq: i64,
     pub mime: String,
     pub width: i64,
     pub height: i64,
     pub orig_size: i64,
-    pub thumb_size: i64,
 }
 
 pub fn insert_item(
@@ -108,7 +105,7 @@ pub fn insert_item(
 
 pub fn find_by_hash(conn: &Connection, hash: &str) -> Result<Option<ItemRow>, String> {
     conn.query_row(
-        "SELECT id, kind, created_at, content_hash, text_enc, html_enc, image_count, byte_size, extra_enc
+        "SELECT id, kind, created_at, text_enc, html_enc, image_count, byte_size, extra_enc
          FROM clipboard_items WHERE content_hash = ?1 LIMIT 1",
         params![hash],
         row_to_item,
@@ -125,7 +122,7 @@ pub fn find_by_hash(conn: &Connection, hash: &str) -> Result<Option<ItemRow>, St
 
 pub fn find_by_id(conn: &Connection, id: &str) -> Result<Option<ItemRow>, String> {
     conn.query_row(
-        "SELECT id, kind, created_at, content_hash, text_enc, html_enc, image_count, byte_size, extra_enc
+        "SELECT id, kind, created_at, text_enc, html_enc, image_count, byte_size, extra_enc
          FROM clipboard_items WHERE id = ?1 LIMIT 1",
         params![id],
         row_to_item,
@@ -145,12 +142,11 @@ fn row_to_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<ItemRow> {
         id: row.get(0)?,
         kind: row.get(1)?,
         created_at: row.get(2)?,
-        content_hash: row.get(3)?,
-        text_enc: row.get(4)?,
-        html_enc: row.get(5)?,
-        image_count: row.get(6)?,
-        byte_size: row.get(7)?,
-        extra_enc: row.get(8)?,
+        text_enc: row.get(3)?,
+        html_enc: row.get(4)?,
+        image_count: row.get(5)?,
+        byte_size: row.get(6)?,
+        extra_enc: row.get(7)?,
     })
 }
 
@@ -184,7 +180,7 @@ pub fn page(
         Some((created, id)) => {
             let mut stmt = conn
                 .prepare(
-                    "SELECT id, kind, created_at, content_hash, text_enc, html_enc, image_count, byte_size, extra_enc
+                    "SELECT id, kind, created_at, text_enc, html_enc, image_count, byte_size, extra_enc
                      FROM clipboard_items
                      WHERE (created_at < ?1) OR (created_at = ?1 AND id < ?2)
                      ORDER BY created_at DESC, id DESC LIMIT ?3",
@@ -200,7 +196,7 @@ pub fn page(
         None => {
             let mut stmt = conn
                 .prepare(
-                    "SELECT id, kind, created_at, content_hash, text_enc, html_enc, image_count, byte_size, extra_enc
+                    "SELECT id, kind, created_at, text_enc, html_enc, image_count, byte_size, extra_enc
                      FROM clipboard_items ORDER BY created_at DESC, id DESC LIMIT ?1",
                 )
                 .map_err(|e| e.to_string())?;
@@ -224,7 +220,7 @@ pub fn for_each_newest(
 ) -> Result<(), String> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, kind, created_at, content_hash, text_enc, html_enc, image_count, byte_size, extra_enc
+            "SELECT id, kind, created_at, text_enc, html_enc, image_count, byte_size, extra_enc
              FROM clipboard_items ORDER BY created_at DESC, id DESC",
         )
         .map_err(|e| e.to_string())?;
@@ -251,7 +247,7 @@ pub fn stats(conn: &Connection) -> Result<(i64, i64, i64), String> {
 pub fn attachments(conn: &Connection, item_id: &str) -> Result<Vec<AttachmentRow>, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, item_id, seq, mime, width, height, orig_size, thumb_size
+            "SELECT id, item_id, mime, width, height, orig_size
              FROM clipboard_attachments WHERE item_id = ?1 ORDER BY seq",
         )
         .map_err(|e| e.to_string())?;
@@ -264,7 +260,7 @@ pub fn attachments(conn: &Connection, item_id: &str) -> Result<Vec<AttachmentRow
 
 pub fn attachment(conn: &Connection, id: &str) -> Result<Option<AttachmentRow>, String> {
     conn.query_row(
-        "SELECT id, item_id, seq, mime, width, height, orig_size, thumb_size
+        "SELECT id, item_id, mime, width, height, orig_size
          FROM clipboard_attachments WHERE id = ?1 LIMIT 1",
         params![id],
         row_to_attachment,
@@ -283,12 +279,10 @@ fn row_to_attachment(row: &rusqlite::Row<'_>) -> rusqlite::Result<AttachmentRow>
     Ok(AttachmentRow {
         id: row.get(0)?,
         item_id: row.get(1)?,
-        seq: row.get(2)?,
-        mime: row.get(3)?,
-        width: row.get(4)?,
-        height: row.get(5)?,
-        orig_size: row.get(6)?,
-        thumb_size: row.get(7)?,
+        mime: row.get(2)?,
+        width: row.get(3)?,
+        height: row.get(4)?,
+        orig_size: row.get(5)?,
     })
 }
 
@@ -324,7 +318,7 @@ pub fn clear(conn: &Connection) -> Result<Vec<AttachmentRow>, String> {
 pub fn all_attachments(conn: &Connection) -> Result<Vec<AttachmentRow>, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, item_id, seq, mime, width, height, orig_size, thumb_size
+            "SELECT id, item_id, mime, width, height, orig_size
              FROM clipboard_attachments",
         )
         .map_err(|e| e.to_string())?;

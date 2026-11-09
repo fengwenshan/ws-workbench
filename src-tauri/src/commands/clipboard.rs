@@ -4,7 +4,6 @@
 //! 面板是独立窗口（label = `clipboard-panel`），前端不直接碰窗口 API。
 
 use tauri::{AppHandle, Emitter};
-use tauri_plugin_clipboard_manager::ClipboardExt;
 
 use crate::clipboard::{self, rich, store};
 use crate::{crypto, filecrypto};

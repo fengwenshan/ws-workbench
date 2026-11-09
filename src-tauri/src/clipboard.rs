@@ -218,10 +218,14 @@ struct StoredFlavor {
 }
 
 /// 单个额外表示的大小上限（原样存，别让私有格式把库撑大）
+// 只有 macOS 会读来源应用的私有表示（见 collect_extra_flavors），其它平台用不到
+#[cfg(target_os = "macos")]
 const MAX_EXTRA_FLAVOR_BYTES: usize = 256 * 1024;
 /// 一条剪贴板记录里所有额外表示的总上限
+#[cfg(target_os = "macos")]
 const MAX_EXTRA_FLAVORS_BYTES: usize = 512 * 1024;
 /// 最多留几个额外表示
+#[cfg(target_os = "macos")]
 const MAX_EXTRA_FLAVORS: usize = 8;
 
 fn encode_extra_flavors(flavors: &[(String, Vec<u8>)]) -> String {

@@ -101,11 +101,6 @@ fn ensure_single_instance() -> bool {
     true
 }
 
-#[cfg(not(target_os = "windows"))]
-fn ensure_single_instance() -> bool {
-    true
-}
-
 // 把主窗口重新显示出来（托盘菜单、Dock 图标、快捷面板里的「打开主窗口」进入）
 pub(crate) fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
     if let Some(window) = app.get_webview_window("main") {
@@ -303,6 +298,9 @@ fn create_quick_panel(app: &mut tauri::App) -> tauri::Result<()> {
         window.outer_size(),
         window.is_visible()
     );
+    // release 下不打日志，显式消费掉绑定，避免 unused_variables
+    #[cfg(not(debug_assertions))]
+    let _ = window;
     Ok(())
 }
 
@@ -338,6 +336,9 @@ fn create_clipboard_panel(app: &mut tauri::App) -> tauri::Result<()> {
         window.outer_size(),
         window.is_visible()
     );
+    // release 下不打日志，显式消费掉绑定，避免 unused_variables
+    #[cfg(not(debug_assertions))]
+    let _ = window;
     Ok(())
 }
 

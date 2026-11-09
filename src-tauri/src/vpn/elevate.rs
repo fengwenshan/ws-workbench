@@ -188,6 +188,7 @@ fn task_definition_matches(definition: &str, exe: &Path, session_dir: &Path) -> 
 ///
 /// Windows 盘符和路径大小写不敏感，所以统一按小写比较；
 /// 顺带把反斜杠归一化，兼容手写配置或从别处拷来的路径。
+#[cfg(test)]
 fn paths_equal(a: &str, b: &Path) -> bool {
     let normalize = |text: &str| {
         text.trim()
@@ -456,6 +457,9 @@ pub fn start_worker(
     session: &VpnSession,
     recorded_task_dir: Option<&str>,
 ) -> Result<String, String> {
+    // 只有 Windows 分支用得到（macOS / Linux 不注册计划任务）
+    #[cfg(not(target_os = "windows"))]
+    let _ = recorded_task_dir;
     // 停止标记的生命周期只由 prepare()（新会话）与 stop_worker()（请求停止）掌控。
     // 这里再清一次会在「断开还没收尾就重连」时抹掉刚写下的停止请求，
     // 导致旧 worker 一直不被回收。
