@@ -3,7 +3,12 @@ import { computed, onMounted, ref } from 'vue'
 import { Checkbox, Input, Modal, message } from 'ant-design-vue'
 import { SearchOutlined } from '@ant-design/icons-vue'
 import type { CleanerApi } from '@/composables/useCleaner'
-import type { InstalledApp, LeftoverItem, UninstallOutcome } from '@/types/cleaner'
+import type {
+  InstalledApp,
+  LeftoverItem,
+  RunningState,
+  UninstallOutcome,
+} from '@/types/cleaner'
 import { safeGet, safeSet } from '@/composables/safeStorage'
 import AppIcon from './AppIcon.vue'
 import {
@@ -130,7 +135,7 @@ const commandText = computed(() => {
     return '运行应用自带的卸载程序（UninstallString）'
   }
   if (app.uninstall_kind === 'app_bundle') {
-    return `结束运行中的实例后，把「${app.install_location || app.name}」移入废纸篓`
+    return `先退出运行中的实例，再把「${app.install_location || app.name}」移入废纸篓`
   }
   return '调用系统卸载入口'
 })
@@ -155,20 +160,58 @@ function closeUninstall() {
   cleaner.resetUninstallOutcome()
 }
 
+/** 运行中应用的二次确认弹窗 */
+const runningPrompt = ref<{ app: InstalledApp; state: RunningState } | null>(null)
+
+/** 二次弹窗里的进程名摘要：最多 3 个，超出加「等」 */
+const runningSummary = computed(() => {
+  const state = runningPrompt.value?.state
+  if (!state || state.names.length === 0) return ''
+  const names = state.names.slice(0, 3).join('、')
+  return `（${names}${state.names.length > 3 ? ' 等' : ''}）`
+})
+
 async function confirmUninstall() {
   const app = uninstallTarget.value
-  if (!app || cleaner.uninstalling) return
-  const outcome = await cleaner.uninstall(app.id)
-  if (!outcome) {
-    message.error(cleaner.actionError || '卸载失败')
+  if (!app || cleaner.uninstalling || cleaner.checkingRunning) return
+  // 先只读检测一次；检测失败按未运行处理，不阻断卸载
+  const state = await cleaner.checkRunning(app.id)
+  if (state?.running) {
+    runningPrompt.value = { app, state }
     return
   }
-  if (!outcome.ok) return // 失败结果留在弹窗里展示（命令 / 退出码 / 错误）
+  await runUninstall(app, false)
+}
+
+async function runUninstall(
+  app: InstalledApp,
+  quitRunning: boolean,
+): Promise<boolean> {
+  const outcome = await cleaner.uninstall(app.id, quitRunning)
+  if (!outcome) {
+    message.error(cleaner.actionError || '卸载失败')
+    return false
+  }
+  if (!outcome.ok) return false // 失败结果留在弹窗里展示（命令 / 退出码 / 错误）
   message.success(`「${app.name}」已卸载`)
   uninstallTarget.value = null
   cleaner.resetUninstallOutcome()
   // 设计 4.2：成功后自动进入残留扫描
   await openLeftovers(app, outcome)
+  return true
+}
+
+function cancelRunningPrompt() {
+  if (cleaner.uninstalling) return
+  runningPrompt.value = null
+}
+
+async function confirmRunningPrompt() {
+  const prompt = runningPrompt.value
+  if (!prompt || cleaner.uninstalling) return
+  // 保持弹窗可见，让按钮文案显示「正在结束进程…」
+  await runUninstall(prompt.app, true)
+  runningPrompt.value = null
 }
 
 // ============================ 残留弹窗 ============================
@@ -209,6 +252,24 @@ async function runScanLeftovers() {
   const next: Record<string, boolean> = {}
   for (const item of cleaner.leftovers) {
     if (!isReadonly(item) && item.selected) next[item.path] = true
+  }
+  selection.value = next
+}
+
+/** 删除成功后重扫：列表按最新磁盘状态刷新，但保留本次逐条删除结果 */
+async function refreshLeftovers() {
+  const app = leftoversTarget.value
+  if (!app) return
+  const failed = new Set(
+    deleteResults.value.filter((result) => !result.ok).map((result) => result.path),
+  )
+  await cleaner.scanLeftovers(app.id)
+  const next: Record<string, boolean> = {}
+  for (const item of cleaner.leftovers) {
+    // 本次删除失败的条目保持未勾选，避免重扫后又默认选上
+    if (!isReadonly(item) && item.selected && !failed.has(item.path)) {
+      next[item.path] = true
+    }
   }
   selection.value = next
 }
@@ -332,6 +393,8 @@ function requestDeleteLeftovers() {
       } else {
         message.warning(`成功 ${okCount} 项，失败 ${outcome.failed.length} 项`)
       }
+      // 成功删掉的条目重新扫描后会消失；失败条目仍留在列表里
+      if (okCount > 0) await refreshLeftovers()
     },
   })
 }
@@ -543,17 +606,19 @@ function requestDeleteLeftovers() {
             type="button"
             class="btn"
             :class="isForce ? 'btn-danger' : 'btn-primary'"
-            :disabled="cleaner.uninstalling"
+            :disabled="cleaner.uninstalling || cleaner.checkingRunning"
             @click="confirmUninstall"
           >
             {{
-              cleaner.uninstalling
-                ? isForce
-                  ? '移除中…'
-                  : '卸载中…'
-                : isForce
-                  ? '确认强制移除'
-                  : '确认卸载'
+              cleaner.checkingRunning
+                ? '检查运行状态…'
+                : cleaner.uninstalling
+                  ? isForce
+                    ? '移除中…'
+                    : '卸载中…'
+                  : isForce
+                    ? '确认强制移除'
+                    : '确认卸载'
             }}
           </button>
           <button
@@ -578,6 +643,40 @@ function requestDeleteLeftovers() {
         <p v-if="!isForce && !cleaner.uninstallOutcome" class="dialog-note">
           卸载程序可能弹出自己的窗口，请按其提示完成；失败时也可以到系统「应用和功能」里卸载。
         </p>
+      </div>
+    </Modal>
+
+    <!-- 运行中二次确认：结束进程并卸载 / 取消 -->
+    <Modal
+      v-if="runningPrompt"
+      :open="true"
+      :footer="null"
+      :width="520"
+      :mask-closable="false"
+      title="应用正在运行"
+      @cancel="cancelRunningPrompt"
+    >
+      <div class="uninstall-dialog">
+        <p class="dialog-hint">
+          「{{ runningPrompt.app.name }}」有
+          {{ runningPrompt.state.processes }} 个进程正在运行{{ runningSummary }}。卸载前会先结束这些进程；未能退出时本次卸载会中止，请手动退出后重试。
+        </p>
+        <div class="dialog-actions">
+          <button
+            class="btn btn-secondary"
+            :disabled="cleaner.uninstalling"
+            @click="cancelRunningPrompt"
+          >
+            取消
+          </button>
+          <button
+            class="btn btn-primary"
+            :disabled="cleaner.uninstalling"
+            @click="confirmRunningPrompt"
+          >
+            {{ cleaner.uninstalling ? '正在结束进程…' : '结束进程并卸载' }}
+          </button>
+        </div>
       </div>
     </Modal>
 
