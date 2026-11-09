@@ -14,7 +14,6 @@ import { platform } from '@/platform'
 import type {
   ClipboardImageMeta,
   ClipboardItemSummary,
-  ClipboardKind,
 } from '@/types/clipboard'
 
 /**
@@ -66,20 +65,9 @@ const viewerImage = computed(() =>
   viewer.value ? viewerImages.value[viewer.value.index] ?? null : null,
 )
 
-const kindLabels: Record<ClipboardKind, string> = {
-  text: '文本',
-  url: '链接',
-  code: '代码',
-  image: '图片',
-  rich: '图文',
-}
-
-function kindLabel(kind: ClipboardKind): string {
-  return kindLabels[kind] ?? '文本'
-}
-
 function preview(item: ClipboardItemSummary): string {
-  return item.text_preview || (item.kind === 'image' ? `${item.image_count} 张图片` : '（空内容）')
+  // 纯图片条目只留缩略图，不写「N 张图片」这种类型说明
+  return item.text_preview
 }
 
 function absoluteTime(timestamp: number): string {
@@ -294,54 +282,35 @@ onUnmounted(() => {
 
       <div ref="listEl" class="cm-list">
         <div
-          v-for="(item, index) in list"
+          v-for="item in list"
           :key="item.id"
           class="cm-row"
+          @click="copyOne(item)"
         >
-          <div class="cm-row-main">
-            <div class="cm-row-top">
-              <span class="cm-kind" :class="'kind-' + item.kind">{{ kindLabel(item.kind) }}</span>
-              <span v-if="item.kind === 'rich'" class="cm-image-count">
-                {{ item.images.length }} 张图
-              </span>
-              <span class="cm-time">{{ absoluteTime(item.created_at) }}</span>
-            </div>
-            <div class="cm-text" :class="{ mono: item.kind === 'code' }">{{ preview(item) }}</div>
-            <div v-if="item.images.length" class="cm-thumbs">
-              <button
-                v-for="(image, imageIndex) in item.images.slice(0, 3)"
-                :key="image.id"
-                type="button"
-                class="cm-thumb-btn"
-                :title="`查看图片 ${image.width}×${image.height}`"
-                @click="openViewer(item, imageIndex)"
-              >
-                <img
-                  class="cm-thumb"
-                  :src="clipboardImageUrl(image.id)"
-                  alt="图片缩略图"
-                  loading="lazy"
-                  draggable="false"
-                />
-              </button>
-              <span v-if="item.images.length > 3" class="cm-thumb-more">
-                +{{ item.images.length - 3 }}
-              </span>
-            </div>
-          </div>
+          <button
+            v-if="item.images.length"
+            type="button"
+            class="cm-thumb-btn"
+            :title="`预览图片 ${item.images[0].width}×${item.images[0].height}`"
+            @click.stop="openViewer(item, 0)"
+          >
+            <img
+              class="cm-thumb"
+              :src="clipboardImageUrl(item.images[0].id)"
+              alt="图片缩略图"
+              loading="lazy"
+              draggable="false"
+            />
+            <span v-if="item.images.length > 1" class="cm-thumb-count">
+              {{ item.images.length }}
+            </span>
+          </button>
+          <div class="cm-text" :class="{ mono: item.kind === 'code' }">{{ preview(item) }}</div>
+          <span class="cm-time">{{ absoluteTime(item.created_at) }}</span>
           <div class="cm-actions">
-            <button type="button" class="cm-action" @click="copyOne(item)">复制</button>
-            <button
-              v-if="item.images.length"
-              type="button"
-              class="cm-action"
-              @click="openViewer(item, 0)"
-            >
-              查看图片
-            </button>
-            <button type="button" class="cm-action danger" @click="deleteOne(item)">删除</button>
+            <button type="button" class="cm-action copy" @click.stop="copyOne(item)">复制</button>
+            <button type="button" class="cm-action delete" @click.stop="deleteOne(item)">删除</button>
           </div>
-          <span class="cm-index">{{ index + 1 }}</span>
         </div>
 
         <div v-if="loading && list.length === 0" class="cm-empty">正在读取历史…</div>
@@ -538,113 +507,43 @@ onUnmounted(() => {
 
 /* ============================== 列表 ============================== */
 
+/* 列表：白底 + 行分隔线，整行可点（点空白处复制） */
 .cm-list {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
   border: 1px solid var(--border-color);
   border-radius: 10px;
-  background: var(--bg-secondary);
-  padding: 4px;
+  background: var(--bg-primary);
 }
 
 .cm-row {
   display: flex;
-  align-items: flex-start;
-  gap: 12px;
-  padding: 10px 12px;
-  border-radius: 8px;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-primary);
+  cursor: pointer;
+}
+
+.cm-row:last-child {
+  border-bottom: 0;
 }
 
 .cm-row:hover {
   background: var(--bg-hover);
 }
 
-.cm-row-main {
-  flex: 1;
-  min-width: 0;
-}
-
-.cm-row-top {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 4px;
-}
-
-.cm-kind {
-  padding: 0 6px;
-  border-radius: 999px;
-  background: var(--bg-tag);
-  color: var(--text-tag);
-  font-size: 11px;
-  line-height: 17px;
-  flex-shrink: 0;
-}
-
-.cm-kind.kind-url {
-  background: #eff6ff;
-  color: #1d4ed8;
-}
-
-.cm-kind.kind-code {
-  background: #f5f3ff;
-  color: #6d28d9;
-}
-
-.cm-kind.kind-image {
-  background: #ecfdf5;
-  color: #047857;
-}
-
-.cm-kind.kind-rich {
-  background: #fef3c7;
-  color: #b45309;
-}
-
-.cm-image-count {
-  color: var(--text-muted);
-  font-size: 11px;
-}
-
-.cm-time {
-  margin-left: auto;
-  color: var(--text-muted);
-  font-size: 11px;
-  white-space: nowrap;
-}
-
-.cm-text {
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  overflow: hidden;
-  color: var(--text-secondary);
-  font-size: 12.5px;
-  line-height: 1.45;
-  white-space: pre-wrap;
-  word-break: break-all;
-}
-
-.cm-text.mono {
-  font-family: 'SF Mono', Menlo, Consolas, monospace;
-  font-size: 12px;
-}
-
-.cm-thumbs {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-top: 6px;
-}
-
 .cm-thumb-btn {
+  position: relative;
+  flex-shrink: 0;
   padding: 0;
   border: 1px solid var(--border-color);
   border-radius: 6px;
   background: var(--bg-primary);
   line-height: 0;
-  cursor: pointer;
+  cursor: zoom-in;
   overflow: hidden;
 }
 
@@ -653,50 +552,79 @@ onUnmounted(() => {
 }
 
 .cm-thumb {
-  width: 52px;
-  height: 52px;
+  width: 44px;
+  height: 44px;
   object-fit: cover;
   display: block;
 }
 
-.cm-thumb-more {
+.cm-thumb-count {
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.7);
+  color: #fff;
+  font-size: 10px;
+  line-height: 14px;
+  pointer-events: none;
+}
+
+.cm-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre;
+  text-overflow: ellipsis;
+}
+
+.cm-text.mono {
+  font-family: 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+.cm-time {
+  flex-shrink: 0;
   color: var(--text-muted);
   font-size: 11px;
+  white-space: nowrap;
 }
 
 .cm-actions {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
   flex-shrink: 0;
 }
 
 .cm-action {
+  height: 24px;
+  padding: 0 10px;
   border: 0;
   border-radius: 6px;
-  background: transparent;
-  color: var(--text-secondary);
+  color: #fff;
   font-size: 12px;
-  padding: 4px 8px;
   cursor: pointer;
 }
 
-.cm-action:hover {
-  background: var(--bg-active);
-  color: var(--text-primary);
+.cm-action.copy {
+  background: #16a34a;
 }
 
-.cm-action.danger:hover {
-  color: var(--danger);
+.cm-action.copy:hover {
+  background: #15803d;
 }
 
-.cm-index {
-  flex-shrink: 0;
-  width: 20px;
-  color: var(--text-muted);
-  font-size: 11px;
-  text-align: right;
-  opacity: 0.6;
+.cm-action.delete {
+  background: #dc2626;
+}
+
+.cm-action.delete:hover {
+  background: #b91c1c;
 }
 
 .cm-empty {
