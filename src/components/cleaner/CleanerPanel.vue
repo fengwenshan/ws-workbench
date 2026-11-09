@@ -6,6 +6,7 @@ import InstalledAppsPanel from './InstalledAppsPanel.vue'
 import PopupPanel from './PopupPanel.vue'
 import SleepPanel from './SleepPanel.vue'
 import HostsEditor from '@/components/hosts/HostsEditor.vue'
+import ClipboardManager from '@/components/clipboard/ClipboardManager.vue'
 
 /**
  * 「系统」工具页：页头 + 页签。
@@ -19,7 +20,7 @@ const props = defineProps<{
   active: boolean
 }>()
 
-type TabKey = 'apps' | 'popup' | 'sleep' | 'hosts'
+type TabKey = 'apps' | 'popup' | 'sleep' | 'hosts' | 'clipboard'
 
 const isWindows = computed(() => platform.is_windows)
 
@@ -41,6 +42,7 @@ watch(
 const popupTabActive = computed(() => props.active && tab.value === 'popup')
 const sleepTabActive = computed(() => props.active && tab.value === 'sleep')
 const hostsTabActive = computed(() => props.active && tab.value === 'hosts')
+const clipboardTabActive = computed(() => props.active && tab.value === 'clipboard')
 </script>
 
 <template>
@@ -94,6 +96,16 @@ const hostsTabActive = computed(() => props.active && tab.value === 'hosts')
       >
         Hosts
       </button>
+      <button
+        type="button"
+        class="cleaner-tab"
+        :class="{ active: tab === 'clipboard' }"
+        role="tab"
+        :aria-selected="tab === 'clipboard'"
+        @click="tab = 'clipboard'"
+      >
+        剪贴板
+      </button>
     </div>
 
     <div v-show="tab === 'apps'" class="cleaner-pane">
@@ -107,6 +119,9 @@ const hostsTabActive = computed(() => props.active && tab.value === 'hosts')
     </div>
     <div v-show="tab === 'hosts'" class="cleaner-pane">
       <HostsEditor :active="hostsTabActive" />
+    </div>
+    <div v-show="tab === 'clipboard'" class="cleaner-pane">
+      <ClipboardManager :active="clipboardTabActive" />
     </div>
   </div>
 </template>
