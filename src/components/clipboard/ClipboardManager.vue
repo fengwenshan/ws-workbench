@@ -394,6 +394,9 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  /* 与 Hosts / 屏幕休眠等页签一致的内容区边距 */
+  padding: 10px 20px 16px;
+  overflow: hidden;
 }
 
 /* ============================== Windows 说明 ============================== */
