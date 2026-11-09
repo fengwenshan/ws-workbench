@@ -62,13 +62,11 @@ const {
   info: updateInfo,
   errorMessage: updateError,
   percentage: updatePercentage,
-  hasUpdatePrompt,
   checkUpdate,
   installUpdate,
   restartApp,
   startDailyCheck,
   stopDailyCheck,
-  dismissCurrent,
 } = useUpdater();
 
 // VPN 与项目打包共用同一份 config.json，这里复用 useConfig 的 saveConfig 落盘
@@ -429,10 +427,6 @@ async function handleUpdateAction() {
   }
 }
 
-function handleDismissUpdate() {
-  dismissCurrent();
-}
-
 // 重命名分组（默认分组不允许重命名）
 async function handleRenameGroup(id: string, name: string) {
   const group = config.value.groups.find((g) => g.id === id);
@@ -703,27 +697,6 @@ async function handlePack(project: any, asZip: boolean = false) {
 
       <!-- 工作区：按工具切换内容 -->
       <main class="workspace">
-        <div v-if="hasUpdatePrompt" class="update-banner">
-          <span class="update-banner-text">
-            发现新版本 <strong>v{{ updateInfo?.version }}</strong>
-            <span class="update-banner-sub"
-              >（当前 v{{ updateInfo?.currentVersion }}）</span
-            >
-          </span>
-          <div class="update-banner-actions">
-            <button
-              class="btn btn-primary"
-              :disabled="updateBusy"
-              @click="handleUpdateAction"
-            >
-              {{ updateBusy ? "下载中…" : "立即更新" }}
-            </button>
-            <button class="btn btn-secondary" @click="handleDismissUpdate">
-              稍后
-            </button>
-          </div>
-        </div>
-
         <!-- 项目工具 -->
         <div v-show="view === 'home'" class="workspace-body home-body">
           <div class="config-section">
@@ -1233,32 +1206,6 @@ async function handlePack(project: any, asZip: boolean = false) {
   width: auto;
 }
 
-/* 新版本提示横幅 */
-.update-banner {
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 10px 20px;
-  background: rgba(37, 99, 235, 0.08);
-  border-bottom: 1px solid rgba(37, 99, 235, 0.25);
-}
-.update-banner-text {
-  font-size: 14px;
-  color: var(--text-primary);
-}
-.update-banner-text strong {
-  color: var(--primary);
-}
-.update-banner-sub {
-  color: var(--text-muted);
-}
-.update-banner-actions {
-  display: flex;
-  gap: 8px;
-  flex-shrink: 0;
-}
 .config-section {
   flex: 1;
   overflow: hidden;
