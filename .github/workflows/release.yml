@@ -1,7 +1,7 @@
 name: Release
 
 # 创建 tag（vX.Y.Z）才触发发版：校验 tag → 构建 macOS 与 Windows 安装包
-# → 上传到发行版 → 把更新清单提交回两个远端。直接 push main 不会触发构建。
+# → 上传到 GitHub 发行版 → 把更新清单提交回 main。直接 push main 不会触发构建。
 #
 # ─────────────────────────────────────────────────────────────
 # 一次性配置（必须做完，否则跑不起来）
@@ -9,25 +9,16 @@ name: Release
 # 1) 仓库密钥（Settings → Secrets and variables → Actions → New repository secret）
 #      TAURI_SIGNING_PRIVATE_KEY  更新签名私钥的**内容**
 #                                 （即本机 ~/.tauri/ws-workbench.key 的全文）
-#      GITEE_TOKEN                Gitee 私人令牌，权限范围需含 projects
-#    两个 job 开头的「预检」步骤都会检查这两项，缺了会直接秒退并给出明确提示。
 #
-# 2) 让代码能同时到达 GitHub（Action 的触发源）与 Gitee（发布目标）
-#    在本机执行一次，之后一条 git push 即同时推到两个仓库：
-#      git remote set-url --add --push origin git@gitee.com:feng_wenshan/ws-workbench.git
-#      git remote set-url --add --push origin git@github.com:fengwenshan/ws-workbench.git
-#
-# 3) 版本号规则
+# 2) 版本号规则
 #    tag 名就是版本号：打 v1.0.16 就发布 1.0.16，通过 tauri build --config
 #    注入，不改动源文件，因此不会产生提交回环。
 #    tag 必须是 vX.Y.Z 形式，否则预检直接失败。
 #
-# 安装包会同时上传到 Gitee 与 GitHub 两个发行版，两边都能直接下载安装。
-# 但客户端自动更新只走 Gitee（清单里的 url 指向 Gitee）——GitHub 在你们网络下不通，
-# 把地址换过去会让已安装的客户端取不到更新。
-#
-# GitHub 侧用的是 Actions 自动注入的 GITHUB_TOKEN，不用手工加密钥，
-# 只依赖上面那句 permissions: contents: write。
+# 安装包与更新清单都在 GitHub：安装包作为发行版附件上传，客户端从
+# raw.githubusercontent.com 的 updates/latest.json 读取清单，再按清单里的
+# releases/download 地址下载。GitHub 侧用 Actions 自动注入的 GITHUB_TOKEN，
+# 只依赖下面那句 permissions: contents: write。
 #
 # 关于提交回环：CI 提交更新清单时带上 [skip ci]，且本工作流只由 tag 触发，
 # 推回 main 的提交不会再次触发构建。
@@ -38,6 +29,7 @@ name: Release
 #   代价是两个 job 会同时改 updates/latest.json —— 脚本里用
 #   「快进到远端最新 → 以远端为基线合并本平台条目 → 推送被拒就撤销重试」
 #   来保证谁先谁后都不会互相顶掉（已用双克隆确定性复现并验证）。
+#
 # ─────────────────────────────────────────────────────────────
 
 on:
@@ -45,7 +37,7 @@ on:
     tags:
       - 'v*'
 
-# CI 需要把更新清单的提交推回 GitHub 与 Gitee
+# CI 需要把更新清单的提交推回 main
 permissions:
   contents: write
 
@@ -65,22 +57,12 @@ jobs:
       - name: 预检（仓库密钥是否已配置）
         env:
           SIGN_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
         run: |
-          missing=0
           if [ -z "$SIGN_KEY" ]; then
             echo "::error::缺少仓库密钥 TAURI_SIGNING_PRIVATE_KEY（Settings → Secrets and variables → Actions）"
-            missing=1
-          else
-            echo "TAURI_SIGNING_PRIVATE_KEY 已配置：${#SIGN_KEY} 字节"
+            exit 1
           fi
-          if [ -z "$GITEE_TOKEN" ]; then
-            echo "::error::缺少仓库密钥 GITEE_TOKEN"
-            missing=1
-          else
-            echo "GITEE_TOKEN 已配置：${#GITEE_TOKEN} 字符"
-          fi
-          exit $missing
+          echo "TAURI_SIGNING_PRIVATE_KEY 已配置：${#SIGN_KEY} 字节"
 
       - name: 拉取代码（需要完整历史来生成 Changelog）
         uses: actions/checkout@v4
@@ -122,17 +104,10 @@ jobs:
           echo "value=$VERSION" >> "$GITHUB_OUTPUT"
           echo "本次发布版本：$VERSION"
 
-      - name: 配置清单推送目标（GitHub + Gitee 都推）
-        # 清单提交必须同时落到两个远端：只推 Gitee 的话，GitHub 的 main 会一直停在
-        # 触发 CI 的那一版，下一轮 CI 仍从那个旧提交签出，再推给已前进的 Gitee 就会
-        # 非快进被拒（实测第一轮之后必然出现）。
-        # GitHub 侧的认证沿用 checkout 写入 git config 的 extraheader，无需额外令牌。
-        # 日志里出现的密钥会被 GitHub 自动屏蔽。
-        env:
-          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+      - name: 配置清单提交身份
+        # 推送认证沿用 actions/checkout 写进 git config 的 extraheader（GITHUB_TOKEN），
+        # 这里只需要补上提交者身份。
         run: |
-          git remote set-url --add --push origin "https://github.com/fengwenshan/ws-workbench.git"
-          git remote set-url --add --push origin "https://feng_wenshan:${GITEE_TOKEN}@gitee.com/feng_wenshan/ws-workbench.git"
           git config user.name "冯文山"
           git config user.email "fengwenshan@example.com"
 
@@ -143,7 +118,6 @@ jobs:
         # 去掉 TAURI_BUNDLES 与 --dmg 两个参数即可。
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAURI_BUNDLES=app node scripts/release.mjs --dmg --version "${{ steps.version.outputs.value }}"
@@ -163,22 +137,12 @@ jobs:
       - name: 预检（仓库密钥是否已配置）
         env:
           SIGN_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
         run: |
-          missing=0
           if [ -z "$SIGN_KEY" ]; then
             echo "::error::缺少仓库密钥 TAURI_SIGNING_PRIVATE_KEY（Settings → Secrets and variables → Actions）"
-            missing=1
-          else
-            echo "TAURI_SIGNING_PRIVATE_KEY 已配置：${#SIGN_KEY} 字节"
+            exit 1
           fi
-          if [ -z "$GITEE_TOKEN" ]; then
-            echo "::error::缺少仓库密钥 GITEE_TOKEN"
-            missing=1
-          else
-            echo "GITEE_TOKEN 已配置：${#GITEE_TOKEN} 字符"
-          fi
-          exit $missing
+          echo "TAURI_SIGNING_PRIVATE_KEY 已配置：${#SIGN_KEY} 字节"
 
       - name: 拉取代码（需要完整历史来生成 Changelog）
         uses: actions/checkout@v4
@@ -230,19 +194,16 @@ jobs:
           echo "value=$VERSION" >> "$GITHUB_OUTPUT"
           echo "本次发布版本：$VERSION"
 
-      - name: 配置清单推送目标（GitHub + Gitee 都推）
-        env:
-          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+      - name: 配置清单提交身份
+        # 推送认证沿用 actions/checkout 写进 git config 的 extraheader（GITHUB_TOKEN），
+        # 这里只需要补上提交者身份。
         run: |
-          git remote set-url --add --push origin "https://github.com/fengwenshan/ws-workbench.git"
-          git remote set-url --add --push origin "https://feng_wenshan:${GITEE_TOKEN}@gitee.com/feng_wenshan/ws-workbench.git"
           git config user.name "冯文山"
           git config user.email "fengwenshan@example.com"
 
       - name: 构建并发布 Windows（交叉编译）
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: node scripts/release.mjs --target x86_64-pc-windows-msvc --version "${{ steps.version.outputs.value }}"
 

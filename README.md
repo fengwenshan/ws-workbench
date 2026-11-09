@@ -302,11 +302,10 @@ node scripts/release.mjs --target x86_64-pc-windows-msvc   # 交叉编译 Window
 | 变量 | 用途 |
 | --- | --- |
 | `TAURI_SIGNING_PRIVATE_KEY` | 更新签名私钥内容，不设时回退读 `~/.tauri/ws-workbench.key` |
-| `GITEE_TOKEN` | Gitee 私人令牌（权限含 projects），创建发行版与上传附件必需 |
-| `GITHUB_TOKEN` | 把安装包镜像到 GitHub 发行版，不设则跳过镜像 |
+| `GITHUB_TOKEN` | GitHub 令牌（CI 里由 Actions 注入），创建发行版、上传附件、推送更新清单必需 |
 | `TAURI_BUNDLES=app` | 只打 app、跳过 Tauri 的 dmg 打包脚本，受限环境配 `--dmg` 使用 |
 
-发布版本的唯一来源是 git tag：CI 把 `vX.Y.Z` 里的 `X.Y.Z` 通过 `tauri build --config` 注入，不改源文件。发布流程：打 tag → 构建（含更新签名）→ 上传安装包到 Gitee 发行版（同名 tag）→ 合并生成本平台的 `updates/latest.json` 条目并提交回 `main`。安装包会同时镜像到 GitHub 发行版，但清单里的 `url` 始终指向 Gitee，因为已装客户端读的就是这个地址。
+发布版本的唯一来源是 git tag：CI 把 `vX.Y.Z` 里的 `X.Y.Z` 通过 `tauri build --config` 注入，不改源文件。发布流程：打 tag → 构建（含更新签名）→ 上传安装包到 GitHub 发行版（同名 tag）→ 合并生成本平台的 `updates/latest.json` 条目并提交回 `main`。清单与安装包都在 GitHub，客户端从 `raw.githubusercontent.com` 读清单、从发行版下载安装包。
 
 ```bash
 git tag v1.0.16
@@ -317,13 +316,13 @@ git push origin v1.0.16   # 只有推 tag 才会触发 GitHub 构建
 
 `.github/workflows/release.yml` 只在推送 `v*` tag 时触发（直接 push `main` 不会构建），macOS 与 Windows 两个 job 并行，都跑在 `macos-14` 上；Windows 侧是交叉编译（`cargo-xwin` + `nsis` + `llvm`）。版本号直接从 tag 解析，因此 tag 必须是 `vX.Y.Z` 形式，否则第一个预检步骤就会失败。
 
-跑之前必须配两个仓库密钥：`TAURI_SIGNING_PRIVATE_KEY` 和 `GITEE_TOKEN`，缺任意一个都会在预检步骤直接退出。
+跑之前必须配一个仓库密钥：`TAURI_SIGNING_PRIVATE_KEY`（本机 `~/.tauri/ws-workbench.key` 的全文），没配会在预检步骤直接退出。
 
 两个 job 会同时改 `updates/latest.json`，脚本用「快进到远端最新 → 以远端为基线合并本平台条目 → 推送被拒就撤销重试」来避免互相覆盖。CI 自己推回 `main` 的清单提交带 `[skip ci]`，且工作流只由 tag 触发，不会自触发。
 
 ## 自动更新
 
-更新端点为 `https://gitee.com/feng_wenshan/ws-workbench/raw/main/updates/latest.json`，用 minisign 公钥（指纹 `9CB4E4B1ECEF3353`）校验签名。之所以只走 Gitee：GitHub 的 `raw.githubusercontent.com` 在目标网络下被拦，把地址换过去已装客户端会取不到更新。这个地址依赖远端仓库已同步改名为 `ws-workbench`。
+更新端点为 `https://raw.githubusercontent.com/fengwenshan/ws-workbench/main/updates/latest.json`，用 minisign 公钥（指纹 `9CB4E4B1ECEF3353`）校验签名。清单与安装包都走 GitHub；如果目标机器访问不到 GitHub，可以自建镜像，改 `src-tauri/tauri.conf.json` 的 `plugins.updater.endpoints` 即可。
 
 `updates/latest.json` 的结构：
 
@@ -333,13 +332,13 @@ git push origin v1.0.16   # 只有推 tag 才会触发 GitHub 构建
   "notes": "ws-workbench v1.0.14",
   "pub_date": "2026-09-17T15:38:15Z",
   "platforms": {
-    "windows-x86_64": { "signature": "...", "url": "https://gitee.com/.../ws-workbench-setup.exe" },
-    "darwin-aarch64": { "signature": "...", "url": "https://gitee.com/.../ws-workbench.app.tar.gz" }
+    "windows-x86_64": { "signature": "...", "url": "https://github.com/fengwenshan/ws-workbench/releases/download/v1.0.16/ws-workbench-setup.exe" },
+    "darwin-aarch64": { "signature": "...", "url": "https://github.com/fengwenshan/ws-workbench/releases/download/v1.0.16/ws-workbench.app.tar.gz" }
   }
 }
 ```
 
-> `updates/latest.json` 由发布脚本生成；仓库里这份仍是 v1.0.14 的旧记录，下次发版会被完整重写。
+> `updates/latest.json` 由发布脚本生成；仓库里这份仍是旧记录，下次发版会按平台条目重写。
 
 客户端启动时静默校验一次，之后每天 10:00 与 16:00 各校验一次；平时标题栏不显示更新入口，只有发现新版本时才在原位置显示「更新」按钮；用户选择忽略的版本记在 localStorage 的 `ws-workbench:dismissed-update-version` 下，不再重复提示。
 

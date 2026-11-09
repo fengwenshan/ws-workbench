@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * 发布脚本：构建（含更新签名）→ 上传安装包到 Gitee 发行版 → 生成/合并 latest.json 并提交
+ * 发布脚本：构建（含更新签名）→ 上传安装包到 GitHub 发行版 → 生成/合并 latest.json 并提交
  *
  * 用法：
  *   node scripts/release.mjs                 # 构建当前平台 + 发布
@@ -11,24 +11,16 @@
  * 环境变量：
  *   TAURI_BUNDLES=app  只打 app、跳过 Tauri 的 dmg 打包脚本
  *                      （受限环境无法挂载 /Volumes 或写裸盘时必需，配合 --dmg 使用）
- *   TAURI_SIGNING_PRIVATE_KEY  签名私钥的内容；不设时回退读 ~/.tauri 下的密钥文件
- *   GITEE_TOKEN                Gitee 私人令牌，上传发行版附件时必需
- *   GITHUB_TOKEN               GitHub 令牌，用于把安装包镜像到 GitHub 发行版；
- *                              不设时跳过镜像（CI 里用 Actions 自动注入的那个）
+ *   TAURI_SIGNING_PRIVATE_KEY  签名私钥的内容；不设时回退读 ~/.tauri/ws-workbench.key
+ *   GITHUB_TOKEN               GitHub 令牌（CI 里用 Actions 自动注入的那个），
+ *                              创建发行版、上传附件、推送更新清单都需要
  *
  * 两个平台分别在各自可用的环境里执行即可：脚本会把本平台条目「合并」进
  * updates/latest.json，不会覆盖另一个平台。
  *
- * 发布需要 GITEE_TOKEN（Gitee 私人令牌，权限范围含 projects）：安装包作为发行版附件上传，
- * 更新清单提交到 updates/，客户端从固定地址匿名读取。
- *
- * 安装包同时会镜像一份到 GitHub 发行版，方便下载。但更新清单里的 url 始终指向 Gitee：
- * 已安装的客户端读的就是清单里的地址，换成 GitHub 它们会取不到更新。
- *
- * 为什么不用 GitLab / GitHub：
- *   内网 GitLab 项目无法设为公开，客户端拿不到文件；
- *   GitHub 的 github.com 与 raw.githubusercontent.com 在你们网络下被拦（实测超时），
- *   Gitee 的 raw 地址实测匿名可读。
+ * 发布全部走 GitHub：安装包作为发行版附件上传，更新清单提交到 updates/，
+ * 客户端从 raw.githubusercontent.com 上的固定文件读取清单，再按清单里的
+ * github.com/<repo>/releases/download 地址下载安装包。
  */
 import { execFileSync } from 'node:child_process'
 import {
@@ -54,23 +46,16 @@ const OUT_DIR = join(ROOT, 'release')
 /** 更新产物在仓库里的目录（会被提交，客户端通过 raw 地址读取） */
 const UPDATES_DIR = 'updates'
 
-const REPO = process.env.GITEE_REPO || 'feng_wenshan/ws-workbench'
-const BRANCH = process.env.GITEE_BRANCH || 'main'
+const REPO = process.env.REPO || 'fengwenshan/ws-workbench'
+const BRANCH = process.env.GITHUB_BRANCH || 'main'
 const SKIP_PUBLISH = process.argv.includes('--no-publish')
 
 /** 更新清单的公开地址（公开仓库，无需凭据） */
-const RAW_BASE = `https://gitee.com/${REPO}/raw/${BRANCH}/${UPDATES_DIR}`
+const RAW_BASE = `https://raw.githubusercontent.com/${REPO}/${BRANCH}/${UPDATES_DIR}`
 /** 发行版附件的下载地址前缀；URL 带 tag，长期稳定 */
-const RELEASE_DOWNLOAD = `https://gitee.com/${REPO}/releases/download`
-/** Gitee 私人令牌：创建发行版与上传附件必需（权限范围需含 projects） */
-const GITEE_TOKEN = process.env.GITEE_TOKEN || ''
-const API_BASE = 'https://gitee.com/api/v5'
+const RELEASE_DOWNLOAD = `https://github.com/${REPO}/releases/download`
 
-/**
- * GitHub 仓库：安装包会同步镜像一份到它的发行版，方便下载。
- * CI 里用 Actions 自动注入的 GITHUB_TOKEN；本机手动发布会跳过这一步。
- */
-const GITHUB_REPO = process.env.GITHUB_REPO || 'fengwenshan/ws-workbench'
+/** GitHub 令牌：创建发行版、上传附件、推送更新清单必需（CI 里由 Actions 注入） */
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN || ''
 const GITHUB_API = 'https://api.github.com'
 /** GitHub 的资产上传走独立域名 */
@@ -314,35 +299,6 @@ function git(args, opts = {}) {
   return execFileSync('git', args, { cwd: ROOT, encoding: 'utf8', ...opts })
 }
 
-// ===== Gitee 发行版 =====
-
-/** 调用 Gitee API（access_token 走查询参数，官方支持的形式） */
-async function gitee(path, options = {}) {
-  const sep = path.includes('?') ? '&' : '?'
-  const res = await fetch(`${API_BASE}${path}${sep}access_token=${GITEE_TOKEN}`, options)
-  if (!res.ok) {
-    const text = await res.text()
-    let hint = ''
-    if (res.status === 401 || res.status === 403) {
-      hint = '\n提示：GITEE_TOKEN 无效，或权限范围缺少 projects。'
-    } else if (res.status === 404) {
-      hint = `\n提示：仓库 ${REPO} 不存在，或令牌无权访问。`
-    }
-    const err = new Error(
-      `Gitee API ${res.status} ${path.split('?')[0]}: ${text.slice(0, 300)}${hint}`
-    )
-    err.status = res.status
-    throw err
-  }
-  if (res.status === 204 || res.headers.get('content-length') === '0') return null
-  return res.json()
-}
-
-/** 找到 tag 对应的发行版；不存在时返回 null（Gitee 对不存在的 tag 返回 200 + null） */
-async function findRelease(tag) {
-  return gitee(`/repos/${REPO}/releases/tags/${encodeURIComponent(tag)}`)
-}
-
 /** 生成更新说明：上一个 tag 到当前 HEAD 之间的提交 */
 function buildChangelog(tag) {
   // 注意区间终点必须用 HEAD：本函数是在发行版创建「之前」调用的，
@@ -382,9 +338,8 @@ function collectAssets(platform) {
 /**
  * 发一个 POST 请求，body 已经构造好。
  *
- * 这里刻意不用 fetch：GitHub 的 runner 在境外，向 Gitee 上行很慢
- * （实测 6MB 要 5 分钟以上），而 undici 的 headersTimeout 默认只有 300s，
- * 会把正常上传误判成超时（UND_ERR_HEADERS_TIMEOUT）。
+ * 这里刻意不用 fetch：上传大附件时 undici 的 headersTimeout 默认只有 300s，
+ * 慢速上行会被误判成超时（UND_ERR_HEADERS_TIMEOUT）。
  * https.request 默认不设超时，这里只加一个 30 分钟的兜底空闲超时。
  */
 function postBody(url, body, extraHeaders = {}) {
@@ -414,23 +369,6 @@ function postBody(url, body, extraHeaders = {}) {
   })
 }
 
-/** 构造 multipart/form-data 的请求体（Gitee 的附件接口要这个格式） */
-function multipartBody(name, filePath) {
-  const boundary = `----distCli${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`
-  return {
-    boundary,
-    body: Buffer.concat([
-      Buffer.from(
-        `--${boundary}\r\n` +
-          `Content-Disposition: form-data; name="file"; filename="${name}"\r\n` +
-          'Content-Type: application/octet-stream\r\n\r\n'
-      ),
-      readFileSync(filePath),
-      Buffer.from(`\r\n--${boundary}--\r\n`),
-    ]),
-  }
-}
-
 /** 上传带上重试：上行偶发中断时，清掉半成品再重来 */
 async function uploadWithRetry(asset, doUpload, doRemove, attempts = 3) {
   for (let i = 1; i <= attempts; i++) {
@@ -456,31 +394,7 @@ async function pushAssets(assets, doUpload, doRemove) {
   }
 }
 
-// ===== Gitee 发行版附件 =====
-
-/** 发行版里已有的同名附件先删掉（Gitee 不允许重复文件名） */
-async function removeAttachment(releaseId, name) {
-  try {
-    const existing = (await gitee(`/repos/${REPO}/releases/${releaseId}/attach_files`)) || []
-    for (const a of existing) {
-      if (a.id && a.name === name) {
-        await gitee(`/repos/${REPO}/releases/${releaseId}/attach_files/${a.id}`, { method: 'DELETE' })
-        log(`已移除旧附件 ${a.name}`)
-      }
-    }
-  } catch (err) {
-    log(`清理附件 ${name} 失败（忽略）：${err.message}`)
-  }
-}
-
-function uploadAttachment(releaseId, name, filePath) {
-  const url = new URL(`${API_BASE}/repos/${REPO}/releases/${releaseId}/attach_files`)
-  url.searchParams.set('access_token', GITEE_TOKEN)
-  const { boundary, body } = multipartBody(name, filePath)
-  return postBody(url, body, { 'Content-Type': `multipart/form-data; boundary=${boundary}` })
-}
-
-// ===== GitHub 发行版（仅作下载镜像）=====
+// ===== GitHub 发行版 =====
 
 /** 调用 GitHub API（Bearer 认证走请求头） */
 async function githubApi(path, options = {}) {
@@ -504,10 +418,10 @@ async function githubApi(path, options = {}) {
   return text ? JSON.parse(text) : null
 }
 
-/** 找到 tag 对应的发行版；不存在时返回 null（GitHub 这里返回 404，与 Gitee 不同） */
+/** 找到 tag 对应的发行版；不存在时返回 null（GitHub 对不存在的 tag 返回 404） */
 async function findGithubRelease(tag) {
   try {
-    return await githubApi(`/repos/${GITHUB_REPO}/releases/tags/${encodeURIComponent(tag)}`)
+    return await githubApi(`/repos/${REPO}/releases/tags/${encodeURIComponent(tag)}`)
   } catch (err) {
     if (err.status === 404) return null
     throw err
@@ -522,7 +436,7 @@ async function ensureGithubRelease(tag) {
   }
   log(`创建 GitHub 发行版 ${tag} …`)
   try {
-    return await githubApi(`/repos/${GITHUB_REPO}/releases`, {
+    return await githubApi(`/repos/${REPO}/releases`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -544,10 +458,10 @@ async function ensureGithubRelease(tag) {
 
 async function removeGithubAsset(releaseId, name) {
   try {
-    const assets = (await githubApi(`/repos/${GITHUB_REPO}/releases/${releaseId}/assets`)) || []
+    const assets = (await githubApi(`/repos/${REPO}/releases/${releaseId}/assets`)) || []
     for (const a of assets) {
       if (a.id && a.name === name) {
-        await githubApi(`/repos/${GITHUB_REPO}/releases/assets/${a.id}`, { method: 'DELETE' })
+        await githubApi(`/repos/${REPO}/releases/assets/${a.id}`, { method: 'DELETE' })
         log(`已移除旧资产 ${a.name}`)
       }
     }
@@ -557,7 +471,7 @@ async function removeGithubAsset(releaseId, name) {
 }
 
 function uploadGithubAsset(releaseId, name, filePath) {
-  const url = new URL(`${GITHUB_UPLOAD}/repos/${GITHUB_REPO}/releases/${releaseId}/assets`)
+  const url = new URL(`${GITHUB_UPLOAD}/repos/${REPO}/releases/${releaseId}/assets`)
   url.searchParams.set('name', name)
   // GitHub 的资产接口要的是裸字节：文件名走 ?name=，body 就是文件本身。
   // 传 multipart 不会报错，但会把整个 body（连边界和报头）原样存成资产，
@@ -569,15 +483,13 @@ function uploadGithubAsset(releaseId, name, filePath) {
 }
 
 /**
- * 把安装包镜像到 GitHub 发行版，方便下载。
+ * 把安装包上传到 GitHub 发行版。
  *
- * 注意这里只做「下载镜像」：更新清单里的 url 仍然指向 Gitee，不改。
- * 已安装的客户端读的是清单里的地址，换掉会让它们取不到更新。
+ * 这是唯一的发布目标：更新清单里的下载地址也指向这里。
  */
 async function publishToGithub(tag, assets) {
   if (!GITHUB_TOKEN) {
-    log('未提供 GITHUB_TOKEN，跳过 GitHub 发行版镜像')
-    return
+    fail('发布需要 GITHUB_TOKEN 环境变量（GitHub 令牌，CI 里由 Actions 自动注入）')
   }
   const release = await ensureGithubRelease(tag)
   await pushAssets(
@@ -585,7 +497,7 @@ async function publishToGithub(tag, assets) {
     (a) => uploadGithubAsset(release.id, a.name, a.path),
     (n) => removeGithubAsset(release.id, n)
   )
-  log(`GitHub 发行版已更新: https://github.com/${GITHUB_REPO}/releases/tag/${tag}`)
+  log(`GitHub 发行版已更新: https://github.com/${REPO}/releases/tag/${tag}`)
 }
 
 /**
@@ -639,8 +551,6 @@ async function commitManifest(version, platform, entry) {
     }
 
     try {
-      // 两个远端都要推：只推 Gitee 会让 GitHub 的 main 停在旧提交，
-      // 下一轮 CI 从旧提交签出后就会非快进被拒。
       git(['push', 'origin', `HEAD:${BRANCH}`], { stdio: 'inherit' })
       log(`清单已包含平台: ${Object.keys(manifest.platforms).join(', ')}`)
       return manifest
@@ -661,61 +571,23 @@ async function commitManifest(version, platform, entry) {
 }
 
 /**
- * 发布：产物上传到 Gitee 发行版附件，更新清单提交到 updates/ 目录。
- * 清单必须留在固定地址上（Gitee 没有 releases/latest 这种路径），
+ * 发布：产物上传到 GitHub 发行版附件，更新清单提交到 updates/ 目录。
+ * 清单必须留在固定地址上（raw.githubusercontent.com 的稳定文件），
  * 而它里面的下载地址指向带 tag 的发行版附件，长期稳定。
  */
 async function publish(version, platform, entry) {
-  if (!GITEE_TOKEN) {
-    fail('发布需要 GITEE_TOKEN 环境变量（Gitee 私人令牌，权限范围需含 projects）')
-  }
   const tag = `v${version}`
-
-  let release = await findRelease(tag)
-  if (!release) {
-    log(`创建发行版 ${tag} …`)
-    try {
-      release = await gitee(`/repos/${REPO}/releases`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          tag_name: tag,
-          name: tag,
-          body: buildChangelog(tag),
-          target_commitish: BRANCH,
-          prerelease: false,
-        }),
-      })
-    } catch (err) {
-      // 两个平台并行时可能同时判定「不存在」而都想创建，
-      // Gitee 对重复 tag 返回 400，此时复用对方刚建好的那个。
-      release = await findRelease(tag)
-      if (!release) throw err
-      log(`发行版 ${tag} 已由另一个平台创建，复用`)
-    }
-  } else {
-    log(`发行版 ${tag} 已存在，更新附件 …`)
-  }
-
   const assets = collectAssets(platform)
 
-  // 主发布目标：Gitee。客户端的更新下载走这里，必须成功。
-  await pushAssets(
-    assets,
-    (a) => uploadAttachment(release.id, a.name, a.path),
-    (n) => removeAttachment(release.id, n)
-  )
+  // 主发布目标：GitHub 发行版。客户端的更新下载走这里，必须成功。
+  await publishToGithub(tag, assets)
 
   // 更新清单：两个平台 job 会同时改这个文件，交给 commitManifest 做同步 + 重试。
-  // 放在镜像之前，这样 GitHub 侧出问题也不会影响更新链路。
   const manifest = await commitManifest(version, platform, entry)
-
-  // 再镜像一份到 GitHub 发行版，供人工下载（该地址不写入更新清单）
-  await publishToGithub(tag, assets)
 
   log(`\x1b[32m发布完成\x1b[0m ${tag} (${platform.key})`)
   log('本次包含平台: ' + Object.keys(manifest.platforms).join(', '))
-  log(`发行版页面: https://gitee.com/${REPO}/releases`)
+  log(`发行版页面: https://github.com/${REPO}/releases/tag/${tag}`)
   log(`客户端更新清单: ${RAW_BASE}/${ASSET_MANIFEST}`)
 }
 
