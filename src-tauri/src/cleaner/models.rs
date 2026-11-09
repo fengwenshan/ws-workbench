@@ -100,3 +100,14 @@ impl CleanerProgress {
         }
     }
 }
+
+/// 应用运行状态（`cleaner_app_running` 返回值）。
+///
+/// `processes` 是主进程 + 该应用 bundle/安装目录内的 helper 进程数（按 pid 去重）；
+/// `names` 已去重，前端只展示前几个，避免弹窗被一长串渲染进程撑爆。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RunningState {
+    pub running: bool,
+    pub processes: usize,
+    pub names: Vec<String>,
+}

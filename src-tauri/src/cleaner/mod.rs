@@ -9,6 +9,7 @@
 //! 这里只放平台无关的公共小工具与 `CleanerState`，避免平台文件互相引用。
 
 pub mod installer;
+pub mod running;
 pub mod trash_guard;
 // 「系统」工具页新增页签，每个 tab 一个子模块（设计 2026-11-07 第 3 节）
 pub mod popup;

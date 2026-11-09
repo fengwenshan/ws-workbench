@@ -11,7 +11,7 @@ use tauri::{AppHandle, Emitter, State};
 
 use crate::cleaner::installer::EVENT_PROGRESS;
 use crate::cleaner::models::{
-    CleanerProgress, DeleteOutcome, InstalledApp, LeftoverItem, UninstallOutcome,
+    CleanerProgress, DeleteOutcome, InstalledApp, LeftoverItem, RunningState, UninstallOutcome,
 };
 
 pub use crate::cleaner::CleanerState;
@@ -73,12 +73,28 @@ pub async fn cleaner_list_apps(
     Ok(apps)
 }
 
-/// 卸载指定应用（阻塞到卸载程序退出或 15 分钟超时）
+/// 检测应用是否仍在运行（只读；卸载前用来决定是否弹二次确认）
+#[tauri::command]
+pub async fn cleaner_app_running(
+    state: State<'_, CleanerState>,
+    app_id: String,
+) -> Result<RunningState, String> {
+    let hint = cached_app(&state, &app_id)
+        .ok_or_else(|| "应用信息不存在，请重新扫描列表".to_string())?;
+    tauri::async_runtime::spawn_blocking(move || crate::cleaner::running::detect(&hint))
+        .await
+        .map_err(|err| format!("运行状态检测失败: {}", err))
+}
+
+/// 卸载指定应用（阻塞到卸载程序退出或 15 分钟超时）。
+///
+/// `quit_running=true`：先优雅退出应用，退不掉直接返回 `ok=false`，不执行卸载。
 #[tauri::command]
 pub async fn cleaner_uninstall_app(
     app: AppHandle,
     state: State<'_, CleanerState>,
     app_id: String,
+    quit_running: bool,
 ) -> Result<UninstallOutcome, String> {
     let hint = cached_app(&state, &app_id);
     let progress_app = app.clone();
@@ -86,7 +102,7 @@ pub async fn cleaner_uninstall_app(
         let emit = move |progress: CleanerProgress| {
             let _ = progress_app.emit(EVENT_PROGRESS, progress);
         };
-        crate::cleaner::installer::uninstall(&app_id, hint.as_ref(), &emit)
+        crate::cleaner::installer::uninstall(&app_id, hint.as_ref(), quit_running, &emit)
     })
     .await
     .map_err(|err| format!("卸载任务失败: {}", err))?

@@ -665,6 +665,7 @@ pub fn run() {
             vpn::commands::vpn_session_dir_info,
             // 系统清理（设计 3.2）：列表/卸载/残留/内存 七个命令
             commands::cleaner_list_apps,
+            commands::cleaner_app_running,
             commands::cleaner_uninstall_app,
             commands::cleaner_scan_leftovers,
             commands::cleaner_delete_leftovers,

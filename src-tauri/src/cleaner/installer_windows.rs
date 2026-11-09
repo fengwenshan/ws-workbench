@@ -1082,7 +1082,32 @@ mod win_impl {
         ));
         Ok(items)
     }
+
+    /// 运行检测用的安装根候选：注册表 `InstallLocation` + `DisplayIcon` 所在目录。
+    ///
+    /// 只返回「原始候选」，是否可用（不是 Program Files / AppData 这类公共父目录）
+    /// 由 `cleaner::running` 过滤；卸载条目被删掉后返回空列表，调用方按未运行处理。
+    pub fn install_root_candidates(app_id: &str) -> Vec<std::path::PathBuf> {
+        let Ok((hive, key_path)) = parse_app_id(app_id) else {
+            return Vec::new();
+        };
+        let Ok(key) = open_entry_key(hive, key_path) else {
+            return Vec::new();
+        };
+        let mut roots = Vec::new();
+        let location = read_string(&key, "InstallLocation");
+        let location = location.trim().trim_matches('"');
+        if !location.is_empty() {
+            roots.push(std::path::PathBuf::from(location));
+        }
+        if let Some(icon) = display_icon_path(&read_string(&key, "DisplayIcon")) {
+            if let Some(parent) = icon.parent() {
+                roots.push(parent.to_path_buf());
+            }
+        }
+        roots
+    }
 }
 
 #[cfg(target_os = "windows")]
-pub use win_impl::{list_apps, scan_leftovers, uninstall};
+pub use win_impl::{install_root_candidates, list_apps, scan_leftovers, uninstall};

@@ -31,12 +31,34 @@ pub fn list_apps(emit: &(dyn Fn(CleanerProgress) + Sync)) -> Result<Vec<Installe
     }
 }
 
-/// 卸载指定应用
+/// 退出失败时返回给前端的统一结果（弹窗里展示原因，不执行卸载）。
+fn quit_failure_outcome(message: String) -> UninstallOutcome {
+    UninstallOutcome {
+        ok: false,
+        command: String::new(),
+        exit_code: None,
+        elevated: false,
+        message,
+    }
+}
+
+/// 卸载指定应用。
+///
+/// `quit_running=true` 时先检测并优雅退出应用：退不掉直接返回失败结果，
+/// 不执行卸载（避免边跑边删导致缓存被重建 / 文件被占用）。
 pub fn uninstall(
     app_id: &str,
     hint: Option<&InstalledApp>,
+    quit_running: bool,
     emit: &dyn Fn(CleanerProgress),
 ) -> Result<UninstallOutcome, String> {
+    if quit_running {
+        if let Some(app) = hint {
+            if let Err(error) = super::running::quit(app, emit) {
+                return Ok(quit_failure_outcome(error));
+            }
+        }
+    }
     #[cfg(target_os = "macos")]
     {
         return super::installer_macos::uninstall(app_id, hint, emit);
@@ -202,4 +224,17 @@ pub fn delete_leftovers(
         ),
     ));
     Ok(outcome)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quit_failure_becomes_failed_outcome() {
+        let outcome = quit_failure_outcome("「Foo」仍有 1 个进程未退出".to_string());
+        assert!(!outcome.ok);
+        assert_eq!(outcome.exit_code, None);
+        assert!(outcome.message.contains("未退出"));
+    }
 }
