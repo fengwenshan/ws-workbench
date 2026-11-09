@@ -258,7 +258,7 @@ fn read_and_store(app: &AppHandle) -> bool {
     if raw_text.chars().count() > MAX_TEXT_CHARS {
         return false;
     }
-    let text = normalize(&raw_text);
+    let mut text = normalize(&raw_text);
     let html = clipboard.get().html().unwrap_or_default();
     let image = clipboard.get().image().ok();
     if text.trim().is_empty() && html.is_empty() && image.is_none() {
@@ -287,9 +287,9 @@ fn read_and_store(app: &AppHandle) -> bool {
         "image".to_string()
     };
 
-    // 纯图片：RGBA → PNG
+    // 没有内嵌图片但有位图：按「图片」记录（文本 / HTML 丢弃，按设计取舍）
     let mut image_item: Option<rich::ExtractedImage> = None;
-    if images.is_empty() && text.trim().is_empty() {
+    if images.is_empty() {
         if let Some(img) = image {
             match rich::encode_png_rgba(img.bytes.as_ref(), img.width as u32, img.height as u32) {
                 Some(png) => {
@@ -302,6 +302,8 @@ fn read_and_store(app: &AppHandle) -> bool {
                             placeholder: String::new(),
                         });
                         kind = "image".into();
+                        text.clear();
+                        stored_html.clear();
                     }
                 }
                 None => {
