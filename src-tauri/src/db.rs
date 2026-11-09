@@ -20,9 +20,10 @@ use crate::vpn::models::{VpnProfile, VpnRuleSet};
 pub const DB_FILE: &str = "ws-workbench.db";
 
 /// 表结构版本
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
-const SCHEMA_SQL: &str = r#"
+/// v1：分组 / 项目 / VPN 配置 / 规则集
+const SCHEMA_SQL_V1: &str = r#"
 CREATE TABLE IF NOT EXISTS groups (
   id         TEXT PRIMARY KEY NOT NULL,
   sort_order INTEGER NOT NULL,
@@ -48,6 +49,37 @@ CREATE TABLE IF NOT EXISTS vpn_rule_sets (
   sort_order INTEGER NOT NULL,
   payload    TEXT NOT NULL
 );
+"#;
+
+/// v2：剪贴板历史（正文/HTML 为密文信封，图片走独立 WST1 附件目录）
+const SCHEMA_SQL_V2: &str = r#"
+CREATE TABLE IF NOT EXISTS clipboard_items (
+  id           TEXT PRIMARY KEY NOT NULL,
+  kind         TEXT NOT NULL,
+  created_at   INTEGER NOT NULL,
+  content_hash TEXT NOT NULL,
+  text_enc     TEXT NOT NULL,
+  html_enc     TEXT NOT NULL,
+  image_count  INTEGER NOT NULL DEFAULT 0,
+  byte_size    INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_clipboard_items_created
+  ON clipboard_items(created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_clipboard_items_hash
+  ON clipboard_items(content_hash);
+
+CREATE TABLE IF NOT EXISTS clipboard_attachments (
+  id         TEXT PRIMARY KEY NOT NULL,
+  item_id    TEXT NOT NULL,
+  seq        INTEGER NOT NULL,
+  mime       TEXT NOT NULL,
+  width      INTEGER NOT NULL,
+  height     INTEGER NOT NULL,
+  orig_size  INTEGER NOT NULL,
+  thumb_size INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_clipboard_attachments_item
+  ON clipboard_attachments(item_id, seq);
 "#;
 
 /// 解析出可写的存储目录，优先创建 app_data_dir 等候选目录
@@ -84,16 +116,21 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .map_err(|e| format!("读取数据库版本失败: {}", e))?;
-    if version == SCHEMA_VERSION {
-        return Ok(());
-    }
     if version > SCHEMA_VERSION {
         return Err(format!("数据库版本过新（{}），请升级应用后再打开", version));
     }
-    conn.execute_batch(SCHEMA_SQL)
-        .map_err(|e| format!("创建数据库表失败: {}", e))?;
-    conn.pragma_update(None, "user_version", SCHEMA_VERSION)
-        .map_err(|e| format!("写入数据库版本失败: {}", e))?;
+    if version < 1 {
+        conn.execute_batch(SCHEMA_SQL_V1)
+            .map_err(|e| format!("创建数据库表失败: {}", e))?;
+    }
+    if version < 2 {
+        conn.execute_batch(SCHEMA_SQL_V2)
+            .map_err(|e| format!("创建剪贴板表失败: {}", e))?;
+    }
+    if version < SCHEMA_VERSION {
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION)
+            .map_err(|e| format!("写入数据库版本失败: {}", e))?;
+    }
     Ok(())
 }
 
@@ -426,22 +463,46 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 1);
+        assert_eq!(version, 2);
         let count: i64 = conn
             .query_row(
                 "SELECT count(*) FROM sqlite_master WHERE type = 'table' \
-                 AND name IN ('groups', 'projects', 'vpn_profiles', 'vpn_rule_sets')",
+                 AND name IN ('groups', 'projects', 'vpn_profiles', 'vpn_rule_sets', \
+                              'clipboard_items', 'clipboard_attachments')",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(count, 4);
+        assert_eq!(count, 6);
+    }
+
+    #[test]
+    fn migrates_v1_db_to_v2_and_creates_clipboard_tables() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("v1.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(SCHEMA_SQL_V1).unwrap();
+            conn.pragma_update(None, "user_version", 1i64).unwrap();
+        }
+
+        let conn = open(&path).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 2);
+        for table in ["clipboard_items", "clipboard_attachments"] {
+            let count: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(count, 0);
+        }
     }
 
     #[test]
     fn init_schema_rejects_newer_version() {
         let conn = memory_conn();
-        conn.pragma_update(None, "user_version", 2i64).unwrap();
+        conn.pragma_update(None, "user_version", 3i64).unwrap();
         let err = init_schema(&conn).unwrap_err();
         assert!(err.contains("版本过新"), "实际错误：{}", err);
     }
