@@ -308,9 +308,9 @@ fn create_quick_panel(app: &mut tauri::App) -> tauri::Result<()> {
 
 /// 创建剪贴板历史面板：无边框透明浮层，启动时建好、默认隐藏。
 ///
-/// 只在 macOS 创建（Windows 系统自带 Win+V，本期不启用）。
+/// macOS / Windows 都创建；Linux 不启用。
 /// 显示位置 / 焦点在 `clipboard::show_panel` 里处理。
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn create_clipboard_panel(app: &mut tauri::App) -> tauri::Result<()> {
     let window = tauri::WebviewWindowBuilder::new(
         app.handle(),
@@ -803,6 +803,8 @@ pub fn run() {
             commands::clipboard_clear,
             commands::clipboard_export_image,
             commands::clipboard_limits,
+            commands::clipboard_set_shortcut,
+            commands::clipboard_set_pinned,
             commands::clipboard_panel_hide,
             // Hosts 在线编辑
             commands::hosts_status,
@@ -816,8 +818,8 @@ pub fn run() {
             create_main_window(app)?;
             // 托盘快捷面板：同样提前建好、默认隐藏，点托盘图标时再定位显示
             create_quick_panel(app)?;
-            // 剪贴板面板：只在 macOS 启用（Windows 系统自带 Win+V），提前建好、默认隐藏
-            #[cfg(target_os = "macos")]
+            // 剪贴板面板：macOS / Windows 启用，提前建好、默认隐藏
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             create_clipboard_panel(app)?;
 
             // dev 模式（裸二进制）Dock 会显示系统占位图标，这里补上真实图标
@@ -850,15 +852,12 @@ pub fn run() {
             // 系统清理的列表缓存与扫描标记（设计 3.3）：只有进程内状态，无需落盘
             app.manage(cleaner::CleanerState::new());
 
-            // 剪贴板历史：运行时状态（changeCount / 采集锁）；采集线程只在 macOS 启用
+            // 剪贴板历史：运行时状态（变化序列号 / 采集锁 / 当前快捷键）；
+            // 采集线程与全局快捷键在 macOS / Windows 启用
             app.manage(clipboard::ClipboardRuntime::new());
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             {
-                use tauri_plugin_global_shortcut::GlobalShortcutExt;
-                match app.global_shortcut().register(clipboard::HOTKEY_ACCELERATOR) {
-                    Ok(()) => eprintln!("[clipboard] 全局快捷键 Command+Shift+V 已注册"),
-                    Err(err) => eprintln!("[clipboard] 全局快捷键 Command+Shift+V 注册失败: {err}"),
-                }
+                clipboard::register_saved_shortcut(app.handle());
                 clipboard::start_poller(app.handle().clone());
             }
 
@@ -973,14 +972,22 @@ pub fn run() {
                         std::sync::atomic::Ordering::Relaxed,
                     );
                 }
-                if window.label() == clipboard::PANEL_LABEL {
+                // 置顶（贴屏幕）时失焦不收起，用户点别的应用面板也留在屏幕上
+                if window.label() == clipboard::PANEL_LABEL
+                    && !clipboard::is_pinned(window.app_handle())
+                {
                     let _ = window.hide();
                 }
             }
             // 点关闭只隐藏到后台，不退出应用
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
-                let _ = window.hide();
+                if window.label() == clipboard::PANEL_LABEL {
+                    // 走统一的收起逻辑：清置顶 + 把焦点还给呼出前的 App
+                    clipboard::hide_panel(window.app_handle());
+                } else {
+                    let _ = window.hide();
+                }
             }
         })
         .build(tauri::generate_context!())

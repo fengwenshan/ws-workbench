@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, ref } from 'vue'
+import { Tabs, TabPane } from 'ant-design-vue'
 import { platform } from '@/platform'
 import { useCleaner } from '@/composables/useCleaner'
 import InstalledAppsPanel from './InstalledAppsPanel.vue'
@@ -12,8 +13,13 @@ import ClipboardManager from '@/components/clipboard/ClipboardManager.vue'
  * 「系统」工具页：页头 + 页签。
  *
  * 页签顺序：弹窗拦截（仅 Windows）/ 屏幕休眠 / Hosts 在线编辑 / 剪贴板 / 软件卸载（放最后）。
- * 各页签用 v-show 保留自己的状态；只有落在激活页签上才启动轮询或监听
- * （垃圾弹窗检测线程由用户手动开关，不随页签切换停止）。
+ *
+ * 页签用 antd Tabs：每个页签下面是独立组件，默认只有首次切到该页签时才渲染挂载
+ * （之后保留在 DOM 里，切回来不丢状态）。因此「软件卸载」的安装列表扫描放在
+ * InstalledAppsPanel 自己的 onMounted 里，打开「系统」页不会提前扫。
+ *
+ * 轮询类页签（屏幕休眠 / Hosts / 剪贴板）仍靠 `active` prop 控制：
+ * 整个工具页不可见或切到别的页签就停（垃圾弹窗检测线程由用户手动开关，不随页签切换停止）。
  */
 const props = defineProps<{
   /** 当前工具页是否激活（App.vue 的 view === 'cleaner'） */
@@ -26,18 +32,11 @@ const isWindows = computed(() => platform.is_windows)
 
 const cleaner = useCleaner()
 const tab = ref<TabKey>('sleep')
-/** 首次真正进入清理页时才拉安装列表，避免应用启动就扫一遍注册表/Applications */
-const started = ref(false)
 
-watch(
-  () => props.active,
-  (active) => {
-    if (!active || started.value) return
-    started.value = true
-    void cleaner.loadApps(false)
-  },
-  { immediate: true },
-)
+/** antd 的 activeKey 类型是 string | number，这里收窄回页签联合类型 */
+function onTabChange(key: string | number): void {
+  tab.value = key as TabKey
+}
 
 const popupTabActive = computed(() => props.active && tab.value === 'popup')
 const sleepTabActive = computed(() => props.active && tab.value === 'sleep')
@@ -53,76 +52,23 @@ const clipboardTabActive = computed(() => props.active && tab.value === 'clipboa
       </div>
     </div>
 
-    <div class="cleaner-tabs" role="tablist" aria-label="系统工具页签">
-      <button
-        v-if="isWindows"
-        type="button"
-        class="cleaner-tab"
-        :class="{ active: tab === 'popup' }"
-        role="tab"
-        :aria-selected="tab === 'popup'"
-        @click="tab = 'popup'"
-      >
-        弹窗拦截
-      </button>
-      <button
-        type="button"
-        class="cleaner-tab"
-        :class="{ active: tab === 'sleep' }"
-        role="tab"
-        :aria-selected="tab === 'sleep'"
-        @click="tab = 'sleep'"
-      >
-        屏幕休眠
-      </button>
-      <button
-        type="button"
-        class="cleaner-tab"
-        :class="{ active: tab === 'hosts' }"
-        role="tab"
-        :aria-selected="tab === 'hosts'"
-        @click="tab = 'hosts'"
-      >
-        Hosts
-      </button>
-      <button
-        type="button"
-        class="cleaner-tab"
-        :class="{ active: tab === 'clipboard' }"
-        role="tab"
-        :aria-selected="tab === 'clipboard'"
-        @click="tab = 'clipboard'"
-      >
-        剪贴板
-      </button>
-      <button
-        type="button"
-        class="cleaner-tab"
-        :class="{ active: tab === 'apps' }"
-        role="tab"
-        :aria-selected="tab === 'apps'"
-        @click="tab = 'apps'"
-      >
-        软件卸载
-        <span v-if="cleaner.apps.length" class="tab-count">{{ cleaner.apps.length }}</span>
-      </button>
-    </div>
-
-    <div v-show="tab === 'apps'" class="cleaner-pane">
-      <InstalledAppsPanel :cleaner="cleaner" />
-    </div>
-    <div v-if="isWindows" v-show="tab === 'popup'" class="cleaner-pane">
-      <PopupPanel :active="popupTabActive" />
-    </div>
-    <div v-show="tab === 'sleep'" class="cleaner-pane">
-      <SleepPanel :active="sleepTabActive" />
-    </div>
-    <div v-show="tab === 'hosts'" class="cleaner-pane">
-      <HostsEditor :active="hostsTabActive" />
-    </div>
-    <div v-show="tab === 'clipboard'" class="cleaner-pane">
-      <ClipboardManager :active="clipboardTabActive" />
-    </div>
+    <Tabs class="cleaner-tabs" :active-key="tab" @change="onTabChange">
+      <TabPane v-if="isWindows" key="popup" tab="弹窗拦截">
+        <PopupPanel :active="popupTabActive" />
+      </TabPane>
+      <TabPane key="sleep" tab="屏幕休眠">
+        <SleepPanel :active="sleepTabActive" />
+      </TabPane>
+      <TabPane key="hosts" tab="Hosts">
+        <HostsEditor :active="hostsTabActive" />
+      </TabPane>
+      <TabPane key="clipboard" tab="剪贴板">
+        <ClipboardManager :active="clipboardTabActive" />
+      </TabPane>
+      <TabPane key="apps" tab="软件卸载">
+        <InstalledAppsPanel :cleaner="cleaner" />
+      </TabPane>
+    </Tabs>
   </div>
 </template>
 
@@ -153,73 +99,62 @@ const clipboardTabActive = computed(() => props.active && tab.value === 'clipboa
   font-size: 12px;
   color: var(--text-muted);
 }
-/* 页签：沿用 ProjectDetail 的 40px 标题栏高度与下划线激活态 */
+
+/* 页签栏：沿用 ProjectDetail 的 40px 标题栏高度与下划线激活态 */
 .cleaner-tabs {
-  flex-shrink: 0;
+  flex: 1;
+  min-height: 0;
   display: flex;
-  align-items: stretch;
-  gap: 28px;
-  height: var(--panel-header-height);
+  flex-direction: column;
   margin-top: 10px;
+}
+.cleaner-tabs :deep(.ant-tabs-nav) {
+  height: var(--panel-header-height);
+  margin: 0;
   padding: 0 20px;
-  border-bottom: 1px solid var(--border-color);
+  flex-shrink: 0;
 }
-.cleaner-tab {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
+.cleaner-tabs :deep(.ant-tabs-nav::before) {
+  border-bottom-color: var(--border-color);
+}
+.cleaner-tabs :deep(.ant-tabs-nav-wrap),
+.cleaner-tabs :deep(.ant-tabs-nav-list) {
+  height: 100%;
+}
+/* 选择器多带一层 .ant-tabs-nav-list：antd 的样式由 cssinjs 后注入，同权重会输给它 */
+.cleaner-tabs :deep(.ant-tabs-nav-list > .ant-tabs-tab) {
+  height: 100%;
   padding: 0;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  color: var(--text-secondary);
+  margin: 0 28px 0 0;
   font-size: 13px;
-  cursor: pointer;
 }
-.cleaner-tab:hover {
+.cleaner-tabs :deep(.ant-tabs-nav-list > .ant-tabs-tab .ant-tabs-tab-btn) {
+  color: var(--text-secondary);
+}
+.cleaner-tabs :deep(.ant-tabs-nav-list > .ant-tabs-tab:hover .ant-tabs-tab-btn) {
   color: var(--text-primary);
 }
-.cleaner-tab.active {
+.cleaner-tabs :deep(.ant-tabs-nav-list > .ant-tabs-tab.ant-tabs-tab-active .ant-tabs-tab-btn) {
   color: var(--primary);
   font-weight: 600;
 }
-.cleaner-tab.active::after {
-  content: '';
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: -1px;
-  height: 2px;
-  border-radius: 1px;
+.cleaner-tabs :deep(.ant-tabs-nav-list > .ant-tabs-ink-bar) {
+  bottom: 0;
   background: var(--primary);
 }
-.cleaner-tab:focus-visible {
-  outline: 1px solid var(--primary);
-  outline-offset: 2px;
-}
-.tab-count {
-  min-width: 18px;
-  height: 18px;
-  padding: 0 5px;
-  border-radius: 9px;
-  background: var(--bg-tag);
-  color: var(--text-secondary);
-  font-size: 11px;
-  font-weight: 500;
-  line-height: 18px;
-  text-align: center;
-}
-.cleaner-tab.active .tab-count {
-  background: rgba(59, 130, 246, 0.12);
-  color: var(--primary);
-}
-
-.cleaner-pane {
+.cleaner-tabs :deep(.ant-tabs-content-holder) {
   flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+.cleaner-tabs :deep(.ant-tabs-content) {
+  height: 100%;
+}
+.cleaner-tabs :deep(.ant-tabs-tabpane) {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
 }
 </style>

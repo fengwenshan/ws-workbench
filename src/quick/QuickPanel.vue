@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { useConfig } from '@/composables/useConfig'
 import { useVpn } from '@/composables/useVpn'
@@ -96,19 +96,88 @@ async function pickMode(mode: VpnProxyMode) {
   if (!ok) modeError.value = '模式切换失败，请稍后重试'
 }
 
-// ============================== 窗口动作 ==============================
+// ============================== 面板高度 ==============================
 
-function openMain(target?: 'cleaner' | 'proxy' | 'settings') {
-  void invoke('quick_panel_open_main', { target: target ?? null })
+/** 窗口高度跟着当前页签的内容走，两个页签都不留一大片空白 */
+const panelEl = ref<HTMLElement | null>(null)
+const vpnPaneEl = ref<HTMLElement | null>(null)
+const sleepPaneEl = ref<HTMLElement | null>(null)
+const activePaneEl = computed(() => (tab.value === 'vpn' ? vpnPaneEl.value : sleepPaneEl.value))
+
+let paneObserver: ResizeObserver | null = null
+let heightScheduled = false
+let lastHeight = 0
+
+/** 头部 + 内边距 + 当前页签内容 + 上下边框，和 `.qp` 的盒模型一一对应 */
+function measurePanelHeight(): number {
+  const panel = panelEl.value
+  const head = panel?.querySelector<HTMLElement>('.qp-head')
+  const body = panel?.querySelector<HTMLElement>('.qp-body')
+  const pane = activePaneEl.value
+  if (!panel || !head || !body || !pane) return 0
+  const panelStyle = getComputedStyle(panel)
+  const bodyStyle = getComputedStyle(body)
+  const border =
+    parseFloat(panelStyle.borderTopWidth) + parseFloat(panelStyle.borderBottomWidth)
+  const padding = parseFloat(bodyStyle.paddingTop) + parseFloat(bodyStyle.paddingBottom)
+  return Math.ceil(head.offsetHeight + pane.offsetHeight + padding + border)
 }
 
+function syncPanelHeight(): void {
+  const height = measurePanelHeight()
+  // 同一高度不重复发 IPC：切页签、提示条出现/消失都会走到这里
+  if (!height || Math.abs(height - lastHeight) < 1) return
+  lastHeight = height
+  void invoke('quick_panel_resize', { height })
+}
+
+function schedulePanelHeightSync(): void {
+  if (heightScheduled) return
+  heightScheduled = true
+  void nextTick(() => {
+    heightScheduled = false
+    syncPanelHeight()
+  })
+}
+
+/** 只观察当前页签：隐藏页签的 offsetHeight 是 0，观察它没有意义 */
+function observeActivePane(): void {
+  paneObserver?.disconnect()
+  const pane = activePaneEl.value
+  if (pane) paneObserver?.observe(pane)
+}
+
+onMounted(() => {
+  if (typeof ResizeObserver !== 'undefined') {
+    paneObserver = new ResizeObserver(() => schedulePanelHeightSync())
+  }
+  observeActivePane()
+  schedulePanelHeightSync()
+  // 面板隐藏期间状态可能变化（比如托盘点连接后提示条变长），
+  // 重新显示拿到焦点时再量一次，避免按旧高度弹出。
+  window.addEventListener('focus', schedulePanelHeightSync)
+  document.addEventListener('visibilitychange', handleVisibilityChange)
+})
+
+function handleVisibilityChange(): void {
+  if (document.visibilityState === 'visible') schedulePanelHeightSync()
+}
+
+watch(tab, () => {
+  observeActivePane()
+  schedulePanelHeightSync()
+})
+
 onUnmounted(() => {
+  paneObserver?.disconnect()
+  window.removeEventListener('focus', schedulePanelHeightSync)
+  document.removeEventListener('visibilitychange', handleVisibilityChange)
   keepAwake.stopPolling()
 })
 </script>
 
 <template>
-  <div class="qp">
+  <div ref="panelEl" class="qp">
     <header class="qp-head" data-tauri-drag-region>
       <div class="qp-tabs" role="tablist" aria-label="快捷面板">
         <button
@@ -138,7 +207,7 @@ onUnmounted(() => {
 
     <div class="qp-body">
       <!-- VPN：状态 + 连接/断开 + 规则/全局/直连 -->
-      <section v-show="tab === 'vpn'" class="qp-pane">
+      <section v-show="tab === 'vpn'" ref="vpnPaneEl" class="qp-pane">
         <div class="vpn-card">
           <span class="vpn-status-dot" :class="{ on: vpn.isConnected }" aria-hidden="true" />
           <div class="vpn-meta">
@@ -183,7 +252,7 @@ onUnmounted(() => {
       </section>
 
       <!-- 休眠：一键保持唤醒 + 时长快捷项 -->
-      <section v-show="tab === 'sleep'" class="qp-pane">
+      <section v-show="tab === 'sleep'" ref="sleepPaneEl" class="qp-pane">
         <div class="vpn-card">
           <span class="vpn-status-dot" :class="{ on: keepAwake.active }" aria-hidden="true" />
           <div class="vpn-meta">
@@ -227,21 +296,15 @@ onUnmounted(() => {
         </div>
 
         <p class="qp-tip">{{ sleepHint() }}</p>
-
-        <button type="button" class="qp-more" @click="openMain('cleaner')">
-          打开系统页管理休眠设置 →
-        </button>
       </section>
     </div>
-
-    <footer class="qp-foot">
-      <button type="button" class="qp-foot-btn" @click="openMain()">打开主窗口</button>
-    </footer>
   </div>
 </template>
 
 <style>
-/* 窗口本身是透明的，圆角与投影都画在这一层上 */
+/* 窗口本身是透明的，圆角与描边都画在这一层上。
+   这里不能加外投影：窗口正好和卡片一样大，投影会被窗口矩形裁掉，只在
+   四个圆角外侧留下一圈灰色直角，看起来像面板的四个角没擦干净。 */
 html,
 body,
 #quick-app {
@@ -261,9 +324,6 @@ body,
   border: 1px solid var(--border-color);
   border-radius: 14px;
   background: var(--bg-primary);
-  box-shadow:
-    0 18px 42px rgba(15, 23, 42, 0.22),
-    0 2px 8px rgba(15, 23, 42, 0.08);
   color: var(--text-primary);
   font-size: 13px;
 }
@@ -473,48 +533,6 @@ body,
 .mode-btn:disabled {
   opacity: 0.6;
   cursor: default;
-}
-
-/* ============================== 底部 ============================== */
-
-.qp-more {
-  margin-top: 4px;
-  padding: 7px 0;
-  border: 0;
-  border-top: 1px dashed var(--border-color);
-  background: transparent;
-  color: var(--text-active);
-  font-size: 12px;
-  text-align: left;
-  cursor: pointer;
-}
-
-.qp-more:hover {
-  color: var(--primary-hover);
-}
-
-.qp-foot {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  height: 44px;
-  padding: 0 14px;
-  border-top: 1px solid var(--border-color);
-  background: var(--bg-primary);
-  flex-shrink: 0;
-}
-
-.qp-foot-btn {
-  border: 0;
-  background: transparent;
-  color: var(--text-secondary);
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.qp-foot-btn:hover {
-  color: var(--text-primary);
 }
 
 .qp-muted {

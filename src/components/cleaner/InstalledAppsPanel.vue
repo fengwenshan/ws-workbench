@@ -47,6 +47,10 @@ const search = ref('')
 const sort = ref<{ by: SortBy; dir: SortDir }>({ by: 'name', dir: 'asc' })
 
 onMounted(async () => {
+  // 页签第一次切到「软件卸载」时本组件才挂载：挂载即拉一次安装列表
+  // （后端有缓存，之后来回切页签不会重扫）
+  if (!cleaner.apps.length && !cleaner.appsLoading) void cleaner.loadApps(false)
+
   const raw = await safeGet(SORT_STORAGE_KEY)
   if (!raw) return
   try {
@@ -64,7 +68,7 @@ function persistSort() {
   void safeSet(SORT_STORAGE_KEY, JSON.stringify(sort.value))
 }
 
-/** 「重新扫描」：重新枚举已安装应用（列表只在进页面时拉一次） */
+/** 「重新扫描」：重新枚举已安装应用（列表只在首次切到本页签时拉一次） */
 async function rescanApps() {
   if (cleaner.appsLoading) return
   await cleaner.loadApps(true)
