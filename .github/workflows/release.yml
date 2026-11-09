@@ -217,7 +217,10 @@ jobs:
       - name: 配置清单提交身份
         # 推送认证沿用 actions/checkout 写进 git config 的 extraheader（GITHUB_TOKEN），
         # 这里只需要补上提交者身份。
+        # core.autocrlf 关掉，否则 Windows 上提交 latest.json 会把 LF 改成 CRLF，
+        # 每次发版都把清单文件整份「改行尾」。
         run: |
+          git config core.autocrlf false
           git config user.name "冯文山"
           git config user.email "fengwenshan@example.com"
 
