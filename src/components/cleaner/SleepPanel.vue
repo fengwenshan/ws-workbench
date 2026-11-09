@@ -215,7 +215,15 @@ async function handleArmed(next: boolean): Promise<void> {
     message.error(keepAwake.triggersError || '切换自动保持失败')
     return
   }
-  message.success(next ? '已开启自动保持' : '已关闭自动保持')
+  if (!next) {
+    message.success('已关闭自动保持')
+    return
+  }
+  // 总开关和规则是两件事：没有规则时也允许先开，但要说清「开了不会生效」
+  const rules = triggersState.value?.triggers.length ?? 0
+  message.success(
+    rules > 0 ? '已开启自动保持' : '已开启自动保持；还没有规则，添加规则后才会生效',
+  )
 }
 
 async function handleAddTrigger(): Promise<void> {
@@ -478,7 +486,7 @@ async function handleStop(): Promise<void> {
 
       <div v-if="triggersState?.armed" class="trigger-body">
         <p v-if="!triggersState.triggers.length" class="empty-line">
-          还没有规则，选一种条件加一条。
+          还没有规则；先添加一条，自动保持才会生效。
         </p>
 
         <div v-for="trigger in triggersState.triggers" :key="trigger.id" class="trigger-row">

@@ -334,8 +334,10 @@ fn snapshot() -> StoredTriggers {
 }
 
 fn detected_snapshot() -> DetectedConditions {
+    // 用 try_lock 而不是 lock：set_armed 正在停监控/启监控时这里可以现场探测，
+    // 避免 state() 与监控线程退出路径互相等待。
     let monitor_running = MONITOR
-        .lock()
+        .try_lock()
         .map(|monitor| monitor.is_some())
         .unwrap_or(false);
     let probe = if monitor_running {
@@ -375,12 +377,22 @@ pub fn set_armed(app: tauri::AppHandle, armed: bool) -> Result<TriggersState, St
         stored.armed = armed;
         save_stored(&stored)?;
     }
-    let mut monitor = MONITOR.lock().unwrap_or_else(|poison| poison.into_inner());
-    if armed {
-        if monitor.is_none() {
-            *monitor = Some(spawn_monitor(Arc::clone(&shared), app)?);
+
+    // 注意：先把 MONITOR 里的 Inner 取出来并释放锁，再 stop()。
+    // stop() 会 join 监控线程，而线程退出前可能调用 emit_state → state() → 这里再锁
+    // MONITOR；如果持有锁 join 就会死锁（表现为「开了就关不掉 / 页面卡住」）。
+    let to_stop = {
+        let mut monitor = MONITOR.lock().unwrap_or_else(|poison| poison.into_inner());
+        if armed {
+            if monitor.is_none() {
+                *monitor = Some(spawn_monitor(Arc::clone(&shared), app)?);
+            }
+            None
+        } else {
+            monitor.take()
         }
-    } else if let Some(inner) = monitor.take() {
+    };
+    if let Some(inner) = to_stop {
         inner.stop();
     }
     Ok(state())
@@ -591,6 +603,24 @@ mod tests {
         let legacy: StoredTriggers = serde_json::from_str("{}").unwrap();
         assert!(!legacy.armed);
         assert!(legacy.triggers.is_empty());
+    }
+
+    #[test]
+    fn detected_snapshot_does_not_wait_for_monitor_lock() {
+        // 模拟 set_armed 持有 MONITOR 的瞬间：state()/detected_snapshot 不能被卡住，
+        // 否则监控线程退出路径（join 前 emit_state）会与它互相等待，表现为开关卡死。
+        let guard = MONITOR.lock().unwrap_or_else(|poison| poison.into_inner());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let _ = detected_snapshot();
+            let _ = tx.send(());
+        });
+        assert!(
+            rx.recv_timeout(Duration::from_secs(2)).is_ok(),
+            "detected_snapshot 不应等待 MONITOR 锁"
+        );
+        drop(guard);
+        worker.join().unwrap();
     }
 
     #[test]
