@@ -4,18 +4,10 @@ on:
   push:
     branches: [main]
 jobs:
-  smoke:
-    runs-on: ubuntu-latest
-    steps:
-      - name: echo
-        run: echo "actions 正常"
-  smoke-macos14:
-    runs-on: macos-14
-    steps:
-      - name: echo
-        run: echo "macos-14 OK"
-  smoke-macos-latest:
+  arch:
     runs-on: macos-latest
     steps:
-      - name: echo
-        run: echo "macos-latest OK"
+      - name: arch
+        run: |
+          uname -m
+          sw_vers -productVersion
