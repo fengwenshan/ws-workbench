@@ -262,10 +262,16 @@ async function runScanLeftovers() {
 async function refreshLeftovers() {
   const app = leftoversTarget.value
   if (!app) return
+  // 重扫失败时保留删除后的列表与本次逐条结果，只显示错误条 + 重试
+  const before = [...cleaner.leftovers]
   const failed = new Set(
     deleteResults.value.filter((result) => !result.ok).map((result) => result.path),
   )
   await cleaner.scanLeftovers(app.id)
+  if (cleaner.leftoversError) {
+    cleaner.leftovers = before
+    return
+  }
   const next: Record<string, boolean> = {}
   for (const item of cleaner.leftovers) {
     // 本次删除失败的条目保持未勾选，避免重扫后又默认选上

@@ -138,13 +138,16 @@ pub fn quit(app: &InstalledApp, emit: &dyn Fn(CleanerProgress)) -> Result<(), St
         format!("正在退出「{}」（{} 个进程）…", app.name, processes.len()),
     ));
     platform_terminate(app, &processes);
-    if wait_until_gone(|| platform_detect(app).len()) {
+    let quit_all = wait_until_gone(|| platform_detect(app).len());
+    // 退出成功到真正卸载之间应用可能又被拉起，卸载前再确认一次
+    let remaining = platform_detect(app).len();
+    if quit_all && remaining == 0 {
         return Ok(());
     }
-    let remaining = platform_detect(app).len();
     Err(format!(
         "「{}」仍有 {} 个进程未退出（可能正在等待保存），请手动退出后重试；本次未执行卸载",
-        app.name, remaining
+        app.name,
+        remaining.max(1)
     ))
 }
 
