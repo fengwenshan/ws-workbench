@@ -11,7 +11,7 @@ import ClipboardManager from '@/components/clipboard/ClipboardManager.vue'
 /**
  * 「系统」工具页：页头 + 页签。
  *
- * 页签顺序：软件卸载 / 弹窗拦截（仅 Windows）/ 屏幕休眠 / Hosts 在线编辑。
+ * 页签顺序：弹窗拦截（仅 Windows）/ 屏幕休眠 / Hosts 在线编辑 / 剪贴板 / 软件卸载（放最后）。
  * 各页签用 v-show 保留自己的状态；只有落在激活页签上才启动轮询或监听
  * （垃圾弹窗检测线程由用户手动开关，不随页签切换停止）。
  */
@@ -25,7 +25,7 @@ type TabKey = 'apps' | 'popup' | 'sleep' | 'hosts' | 'clipboard'
 const isWindows = computed(() => platform.is_windows)
 
 const cleaner = useCleaner()
-const tab = ref<TabKey>('apps')
+const tab = ref<TabKey>('sleep')
 /** 首次真正进入清理页时才拉安装列表，避免应用启动就扫一遍注册表/Applications */
 const started = ref(false)
 
@@ -54,17 +54,6 @@ const clipboardTabActive = computed(() => props.active && tab.value === 'clipboa
     </div>
 
     <div class="cleaner-tabs" role="tablist" aria-label="系统工具页签">
-      <button
-        type="button"
-        class="cleaner-tab"
-        :class="{ active: tab === 'apps' }"
-        role="tab"
-        :aria-selected="tab === 'apps'"
-        @click="tab = 'apps'"
-      >
-        软件卸载
-        <span v-if="cleaner.apps.length" class="tab-count">{{ cleaner.apps.length }}</span>
-      </button>
       <button
         v-if="isWindows"
         type="button"
@@ -105,6 +94,17 @@ const clipboardTabActive = computed(() => props.active && tab.value === 'clipboa
         @click="tab = 'clipboard'"
       >
         剪贴板
+      </button>
+      <button
+        type="button"
+        class="cleaner-tab"
+        :class="{ active: tab === 'apps' }"
+        role="tab"
+        :aria-selected="tab === 'apps'"
+        @click="tab = 'apps'"
+      >
+        软件卸载
+        <span v-if="cleaner.apps.length" class="tab-count">{{ cleaner.apps.length }}</span>
       </button>
     </div>
 

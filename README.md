@@ -1,6 +1,6 @@
 # ws-workbench
 
-基于 Tauri 2 的桌面工作台，把交付日常收进一个窗口：分组/项目管理、Markdown 笔记与加密附件、Layui 项目打包、VPN 规则分流、Hosts 在线编辑、运行环境自检；macOS 下还带一份加密落盘的剪贴板历史（文本 / 图片 / 图文）。主页按「分组 → 项目」组织内容，系统 / 代理 / 设置 / 日志从托盘进入；关闭窗口不退出应用，常驻系统托盘。
+基于 Tauri 2 的桌面工作台，把交付日常收进一个窗口：分组/项目管理、Markdown 笔记与加密附件、Layui 项目打包、VPN 规则分流、Hosts 在线编辑、运行环境自检；macOS 下还带一份加密落盘的剪贴板历史（文本 / 图片 / 图文）。主页按「分组 → 项目」组织内容，系统 / 代理 / 设置从托盘进入；关闭窗口不退出应用，常驻系统托盘。
 
 ## 功能
 
@@ -224,17 +224,17 @@ openconnect 探测失败时，代理页给出按平台区分的安装引导：ma
 
 「用编辑器打开项目」与非 Windows 的 VPN 连接器探测共用同一套应用查找逻辑，优先级为专用路径 > 已导入副本 > 内置资源 > 注册表 > PATH；导入副本只对 openconnect 开放。Windows 的 VPN 探测是例外：只认安装包内置副本，不查注册表、安装目录或 PATH。macOS 与 Linux 下分别检查 `/Applications`、Homebrew 前缀以及 PATH 里的 `/usr/bin`、`/usr/local/bin`。
 
-### 日志
-
-应用日志与 VPN 日志分两个来源，可切换、清空。VPN 日志来自会话目录里 worker 与 vpnc-script 的输出。
-
 ### 托盘
 
-右键菜单：显示主窗口 / 系统 / 代理 / 设置 / 日志 / 连接 VPN / 断开 VPN / 退出。左键单击图标弹出快捷面板（VPN / 休眠两个页签，见上），菜单只在右键时出现。点「退出」会先请求 worker 收尾再结束进程，否则可能留下没人回收的路由。关闭主窗口只是隐藏，应用继续在托盘里运行。
+右键菜单：显示主窗口 / 系统 / 代理 / 设置 / 连接 VPN / 断开 VPN / 退出。左键单击图标弹出快捷面板（VPN / 休眠两个页签，见上），菜单只在右键时出现。点「退出」会先请求 worker 收尾再结束进程，否则可能留下没人回收的路由。关闭主窗口只是隐藏，应用继续在托盘里运行。
 
 快捷面板是独立的透明无边框窗口：点面板外部（失焦）或再点一次托盘图标收起，面板上没有关闭按钮，也没有底部操作栏（打开主窗口走托盘右键菜单）；窗口高度按当前页签内容自适应，切换 VPN / 休眠会重新量一次，不会留固定高度那种底部空白。macOS 的透明窗口依赖 Tauri 的 `macos-private-api` feature（`Cargo.toml` + `tauri.conf.json` 的 `macOSPrivateApi`），**直装/DMG 渠道没问题，但用不了 Mac App Store**。
 
 macOS 的应用菜单做了汉化，点 Dock 图标会把窗口重新显示出来。
+
+## 日志
+
+不做全局日志页：哪个模块产生日志，就显示在哪个模块里。VPN 的连接 / 分流日志在「代理」页右侧抽屉（含清空）；项目打包的进度与结果（含错误明细）在「项目」页底部。这样出问题时看到的内容和操作上下文绑在一起，也不用再维护一份全局日志缓冲。
 
 ## 技术栈
 
@@ -449,7 +449,7 @@ src-tauri/src/
     session.rs     会话目录 IPC
 src/
   components/      ProjectList / GroupDetail / ProjectDetail / ProjectConfig /
-                   NoteEditor / AttachmentPanel / PackProgress / ExcludeRules / LogPanel
+                   NoteEditor / AttachmentPanel / PackProgress / ExcludeRules / LogDrawer（VPN 日志抽屉复用）
     vpn/           VpnPanel / VpnProfileDialog / VpnRuleDialog / VpnRoutePreview /
                    VpnStatusDot / VpnLogDrawer / VpnInstallGuide
     settings/      SettingsPanel
@@ -457,7 +457,7 @@ src/
                    PopupPanel / SleepPanel / StartupPanel / DefaultAppsPanel
     hosts/         HostsEditor（整文件在线编辑 + 备份还原）
     clipboard/     ClipboardManager（「系统 → 剪贴板」管理页签）
-  composables/     useConfig / usePack / useVpn / useCleaner / useApps / useLog / useUpdater /
+  composables/     useConfig / usePack / useVpn / useCleaner / useApps / useUpdater /
                    useWorkbenchLayout / useEntitySelection / useProjectForm /
                    useDeleteConfirm / safeStorage / useKeepAwake / useStartup / usePopup /
                    useDefaultApps / useHosts / useClipboardHistory

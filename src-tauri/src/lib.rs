@@ -32,7 +32,7 @@ use tauri::{
 
 /// 托盘菜单里点击 VPN 相关项时推给前端的事件名
 pub const EVENT_VPN_TRAY: &str = "vpn-tray";
-/// 托盘菜单里点击页面入口（清理 / 代理 / 设置 / 日志）时推给前端的事件名
+/// 托盘菜单里点击页面入口（清理 / 代理 / 设置）时推给前端的事件名
 pub const EVENT_NAV_TRAY: &str = "nav-tray";
 
 /// 托盘快捷面板的窗口 label（前端 `/quick.html`）
@@ -872,7 +872,6 @@ pub fn run() {
             let nav_proxy = MenuItem::with_id(app, "nav-proxy", "代理", true, None::<&str>)?;
             let nav_settings =
                 MenuItem::with_id(app, "nav-settings", "设置", true, None::<&str>)?;
-            let nav_logs = MenuItem::with_id(app, "nav-logs", "日志", true, None::<&str>)?;
             let vpn_connect =
                 MenuItem::with_id(app, "vpn-connect", "连接 VPN", true, None::<&str>)?;
             let vpn_disconnect =
@@ -888,7 +887,6 @@ pub fn run() {
                     &nav_cleaner,
                     &nav_proxy,
                     &nav_settings,
-                    &nav_logs,
                     &separator2,
                     &vpn_connect,
                     &vpn_disconnect,
@@ -904,8 +902,8 @@ pub fn run() {
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => show_main_window(app),
-                    // 页面入口：唤起窗口，让前端切到清理 / 代理 / 设置 / 日志页
-                    "nav-cleaner" | "nav-proxy" | "nav-settings" | "nav-logs" => {
+                    // 页面入口：唤起窗口，让前端切到清理 / 代理 / 设置页
+                    "nav-cleaner" | "nav-proxy" | "nav-settings" => {
                         show_main_window(app);
                         let _ = app.emit(EVENT_NAV_TRAY, event.id.as_ref().to_string());
                     }

@@ -1,8 +1,8 @@
 import { ref } from 'vue'
+import { message } from 'ant-design-vue'
 import type {
   AttachmentMeta,
   EntityKind,
-  LogLevel,
   ProjectConfig,
   ProjectGroup,
 } from '@/types'
@@ -22,7 +22,6 @@ interface Options {
   deleteProject: (id: string) => Promise<void>
   collectAttachments: (kind: EntityKind, id: string) => AttachmentMeta[]
   ensureSelection: () => void
-  addLog: (level: LogLevel, message: string) => void
 }
 
 /** 分组/项目删除确认：单次确认 + 可选同时删除附件密文 */
@@ -34,7 +33,6 @@ export function useDeleteConfirm(options: Options) {
     deleteProject,
     collectAttachments,
     ensureSelection,
-    addLog,
   } = options
 
   const deleteModalOpen = ref(false)
@@ -46,7 +44,7 @@ export function useDeleteConfirm(options: Options) {
     if (!group) return
     // 默认分组不允许删除（内部项目仍可单独删除）
     if (group.is_default) {
-      addLog('warn', `默认分组「${group.name}」不可删除`)
+      message.warning(`默认分组「${group.name}」不可删除`)
       return
     }
     const projectCount = group.projects.length
@@ -84,16 +82,14 @@ export function useDeleteConfirm(options: Options) {
           try {
             await removeAttachmentFile(meta.dir, meta.id)
           } catch (err) {
-            addLog('warn', `删除附件文件失败（${meta.name}）: ${err}`)
+            message.warning(`删除附件文件失败（${meta.name}）: ${err}`)
           }
         }
       }
       if (target.kind === 'group') {
         await deleteGroup(target.id)
-        addLog('info', `已删除分组: ${target.name}`)
       } else {
         await deleteProject(target.id)
-        addLog('info', `已删除项目: ${target.name}`)
       }
       ensureSelection()
     } finally {

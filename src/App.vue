@@ -23,7 +23,6 @@ import ProjectList from "@/components/ProjectList.vue";
 import GroupDetail from "@/components/GroupDetail.vue";
 import ProjectDetail from "@/components/ProjectDetail.vue";
 import PackProgress from "@/components/PackProgress.vue";
-import LogDrawer from "@/components/LogDrawer.vue";
 import VpnPanel from "@/components/vpn/VpnPanel.vue";
 import VpnStatusDot from "@/components/vpn/VpnStatusDot.vue";
 import SettingsPanel from "@/components/settings/SettingsPanel.vue";
@@ -56,7 +55,7 @@ const {
   collectAttachments,
 } = useConfig();
 
-const { packing, progress, logs, addLog, clearLogs, pack } = usePack();
+const { packing, progress, result: packResult, error: packError, pack } = usePack();
 
 const {
   status: updateStatus,
@@ -87,7 +86,7 @@ const vpnTitle = computed(() => {
   return "VPN 未连接，点击进入代理";
 });
 
-// 工作台布局：工具切换、项目树 / 日志面板尺寸与持久化
+// 工作台布局：工具切换、项目树尺寸与持久化
 const {
   view,
   isMac,
@@ -96,9 +95,6 @@ const {
   treeWidth,
   treeCollapsed,
   vpnMenuCollapsed,
-  logOpen,
-  setLogOpen,
-  toggleLogs,
   startTreeResize,
   resetTreeWidth,
   onTreeResizerKeydown,
@@ -144,7 +140,6 @@ const {
 } = useProjectForm({
   addGroup,
   addProject,
-  addLog,
   onProjectCreated: (project) => {
     selection.value = { kind: "project", id: project.id };
   },
@@ -280,22 +275,14 @@ const {
   deleteProject,
   collectAttachments,
   ensureSelection,
-  addLog,
 });
-
-/** 应用日志抽屉的副标题：只报条数，不做别的判断 */
-const appLogStatus = computed(() => `${logs.value.length} 条记录`);
 
 // 托盘菜单只负责转发动作，具体行为在这里决定
 let trayUnlisten: UnlistenFn | null = null;
 let navUnlisten: UnlistenFn | null = null;
 onMounted(async () => {
-  // 托盘里的页面入口：代理 / 设置 / 日志
+  // 托盘里的页面入口：系统 / 代理 / 设置
   navUnlisten = await listen<string>("nav-tray", (event) => {
-    if (event.payload === "nav-logs") {
-      setLogOpen(true);
-      return;
-    }
     const map: Record<string, AppView> = {
       "nav-cleaner": "cleaner",
       "nav-proxy": "proxy",
@@ -327,15 +314,7 @@ onUnmounted(() => {
 
 // 打开应用先静默检查一次；之后每天 10:00 / 16:00 自动校验
 onMounted(async () => {
-  const found = await checkUpdate({ silent: true });
-  if (found) {
-    addLog(
-      "info",
-      `发现新版本 v${found.version}（当前 v${found.currentVersion}）`,
-    );
-  } else if (updateError.value) {
-    addLog("warn", `自动检查更新失败: ${updateError.value}`);
-  }
+  await checkUpdate({ silent: true });
 });
 onMounted(startDailyCheck);
 onUnmounted(stopDailyCheck);
@@ -360,7 +339,7 @@ async function syncMaximized() {
 
 function minimizeWindow() {
   void appWindow.minimize().catch((err) => {
-    addLog("error", `最小化窗口失败: ${err}`);
+    message.error(`最小化窗口失败: ${err}`);
   });
 }
 
@@ -369,7 +348,7 @@ async function toggleMaximizeWindow() {
     await appWindow.toggleMaximize();
     await syncMaximized();
   } catch (err) {
-    addLog("error", `切换窗口大小失败: ${err}`);
+    message.error(`切换窗口大小失败: ${err}`);
   }
 }
 
@@ -427,12 +406,9 @@ const updateButtonTitle = computed(() => {
 });
 
 async function installPendingUpdate() {
-  addLog("info", `开始下载 v${updateInfo.value?.version} …`);
   const ok = await installUpdate();
-  if (ok) {
-    addLog("success", `v${updateInfo.value?.version} 已安装，重启后生效`);
-  } else {
-    addLog("error", `更新失败: ${updateError.value}`);
+  if (!ok) {
+    message.error(`更新失败: ${updateError.value}`);
   }
 }
 
@@ -454,9 +430,7 @@ async function handleUpdateAction() {
 }
 
 function handleDismissUpdate() {
-  const version = updateInfo.value?.version;
   dismissCurrent();
-  addLog("info", `已忽略 v${version}，本次不再提示`);
 }
 
 // 重命名分组（默认分组不允许重命名）
@@ -464,15 +438,13 @@ async function handleRenameGroup(id: string, name: string) {
   const group = config.value.groups.find((g) => g.id === id);
   if (!group) return;
   if (group.is_default) {
-    addLog("warn", `默认分组「${group.name}」不可重命名`);
+    message.warning(`默认分组「${group.name}」不可重命名`);
     return;
   }
-  const oldName = group.name;
   try {
     await renameGroup(id, name);
-    addLog("info", `分组已重命名: ${oldName} → ${name}`);
   } catch (err) {
-    addLog("error", `重命名分组失败: ${err}`);
+    message.error(`重命名分组失败: ${err}`);
   }
 }
 
@@ -512,12 +484,11 @@ async function handleUpdateDefaultInclude(rules: string[]) {
 async function handleSetDefaultUploadDir(dir: string | null) {
   try {
     await setDefaultUploadDir(dir);
-    addLog(
-      "info",
+    message.success(
       dir ? `全局默认上传目录已设为: ${dir}` : "已清除全局默认上传目录",
     );
   } catch (err) {
-    addLog("error", `设置全局默认上传目录失败: ${err}`);
+    message.error(`设置全局默认上传目录失败: ${err}`);
   }
 }
 
@@ -683,19 +654,6 @@ async function handlePack(project: any, asZip: boolean = false) {
         <div class="rail-bottom">
           <button
             class="rail-btn"
-            :class="{ active: logOpen }"
-            :aria-pressed="logOpen"
-            :title="shortcutTitle('日志', 'J')"
-            aria-label="日志"
-            @click="toggleLogs"
-          >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <rect x="3" y="5" width="18" height="14" rx="2" />
-              <path d="M7 9l3 3-3 3M13 15h4" />
-            </svg>
-          </button>
-          <button
-            class="rail-btn"
             :class="{ active: view === 'settings' }"
             :aria-current="view === 'settings' ? 'page' : undefined"
             :title="shortcutTitle('设置', '3')"
@@ -743,7 +701,7 @@ async function handlePack(project: any, asZip: boolean = false) {
         @dblclick="resetTreeWidth"
       ></div>
 
-      <!-- 工作区：按工具切换内容，日志是底部可折叠面板 -->
+      <!-- 工作区：按工具切换内容 -->
       <main class="workspace">
         <div v-if="hasUpdatePrompt" class="update-banner">
           <span class="update-banner-text">
@@ -779,7 +737,6 @@ async function handlePack(project: any, asZip: boolean = false) {
               @add-attachment="handleEntityAddAttachment"
               @remove-attachment="handleEntityRemoveAttachment"
               @rename-attachment="handleEntityRenameAttachment"
-              @log="addLog"
             />
             <ProjectDetail
               v-else-if="selection && selection.kind === 'project' && selectedProject"
@@ -793,14 +750,13 @@ async function handlePack(project: any, asZip: boolean = false) {
               @add-attachment="handleEntityAddAttachment"
               @remove-attachment="handleEntityRemoveAttachment"
               @rename-attachment="handleEntityRenameAttachment"
-              @log="addLog"
             />
             <div v-else class="no-selection">
               <p>请选择左侧的分组或项目</p>
             </div>
           </div>
 
-          <PackProgress :progress="progress" :packing="packing" />
+          <PackProgress :progress="progress" :packing="packing" :result="packResult" :error="packError" />
         </div>
 
         <!-- 代理工具 -->
@@ -828,17 +784,6 @@ async function handlePack(project: any, asZip: boolean = false) {
         </div>
 
       </main>
-
-      <!-- 应用日志：和 VPN 日志一样走右侧抽屉 -->
-      <LogDrawer
-        v-if="logOpen"
-        title="应用日志"
-        :status="appLogStatus"
-        :logs="logs"
-        empty-text="暂无日志。解密、打包、设置这些操作会记录在这里。"
-        @clear="clearLogs"
-        @close="setLogOpen(false)"
-      />
     </div>
 
       <!-- 新建分组弹窗：分组只需要名称 -->
@@ -1245,7 +1190,7 @@ async function handlePack(project: any, asZip: boolean = false) {
   overflow: hidden;
 }
 
-/* 窄窗口：先收起项目树，再让日志面板覆盖工作区 */
+/* 窄窗口：先收起项目树 */
 @media (max-width: 900px) {
   .tree-panel,
   .resizer-tree {

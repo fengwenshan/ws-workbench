@@ -1,11 +1,35 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
-import type { PackProgress } from '@/types'
+import { computed, ref, watch } from 'vue'
+import type { PackProgress, PackResult } from '@/types'
 
 const props = defineProps<{
   progress: PackProgress | null
   packing: boolean
+  /** 打包结果：在模块内展示成功 / 失败明细，不再写全局日志 */
+  result?: PackResult | null
+  /** invoke 直接失败时的错误 */
+  error?: string
 }>()
+
+/** 打包结束后的一行结论（模块内日志） */
+const statusLine = computed(() => {
+  if (props.error) return props.error
+  const res = props.result
+  if (!res) return ''
+  if (res.success) {
+    return `打包完成：${res.copied_files}/${res.total_files} 个文件，耗时 ${res.elapsed_ms}ms`
+  }
+  return `打包完成（有错误）：${res.copied_files}/${res.total_files}，跳过 ${res.skipped_files}`
+})
+const failed = computed(() => {
+  if (props.error) return true
+  return props.result ? !props.result.success : false
+})
+const errors = computed(() => {
+  const res = props.result
+  if (!res || res.success) return []
+  return res.errors.slice(0, 5)
+})
 
 const phaseLabels: Record<string, string> = {
   scanning: '扫描文件中...',
@@ -58,6 +82,12 @@ watch(() => props.packing, (isPacking, wasPacking) => {
     <div class="current-file" v-if="progress && progress.current_file">
       {{ progress.current_file }}
     </div>
+    <div v-if="statusLine && !packing" class="pack-status" :class="{ failed }">
+      {{ statusLine }}
+    </div>
+    <ul v-if="errors.length" class="pack-errors">
+      <li v-for="(line, index) in errors" :key="index">{{ line }}</li>
+    </ul>
   </div>
 </template>
 
@@ -94,6 +124,20 @@ watch(() => props.packing, (isPacking, wasPacking) => {
   background: var(--primary);
   border-radius: 4px;
   transition: width 0.3s ease;
+}
+.pack-status {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.pack-status.failed {
+  color: var(--danger);
+}
+.pack-errors {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  font-size: 12px;
+  color: var(--danger);
 }
 .current-file {
   margin-top: 4px;
