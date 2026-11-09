@@ -273,7 +273,7 @@ CREATE INDEX IF NOT EXISTS idx_clipboard_attachments_item
 
 - 首屏 20 条，滚动到底部哨兵触发 `clipboard_page` 下一页，到底显示「没有更多了」
 - 行内容：类型徽标（文本 / 链接 / 代码 / 图片 / 图文）+ 两行文字预览 + 最多 3 张 56–64px 缩略图 + 相对时间；纯图片条目用首图作封面
-- 缩略图用 `wsclip://img/<attachment_id>?variant=thumb`（见第 7 节），`loading="lazy"`，加载失败显示占位图标
+- 缩略图用 `wsclip://localhost/img?id=<attachment_id>&variant=thumb`（Windows 为 `http://wsclip.localhost/img?...`，见第 7 节），`loading="lazy"`，加载失败显示占位图标
 - 顶部显示总条数（`clipboard_stats`）；窗口尺寸保持 380 × 480
 
 ### 6.3 搜索与键盘
@@ -284,9 +284,9 @@ CREATE INDEX IF NOT EXISTS idx_clipboard_attachments_item
 
 ## 7. `wsclip` 自定义协议
 
-- 在 `lib.rs` 注册异步协议（同 `wst-img` 的写法），URL 形态：
-  - macOS：`wsclip://img/<attachment_id>?variant=thumb|full`
-  - Windows：`http://wsclip.localhost/img/<attachment_id>?variant=...`（沿用现有平台前缀处理）
+- 在 `lib.rs` 注册异步协议（同 `wst-img` 的写法），URL 形态（与笔记 `wst-img` 的 `isWindows()` 前缀约定一致）：
+  - macOS：`wsclip://localhost/img?id=<attachment_id>&variant=thumb|full`
+  - Windows：`http://wsclip.localhost/img?id=<attachment_id>&variant=...`
 - 处理流程：解析 id → 查 `clipboard_attachments`（必须存在）→ 由 id 推导 blob 路径（`thumb` 用 `.thumb.wst`，`full` 用 `.wst`）→ `decrypt_bytes` → 带正确 `Content-Type` 返回，`Cache-Control: no-store`
 - 安全：**不接受目录 / 文件名参数**，只认数据库里的附件 id，天然无目录穿越；解密失败返回 500，缺失返回 404
 
