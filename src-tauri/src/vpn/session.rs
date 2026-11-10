@@ -432,8 +432,8 @@ mod tests {
             connector_path: r"C:\app\openconnect\openconnect.exe".into(),
             rules: vec![crate::vpn::models::VpnRule {
                 id: "r1".into(),
-                kind: "IP-CIDR".into(),
-                value: "198.51.100.0/24".into(),
+                kind: "DOMAIN-SUFFIX".into(),
+                value: "example.com".into(),
                 policy: "VPN".into(),
                 remark: String::new(),
                 enabled: true,
@@ -454,7 +454,7 @@ mod tests {
         assert_eq!(back.server, "vpn.example.com:1218");
         assert_eq!(back.default_policy, "DIRECT");
         assert_eq!(back.rules.len(), 1);
-        assert_eq!(back.rules[0].value, "198.51.100.0/24");
+        assert_eq!(back.rules[0].value, "example.com");
         // 规则的 kind/policy 必须能被引擎解析，否则运行期会被静默丢弃
         assert!(crate::vpn::rule_engine::RuleKind::parse(&back.rules[0].kind).is_ok());
         assert!(crate::vpn::rule_engine::Policy::parse(&back.rules[0].policy).is_ok());
@@ -463,9 +463,11 @@ mod tests {
     #[test]
     fn status_roundtrip() {
         let session = temp_session("status");
-        let mut status = VpnStatus::default();
-        status.phase = crate::vpn::models::VpnPhase::Connected;
-        status.vpn_ip = "198.51.100.39".into();
+        let status = VpnStatus {
+            phase: crate::vpn::models::VpnPhase::Connected,
+            vpn_ip: "198.51.100.39".into(),
+            ..VpnStatus::default()
+        };
         session.write_status(&status).unwrap();
         let back = session.read_status().unwrap();
         assert_eq!(back.phase, crate::vpn::models::VpnPhase::Connected);

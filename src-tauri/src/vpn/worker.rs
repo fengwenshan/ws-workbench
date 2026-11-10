@@ -74,10 +74,6 @@ struct Worker {
     split: Option<crate::vpn::split::SplitTunnel>,
     /// 全局模式：半默认路由 + DNS 都指向隧道
     full: Option<crate::vpn::fulltunnel::FullTunnel>,
-    /// 服务端下发的 split-include 网段（「公司内网」最权威的覆盖范围）
-    server_split_routes: Vec<String>,
-    /// 服务端下发的默认域名（AnyConnect 的 default domain），有它就能自动覆盖整族子域
-    server_def_domain: Option<String>,
     /// 最近几行输出，失败时作为诊断信息
     tail: Vec<String>,
     /// script.log 已经读过的行数（脚本的 stdout 接不到管道，只能靠这个文件回传）
@@ -92,6 +88,9 @@ struct Worker {
     /// 当前生效的规则与兜底走向（可由主进程通过 rules.json 改）
     current_rules: Vec<VpnRule>,
     current_default_policy: String,
+    /// 本会话见过的 DNS 应答：规则热更新时用它补注入「现在该走隧道」的地址
+    /// （应用可能缓存着旧答案，不会再发查询）
+    memo: crate::vpn::split::DnsMemo,
     /// 上次读到的规则原文，内容没变就不重新编译
     last_rules_raw: Option<String>,
     last_mode_check: Instant,
@@ -105,19 +104,22 @@ struct Worker {
 
 impl Worker {
     fn new(session: VpnSession, request: VpnRequest) -> Self {
-        let mut status = VpnStatus::default();
-        status.profile_id = request.profile_id.clone();
-        status.profile_name = request.profile_name.clone();
-        status.conn_identity = request.conn_identity.clone();
-        status.pid = std::process::id();
-        status.started_at = now();
-        status.updated_at = now();
         let applied_mode = ProxyMode::parse(&request.proxy_mode).unwrap_or(ProxyMode::Rule);
-        // 让界面知道这条会话实际按哪个模式在跑（界面上的选择只代表「下次连接」）
-        status.applied_mode = applied_mode.as_str().to_string();
+        let stamp = now();
         let current_rules: Vec<VpnRule> =
             request.rules.iter().filter(|r| r.enabled).cloned().collect();
         let current_default_policy = request.default_policy.clone();
+        let status = VpnStatus {
+            profile_id: request.profile_id.clone(),
+            profile_name: request.profile_name.clone(),
+            conn_identity: request.conn_identity.clone(),
+            // 让界面知道这条会话实际按哪个模式在跑（界面上的选择只代表「下次连接」）
+            applied_mode: applied_mode.as_str().to_string(),
+            pid: std::process::id(),
+            started_at: stamp.clone(),
+            updated_at: stamp,
+            ..VpnStatus::default()
+        };
         Worker {
             session,
             request,
@@ -127,8 +129,6 @@ impl Worker {
             degraded_reason: None,
             split: None,
             full: None,
-            server_split_routes: Vec::new(),
-            server_def_domain: None,
             tail: Vec::new(),
             script_log_lines: 0,
             script_log_error_logged: false,
@@ -136,6 +136,7 @@ impl Worker {
             applied_mode,
             current_rules,
             current_default_policy,
+            memo: crate::vpn::split::DnsMemo::default(),
             last_rules_raw: None,
             last_mode_check: Instant::now(),
             last_rules_check: Instant::now(),
@@ -264,20 +265,30 @@ Get-Service -Name Dnscache | Format-List Status,StartType
                     // 这里先原样打出来，方便没有 worker.log 时也能定位。
                     self.log(&format!("[脚本] 脚本报告错误：{}", value));
                 }
-                // 服务端下发的默认域名：按域名分流解析就能覆盖整族子域，
-                // 不用用户把每个内网域名都列出来
+                // 服务端下发的默认域名与 split-include 网段：**只记录、只展示，
+                // 不参与分流**。走 VPN 的唯一依据是用户规则，否则「规则空着也能
+                // 连内网」会变成界面上解释不了的隐式行为。
                 "defdomain" => {
-                    let domain = value.trim().trim_end_matches('.').to_ascii_lowercase();
-                    if !domain.is_empty() {
-                        self.server_def_domain = Some(domain);
+                    if let Some(domain) = crate::vpn::split::normalize_domain(value.trim()) {
+                        if !self.status.server_scope.domains.contains(&domain) {
+                            self.status.server_scope.domains.push(domain.clone());
+                            self.log(&format!(
+                                "[分流] 服务端下发内网域 {}：仅记录展示，不自动并入分流",
+                                domain
+                            ));
+                        }
                     }
                 }
-                // 服务端下发的 split-include 网段：正规 VPN 客户端的做法就是把这些
-                // 网段的路由指向隧道。这里只记下来，装配分流时统一注入。
                 "split" => {
-                    let cidr = value.trim();
-                    if !cidr.is_empty() && !self.server_split_routes.iter().any(|item| item == cidr) {
-                        self.server_split_routes.push(cidr.to_string());
+                    if let Ok((net, prefix)) = route::parse_cidr(value.trim()) {
+                        let cidr = format!("{}/{}", std::net::Ipv4Addr::from(net), prefix);
+                        if !self.status.server_scope.cidrs.contains(&cidr) {
+                            self.status.server_scope.cidrs.push(cidr.clone());
+                            self.log(&format!(
+                                "[分流] 服务端下发网段 {}：仅记录展示，不自动并入分流",
+                                cidr
+                            ));
+                        }
                     }
                 }
                 _ => {}
@@ -559,20 +570,43 @@ Get-Service -Name Dnscache | Format-List Status,StartType
         self.last_rules_raw = Some(raw);
         self.current_rules = enabled;
         self.current_default_policy = default_policy;
-        if self.split.is_some() {
-            self.log(&format!(
-                "[规则] 已更新 {} 条规则，正在重新下发路由注入分流",
-                self.current_rules.len()
-            ));
-            self.restart_split();
-        } else {
-            self.log(&format!(
-                "[规则] 已更新 {} 条规则，当前是{}模式，切回规则模式后生效",
+        self.apply_reloaded_rules();
+    }
+
+    /// 规则热更新后的动作：规则模式下只要隧道就绪就重新布线。
+    ///
+    /// 不能只看 `self.split.is_some()`：严格规则模式下「连接时规则为空」不会接管
+    /// 任何流量，split 保持 None；此时用户新增规则必须真的把分流拉起来，否则规则
+    /// 永远不生效，只能断开重连（macOS 现场踩过：空规则连上后加
+    /// `DOMAIN-SUFFIX example.com`，内网打不开，重连才好）。所以判据是
+    /// 「当前是不是规则模式 + 隧道是否就绪」，而不是分流是否已经在跑。
+    fn apply_reloaded_rules(&mut self) {
+        match self.applied_mode {
+            ProxyMode::Rule => {
+                // 必须等连接流程把布线做完（phase=Connected）再热更新：连接过程中
+                // apply_mode 还在布线，这时抢先 restart 会和它重复创建一份
+                // SplitTunnel，前一份的转发线程/路由不会被回收。
+                if self.status.phase == VpnPhase::Connected && self.tunnel_ready() {
+                    self.log(&format!(
+                        "[规则] 已更新 {} 条规则，正在重新下发路由注入分流",
+                        self.current_rules.len()
+                    ));
+                    self.restart_split();
+                } else {
+                    self.log(&format!(
+                        "[规则] 已更新 {} 条规则，连接完成后按最新规则布线",
+                        self.current_rules.len()
+                    ));
+                }
+            }
+            mode => self.log(&format!(
+                "[规则] 已更新 {} 条规则，当前是{}模式（规则不参与布线），切回规则模式后生效",
                 self.current_rules.len(),
-                self.applied_mode.as_str()
-            ));
+                mode.as_str()
+            )),
         }
     }
+
     /// 路由守护：VPN 客户端或系统可能在后台把我们的路由改掉，这里定期补回来
     fn guard_routes(&mut self) {
         // 全局模式：守护半默认路由 + 隧道 DNS
@@ -588,6 +622,15 @@ Get-Service -Name Dnscache | Format-List Status,StartType
 
     // ======================= 路由注入式分流（规则模式） =======================
 
+    /// 严格规则模式的分流计划：只由用户规则决定。
+    ///
+    /// 服务端下发的默认域名 / split-include 网段不进这里——它们只写进
+    /// `status.server_scope` 供界面和日志对照。这个边界是产品要求：用户
+    /// 要能仅凭规则列表解释「为什么某条流量进了 VPN」。
+    fn rule_plan(&self) -> crate::vpn::split::SplitPlan {
+        crate::vpn::split::plan(&self.current_rules, &self.current_default_policy)
+    }
+
     /// 规则模式的落地实现：不捕获、不抢默认路由、不改系统 DNS，只做两件事——
     ///
     /// 1. 把命中「走 VPN」的域名交给 VPN DNS 解析：macOS 写 `/etc/resolver/<域名>`
@@ -598,48 +641,9 @@ Get-Service -Name Dnscache | Format-List Status,StartType
     /// 默认路由和系统 DNS 一律不动，所以结构上不可能再出现「一连上就全网断」。
     /// 任何一步失败都只是「本次分流不生效」，隧道照旧，网络不受影响。
     fn start_split_rules(&mut self) -> Result<(), String> {
-        let mut plan = crate::vpn::split::plan(&self.current_rules, &self.current_default_policy);
+        let plan = self.rule_plan();
         for note in &plan.notes {
             self.log(&format!("[分流] {}", note));
-        }
-        // 服务端下发的「公司内网」范围：默认域名 + split-include 网段。
-        // 这是 VPN 管理员配的权威范围，比用户手写规则更全 —— 默认域名一条就能
-        // 覆盖整族子域，网段则把「落在内网的 IP」全部兜住（应用自己解析域名也跑不掉）。
-        if let Some(domain) = self.server_def_domain.clone() {
-            if plan.add_domain(&domain) {
-                self.log(&format!(
-                    "[分流] 服务端下发默认域名 {}：该域及其所有子域自动走 VPN",
-                    domain
-                ));
-            }
-        }
-        let mut pushed = 0usize;
-        let mut all_tunnel = false;
-        for cidr in self.server_split_routes.clone() {
-            match crate::vpn::route::parse_cidr(&cidr) {
-                Ok((_, 0)) => all_tunnel = true,
-                Ok(_) => {
-                    if plan.add_cidr(&cidr) {
-                        pushed += 1;
-                    }
-                }
-                Err(e) => self.log(&format!(
-                    "[分流] 服务端下发的网段 {} 无法解析，跳过：{}",
-                    cidr, e
-                )),
-            }
-        }
-        if all_tunnel {
-            self.log(
-                "[分流] 服务端下发的是全隧道（0.0.0.0/0）：路由注入模式不接管全隧道，\
-                 要「全部走 VPN」请用全局模式",
-            );
-        }
-        if pushed > 0 {
-            self.log(&format!(
-                "[分流] 服务端下发 {} 条分流网段，已并入隧道路由（落这些网段的流量都走 VPN）",
-                pushed
-            ));
         }
         let tun_dev = self.status.tun_dev.clone();
         if tun_dev.is_empty() {
@@ -661,14 +665,24 @@ Get-Service -Name Dnscache | Format-List Status,StartType
             .filter_map(|item| item.trim().parse().ok())
             .collect();
         self.log(&format!(
-            "[分流] 路由注入模式：域名 {:?}，网段 {:?}，VPN DNS {:?}，隧道 {}",
-            plan.domains, plan.cidrs, vpn_dns, tun_dev
+            "[分流] 路由注入模式：域名 {:?}，VPN DNS {:?}，隧道 {}",
+            plan.domains, vpn_dns, tun_dev
         ));
+        // VPN 服务器自己的公网 IP 绝不能进隧道：否则 openconnect 的 TLS/DTLS
+        // 会被自己的路由抓回隧道打环（现场日志出现过「内网 IP 203.0.113.10
+        // 已注入隧道」，那正是服务器地址）。
+        let server_ips: Vec<std::net::Ipv4Addr> = self
+            .vpn_server_ips
+            .iter()
+            .filter_map(|ip| ip.trim().parse().ok())
+            .collect();
         match crate::vpn::split::SplitTunnel::apply(
             &self.session,
             &tun_dev,
             self.status.tun_index,
             &vpn_dns,
+            &server_ips,
+            self.memo.clone(),
             plan,
         ) {
             Ok(split) => {
@@ -782,23 +796,16 @@ Get-Service -Name Dnscache | Format-List Status,StartType
         if let Err(e) = result {
             self.log(&format!("[模式] 切换为 {} 失败：{}", target.as_str(), e));
         }
-        let message = match (&self.split, &self.full, &self.degraded_reason) {
-            (_, Some(_), _) => "隧道已建立，全局模式生效（全部流量走 VPN）".to_string(),
-            (Some(split), None, _) => format!(
-                "隧道已建立，路由注入分流已生效（{} 个域名 → {}）",
-                split.domain_count(),
-                split.tun_dev()
-            ),
-            (None, None, Some(reason)) => format!("已连接（未接管系统流量：{}）", reason),
-            (None, None, None) if target == ProxyMode::Direct => {
-                "隧道已建立（直连模式，未接管任何流量）".to_string()
-            }
-            _ => "隧道已建立".to_string(),
+        let fallback = if target == ProxyMode::Direct {
+            "隧道已建立（直连模式，未接管任何流量）"
+        } else {
+            "隧道已建立"
         };
+        let message = self.connected_message(fallback);
         self.set_phase(VpnPhase::Connected, &message);
     }
 
-    /// 规则改了之后重新下发分流（域名、网段都可能变）。
+    /// 规则改了之后重新下发分流（域名名单可能变）。
     fn restart_split(&mut self) {
         if let Some(mut old) = self.split.take() {
             old.teardown();
@@ -808,16 +815,29 @@ Get-Service -Name Dnscache | Format-List Status,StartType
         if let Err(e) = self.start_split_rules() {
             self.log(&format!("[分流] 重新下发分流失败：{}", e));
         }
-        let message = match (&self.split, &self.degraded_reason) {
-            (Some(split), _) => format!(
+        let message = self.connected_message("隧道已建立");
+        self.set_phase(VpnPhase::Connected, &message);
+    }
+
+    /// 连接成功后写进状态栏的一句话：全局 / 分流 / 降级 / 兜底。
+    ///
+    /// 首次连接、运行期切模式、规则热更新三个入口共用，避免同一件事写出三套
+    /// 措辞；`fallback` 由调用方给 —— 各入口对「什么都没接管」的说法不同。
+    fn connected_message(&self, fallback: &str) -> String {
+        if self.full.is_some() {
+            return "隧道已建立，全局模式生效（全部流量走 VPN）".to_string();
+        }
+        if let Some(split) = self.split.as_ref() {
+            return format!(
                 "隧道已建立，路由注入分流已生效（{} 个域名 → {}）",
                 split.domain_count(),
                 split.tun_dev()
-            ),
-            (None, Some(reason)) => format!("已连接（未接管系统流量：{}）", reason),
-            (None, None) => "隧道已建立".to_string(),
-        };
-        self.set_phase(VpnPhase::Connected, &message);
+            );
+        }
+        if let Some(reason) = self.degraded_reason.as_ref() {
+            return format!("已连接（未接管系统流量：{}）", reason);
+        }
+        fallback.to_string()
     }
 
     // ======================= 按代理模式布线 =======================
@@ -826,7 +846,7 @@ Get-Service -Name Dnscache | Format-List Status,StartType
     ///
     /// 三种模式都是「本地布线」，不再开捕获网卡：
     /// - 直连：隧道留着，什么都不改；
-    /// - 规则：按域名/网段的 DNS + 路由注入（`split.rs`），默认路由与系统 DNS 不动；
+    /// - 规则：按域名的 DNS + 路由注入（`split.rs`），默认路由与系统 DNS 不动；
     /// - 全局：两条半默认路由 + 系统 DNS 指向 VPN（`fulltunnel.rs`），带验证与回滚。
     ///
     /// 非 macOS / Windows 平台不在这里判：`SplitTunnel::apply` / `FullTunnel::apply`
@@ -1093,20 +1113,12 @@ Get-Service -Name Dnscache | Format-List Status,StartType
                         ));
                     }
                     None => {
-                        let message = match (&self.split, &self.full, self.applied_mode) {
-                            (_, Some(_), _) => {
-                                "隧道已建立，全局模式生效（全部流量走 VPN）".to_string()
-                            }
-                            (Some(split), _, _) => format!(
-                                "隧道已建立，路由注入分流已生效（{} 个域名 → {}）",
-                                split.domain_count(),
-                                split.tun_dev()
-                            ),
-                            (None, None, ProxyMode::Direct) => {
-                                "隧道已建立（直连模式，未接管任何流量）".to_string()
-                            }
-                            (None, None, _) => "隧道已建立（未接管系统流量）".to_string(),
+                        let fallback = if self.applied_mode == ProxyMode::Direct {
+                            "隧道已建立（直连模式，未接管任何流量）"
+                        } else {
+                            "隧道已建立（未接管系统流量）"
                         };
+                        let message = self.connected_message(fallback);
                         self.set_phase(VpnPhase::Connected, &message);
                     }
                 }
@@ -1936,5 +1948,174 @@ mod tests {
     fn vpn_server_ips_excludes_capture_tun_address() {
         let ips = vec!["1.1.1.1".to_string(), "10.10.0.9".to_string()];
         assert_eq!(filter_server_ips(&ips, "10.10.0.9"), vec!["1.1.1.1".to_string()]);
+    }
+
+    fn request_with_rules(rules: Vec<VpnRule>) -> VpnRequest {
+        VpnRequest {
+            conn_identity: String::new(),
+            proxy_mode: "rule".to_string(),
+            profile_id: "p".into(),
+            profile_name: "n".into(),
+            server: "s".into(),
+            username: "u".into(),
+            password: "p".into(),
+            protocol: "anyconnect".into(),
+            connector: crate::vpn::models::ConnectorKind::Auto,
+            connector_path: "x".into(),
+            rules,
+            default_policy: "DIRECT".into(),
+            extra_args: vec![],
+            script_path: "s".into(),
+            hook_exe: "h".into(),
+            created_at: String::new(),
+        }
+    }
+
+    /// 严格规则模式：服务端下发的内网范围只用于展示，绝不自动并入分流计划。
+    #[test]
+    fn server_scope_is_visible_but_never_routed() {
+        let dir = crate::test_support::TempDir::new("worker-server-scope");
+        let session = VpnSession::new(dir.path().to_path_buf());
+        session.ensure().unwrap();
+        let mut worker = Worker::new(session, request_with_rules(vec![]));
+
+        worker.handle_line("WS-WORKBENCH defdomain=example.com.");
+        worker.handle_line("WS-WORKBENCH split=198.51.100.7/22");
+        worker.handle_line("WS-WORKBENCH split=198.51.100.9/22");
+
+        assert_eq!(
+            worker.status.server_scope.domains,
+            vec!["example.com".to_string()],
+            "服务端下发的默认域名要归一化后展示在状态里"
+        );
+        assert_eq!(
+            worker.status.server_scope.cidrs,
+            vec!["198.51.100.0/24".to_string()],
+            "服务端下发的网段要归一化并去重后展示"
+        );
+
+        let plan = worker.rule_plan();
+        assert!(
+            plan.domains.is_empty(),
+            "空规则时不能因为服务端下发了默认域名就分流"
+        );
+
+        // 换个域名行为必须一模一样：服务端推 example.org 也只展示、不分流
+        worker.handle_line("WS-WORKBENCH defdomain=example.org");
+        worker.handle_line("WS-WORKBENCH split=10.10.0.0/16");
+        assert_eq!(
+            worker.status.server_scope.domains,
+            vec!["example.com".to_string(), "example.org".to_string()]
+        );
+        assert_eq!(
+            worker.status.server_scope.cidrs,
+            vec!["198.51.100.0/24".to_string(), "10.10.0.0/16".to_string()]
+        );
+        let plan = worker.rule_plan();
+        assert!(plan.domains.is_empty(), "服务端下发的范围永远不参与分流");
+    }
+
+    #[test]
+    fn only_user_rules_build_the_plan() {
+        let rule = VpnRule {
+            id: "r1".into(),
+            kind: "DOMAIN-SUFFIX".into(),
+            value: "corp.example.com".into(),
+            policy: "VPN".into(),
+            remark: String::new(),
+            enabled: true,
+        };
+        let dir = crate::test_support::TempDir::new("worker-user-rule-plan");
+        let session = VpnSession::new(dir.path().to_path_buf());
+        session.ensure().unwrap();
+        let mut worker = Worker::new(session, request_with_rules(vec![rule]));
+
+        worker.handle_line("WS-WORKBENCH defdomain=example.com");
+        let plan = worker.rule_plan();
+        assert_eq!(
+            plan.domains,
+            vec!["corp.example.com".to_string()],
+            "分流计划只能来自用户规则，不能混进服务端下发的域"
+        );
+    }
+
+    /// 现场（macOS）：空规则连上后新增 `DOMAIN-SUFFIX example.com`，内网打不开，
+    /// 必须断开重连才行。
+    ///
+    /// 根因是规则热更新只看「split 是否已经起来」：严格规则模式下空规则时
+    /// split 恒为 None，于是新增规则被当成「切回规则模式后生效」直接跳过。
+    #[test]
+    fn adding_rules_after_an_empty_rule_connect_reapplies_split() {
+        let dir = crate::test_support::TempDir::new("worker-hot-add-rules");
+        let session = VpnSession::new(dir.path().to_path_buf());
+        session.ensure().unwrap();
+        let mut request = request_with_rules(vec![]);
+        // 不真的做 DNS 解析：server 用回环地址，免得测试卡在主机名解析上
+        request.server = "127.0.0.1".into();
+        let mut worker = Worker::new(session.clone(), request);
+
+        // 连接已建立，但严格规则模式下空规则不接管任何流量
+        worker.status.phase = VpnPhase::Connected;
+        worker.status.vpn_ip = "198.51.100.149".into();
+        worker.status.tun_dev = "utun-test".into();
+        worker.script_done = true;
+        assert!(worker.tunnel_ready());
+        assert!(worker.split.is_none(), "空规则时不应有分流");
+
+        // 连接后新增一条域名后缀规则：主进程写 rules.json，worker 轮询到变化
+        let rule = VpnRule {
+            id: "r1".into(),
+            kind: "DOMAIN-SUFFIX".into(),
+            value: "example.com".into(),
+            policy: "VPN".into(),
+            remark: String::new(),
+            enabled: true,
+        };
+        session.write_rules(&[rule], "DIRECT").unwrap();
+        worker.last_rules_check = Instant::now() - Duration::from_secs(1);
+        worker.poll_rules_change();
+
+        assert_eq!(worker.current_rules.len(), 1);
+        let log = session.read_log_tail(80).join("\n");
+        assert!(
+            log.contains("正在重新下发路由注入分流"),
+            "新增规则后必须真的重新下发，而不能因为 split 还没起来就跳过；日志：\n{log}"
+        );
+    }
+
+    /// 连接流程还没走完（phase 不是 Connected）时改规则不能抢先布线：
+    /// 否则会和 apply_mode 重复创建一份 SplitTunnel。
+    #[test]
+    fn rules_change_during_connect_waits_for_wiring() {
+        let dir = crate::test_support::TempDir::new("worker-hot-rules-connecting");
+        let session = VpnSession::new(dir.path().to_path_buf());
+        session.ensure().unwrap();
+        let mut request = request_with_rules(vec![]);
+        request.server = "127.0.0.1".into();
+        let mut worker = Worker::new(session.clone(), request);
+        worker.status.phase = VpnPhase::ConfiguringRoutes;
+        worker.status.vpn_ip = "198.51.100.149".into();
+        worker.status.tun_dev = "utun-test".into();
+        worker.script_done = true;
+        assert!(worker.tunnel_ready());
+
+        let rule = VpnRule {
+            id: "r1".into(),
+            kind: "DOMAIN-SUFFIX".into(),
+            value: "example.com".into(),
+            policy: "VPN".into(),
+            remark: String::new(),
+            enabled: true,
+        };
+        session.write_rules(&[rule], "DIRECT").unwrap();
+        worker.last_rules_check = Instant::now() - Duration::from_secs(1);
+        worker.poll_rules_change();
+
+        let log = session.read_log_tail(80).join("\n");
+        assert!(
+            log.contains("连接完成后按最新规则布线"),
+            "连接中改规则应等连接流程收尾；日志：\n{log}"
+        );
+        assert!(worker.split.is_none(), "连接中不应抢先创建分流");
     }
 }

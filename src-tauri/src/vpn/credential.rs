@@ -18,7 +18,7 @@ pub(crate) fn to_hex(bytes: &[u8]) -> String {
 /// 十六进制解码
 pub(crate) fn from_hex(text: &str) -> Result<Vec<u8>, String> {
     let trimmed = text.trim();
-    if trimmed.len() % 2 != 0 {
+    if !trimmed.len().is_multiple_of(2) {
         return Err("密文长度不合法".to_string());
     }
     let mut out = Vec::with_capacity(trimmed.len() / 2);

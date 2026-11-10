@@ -15,14 +15,21 @@ export type VpnPhase =
 /** 代理模式，语义与 Clash 的 mode 一致 */
 export type VpnProxyMode = 'rule' | 'global' | 'direct'
 
-/** 规则匹配类型，取值与后端 rule_engine::RuleKind 一致 */
-export type VpnRuleKind = 'DOMAIN' | 'DOMAIN-SUFFIX' | 'IP-CIDR'
+/** 规则匹配类型，取值与后端 rule_engine::RuleKind 一致（`IP-CIDR` 已下线） */
+export type VpnRuleKind = 'DOMAIN' | 'DOMAIN-SUFFIX'
 
 /**
  * 历史上还有这几种规则类型，但需要「按连接抓包 + 按进程/端口匹配」的数据面，
  * 路由注入模式没有落点，后端会直接拒绝。留着这份名单只为把老配置标成「不生效」。
  */
-export const RETIRED_RULE_KINDS = ['DOMAIN-KEYWORD', 'PROCESS-NAME', 'DST-PORT', 'RULE-SET'] as const
+export const RETIRED_RULE_KINDS = [
+  'DOMAIN-KEYWORD',
+  'PROCESS-NAME',
+  'DST-PORT',
+  'RULE-SET',
+  // 网段规则只能整段注入、做不到按网段排除，已整体下线
+  'IP-CIDR',
+] as const
 
 /** 规则走向，取值与后端 rule_engine::Policy 一致 */
 export type VpnPolicy = 'DIRECT' | 'VPN'
@@ -113,6 +120,14 @@ export interface NetworkSnapshot {
   local_subnets: string[]
 }
 
+/** 服务端下发的「公司内网」范围：只展示，不自动生效 */
+export interface ServerScope {
+  /** 服务端下发的默认域名（已归一化） */
+  domains: string[]
+  /** 服务端下发的 split-include 网段（已归一化） */
+  cidrs: string[]
+}
+
 /** 连接状态 */
 export interface VpnStatus {
   phase: VpnPhase
@@ -133,6 +148,8 @@ export interface VpnStatus {
   mtu: number
   routes: AppliedRoute[]
   snapshot: NetworkSnapshot | null
+  /** 服务端下发的内网范围：只展示，不参与分流（老版本 status.json 可能没有） */
+  server_scope?: ServerScope
   error: string
   pid: number
   started_at: string
@@ -205,14 +222,12 @@ export const PHASE_LABELS: Record<VpnPhase, string> = {
 export const RULE_KIND_LABELS: Record<VpnRuleKind, string> = {
   DOMAIN: 'DOMAIN',
   'DOMAIN-SUFFIX': 'DOMAIN-SUFFIX',
-  'IP-CIDR': 'IP-CIDR',
 }
 
 /** 规则类型的中文含义，只用于下拉选项，不改动规则值本身 */
 export const RULE_KIND_HINTS: Record<VpnRuleKind, string> = {
   DOMAIN: '域名',
   'DOMAIN-SUFFIX': '域名后缀',
-  'IP-CIDR': 'IP 网段',
 }
 
 export const POLICY_LABELS: Record<VpnPolicy, string> = {

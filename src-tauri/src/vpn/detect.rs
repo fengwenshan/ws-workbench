@@ -34,7 +34,7 @@ fn parse_openconnect_version(text: &str) -> String {
 fn source_suffix(source: &str) -> &'static str {
     match source {
         "custom" => "（手动指定）",
-        "managed" => "（已导入）",
+        "managed" => "（已指定）",
         "bundled" => "（内置）",
         _ => "",
     }
@@ -85,6 +85,19 @@ fn probe_app(id: AppId, ctx: &AppContext, override_path: &str) -> Vec<ConnectorI
         out.push(info);
         if available {
             break;
+        }
+    }
+
+    // 系统里已经有能跑的 openconnect 了：之前「指定位置」登记的那份没有存在意义，删掉。
+    //
+    // 留着不只是占地方 —— 系统那份哪天被卸载/跑不起来，它会悄悄顶上来，用户会以为
+    // 还在用自定义前缀。按产品定的规则：系统没了就回到安装引导，让人重新指定。
+    if out
+        .iter()
+        .any(|item| item.available && item.source == "system")
+    {
+        if let Some(data_dir) = ctx.data_dir.as_ref() {
+            let _ = apps::finder::remove_managed(AppId::Openconnect, data_dir);
         }
     }
 
@@ -172,10 +185,10 @@ pub fn detect_all(ctx: &AppContext, custom_openconnect: &str) -> Vec<ConnectorIn
 ///
 /// 现在只剩 openconnect 一条通道，`auto` 与 `openconnect` 的挑选结果完全一致；
 /// 保留 `want` 是为了让枚举匹配穷尽，将来再加通道时编译器会强制这里处理。
-pub fn pick_connector<'a>(
-    candidates: &'a [ConnectorInfo],
+pub fn pick_connector(
+    candidates: &[ConnectorInfo],
     want: ConnectorKind,
-) -> Option<&'a ConnectorInfo> {
+) -> Option<&ConnectorInfo> {
     match want {
         ConnectorKind::Auto | ConnectorKind::Openconnect => candidates
             .iter()
@@ -193,35 +206,67 @@ pub fn fetch_version(info: &ConnectorInfo) -> String {
     parse_openconnect_version(&text)
 }
 
-/// 把一份已有的 openconnect 目录导入到程序数据目录并托管，返回版本号。
+/// 登记结果：版本号 + 实际记住的 openconnect 位置。
 ///
-/// 复用通用的 `apps::finder::import_from_dir`（会连同同目录的 DLL 一起复制），
-/// 这里额外做一次 `--version` 校验：缺 DLL 的残包必须在导入时就拦下来。
+/// 位置要回显到界面上 —— 用户专门强调过「hb 是自定义目录，名字可能是别的」，
+/// 只回一句「已记住」等于没说，得让他看见程序到底认的是哪个文件。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportedOpenconnect {
+    pub version: String,
+    /// 真正被记住的可执行文件（Cellar 版本目录会折算成稳定的 `prefix/bin`）
+    pub path: String,
+}
+
+/// 把用户指定的 openconnect「登记」成程序托管的连接器，返回版本号与位置。
+///
+/// Windows 上只认安装包内置的那份，不允许登记外部副本。
 #[cfg(windows)]
-pub fn import_openconnect(_data_dir: &Path, _source_dir: &Path) -> Result<String, String> {
+pub fn import_openconnect(_data_dir: &Path, _source_dir: &Path) -> Result<ImportedOpenconnect, String> {
     Err("Windows 版只使用安装包内置的 openconnect，不支持导入外部副本".to_string())
 }
 
+/// macOS/Linux：把用户指定的 openconnect 登记到托管目录，返回版本号与位置。
+///
+/// **不复制二进制**。这里先后踩过两个坑：
+/// - Homebrew 的 openconnect 通过绝对路径加载自己前缀里的动态库，拷出来的副本只是
+///   碰巧能跑，`brew upgrade` 之后依赖失配；
+/// - 复制要先读用户目录里的文件，自定义前缀很容易被权限/隐私策略挡住，现场报的就是
+///   `复制 openconnect 失败: Permission denied (os error 13)`。
+///
+/// 所以改成「登记软链」：只写不读，源文件原样保留，brew 升级也跟着走。
+/// 用户的选法不固定（可执行文件 / bin 目录 / Cellar 版本目录），交给 `resolve_binary` 统一解析。
 #[cfg(not(windows))]
-pub fn import_openconnect(data_dir: &Path, source_dir: &Path) -> Result<String, String> {
-    apps::finder::import_from_dir(AppId::Openconnect, source_dir, data_dir)?;
+pub fn import_openconnect(data_dir: &Path, source: &Path) -> Result<ImportedOpenconnect, String> {
+    let picked = apps::finder::resolve_binary(AppId::Openconnect, source)?;
+    // Cellar 的版本目录会被 brew 升级换掉，能改指 prefix/bin 就改
+    let binary = apps::finder::stable_binary_path(&picked);
 
-    let target_dir = apps::managed_dir(AppId::Openconnect, data_dir);
-    let candidates = [target_dir.join("openconnect.exe"), target_dir.join("openconnect")];
-    let binary = candidates
-        .iter()
-        .find(|path| path.is_file())
-        .ok_or_else(|| "导入后没有找到 openconnect 可执行文件".to_string())?;
-
-    let (text, ok) = crate::process::run_with_timeout(binary, &["--version"], PROBE_TIMEOUT);
+    // 先探测：跑不起来就把原始输出带回去，别让用户猜
+    let (text, ok) = crate::process::run_with_timeout(&binary, &["--version"], PROBE_TIMEOUT);
     let version = parse_openconnect_version(&text);
     if !ok || version.is_empty() {
         return Err(format!(
-            "导入后校验失败，可能缺少依赖 DLL: {}",
+            "这份 openconnect 跑不起来（缺少依赖库或没有执行权限）: {}",
             text.trim().chars().take(200).collect::<String>()
         ));
     }
-    Ok(version)
+
+    let linked = apps::finder::link_binary(AppId::Openconnect, &binary, data_dir)?;
+
+    // 登记后再验一次软链本身：断链、权限问题要在这里暴露，不能留个坏副本给探测用
+    let (verify_text, verify_ok) =
+        crate::process::run_with_timeout(&linked, &["--version"], PROBE_TIMEOUT);
+    if !verify_ok || parse_openconnect_version(&verify_text).is_empty() {
+        let _ = std::fs::remove_file(&linked);
+        return Err(format!(
+            "登记后校验失败，已撤销: {}",
+            verify_text.trim().chars().take(200).collect::<String>()
+        ));
+    }
+    Ok(ImportedOpenconnect {
+        version,
+        path: binary.to_string_lossy().to_string(),
+    })
 }
 
 /// 删除程序托管的 openconnect
@@ -259,7 +304,7 @@ mod tests {
     #[test]
     fn source_suffix_labels_are_distinct() {
         assert_eq!(source_suffix("custom"), "（手动指定）");
-        assert_eq!(source_suffix("managed"), "（已导入）");
+        assert_eq!(source_suffix("managed"), "（已指定）");
         assert_eq!(source_suffix("bundled"), "（内置）");
         assert_eq!(source_suffix("system"), "");
         assert_eq!(source_suffix("path"), "");
@@ -373,5 +418,170 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&source);
         let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// 造一个能跑 `--version` 的假 openconnect（真跑一次，不依赖本机装没装）
+    #[cfg(unix)]
+    fn fake_openconnect(dir: &Path, version: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(dir).unwrap();
+        let path = dir.join("openconnect");
+        std::fs::write(
+            &path,
+            format!("#!/bin/sh\necho 'OpenConnect version {}'\n", version),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    fn temp_root(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("ws-oc-{}-{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    /// 核心行为：macOS 上「导入」是登记路径（软链），不是复制二进制
+    #[cfg(unix)]
+    #[test]
+    fn import_registers_path_instead_of_copying() {
+        let root = temp_root("import-link");
+        let source = fake_openconnect(&root.join("hb/bin"), "v9.99");
+        let data = root.join("data");
+
+        let imported = import_openconnect(&data, &source).unwrap();
+        assert_eq!(imported.version, "v9.99");
+        assert_eq!(
+            imported.path,
+            source.to_string_lossy().to_string(),
+            "要回显记住的位置"
+        );
+
+        let managed = apps::managed_dir(AppId::Openconnect, &data).join("openconnect");
+        let meta = std::fs::symlink_metadata(&managed).unwrap();
+        assert!(
+            meta.file_type().is_symlink(),
+            "托管副本必须是软链；复制二进制既多余又会撞权限（现场 Permission denied）"
+        );
+        assert_eq!(std::fs::read_link(&managed).unwrap(), source);
+        assert!(source.is_file(), "源文件必须原样保留");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 用户截图里框的是 `Cellar/openconnect/9.21`，这一层也必须能导入，
+    /// 并且软链要指到稳定的 `prefix/bin`（否则 brew 升级后断链）
+    #[cfg(unix)]
+    #[test]
+    fn import_accepts_homebrew_version_dir() {
+        let root = temp_root("import-cellar");
+        let prefix = root.join("hb");
+        let real = fake_openconnect(&prefix.join("Cellar/openconnect/9.21/bin"), "v9.21");
+        std::fs::create_dir_all(prefix.join("bin")).unwrap();
+        std::os::unix::fs::symlink(&real, prefix.join("bin/openconnect")).unwrap();
+        let data = root.join("data");
+
+        let imported =
+            import_openconnect(&data, &prefix.join("Cellar/openconnect/9.21")).unwrap();
+        assert_eq!(imported.version, "v9.21");
+        assert_eq!(
+            imported.path,
+            prefix
+                .join("bin/openconnect")
+                .to_string_lossy()
+                .to_string(),
+            "回显的位置要是稳定的 prefix/bin，不是带版本号的 Cellar 路径"
+        );
+
+        let managed = apps::managed_dir(AppId::Openconnect, &data).join("openconnect");
+        assert_eq!(
+            std::fs::read_link(&managed).unwrap(),
+            prefix.join("bin/openconnect"),
+            "软链要指向稳定的 prefix/bin，不能钉死带版本号的 Cellar 路径"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 跑不起来的二进制要当场报错，并且不能留下半截托管副本
+    #[cfg(unix)]
+    #[test]
+    fn import_reports_unrunnable_binary_and_leaves_nothing() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = temp_root("import-broken");
+        let dir = root.join("hb/bin");
+        std::fs::create_dir_all(&dir).unwrap();
+        let broken = dir.join("openconnect");
+        std::fs::write(&broken, "#!/bin/sh\necho 'dyld: missing library' >&2\nexit 1\n").unwrap();
+        std::fs::set_permissions(&broken, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let data = root.join("data");
+
+        let error = import_openconnect(&data, &broken).unwrap_err();
+        assert!(error.contains("跑不起来"), "实际: {}", error);
+        assert!(
+            !apps::managed_dir(AppId::Openconnect, &data)
+                .join("openconnect")
+                .exists(),
+            "失败时不能留下坏副本"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 端到端：先前「指定位置」登记过一份，后来 openconnect 换到了标准路径
+    ///
+    /// 点「检测」必须落到系统那份（`source == "system"`），登记的那份不再参与；
+    /// 界面上「已指定 openconnect + 路径」那行就是靠这个结果消失的。
+    #[cfg(unix)]
+    #[test]
+    fn detection_prefers_standard_install_over_registration() {
+        // 标准安装位置：本机没有就跳过（CI 上大概率没装），有但要先确认它真能跑
+        let standard = ["/opt/homebrew/bin/openconnect", "/usr/local/bin/openconnect", "/opt/local/bin/openconnect"]
+            .iter()
+            .map(PathBuf::from)
+            .find(|path| path.is_file());
+        let standard = match standard {
+            Some(path) => path,
+            None => return,
+        };
+        let (text, ok) = crate::process::run_with_timeout(&standard, &["--version"], PROBE_TIMEOUT);
+        if !ok || parse_openconnect_version(&text).is_empty() {
+            return;
+        }
+
+        let root = temp_root("detect-system-wins");
+        let data = root.join("data");
+        // 模拟「指定位置」登记：托管目录里有个指向自定义前缀的软链
+        let custom = fake_openconnect(&root.join("hb/bin"), "v0.0.1-custom");
+        let managed = apps::managed_dir(AppId::Openconnect, &data);
+        std::fs::create_dir_all(&managed).unwrap();
+        std::os::unix::fs::symlink(&custom, managed.join("openconnect")).unwrap();
+
+        let ctx = AppContext {
+            data_dir: Some(data),
+            ..Default::default()
+        };
+        let found = detect_all(&ctx, "");
+        let available: Vec<&ConnectorInfo> = found.iter().filter(|item| item.available).collect();
+        assert_eq!(
+            available.len(),
+            1,
+            "检测到第一份能用的就停，不该同时留着两份: {:?}",
+            found
+        );
+        assert_eq!(
+            available[0].source, "system",
+            "标准路径里有能跑的 openconnect 时，不再用「指定位置」登记的那份"
+        );
+        assert_eq!(available[0].path, standard.to_string_lossy().to_string());
+        assert!(!available[0].version.is_empty(), "要带上探测到的版本号");
+        assert!(
+            !managed.join("openconnect").exists(),
+            "登记的那份要被删掉：系统没了就回安装引导重新指定，不能偷偷顶着用"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

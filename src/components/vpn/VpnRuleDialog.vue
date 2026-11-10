@@ -17,9 +17,10 @@ const vpn = props.vpn
 
 /**
  * 只保留路由注入模式（规则模式的实际实现）能生效的类型：
- * 域名类靠系统按域名解析 + 本地转发器注入隧道路由，网段类直接注入隧道。
- * `DOMAIN-KEYWORD` / `PROCESS-NAME` / `DST-PORT` 没有数据面可用，做了也不生效，
- * 已从下拉里下架；历史配置里若还留着这种规则，列表里会打「不生效」标记。
+ * 域名类靠系统按域名解析 + 本地转发器注入隧道路由。
+ * `DOMAIN-KEYWORD` / `PROCESS-NAME` / `DST-PORT` 没有数据面可用，`IP-CIDR`
+ * 只能整段注入、做不到按网段排除，都已从下拉里下架；历史配置里若还留着
+ * 这些规则，列表里会打「不生效」标记，删掉即可。
  *
  * 顺序按「最常用在前」：域名后缀放第一个并设为默认 —— Windows 的 NRPT 精确匹配
  * 只覆盖裸域名，绝大多数场景要的是「这个域连同所有子域」。
@@ -27,7 +28,6 @@ const vpn = props.vpn
 const KIND_OPTIONS: { value: VpnRuleKind; label: string }[] = [
   { value: 'DOMAIN-SUFFIX', label: '域名后缀 (DOMAIN-SUFFIX)' },
   { value: 'DOMAIN', label: '完整域名 (DOMAIN)' },
-  { value: 'IP-CIDR', label: 'IP 网段 (IP-CIDR)' },
 ]
 
 /** 历史规则里可能还存着这些类型：能显示、能删，但不会再生效 */
@@ -85,7 +85,7 @@ function cancelEdit() {
   void nextTick(() => valueInput.value?.focus())
 }
 
-/** 新增或保存修改：先本地挡重复，再让后端校验格式（IP-CIDR 会顺手归一化） */
+/** 新增或保存修改：先本地挡重复，再让后端校验格式 */
 async function submitRule() {
   if (adding.value || saving.value) return
   const text = value.value.trim()
@@ -99,7 +99,7 @@ async function submitRule() {
   }
   adding.value = true
   try {
-    // 后端返回的是归一化后的写法（非 IP-CIDR 原样返回），校验失败会抛错
+    // 后端校验失败会抛错；域名规则原样返回
     const normalized = await vpn.validateRule(kind.value, text)
     const finalValue = (normalized || text).trim()
     if (hasDuplicate(finalValue)) {
@@ -282,7 +282,7 @@ async function closeDialog() {
 
         <div class="rule-list">
           <div v-if="rules.length === 0" class="rule-list-empty">
-            还没有规则。没有规则时所有流量都直连；在左边填好类型、内容和策略，点「添加规则」。
+            还没有规则。严格规则模式下只有这里命中的域名才会走 VPN，服务端下发的内网范围不会自动生效；「直连」规则可以当例外用（更具体的规则优先）。在左边填好类型、内容和策略，点「添加规则」。
           </div>
 
           <div

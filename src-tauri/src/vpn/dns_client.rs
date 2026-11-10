@@ -1,9 +1,8 @@
-//! 极简 DNS 客户端：给 fake-ip 连接补一次真实解析。
+//! 极简 DNS 客户端：构造 A 查询、从应答里取回 A 记录。
 //!
-//! 引擎把应用侧的 A 查询一律应答成 fake-ip，真正连接时才知道要连哪里。
-//! 这里只实现「发一个 A 查询、从应答里取回 A 记录」的最小闭环，
-//! 不依赖系统解析器 —— 系统 DNS 在 TUN 接管后指向的是我们自己的 fake-ip
-//! 应答，再走 `getaddrinfo` 会绕回捕获网卡形成递归。
+//! 分流需要在用户态主动查一次 VPN DNS（Windows 回退路径的后台解析、按域名
+//! 自检都走这里）。不能依赖系统解析器：NRPT 会把查询交回我们自己的转发器，
+//! 再走 `getaddrinfo` 就绕成递归。这里只实现最小闭环：发一个 A 查询、解析应答。
 
 use std::net::Ipv4Addr;
 
@@ -51,6 +50,42 @@ fn skip_name(packet: &[u8], mut pos: usize) -> Option<usize> {
                 }
             }
         }
+    }
+}
+
+/// 读第一个问题的名字（小写、去尾点）。
+///
+/// 转发器要靠它判断「这条查询属于哪个域名」，再决定要不要按应答注入 `/32`：
+/// 直连例外（`DOMAIN hlwapi.example.com → 直连`）的查询也会进到转发器
+/// （它在父级后缀的 resolver/NRPT 范围里），但它的地址不能被塞进隧道。
+///
+/// 问题段按 RFC 1035 不允许压缩指针，遇到就返回 `None`（调用方按旧行为处理）。
+pub fn parse_question_name(packet: &[u8]) -> Option<String> {
+    if packet.len() < 12 {
+        return None;
+    }
+    let mut labels: Vec<String> = Vec::new();
+    let mut pos = 12usize;
+    loop {
+        let len = *packet.get(pos)? as usize;
+        pos += 1;
+        if len == 0 {
+            break;
+        }
+        if len & 0xC0 != 0 {
+            return None;
+        }
+        let label = packet.get(pos..pos + len)?;
+        labels.push(String::from_utf8_lossy(label).to_ascii_lowercase());
+        pos += len;
+        if labels.len() > 128 {
+            return None;
+        }
+    }
+    if labels.is_empty() {
+        None
+    } else {
+        Some(labels.join("."))
     }
 }
 
@@ -175,6 +210,30 @@ mod tests {
         assert!(build_query("", 1).is_none());
         assert!(build_query("a..b", 1).is_none());
         assert!(build_query(&"a".repeat(64), 1).is_none());
+    }
+
+    #[test]
+    fn reads_question_name_from_query_and_answer() {
+        let query = build_query("HLWAPI.example.com.", 7).unwrap();
+        assert_eq!(
+            parse_question_name(&query).as_deref(),
+            Some("hlwapi.example.com")
+        );
+        let answer = response("oa.example.com", Ipv4Addr::new(10, 10, 3, 4));
+        assert_eq!(
+            parse_question_name(&answer).as_deref(),
+            Some("oa.example.com")
+        );
+    }
+
+    #[test]
+    fn question_name_is_none_for_junk() {
+        assert!(parse_question_name(&[]).is_none());
+        assert!(parse_question_name(&[0u8; 12]).is_none());
+        // 压缩指针出现在问题段：按约定不解析
+        let mut packet = build_query("a.com", 1).unwrap();
+        packet[12] = 0xC0;
+        assert!(parse_question_name(&packet).is_none());
     }
 
     #[test]

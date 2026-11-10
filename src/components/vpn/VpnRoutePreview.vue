@@ -41,6 +41,34 @@ const tunnelRows = computed(() => {
 })
 
 const hasRoutes = computed(() => props.status.routes.length > 0)
+
+/**
+ * 服务端下发的内网范围：只展示、不参与分流。
+ * 放在这里是为了让「规则空着却进得去内网」这类现象能从界面上直接对照出来。
+ */
+const scopeRows = computed(() => {
+  const scope = props.status.server_scope
+  const rows: { label: string; value: string }[] = []
+  if (scope?.domains?.length) {
+    rows.push({ label: '服务端下发域', value: scope.domains.join('  ') })
+  }
+  if (scope?.cidrs?.length) {
+    rows.push({ label: '服务端下发网段', value: scope.cidrs.join('  ') })
+  }
+  return rows
+})
+
+/** 不同模式下这句话的语义完全不同，不能写成一句固定的话 */
+const scopeNote = computed(() => {
+  switch (props.status.applied_mode) {
+    case 'global':
+      return '全局模式：所有流量都走 VPN，以上服务端范围仅供参考。'
+    case 'direct':
+      return '直连模式：不接管任何流量，以上服务端范围仅供参考。'
+    default:
+      return '严格规则模式：以上是服务端下发的内网范围，仅展示、不参与分流；只有规则命中才会走 VPN。'
+  }
+})
 </script>
 
 <template>
@@ -59,6 +87,14 @@ const hasRoutes = computed(() => props.status.routes.length > 0)
           <span class="info-label">{{ row.label }}</span>
           <span class="info-value mono">{{ row.value }}</span>
         </div>
+      </div>
+
+      <div v-if="scopeRows.length > 0" class="info-grid scope-grid">
+        <div v-for="row in scopeRows" :key="row.label" class="info-row">
+          <span class="info-label">{{ row.label }}</span>
+          <span class="info-value mono">{{ row.value }}</span>
+        </div>
+        <p class="scope-note">{{ scopeNote }}</p>
       </div>
 
       <div class="routes">
@@ -80,7 +116,7 @@ const hasRoutes = computed(() => props.status.routes.length > 0)
           </span>
         </div>
         <div v-if="!hasRoutes" class="preview-empty">
-          本次没有下发任何分流路由
+          本次没有规则命中，未接管任何流量
         </div>
       </div>
     </template>
@@ -115,6 +151,16 @@ const hasRoutes = computed(() => props.status.routes.length > 0)
   grid-template-columns: 1fr 1fr;
   gap: 4px 16px;
   margin-bottom: 12px;
+}
+.scope-grid {
+  padding-top: 8px;
+  border-top: 1px dashed var(--border-color);
+}
+.scope-note {
+  grid-column: 1 / -1;
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 4px;
 }
 .info-row {
   display: flex;

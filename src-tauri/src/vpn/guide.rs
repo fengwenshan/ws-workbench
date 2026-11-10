@@ -70,13 +70,16 @@ fn windows_guide(openconnect_available: bool) -> InstallGuide {
 fn macos_guide(openconnect_available: bool) -> InstallGuide {
     let mut steps = vec![step(
         "用 Homebrew 安装 openconnect",
-        "Apple Silicon 会装到 /opt/homebrew/bin，Intel 机器在 /usr/local/bin，两个位置本程序都会探测。",
+        "必须装在标准前缀：Apple Silicon 是 /opt/homebrew，Intel 机器是 /usr/local。\
+         本程序只自动识别这两个位置，装到自定义前缀（例如 ~/hb）不会被当成连接器。",
         "brew install openconnect",
     )];
     steps.push(step(
         "确认安装位置",
-        "如果 brew 装在了非标准前缀，到「设置」页找到 OpenConnect 这一项，用「手动指定」选一下即可。",
-        "which openconnect",
+        "brew --prefix 应输出 /opt/homebrew（Intel 机器是 /usr/local），\
+         which openconnect 应指向 <前缀>/bin/openconnect。\
+         已经装在其它前缀里的，用下面「指定位置」选中那个 openconnect 即可，不需要重装。",
+        "brew --prefix && which openconnect",
     ));
 
     InstallGuide {
@@ -117,7 +120,7 @@ fn linux_guide(openconnect_available: bool) -> InstallGuide {
             step(
                 "确认安装位置",
                 "如果装在了非标准前缀（例如 /usr/local 或自定义目录），\
-                 到「设置」页找到 OpenConnect 这一项，用「手动指定」选一下即可。",
+                 用下面「指定位置」选中那个 openconnect 即可，不需要重装。",
                 "which openconnect",
             ),
         ],
@@ -232,5 +235,33 @@ mod tests {
             .map(|os| build(*os, false).platform)
             .collect();
         assert_eq!(names, vec!["windows", "macos", "linux"]);
+    }
+
+    /// brew 装在自定义前缀（例如 ~/hb）时程序探测不到，引导必须先说清「必须装到标准前缀」，
+    /// 并把兜底指向真实存在的「指定位置」，不能再提已经删掉的「设置页手动指定」。
+    #[test]
+    fn macos_guide_requires_standard_prefix_and_real_fallback() {
+        let guide = build(Os::Macos, false);
+        let mut text = format!("{}\n{}", guide.title, guide.description);
+        for step in &guide.steps {
+            text.push_str(&format!("\n{}\n{}", step.title, step.detail));
+        }
+
+        assert!(text.contains("/opt/homebrew"), "缺少标准前缀地址: {}", text);
+        assert!(text.contains("自定义前缀"), "要点明自定义前缀不被识别: {}", text);
+        assert!(text.contains("指定位置"), "兜底入口名称要和界面按钮一致: {}", text);
+        assert!(!text.contains("设置"), "设置页里没有这个入口，不能再引导过去: {}", text);
+    }
+
+    /// Linux 引导同样不能指向不存在的设置项
+    #[test]
+    fn linux_guide_points_at_real_fallback() {
+        let guide = build(Os::Linux, false);
+        let mut text = String::new();
+        for step in &guide.steps {
+            text.push_str(&format!("\n{}\n{}", step.title, step.detail));
+        }
+        assert!(text.contains("指定位置"), "兜底入口名称要和界面按钮一致: {}", text);
+        assert!(!text.contains("设置"), "设置页里没有这个入口: {}", text);
     }
 }

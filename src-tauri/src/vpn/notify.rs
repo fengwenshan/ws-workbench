@@ -297,11 +297,9 @@ mod tests {
         let decoded = base64::engine::general_purpose::STANDARD
             .decode(encoded_command(&script))
             .expect("必须是合法 base64");
-        assert_eq!(decoded.len() % 2, 0);
-        let units: Vec<u16> = decoded
-            .chunks_exact(2)
-            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
-            .collect();
+        let (pairs, rest) = decoded.as_chunks::<2>();
+        assert!(rest.is_empty(), "UTF-16 字节数必须是偶数");
+        let units: Vec<u16> = pairs.iter().map(|pair| u16::from_le_bytes(*pair)).collect();
         assert_eq!(String::from_utf16(&units).unwrap(), script);
     }
 

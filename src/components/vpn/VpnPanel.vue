@@ -36,6 +36,16 @@ const profileDialogOpen = ref(false)
 const editingProfile = ref<VpnProfile | null>(null)
 const savingProfile = ref(false)
 const importHint = ref('')
+/** 提示语义：成功停留几秒自动收起；失败常驻，等下一次尝试再替换 */
+const importHintKind = ref<'success' | 'error'>('success')
+let importHintTimer: ReturnType<typeof setTimeout> | undefined
+
+function clearImportHintTimer() {
+  if (importHintTimer) {
+    clearTimeout(importHintTimer)
+    importHintTimer = undefined
+  }
+}
 
 const MODE_OPTIONS: Array<{
   value: VpnProxyMode
@@ -45,7 +55,8 @@ const MODE_OPTIONS: Array<{
   {
     value: 'rule',
     label: '规则',
-    description: '基于预设规则智能判断流量走向，只有规则列表里命中的流量才按列表中的走向处理。',
+    description:
+      '严格按规则分流：只有规则列表里命中的流量才走 VPN，未命中的一律直连；服务端下发的内网范围不会自动并入。',
   },
   {
     value: 'global',
@@ -265,14 +276,24 @@ async function confirmReconnect() {
   await vpn.connect(profile)
 }
 
+/** 指定成功后提示停留多久；失败提示不自动消失，否则用户还没看清原因就没了 */
+const IMPORT_HINT_MS = 6000
+
 async function handleImport() {
   try {
-    await vpn.importOpenconnect()
-    importHint.value = '导入完成，连接器列表已刷新'
+    const message = await vpn.importOpenconnect()
+    // 用户取消了文件选择：保持上一条提示（连同它的倒计时）不动
+    if (!message) return
+    clearImportHintTimer()
+    importHintKind.value = 'success'
+    importHint.value = `${message}，连接器列表已刷新`
+    importHintTimer = setTimeout(() => (importHint.value = ''), IMPORT_HINT_MS)
   } catch (err: any) {
-    importHint.value = `导入失败: ${err}`
+    clearImportHintTimer()
+    // 失败常驻：下一次指定成功或再次失败时才会被替换
+    importHintKind.value = 'error'
+    importHint.value = `指定失败: ${err}`
   }
-  setTimeout(() => (importHint.value = ''), 4000)
 }
 
 function openCreateProfile() {
@@ -463,6 +484,15 @@ watch(
             </div>
           </div>
 
+          <!-- 只有手动指定的 openconnect 才显示位置：系统默认路径是装好就有的，显示出来只是噪音 -->
+          <div v-if="vpn.manualConnector" class="connector-location">
+            <span class="connector-location-label">已指定 openconnect</span>
+            <code class="connector-location-path">{{ vpn.manualConnector.path }}</code>
+            <span v-if="vpn.manualConnector.version" class="connector-location-version">
+              {{ vpn.manualConnector.version }}
+            </span>
+          </div>
+
           <VpnInstallGuide
             v-if="vpn.noConnector"
             :guide="vpn.guide"
@@ -470,7 +500,9 @@ watch(
             @import="handleImport"
             @copy-command="(cmd: string) => vpn.pushLog('info', `已复制命令: ${cmd}`)"
           />
-          <p v-if="importHint" class="import-hint">{{ importHint }}</p>
+          <p v-if="importHint" class="import-hint" :class="`is-${importHintKind}`">
+            {{ importHint }}
+          </p>
 
           <!-- 代理模式：和 Clash 一样在规则/全局/直连之间切换 -->
           <section
@@ -876,6 +908,33 @@ watch(
 .import-hint {
   font-size: 12px;
   color: var(--primary);
+  line-height: 1.6;
+  /* 回显的是绝对路径，可能很长：允许任意位置折行，别把卡片撑变形 */
+  word-break: break-all;
+}
+.import-hint.is-error {
+  color: var(--danger);
+}
+/* 手动指定的 openconnect 位置：长期显示，路径再长也要能一眼看全 */
+.connector-location {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.connector-location-label {
+  white-space: nowrap;
+}
+.connector-location-path {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: var(--text-primary);
+  word-break: break-all;
+}
+.connector-location-version {
+  white-space: nowrap;
 }
 .card {
   border: 1px solid var(--border-color);

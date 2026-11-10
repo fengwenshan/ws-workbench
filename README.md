@@ -87,8 +87,9 @@ const canPack = computed(() => projectType.value === 'layui')
 
 连接器来源按平台区分：
 
-- **Windows 只认安装包内置的 openconnect**（`src-tauri/resources/apps/openconnect/openconnect.exe` + 同目录 `wintun.dll`）。不扫描注册表、常见安装目录或 PATH，也不提供「导入外部 openconnect」入口，避免把来源不明的二进制拉进提权进程。内置副本缺失时直接报错并提示重装。
-- **macOS** 按「手动指定 > 已导入副本 > 内置资源 > Homebrew / 常见目录 > PATH」查找。
+- **Windows 只认安装包内置的 openconnect**（`src-tauri/resources/apps/openconnect/openconnect.exe` + 同目录 `wintun.dll`）。不扫描注册表、常见安装目录或 PATH，也不提供「指定外部 openconnect」入口，避免把来源不明的二进制拉进提权进程。内置副本缺失时直接报错并提示重装。
+- **macOS** 按「专用路径 > 标准前缀 > 已登记的 openconnect > 内置资源 > PATH」查找。自动识别只覆盖标准前缀（Apple Silicon `/opt/homebrew/bin`、Intel `/usr/local/bin`，外加 `/opt/local/bin`）；`brew` 装在自定义前缀（例如 `~/hb`）时不会被自动识别，要用引导里的「指定位置」登记。反过来，**标准前缀里一旦出现能跑的 openconnect，就按系统默认处理，并直接删掉之前登记的旧路径** —— 界面上那行「已指定 openconnect + 路径」随之消失。留着旧登记只会在系统那份被卸载后悄悄顶上来，所以干脆不存：用户把 openconnect 从自定义前缀换到标准安装后点一次「检测」即可；将来系统那份没了，就回到安装引导让用户重新指定。
+- **「指定位置」在 macOS/Linux 上不复制二进制**，只在程序数据目录里建一个软链指向原来的可执行文件：Homebrew 的 openconnect 用绝对路径加载自己前缀里的动态库，拷出来的副本 `brew upgrade` 之后就会失配；而且复制要先读用户目录里的文件，自定义前缀经常被权限/隐私策略挡住（现场报过 `复制 openconnect 失败: Permission denied (os error 13)`）。软链只写不读，brew 升级后自动跟着走。选可执行文件、选 `bin` 目录、选 Cellar 的 `9.21` 版本目录三种都认，Cellar 路径会改指到稳定的 `prefix/bin`。登记成功后在引导卡片下方回显记住的**绝对路径**和版本号（自定义前缀名字五花八门，只能靠这行确认认的是哪个文件），提示停留 6 秒；失败提示一律常驻，不自动消失，免得用户还没看清原因就没了。之后这个位置会长期显示在详情区顶部（`已指定 openconnect` + 路径 + 版本）；**系统默认路径不显示** —— 装好就有的东西摆出来只是噪音，只有手动指定的那份才需要在界面上认领。
 
 判定可用性的方式是真正执行一次 `openconnect --version` 并解析版本号，而不是看文件存在与否 —— 解压后缺依赖 DLL 是很常见的情况，光看路径会把跑不起来的二进制当成可用。
 
@@ -98,17 +99,20 @@ const canPack = computed(() => projectType.value === 'layui')
 
 分流的配置单位是**规则集**，每个 VPN 配置绑定其中一个。
 
-- 规则类型只保留真正有数据面的三类：`DOMAIN`、`DOMAIN-SUFFIX`、`IP-CIDR`；出口只有 `DIRECT`（直连）与 `VPN` 两种
-- 路由注入模式没有「按连接判定」这一步：`VPN` 规则只负责把命中的域名 / 网段送进隧道，未命中的一律直连（所以 `DIRECT` 规则天然满足，写不写都一样）
-- 服务端下发的默认域名（`CISCO_DEF_DOMAIN`）与 split-include 网段会被自动并入，不用手工抄一遍
+- 规则类型只剩两类：`DOMAIN`、`DOMAIN-SUFFIX`；出口只有 `DIRECT`（直连）与 `VPN` 两种。`IP-CIDR` 已下线——网段路由只能整段注入、做不到按网段排除，留着只会让人配了以为生效
+- 路由注入模式没有「按连接判定」这一步：`VPN` 规则只负责把命中的域名送进隧道，未命中的一律直连
+- `DIRECT` 规则是**例外**：同一域名下取最具体的规则（后缀越长越具体；长度相同时 `DOMAIN` 比 `DOMAIN-SUFFIX` 具体）。所以 `DOMAIN-SUFFIX example.com → 走 VPN` 再加 `DOMAIN hlwapi.example.com → 直连`，就只有 hlwapi 不进隧道；规则在列表里的先后不影响判定。例外域名仍由本机转发器代答（答案来自 VPN DNS），只是不会被注入隧道路由
+  - 老配置里的 `IP-CIDR` 规则不会再生效：列表里标「不生效」，连接时这条规则会被跳过，删掉即可
+- 规则热更新不需要重连：改完点「完成」立刻重新布线。之前经本机转发器解析过的名字会按记下的 DNS 答案补注入 `/32`，所以即使应用缓存着旧答案、不再发查询，「改成走 VPN / 改成直连」也会立即生效
+- **严格规则模式**：走 VPN 的唯一依据是规则。服务端下发的默认域名（`CISCO_DEF_DOMAIN`）与 split-include 网段**不会自动并入**，只在「当前生效的分流」里展示（仅展示、不生效），方便把「服务端说内网在哪」和「客户端实际接管了什么」对照起来看；规则为空时不接管任何流量
 - 保存前校验规则语法，可以预览一条规则对指定「域名 / IP」的判定结果
 - 右侧规则列表可编辑（点编辑按钮或双击整行，原地改，顺序不变）、可逐条启用/禁用（默认启用）；禁用的规则不参与分流但保留在列表里。编辑一条被禁用的规则并保存后，它会变成启用
 
 三种代理模式，已连接时也能运行期切换（都是本地布线，点了就生效）：
 
-- **规则模式（默认）**：不抓包、不抢默认路由、不改系统 DNS。命中「走 VPN」的域名交给 VPN DNS 解析，解析出来的内网 IP 装 `/32` 路由指向隧道；`IP-CIDR` 与服务端 split-include 网段整段注入隧道。默认路由和系统 DNS 都不动，结构上不可能「一连上就全网断」。
+- **规则模式（默认）**：不抓包、不抢默认路由、不改系统 DNS。命中「走 VPN」的域名交给 VPN DNS 解析，解析出来的内网 IP 装 `/32` 路由指向隧道。默认路由和系统 DNS 都不动，结构上不可能「一连上就全网断」。服务端下发的内网范围只做展示（见上方「严格规则模式」），不参与布线。
   - **macOS**：写 `/etc/resolver/<域名>` + 本机 DNS 转发器（`127.0.0.1:53`），转发器把应答回给应用**之前**就装好 `/32`，没有时间差。
-  - **Windows**：用 NRPT（`Add-DnsClientNrptRule`）把这些域名的解析交给 VPN DNS；后台线程每 15 秒按域名向 VPN DNS 查 A 记录并注入 `/32`。Windows 没有「应答前注入」的用户态时机，所以按域名解析出的地址是连接后 1~2 秒补齐的；服务端下发的 split-include 网段不受影响（一开始就整段注入）。NRPT 不可用时退回「只给隧道网卡配 DNS」并在日志里说明原因。
+  - **Windows**：用 NRPT（`Add-DnsClientNrptRule`）把这些域名的解析交给本机 `127.0.0.1:53` 转发器（转发器在回包前装好 `/32`）；NRPT 指向 loopback 不生效时退回「NRPT 直连 VPN DNS + 后台解析」，再不行才退回「只给隧道网卡配 DNS」，每一步都会在日志里写明原因。回退路径下子域的首个请求可能失败一次，`/32` 补齐（约 3 秒）后重试即通。回退路径的缓存扫描同样会把看到的答案记进「DNS 答案账本」：热更新时 teardown 要清空 DNS Client 缓存，没有这份记账，删掉直连例外就又要等应用重新解析。
 - **全局模式**：`0.0.0.0/1` + `128.0.0.0/1` 两条半默认路由指向隧道，系统 DNS 改成 VPN DNS。装完立刻验证系统解析器还能解析，不通就整段回滚（路由与 DNS 一起还原）。本地直连网段比 `/1` 更具体，自动保持直连。
 - **直连模式**：只建隧道，不接管任何流量。
 
@@ -151,7 +155,7 @@ const canPack = computed(() => projectType.value === 'layui')
   整个生命周期跟着「连接」按钮走，状态只体现在日志里（`[启动]` / `[elevate]` 行）。
   注册失败（组策略禁止建任务）不影响本次连接，schtasks 的原始输出落在会话目录的
   `create-task.log` 里；这种机器只能每次连接弹一次系统授权框。
-- macOS：`osascript ... with administrator privileges`
+- macOS：`osascript ... with administrator privileges`。macOS 没有类似「注册计划任务免 UAC」的持久授权机制，所以**每次点「连接」都会弹一次系统授权框、要输一次密码**；断开后 worker 会自行收尾退出，不常驻 root 进程。这是刻意的取舍：少一次输密码就得常驻特权进程或写 sudoers 免密，安全面更大。
 
 > 换新包时**覆盖解压到同一个目录**，任务的 `/TR` 里 exe 路径不变，升级后也完全不会弹 UAC；
 > 解压到日期命名的新目录则会多一次 UAC（这一次会把任务挪到新路径）。
@@ -181,7 +185,7 @@ Windows 上的虚拟网卡由 Wintun 驱动提供（`src-tauri/resources/apps/op
 
 #### 安装引导
 
-openconnect 探测失败时，代理页给出按平台区分的安装引导：macOS/Linux 给可复制的安装命令加官方下载地址；Windows 只说明内置副本缺失并提示覆盖安装，不引导下载外部二进制。
+openconnect 探测失败时，代理页给出按平台区分的安装引导：macOS 明确要求 `brew` 装在标准前缀（`/opt/homebrew`，Intel 是 `/usr/local`）并给出可复制的安装命令与官方文档；Linux 给发行版安装命令；Windows 只说明内置副本缺失并提示覆盖安装，不引导下载外部二进制。已经装在自定义前缀里的用户走引导下方的「指定位置」，登记现有二进制即可，不需要重装。
 
 ### 系统
 
@@ -225,7 +229,7 @@ openconnect 探测失败时，代理页给出按平台区分的安装引导：ma
 
 显示运行环境（操作系统、架构、可执行文件后缀、是否需要提权、配置文件位置、各网卡的 MAC 与全部 IP —— 多 IP 逐条列出），以及附件实际落盘位置（可直接打开目录）。
 
-「用编辑器打开项目」与非 Windows 的 VPN 连接器探测共用同一套应用查找逻辑，优先级为专用路径 > 已导入副本 > 内置资源 > 注册表 > PATH；导入副本只对 openconnect 开放。Windows 的 VPN 探测是例外：只认安装包内置副本，不查注册表、安装目录或 PATH。macOS 与 Linux 下分别检查 `/Applications`、Homebrew 前缀以及 PATH 里的 `/usr/bin`、`/usr/local/bin`。
+「用编辑器打开项目」与非 Windows 的 VPN 连接器探测共用同一套应用查找逻辑，优先级为专用路径 > 标准安装位置 > 已登记的副本 > 内置资源 > PATH（Windows 上还有注册表，位置在标准安装位置之前）；其中「指定位置」入口只对 openconnect 开放（Windows 版用内置副本，不提供该入口）。Windows 的 VPN 探测是例外：只认安装包内置副本，不查注册表、安装目录或 PATH。macOS 与 Linux 下分别检查 `/Applications`、Homebrew 前缀以及 PATH 里的 `/usr/bin`、`/usr/local/bin`。
 
 ### 托盘
 
@@ -246,7 +250,7 @@ macOS 的应用菜单做了汉化，点 Dock 图标会把窗口重新显示出�
 | 桌面框架 | Tauri 2（`tauri` 开启 `tray-icon`、`image-png`、`macos-private-api`） |
 | 前端 | Vue 3.5 + TypeScript 5.6 + Vite 6；ant-design-vue 4 + Vditor 4（组件与图标按需自动引入） |
 | 后端 | Rust edition 2021，库名 `ws_workbench_lib` |
-| 数据面 | 路由注入（隧道 /32 / 网段路由 + 按域名 DNS），不抓包 |
+| 数据面 | 路由注入（隧道 /32 + 按域名 DNS），不抓包 |
 | 存储加密 | SM4-CBC + HMAC-SM3；主密钥由 macOS 钥匙串 / Windows DPAPI 托管 |
 | 插件 | dialog、shell、store、updater、process；clipboard-manager（剪贴板历史）、global-shortcut（默认 `⌘⇧V` 呼出，可在管理页改） |
 | 关键 crate | `ignore`、`zip`、`chrono`、`uuid`、`tempfile`、`sm4`、`hmac`、`cbc`、`nix` |
@@ -255,7 +259,7 @@ macOS 的应用菜单做了汉化，点 Dock 图标会把窗口重新显示出�
 
 - Node 22 与 pnpm（CI 固定 pnpm 10；`pnpm-lock.yaml` 为 9.0 格式）
 - Rust stable 工具链
-- 仅在需要 VPN 时：可用的 openconnect。Windows 必须使用 `src-tauri/resources/apps/openconnect/` 里的内置副本（安装包会一起打进去），macOS 建议 `brew install openconnect`
+- 仅在需要 VPN 时：可用的 openconnect。Windows 必须使用 `src-tauri/resources/apps/openconnect/` 里的内置副本（安装包会一起打进去），macOS 用 `brew install openconnect` 装到标准前缀（`/opt/homebrew`，Intel 是 `/usr/local`）；装在自定义前缀里的用引导里的「指定位置」登记一次
 - VPN 连接需要管理员授权，见「权限与进程拆分」；两个平台都用路由注入做规则分流，不抓包，macOS 用系统 utun，Windows 用内置 `wintun.dll`
 
 ## 开发
@@ -420,8 +424,8 @@ VPN 会话目录同时被主进程和提权 worker 使用，因此不做路径�
 - 打包只支持 Layui 项目
 - 相对路径含空格的文件会被跳过
 - 分流只处理 IPv4：域名解析可能返回 AAAA，IPv6 目标不进隧道、仍走系统默认路由
-- 域名分流只覆盖系统解析器（getaddrinfo）：自带 DoH/DoT 的应用不受控；它解析出的 IP 若命中 `IP-CIDR` 规则，照样能进隧道
-- Windows 上按域名解析出来的 `/32` 是后台轮询注入的，新地址最多晚约 15 秒生效；服务端下发的 split-include 网段不受影响（整段注入）
+- 域名分流只覆盖系统解析器（getaddrinfo）：自带 DoH/DoT 的应用不受控
+- Windows 上按域名解析出来的 `/32` 由本机转发器在回包前注入；NRPT 退回旧路径时最多晚约 3~15 秒生效。服务端下发的内网范围（默认域名 / split-include）只展示、不参与分流，所以不会再有「服务端一推就接管」的隐式路由
 - 规则与代理模式的改动都会热生效（worker 轮询 `rules.json` / `mode` 后重新布线），不需要断开重连
 - 系统清理的 Windows 运行时行为（注册表枚举、UAC 卸载、工作集/待机列表）只做了交叉编译检查，需按设计文档第 9 节的 Windows 清单实机验收
 - `~/.Trash` 内容受 TCC 保护，删除结果以「原路径消失 + trash API 成功」为准
