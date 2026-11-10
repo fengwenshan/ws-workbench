@@ -245,8 +245,19 @@ function handleQuickChoose(item: QuickAttachmentItem) {
   quickPreviewOpen.value = true;
 }
 
+/** 「打开方式 → DeepSeek」提示去设置时，切到设置页并定位资源卡片 */
+function onOpenSettings(event: Event) {
+  const detail = (event as CustomEvent<string>).detail;
+  selectTool("settings");
+  if (detail === "resources") {
+    setTimeout(() => window.dispatchEvent(new CustomEvent("ws-focus-resources")), 50);
+  }
+}
+
 onMounted(() => window.addEventListener("keydown", handleQuickKeydown));
 onUnmounted(() => window.removeEventListener("keydown", handleQuickKeydown));
+onMounted(() => window.addEventListener("ws-open-settings", onOpenSettings));
+onUnmounted(() => window.removeEventListener("ws-open-settings", onOpenSettings));
 
 // 新建分组 / 添加项目弹窗都是「先选目录、后弹窗」，打开后把焦点落到名称输入框（已带出目录名，全选便于直接改写）
 const groupNameInputEl = ref<{ focus: () => void; select?: () => void } | null>(
@@ -426,6 +437,44 @@ async function handleUpdateAction() {
     await restartApp();
   }
 }
+
+// ========== 托盘右键「检查更新」 ==========
+// Rust 侧 emit "tray-check-update"：切到设置页并立刻检查一次，结果用 antd message 提示。
+// 设置页与标题栏共用 useUpdater 的同一份状态，这里查到的结果两边都会同步刷新。
+let trayCheckUnlisten: UnlistenFn | null = null;
+
+async function handleTrayCheckUpdate() {
+  selectTool("settings");
+  if (updateBusy.value) {
+    message.info("正在更新，请稍候…");
+    return;
+  }
+  const found = await checkUpdate();
+  // 失败时 updateStatus 已经是 error，错误原因放在 updateError
+  if (!found && updateStatus.value === "error") {
+    message.error(`检查更新失败：${updateError.value || "未知错误"}`);
+    return;
+  }
+  if (found) {
+    message.success(`发现新版本 v${found.version}`);
+    return;
+  }
+  message.success("已是最新版本");
+}
+
+onMounted(async () => {
+  try {
+    trayCheckUnlisten = await listen("tray-check-update", () => {
+      void handleTrayCheckUpdate();
+    });
+  } catch {
+    // 事件 API 不可用（例如浏览器里调试）时不注册，不影响其他功能
+  }
+});
+onUnmounted(() => {
+  trayCheckUnlisten?.();
+  trayCheckUnlisten = null;
+});
 
 // 重命名分组（默认分组不允许重命名）
 async function handleRenameGroup(id: string, name: string) {
@@ -750,6 +799,7 @@ async function handlePack(project: any, asZip: boolean = false) {
         <!-- 设置工具 -->
         <div v-show="view === 'settings'" class="workspace-body">
           <SettingsPanel
+            :active="view === 'settings'"
             :default-upload-dir="config.default_upload_dir"
             :default-include="config.default_include"
             @update-default-upload-dir="handleSetDefaultUploadDir"

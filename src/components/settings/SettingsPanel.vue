@@ -6,6 +6,7 @@ import { ensureDir, getNetworkInfo, openDir, type NetworkInfo } from '@/api/syst
 import { platform } from '@/platform'
 import { pickDirectory } from '@/utils/dialog'
 import RulesEditor from '@/components/RulesEditor.vue'
+import ResourcePanel from '@/components/settings/ResourcePanel.vue'
 
 const props = defineProps<{
   defaultUploadDir: string | null
@@ -271,6 +272,8 @@ async function run(action: () => Promise<unknown>, failureLabel: string) {
         规则为空时视为未配置：除 <code>.</code>/<code>_</code> 开头的条目外全部打包。
       </p>
     </section>
+
+    <ResourcePanel :active="active" />
   </div>
 </template>
 

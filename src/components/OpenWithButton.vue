@@ -11,7 +11,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { message, Modal } from 'ant-design-vue'
 import {
   deepseekPluginStatus,
-  installDeepseekPlugin,
+  deepseekPluginUpdate,
   listOpenWithApps,
   openDeepseekApp,
   openDeepseekWorkspace,
@@ -77,83 +77,77 @@ function toggle() {
   open.value = !open.value
 }
 
-/** 弹「是否安装插件」确认：true=安装并继续打开工作区，false=直接打开 DeepSeek */
-function askInstall(status: DeepseekPluginStatus, action: string): Promise<boolean> {
-  return new Promise((resolve) => {
-    Modal.confirm({
-      title: `检测到 DeepSeek 还没装工作区插件，是否${action}？`,
-      content:
-        `装好之后，点「DeepSeek」会在左侧自动新建或选中对应工作区并打开空白新会话。` +
-        `插件一次性安装、离线、不改 DeepSeek 安装目录、首次安装会备份 profile 清单，` +
-        `装完需要退出并重新打开一次 DeepSeek 才生效。` +
-        `安装位置：${status.dsh_home}/profiles/desktop 与 ${status.dsh_home}/plugins/dsh-open-workspace。`,
-      okText: `${action}插件并打开工作区`,
-      cancelText: '直接打开 DeepSeek',
-      onOk: () => resolve(true),
-      onCancel: () => resolve(false),
-    })
-  })
-}
-
-/** DSH 首次启动才会生成 profile：确认后只打开 DeepSeek，让用户完成初始化 */
-function askOpenFirst(): Promise<boolean> {
-  return new Promise((resolve) => {
-    Modal.confirm({
-      title: 'DeepSeek 还没初始化',
-      content: '先打开一次 DeepSeek Harness，等它完成初始化后再回来点「DeepSeek」，就能直接打开工作区。',
-      okText: '先打开 DeepSeek',
-      cancelText: '取消',
-      onOk: () => resolve(true),
-      onCancel: () => resolve(false),
-    })
-  })
+/** 切到设置页并定位到资源卡片 */
+function openResourceSettings() {
+  window.dispatchEvent(new CustomEvent("ws-open-settings", { detail: "resources" }))
 }
 
 /** 「打开方式 → DeepSeek」的完整流程 */
 async function runDeepseek() {
-  let status = await deepseekPluginStatus()
-  // 1) 没装 DeepSeek：先提示去装，不尝试启动
+  const status = await deepseekPluginStatus()
   if (!status.app_installed) {
     Modal.warning({
-      title: '还没安装 DeepSeek Harness',
-      content: '请先安装 DeepSeek Harness 桌面版，打开一次完成初始化，再回来点「DeepSeek」。',
+      title: "还没安装 DeepSeek Harness",
+      content: "请先安装 DeepSeek Harness 桌面版，打开一次完成初始化，再回来点「DeepSeek」。",
     })
     return
   }
-  // 2) 装了但还没初始化过 profile：帮用户先打开一次
   if (!status.profile_ready) {
-    if (await askOpenFirst()) await openDeepseekApp()
+    const openIt = await new Promise<boolean>((resolve) => {
+      Modal.confirm({
+        title: "DeepSeek 还没初始化",
+        content: "先打开一次 DeepSeek Harness，等它完成初始化后再回来点「DeepSeek」。",
+        okText: "先打开 DeepSeek",
+        cancelText: "取消",
+        onOk: () => resolve(true),
+        onCancel: () => resolve(false),
+      })
+    })
+    if (openIt) await openDeepseekApp()
+    return
+  }
+  if (!status.plugin_installed) {
+    const toSettings = await new Promise<boolean>((resolve) => {
+      Modal.confirm({
+        title: "还没安装 DeepSeek 工作区插件",
+        content: "打开「设置 → 资源」下载安装后，再点一次「DeepSeek」就能直接打开工作区。",
+        okText: "打开设置",
+        cancelText: "取消",
+        onOk: () => resolve(true),
+        onCancel: () => resolve(false),
+      })
+    })
+    if (toSettings) openResourceSettings()
     return
   }
 
-  // 3) 没装插件/版本旧：二次确认；不装就只打开 DeepSeek，装完继续打开工作区
-  const action = status.plugin_installed ? '更新' : '安装'
-  let installedNow = false
-  if (!status.plugin_installed || status.needs_update) {
-    const installIt = await askInstall(status, action)
-    if (!installIt) {
-      await openDeepseekApp()
-      emit('log', 'info', `直接打开 DeepSeek（未${action}工作区插件）: ${props.path}`)
+  let update: Awaited<ReturnType<typeof deepseekPluginUpdate>> | null = null
+  try {
+    update = await deepseekPluginUpdate()
+  } catch (err) {
+    emit("log", "warn", `检查 DeepSeek 插件更新失败: ${err}`)
+  }
+  if (update?.update_available) {
+    const toSettings = await new Promise<boolean>((resolve) => {
+      Modal.confirm({
+        title: `插件有新版本 v${update?.latest_version}`,
+        content: `当前安装 v${status.installed_version}。可以先去「设置 → 资源」更新（重启 DeepSeek 生效），也可以现在直接打开。`,
+        okText: "去设置更新",
+        cancelText: "直接打开",
+        onOk: () => resolve(true),
+        onCancel: () => resolve(false),
+      })
+    })
+    if (toSettings) {
+      openResourceSettings()
       return
     }
-    status = await installDeepseekPlugin()
-    installedNow = true
-    message.success(`DeepSeek 工作区插件已${action}`)
-    emit('log', 'info', `DeepSeek 工作区插件已${action}: ${status.installed_version}`)
+  } else if (update?.error) {
+    emit("log", "warn", `查不到插件最新版本，按当前版本打开: ${update.error}`)
   }
 
-  // 4) 写请求 + 唤起；只有本次刚装/刚更新且 DSH 正开着才提示重启
-  const restartNeeded = installedNow && status.dsh_running
   await openDeepseekWorkspace(props.path)
-  emit('log', 'info', `用 DeepSeek 打开: ${props.path}`)
-  if (restartNeeded) {
-    Modal.info({
-      title: '重启 DeepSeek 后工作区才生效',
-      content:
-        '插件已就绪。请退出并重新打开 DeepSeek Harness：10 分钟内重启会自动打开这个目录；' +
-        '超过 10 分钟的话，重启后再点一次「DeepSeek」即可。',
-    })
-  }
+  emit("log", "info", `用 DeepSeek 打开: ${props.path}`)
 }
 
 /** 用指定应用打开当前目录：纯动作，不改变按钮上显示的应用 */

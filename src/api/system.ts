@@ -45,8 +45,6 @@ export interface DeepseekPluginStatus {
   profile_ready: boolean
   plugin_installed: boolean
   installed_version: string
-  bundled_version: string
-  needs_update: boolean
   dsh_running: boolean
 }
 
@@ -55,9 +53,42 @@ export function deepseekPluginStatus(): Promise<DeepseekPluginStatus> {
   return invoke<DeepseekPluginStatus>('deepseek_plugin_status')
 }
 
-/** 安装/更新插件（复制到 DSH profile + 改清单，离线、可回滚） */
-export function installDeepseekPlugin(): Promise<DeepseekPluginStatus> {
-  return invoke<DeepseekPluginStatus>('install_deepseek_plugin')
+/** 设置 → 资源：可下载资源的安装状态与远端版本 */
+export interface ResourceStatus {
+  id: string
+  name: string
+  kind: string
+  description: string
+  available: boolean
+  installed: boolean
+  installed_version: string | null
+  latest_version: string | null
+  update_available: boolean
+  error: string | null
+  note: string | null
+}
+
+export function resourceList(force = false): Promise<ResourceStatus[]> {
+  return invoke<ResourceStatus[]>('resource_list', { force })
+}
+
+export function resourceInstall(id: string): Promise<ResourceStatus> {
+  return invoke<ResourceStatus>('resource_install', { id })
+}
+
+export function resourceUninstall(id: string): Promise<ResourceStatus> {
+  return invoke<ResourceStatus>('resource_uninstall', { id })
+}
+
+/** 点 DeepSeek 时查插件是否有更新（远端检查，失败不阻塞） */
+export interface DeepseekPluginUpdate {
+  latest_version: string | null
+  update_available: boolean
+  error: string | null
+}
+
+export function deepseekPluginUpdate(): Promise<DeepseekPluginUpdate> {
+  return invoke<DeepseekPluginUpdate>('deepseek_plugin_update')
 }
 
 /** 写打开请求并唤起 DeepSeek（插件消费后新建/选中左侧工作区） */
