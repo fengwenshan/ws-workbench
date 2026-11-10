@@ -65,6 +65,7 @@ git clone --branch dsh-open-workspace-split \
   /Users/fengwenshan/wenshan/demo/dsh-open-workspace
 cd /Users/fengwenshan/wenshan/demo/dsh-open-workspace
 git checkout -b main
+git branch -D dsh-open-workspace-split
 git remote remove origin
 git remote add origin https://github.com/fengwenshan/dsh-open-workspace.git
 ls -la

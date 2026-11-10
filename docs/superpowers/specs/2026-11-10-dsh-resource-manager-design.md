@@ -159,7 +159,7 @@ note=「Chrome 插件管理规划中」）。
 6. 安装到 DSH：
    - 写 `$DSH_HOME/plugins/dsh-open-workspace/` 与
      `$DSH_HOME/profiles/desktop/node_modules/dsh-open-workspace/`；
-   - 合并 `$DSH_HOME/profiles/desktop/package.json` 的 `dependencies` 与 `dsh.bundles`
+   - 合并 `$DSH_HOME/profiles/desktop/package.json` 的 `dependencies` 与 `dsh.profile.bundles`
      （保留其它条目，重复则覆盖为 `link:../../plugins/dsh-open-workspace`）；
    - 首次修改前备份 `package.json.ws-workbench.bak`（已存在则不覆盖）。
 7. 返回安装后的 `ResourceStatus`；若检测到 DSH 正在运行，`note` 置为「需要重启 DeepSeek 生效」。
@@ -167,7 +167,7 @@ note=「Chrome 插件管理规划中」）。
 ### 7.4 卸载
 
 `resource_uninstall(id)`：删除两个插件目录，从 profile `package.json` 移除 `dsh-open-workspace`
-的 `dependencies` 与 `dsh.bundles` 条目（备份文件保留，不自动恢复）。重启 DSH 生效。
+的 `dependencies` 与 `dsh.profile.bundles` 条目（备份文件保留，不自动恢复）。重启 DSH 生效。
 
 ### 7.5 命令
 
