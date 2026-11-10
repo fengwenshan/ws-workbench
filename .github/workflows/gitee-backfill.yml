@@ -1,0 +1,53 @@
+name: Gitee Backfill
+
+# 手动补镜像：把「当前 main 清单对应的那个版本」从 GitHub 发行版再走一遍 Gitee 镜像，
+# 并把两份清单的下载地址改成 Gitee。
+#
+# 用途：某个版本已经发布、但当时还没接 Gitee（或者 gitee-sync 失败过）时，
+# 用它在 Actions 页面点一下补传，已经在用旧版本的老客户端下次检查更新
+# 就能直接从 Gitee 下包，不用等下一个版本。
+#
+# 前置：和 release.yml 一样，需要仓库密钥 GITEE_TOKEN、公开的 Gitee 仓库；
+# 本工作流跑在 main 上，所以要求 scripts/gitee-sync.mjs 已经提交进 main。
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: 从 GitHub 发行版下载当前版本的三个更新载荷
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION=$(node -p "JSON.parse(require('fs').readFileSync('updates/latest.json','utf8')).version")
+          TAG="v$VERSION"
+          echo "补镜像版本: $TAG"
+          mkdir -p release-assets
+          gh release download "$TAG" \
+            --pattern "ws-workbench-setup.exe" \
+            --pattern "ws-workbench_aarch64.app.tar.gz" \
+            --pattern "ws-workbench_x86_64.app.tar.gz" \
+            --dir release-assets --clobber
+          ls -la release-assets
+
+      - name: 镜像到 Gitee 并改写清单
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+          GITEE_REPO: ${{ vars.GITEE_REPO }}
+          GITEE_BRANCH: ${{ vars.GITEE_BRANCH }}
+        run: node scripts/gitee-sync.mjs --dir release-assets --manifest updates/latest.json

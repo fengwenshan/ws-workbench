@@ -23,9 +23,13 @@
  * 两个平台分别在各自可用的环境里执行即可：脚本会把本平台条目「合并」进
  * updates/latest.json，不会覆盖另一个平台。
  *
- * 发布全部走 GitHub：安装包作为发行版附件上传，更新清单提交到 updates/，
+ * GitHub 侧：安装包作为发行版附件上传，更新清单提交到 updates/，
  * 客户端从 raw.githubusercontent.com 上的固定文件读取清单，再按清单里的
  * github.com/<repo>/releases/download 地址下载安装包。
+ *
+ * Gitee 镜像不在这里做：三个平台的构建 job 并行跑，镜像要等安装包都齐了
+ * 才能开始，所以由 release.yml 里串行的 gitee-sync job 调 scripts/gitee-sync.mjs：
+ * 把安装包传到 Gitee 同名 tag 的发行版，再把两份清单的下载地址改写成 Gitee。
  */
 import { execFileSync } from 'node:child_process'
 import {

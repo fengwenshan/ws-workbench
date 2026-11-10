@@ -28,6 +28,13 @@ name: Release
 # releases/download 地址下载。GitHub 侧用 Actions 自动注入的 GITHUB_TOKEN，
 # 只依赖下面那句 permissions: contents: write。
 #
+# Gitee 镜像（国内下载加速）：最后一个 gitee-sync job 会把三个平台的更新载荷
+# 镜像到 Gitee 同名 tag 的发行版，并把两份清单里的下载地址改成 Gitee。
+# 客户端端点顺序是「Gitee 清单优先，GitHub 清单兜底」，见
+# src-tauri/tauri.conf.json 的 plugins.updater.endpoints。
+# 需要额外配一个仓库密钥 GITEE_TOKEN（Gitee 私人令牌，projects 权限），
+# 以及一个公开的 Gitee 仓库（默认 feng_wenshan/ws-workbench）。
+#
 # 关于提交回环：CI 提交更新清单时带上 [skip ci]，且本工作流只由 tag 触发，
 # 推回 main 的提交不会再次触发构建。
 #
@@ -239,3 +246,55 @@ jobs:
           path: release/*
           if-no-files-found: warn
           retention-days: 14
+
+  # 三个平台的包都齐了之后，串行做 Gitee 镜像（Gitee 侧只有一个写者，不并发）：
+  #   1. 建 tag vX.Y.Z + 同名发行版，把三个更新载荷传上去
+  #   2. 把 Gitee 仓库里 updates/latest.json 的下载地址改成 Gitee
+  #   3. 把 GitHub main 上的清单也改写成 Gitee 地址（老客户端只认 GitHub 端点，
+  #      改完它们升级时也能从 Gitee 下包）
+  # 客户端端点顺序见 src-tauri/tauri.conf.json：Gitee 清单优先，GitHub 清单兜底。
+  # 上传失败时对应平台保留 GitHub 地址，job 标记失败但清单仍是最新版本。
+  gitee-sync:
+    needs: [macos, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: 校验 tag 并计算版本号
+        id: version
+        run: |
+          REF="${GITHUB_REF_NAME}"
+          if ! printf '%s' "$REF" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::tag 必须是 vX.Y.Z 形式（例如 v1.0.17），当前: $REF"
+            exit 1
+          fi
+          VERSION="${REF#v}"
+          echo "value=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "本次发布版本：$VERSION"
+
+      - name: 下载三个平台的构建产物
+        uses: actions/download-artifact@v4
+        with:
+          pattern: installers-*
+          path: release-assets
+
+      # 仓库密钥 GITEE_TOKEN：Gitee → 设置 → 私人令牌（勾选 projects 仓库读写）
+      # 可选仓库变量：GITEE_REPO（默认 feng_wenshan/ws-workbench）、
+      #              GITEE_BRANCH（默认用 Gitee 仓库的默认分支）
+      - name: 镜像到 Gitee 并改写清单
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+          GITEE_REPO: ${{ vars.GITEE_REPO }}
+          GITEE_BRANCH: ${{ vars.GITEE_BRANCH }}
+        run: |
+          node scripts/gitee-sync.mjs \
+            --version "${{ steps.version.outputs.value }}" \
+            --dir release-assets
