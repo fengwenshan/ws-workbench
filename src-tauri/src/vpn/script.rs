@@ -201,9 +201,9 @@ if (reason == "connect") {
     report("vpngw", vpngw);
 
     // Server-pushed split-tunnel scope: default domain + split-include subnets.
-    // openconnect exposes them as CISCO_* environment variables. The worker
-    // turns the domain into a per-name DNS split and the subnets into tunnel
-    // routes, exactly like the macOS script does.
+    // openconnect exposes them as CISCO_* environment variables. Report them
+    // verbatim; the worker only records them for the panel (strict rule mode:
+    // routing is decided by user rules alone).
     report("defdomain", env("CISCO_DEF_DOMAIN") || "");
     report("splitexc", env("CISCO_SPLIT_EXC") || "0");
     var splitInc = parseInt(env("CISCO_SPLIT_INC") || "0", 10);
@@ -318,8 +318,7 @@ if [ "$reason" = "connect" ]; then
     report vpngw "${VPNGATEWAY:-}"
 
     # 服务端下发的「公司内网覆盖范围」：split-include 网段 + 默认域名。
-    # 这是判断「哪些流量属于公司」最权威的依据（比用户手写规则准），
-    # 所以原样回报给 worker：网段直接注入隧道，默认域名自动生成按域名分流解析。
+    # 原样回报给 worker；严格规则模式下它只进面板展示，分流仍只看用户规则。
     report defdomain "${CISCO_DEF_DOMAIN:-}"
     report splitexc "${CISCO_SPLIT_EXC:-0}"
     split_inc="${CISCO_SPLIT_INC:-0}"
@@ -431,16 +430,18 @@ fn escape_js_string(text: &str) -> String {
 pub fn read_log(path: &Path) -> Result<String, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("读取 {} 失败: {}", path.display(), e))?;
     if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE {
-        let units: Vec<u16> = bytes[2..]
-            .chunks_exact(2)
-            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        let (pairs, _) = bytes[2..].as_chunks::<2>();
+        let units: Vec<u16> = pairs
+            .iter()
+            .map(|pair| u16::from_le_bytes(*pair))
             .collect();
         return Ok(String::from_utf16_lossy(&units));
     }
     if bytes.len() >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF {
-        let units: Vec<u16> = bytes[2..]
-            .chunks_exact(2)
-            .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+        let (pairs, _) = bytes[2..].as_chunks::<2>();
+        let units: Vec<u16> = pairs
+            .iter()
+            .map(|pair| u16::from_be_bytes(*pair))
             .collect();
         return Ok(String::from_utf16_lossy(&units));
     }
@@ -553,8 +554,9 @@ mod tests {
 
     #[test]
     fn windows_script_reports_server_split_scope() {
-        // 和 macOS 脚本一致：服务端下发的默认域名 + split-include 网段必须回报，
-        // 否则 Windows 侧只能靠用户手写规则，漏写一条就少覆盖一片内网。
+        // 和 macOS 脚本一致：服务端下发的默认域名 + split-include 网段必须回报。
+        // 严格规则模式下它们只用于面板展示，丢了不影响分流，但排查时就没法
+        // 对照「服务端声明的内网范围」和「客户端实际接管了什么」。
         let script = windows_script(&ctx());
         assert!(script.contains(r#"report("defdomain", env("CISCO_DEF_DOMAIN") || "");"#));
         assert!(script.contains(r#"report("splitexc", env("CISCO_SPLIT_EXC") || "0");"#));

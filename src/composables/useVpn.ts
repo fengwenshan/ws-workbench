@@ -2,7 +2,8 @@ import { ref, computed, onMounted, onUnmounted, reactive, watch, type Ref } from
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import type { AppConfig, LogEntry, LogLevel } from '@/types'
-import { pickDirectory } from '@/utils/dialog'
+import { pickDirectory, pickFile } from '@/utils/dialog'
+import { platform } from '@/platform'
 import { nowIso, timeLabel } from '@/utils/time'
 import type {
   ConnectorInfo,
@@ -19,7 +20,17 @@ import type {
   VpnSnapshotPayload,
   VpnStatus,
 } from '@/types/vpn'
-import { BUSY_PHASES } from '@/types/vpn'
+import { BUSY_PHASES, RETIRED_RULE_KINDS } from '@/types/vpn'
+
+const RETIRED_KINDS: readonly string[] = RETIRED_RULE_KINDS
+
+/**
+ * 已下线的规则类型（IP-CIDR 等）不参与数据面，留着只会让后端整体校验失败。
+ * 从配置里读出来时就剔掉；界面仍能看到它们并手动删除。
+ */
+function usableRules(rules: VpnRule[]): VpnRule[] {
+  return rules.filter((rule) => !RETIRED_KINDS.includes(rule.kind))
+}
 
 /** 后端事件名，与 Rust 侧 vpn/commands.rs 保持一致 */
 const EVENT_STATUS = 'vpn-status'
@@ -132,6 +143,17 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
     () => activeConnectors.value.find((c) => c.kind === 'openconnect') ?? null,
   )
   const noConnector = computed(() => activeConnectors.value.length === 0)
+  /**
+   * 手动指定的 openconnect（配置里的专用路径，或「指定位置」登记的那份）。
+   *
+   * 只有它需要在界面上显示路径：系统默认路径（Homebrew 标准前缀、PATH）是安装好就有的，
+   * 显示出来只是噪音；而自定义前缀叫什么名字都可能，不显示就不知道程序认的是哪个文件。
+   */
+  const manualConnector = computed<ConnectorInfo | null>(() => {
+    const connector = bestConnector.value
+    if (!connector) return null
+    return connector.source === 'custom' || connector.source === 'managed' ? connector : null
+  })
   const phaseBusy = computed(() => BUSY_PHASES.includes(status.value.phase))
   const isConnected = computed(() => status.value.phase === 'connected')
 
@@ -203,14 +225,25 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
     }
   }
 
-  async function importOpenconnect() {
-    const picked = await pickDirectory()
-    if (!picked) return
+  /**
+   * 指定已有的 openconnect 运行位置（macOS/Linux 上就是登记路径，不复制文件）。
+   *
+   * macOS 的 openconnect 是单个可执行文件，直接选文件；Windows 版用的是安装包内置
+   * 副本，走不到这里，真要选也是选目录（要连带同目录的 DLL）。
+   *
+   * 返回值是后端给的提示文案（里面带登记到的绝对路径），用户取消选择时返回空串。
+   */
+  async function importOpenconnect(): Promise<string> {
+    const picked = platform.is_windows
+      ? await pickDirectory()
+      : await pickFile({ title: '选择 openconnect 可执行文件' })
+    if (!picked) return ''
     const message = await invoke<string>('vpn_import_openconnect', {
       sourceDir: picked,
     })
     pushLog('success', message)
     await refreshConnectors()
+    return message
   }
 
   async function removeManagedOpenconnect() {
@@ -274,7 +307,7 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
     try {
       const mode = target.proxy_mode ?? 'rule'
       // 规则来自配置自身；全局/直连模式不把规则交给后端参与判定
-      const rules = mode === 'rule' ? (target.rules ?? []) : []
+      const rules = mode === 'rule' ? usableRules(target.rules ?? []) : []
       // 规则模式没命中就走直连；全局模式全部走隧道，直连模式全部直连
       const defaultPolicy = mode === 'global' ? 'VPN' : 'DIRECT'
       if (mode === 'rule' && !rules.some((rule) => rule.enabled)) {
@@ -349,7 +382,7 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
     if (!isConnected.value) return 'none'
     const shared = await invoke<boolean>('vpn_switch_profile', {
       profile,
-      rules: profile.rules ?? [],
+      rules: usableRules(profile.rules ?? []),
       defaultPolicy: profile.rules_default_policy ?? 'DIRECT',
     })
     if (!shared) return 'reconnect'
@@ -503,7 +536,7 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
     // 同通道切换后两者会不同，推错对象会把别人的规则顶上去。
     if (!isConnected.value || policyProfileId.value !== profile.id) return
     await invoke('vpn_push_rules', {
-      rules: profile.rules ?? [],
+      rules: usableRules(profile.rules ?? []),
       defaultPolicy: profile.rules_default_policy ?? 'DIRECT',
     })
     // 后端写完后 worker 约 200ms 轮询到；给界面一个能看见的落点，
@@ -550,18 +583,17 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
   /**
    * 预览一条输入会走哪。
    *
-   * 路由注入模式下没有按连接分流，端口/进程都不参与判定，只认域名和网段。
+   * 路由注入模式下没有按连接分流，端口/进程都不参与判定，只看域名。
    */
   async function previewRule(
     rules: VpnRule[],
     defaultPolicy: VpnPolicy,
-    probe: { domain?: string; ip?: string },
+    domain: string,
   ): Promise<VpnPolicy> {
     const verdict = await invoke<string>('vpn_preview_rules', {
-      rules,
+      rules: usableRules(rules),
       defaultPolicy,
-      domain: probe.domain ?? null,
-      ip: probe.ip ?? null,
+      domain: domain || null,
     })
     return verdict as VpnPolicy
   }
@@ -650,6 +682,7 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
     connectors,
     activeConnectors,
     bestConnector,
+    manualConnector,
     noConnector,
     status,
     elevation,

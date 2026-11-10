@@ -248,18 +248,23 @@ pub fn vpn_detect_connectors(
     )
 }
 
-/// 从用户选定的目录里导入一份 openconnect（含同目录的 DLL），放进程序自管目录。
+/// 记住用户指定的 openconnect 运行位置。
 ///
-/// 这样换机器时只要指一下已有的 openconnect 目录即可，不需要管理员权限，
-/// 也不用改动安装目录。
+/// 传进来的可能是可执行文件本身、它所在的目录，或 Homebrew 的 Cellar 版本目录，
+/// 由 `detect::import_openconnect` 统一解析。macOS/Linux 上不复制二进制，
+/// 只在程序数据目录里登记一个软链；Windows 版用安装包内置副本，直接报不支持。
 #[tauri::command]
 pub fn vpn_import_openconnect(app: AppHandle, source_dir: String) -> Result<String, String> {
     let data_dir = app
         .path()
         .app_data_dir()
         .map_err(|e| format!("无法获取应用数据目录: {}", e))?;
-    let version = detect::import_openconnect(&data_dir, std::path::Path::new(&source_dir))?;
-    Ok(format!("已导入 OpenConnect {}", version))
+    let imported = detect::import_openconnect(&data_dir, std::path::Path::new(&source_dir))?;
+    // 位置一定要回显：自定义前缀叫什么名字都行，用户只能靠这行确认程序认的是哪个文件
+    Ok(format!(
+        "已记住 OpenConnect {} 的位置：{}",
+        imported.version, imported.path
+    ))
 }
 
 #[tauri::command]
@@ -269,7 +274,7 @@ pub fn vpn_remove_managed_openconnect(app: AppHandle) -> Result<String, String> 
         .app_data_dir()
         .map_err(|e| format!("无法获取应用数据目录: {}", e))?;
     detect::remove_managed_openconnect(&data_dir)?;
-    Ok("已移除导入的 OpenConnect".to_string())
+    Ok("已移除登记的 OpenConnect 位置".to_string())
 }
 
 #[tauri::command]
@@ -290,9 +295,6 @@ pub fn validate_rule_input(kind: &str, value: &str) -> Result<(), String> {
         return Err("匹配值不能为空".to_string());
     }
     match kind {
-        RuleKind::IpCidr => {
-            crate::vpn::route::normalize_cidr(value)?;
-        }
         RuleKind::Domain | RuleKind::DomainSuffix => {
             crate::vpn::split::normalize_domain(value)
                 .ok_or_else(|| format!("不是合法域名：{}", value))?;
@@ -301,54 +303,39 @@ pub fn validate_rule_input(kind: &str, value: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// 校验单条规则并回填规范化后的匹配值（`IP-CIDR` 会规范化网络地址）。
+/// 校验单条规则；域名规则原样返回（不再有需要规范化的网段写法）。
 #[tauri::command]
 pub fn vpn_validate_rule(kind: String, value: String) -> Result<String, String> {
     validate_rule_input(&kind, &value)?;
-    Ok(match crate::vpn::rule_engine::RuleKind::parse(&kind)? {
-        crate::vpn::rule_engine::RuleKind::IpCidr => crate::vpn::route::normalize_cidr(&value)?,
-        _ => value,
-    })
+    Ok(value)
 }
 
-/// 预览一条输入会走哪：只看「域名/网段是否命中走 VPN 的规则」。
+/// 预览一条输入会走哪：和真实数据面共用同一套判定（[`SplitPlan::tunnels`]）。
 ///
 /// 早期这里按连接匹配（端口、进程都能参与），那是捕获引擎时代的语义；
-/// 现在 macOS 走路由注入，能不能进隧道只取决于域名和网段，所以参数也只剩这两个。
+/// 现在 macOS 走路由注入，能不能进隧道只取决于域名（`IP-CIDR` 已下线）。
+/// 直连例外在预览里必须显示 DIRECT——用户配了
+/// `DOMAIN-SUFFIX example.com → 走 VPN` + `DOMAIN hlwapi.example.com → 直连`，
+/// 预览还说 VPN 的话，他会以为规则没生效。
+pub(crate) fn preview_verdict(
+    rules: &[VpnRule],
+    default_policy: &str,
+    domain: Option<&str>,
+) -> Result<String, String> {
+    let plan = crate::vpn::split::plan(rules, default_policy);
+    if let Some(domain) = domain.map(str::trim).filter(|d| !d.is_empty()) {
+        return Ok(if plan.tunnels(domain) { "VPN" } else { "DIRECT" }.to_string());
+    }
+    Err("请提供要预览的域名".to_string())
+}
+
 #[tauri::command]
 pub fn vpn_preview_rules(
     rules: Vec<VpnRule>,
     default_policy: String,
     domain: Option<String>,
-    ip: Option<String>,
 ) -> Result<String, String> {
-    let plan = crate::vpn::split::plan(&rules, &default_policy);
-    if let Some(domain) = domain.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
-        let name = domain.trim_end_matches('.').to_ascii_lowercase();
-        let hit = plan.domains.iter().any(|suffix| {
-            name == *suffix || name.ends_with(&format!(".{}", suffix))
-        });
-        return Ok(if hit { "VPN" } else { "DIRECT" }.to_string());
-    }
-    if let Some(ip) = ip.as_deref().map(str::trim).filter(|i| !i.is_empty()) {
-        let addr: std::net::Ipv4Addr = ip
-            .parse()
-            .map_err(|_| format!("IP 不合法：{}", ip))?;
-        let hit = plan.cidrs.iter().any(|cidr| {
-            crate::vpn::route::parse_cidr(cidr)
-                .map(|(net, prefix)| {
-                    let mask = if prefix == 0 {
-                        0
-                    } else {
-                        u32::MAX << (32 - prefix)
-                    };
-                    (u32::from(addr) & mask) == net
-                })
-                .unwrap_or(false)
-        });
-        return Ok(if hit { "VPN" } else { "DIRECT" }.to_string());
-    }
-    Err("请提供要预览的域名或 IP".to_string())
+    preview_verdict(&rules, &default_policy, domain.as_deref())
 }
 
 // ============================== 提权 ==============================
@@ -809,7 +796,7 @@ pub async fn vpn_connect(
                     // 而主进程其实好好的——这个文件每 2s 被重写一次，杀软扫描、
                     // 磁盘瞬时占用都会让某一次写失败。
                     failures += 1;
-                    if failures == 1 || failures % 15 == 0 {
+                    if failures == 1 || failures.is_multiple_of(15) {
                         heartbeat.append_log(&format!(
                             "[心跳] 第 {} 次刷新失败，继续重试: {}",
                             failures, err
@@ -1378,8 +1365,9 @@ mod tests {
     fn validates_the_three_live_kinds() {
         assert!(validate_rule_input("DOMAIN", "oa.example.com").is_ok());
         assert!(validate_rule_input("DOMAIN-SUFFIX", "example.com").is_ok());
-        assert!(validate_rule_input("IP-CIDR", "10.0.0.0/8").is_ok());
-        assert!(validate_rule_input("IP-CIDR", "10.0.0.0/33").is_err());
+        // IP-CIDR 已下线：入参校验必须明确拒绝，而不是悄悄放行
+        assert!(validate_rule_input("IP-CIDR", "10.0.0.0/8").is_err());
+        assert!(validate_rule_input("10.0.0.0/8", "10.0.0.0/8").is_err());
         assert!(validate_rule_input("DOMAIN", "").is_err());
         assert!(validate_rule_input("bogus", "x").is_err());
         // 退役的三种类型必须明确报错，而不是静默通过
@@ -1506,6 +1494,57 @@ mod tests {
         assert_eq!(
             decide_switch(Some(""), Some("abc")),
             SwitchDecision::NeedsReconnect
+        );
+    }
+
+    fn rule_of(kind: &str, value: &str, policy: &str) -> VpnRule {
+        VpnRule {
+            id: "r".to_string(),
+            kind: kind.to_string(),
+            value: value.to_string(),
+            policy: policy.to_string(),
+            remark: String::new(),
+            enabled: true,
+        }
+    }
+
+    /// 预览要和数据面同一套判定：直连例外不能被预览成 VPN。
+    #[test]
+    fn preview_shows_direct_for_exceptions() {
+        let rules = vec![
+            rule_of("DOMAIN-SUFFIX", "example.com", "VPN"),
+            rule_of("DOMAIN", "hlwapi.example.com", "DIRECT"),
+        ];
+        assert_eq!(
+            preview_verdict(&rules, "DIRECT", Some("hlwapi.example.com")).unwrap(),
+            "DIRECT"
+        );
+        assert_eq!(
+            preview_verdict(&rules, "DIRECT", Some("oa.example.com")).unwrap(),
+            "VPN"
+        );
+        assert_eq!(
+            preview_verdict(&rules, "DIRECT", Some("a.hlwapi.example.com")).unwrap(),
+            "VPN",
+            "完整域名例外只作用于它自己"
+        );
+        assert!(preview_verdict(&rules, "DIRECT", None).is_err(), "没有域名就没什么可预览");
+    }
+
+    /// `IP-CIDR` 已下线：老配置里留着它时，预览与校验都要明确报错，
+    /// 不能悄悄当成「没命中」。
+    #[test]
+    fn retired_ip_cidr_is_rejected_everywhere() {
+        let rules = vec![
+            rule_of("DOMAIN-SUFFIX", "example.com", "VPN"),
+            rule_of("IP-CIDR", "10.10.0.0/16", "VPN"),
+        ];
+        assert!(validate_rule_input("IP-CIDR", "10.10.0.0/16").is_err());
+        assert!(validate_rule_set(&rules, "DIRECT").is_err());
+        // 预览不因为存在一条已下线的规则就罢工：那条不参与判定，域名照旧可预览
+        assert_eq!(
+            preview_verdict(&rules, "DIRECT", Some("10.10.3.7")).unwrap(),
+            "DIRECT"
         );
     }
 }

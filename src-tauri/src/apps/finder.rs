@@ -252,7 +252,26 @@ fn known_install_candidates(id: AppId, names: &[&str]) -> Vec<(PathBuf, String)>
     out
 }
 
-/// 按给定的文件名列表，把六条来源的候选汇总起来（已去重，保持优先级顺序）
+/// 候选来源的优先级：数字小的先算数，同来源内部保持原有顺序（稳定排序）。
+///
+/// `managed` 排在 `system` 后面是有意的。「指定位置」登记的那份是给**自定义前缀兜底**的；
+/// 一旦标准安装位置里出现了能跑的 openconnect（用户后来把 brew 装到 /opt/homebrew，
+/// 或者干脆从自定义前缀换成了标准安装），就该改用系统那份、并把它当系统默认 ——
+/// 不能让旧登记一直顶在前面。现场就遇到过：先手动指定 `~/hb`，后来装到标准前缀，
+/// 点「检测」仍然显示「已指定 …/.hb/bin/openconnect」。
+fn source_priority(source: &str) -> u8 {
+    match source {
+        "custom" => 0,
+        // 注册表条目和固定安装位置是同一档「系统里装好的」；同档按收集顺序排（稳定排序）
+        "system" | "registry" => 1,
+        "managed" => 2,
+        "bundled" => 3,
+        // path 以及将来的其它来源
+        _ => 4,
+    }
+}
+
+/// 按给定的文件名列表，把六条来源的候选汇总起来（已去重，按来源优先级排序）
 fn collect(id: AppId, ctx: &AppContext, names: &[&str]) -> Vec<(PathBuf, String)> {
     let mut collected: Vec<(PathBuf, String)> = Vec::new();
 
@@ -269,6 +288,10 @@ fn collect(id: AppId, ctx: &AppContext, names: &[&str]) -> Vec<(PathBuf, String)
     for found in search_path(names) {
         collected.push((found, "path".to_string()));
     }
+
+    // 上面是「按来源分批收集」，这里统一按来源优先级排一次：分批的顺序不等于最终优先级，
+    // 尤其「已登记」必须排在标准安装位置之后，否则系统装好之后旧登记还会被优先探测到。
+    collected.sort_by_key(|(_, source)| source_priority(source));
 
     dedup(collected)
 }
@@ -479,6 +502,147 @@ pub fn import_from_dir(id: AppId, source_dir: &Path, data_dir: &Path) -> Result<
     }
 
     Ok(primary.to_string_lossy().to_string())
+}
+
+/// 把用户「选中」的路径解析成真正的可执行文件。
+///
+/// macOS/Linux 上的「导入」就是**指定已有 openconnect 的运行位置**，不复制文件。
+/// 用户会怎么选都得认，现场就遇到三种：
+/// - 直接选中可执行文件本身（`.../bin/openconnect`）；
+/// - 选中它所在的目录（`.../bin`）；
+/// - 选中 Homebrew Cellar 的版本目录（`.../Cellar/openconnect/9.21`，可执行文件在 `bin/` 里）。
+///
+/// 只在这些形态里找，不做全盘搜索：选错目录宁可报错，也不要随手指到一个八竿子打不着的文件。
+#[cfg(unix)]
+pub fn resolve_binary(id: AppId, source: &Path) -> Result<PathBuf, String> {
+    // 用 metadata（跟随软链）：Homebrew 的 `<prefix>/bin/openconnect` 本身就是软链，
+    // 用 symlink_metadata 会把软链判成「既不是文件也不是目录」。
+    let metadata = match std::fs::metadata(source) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Err(format!("路径不存在: {}（可能是指向已卸载版本的断链）", source.display()))
+        }
+        Err(err) => {
+            return Err(format!(
+                "无法访问 {}: {}（若被 macOS 隐私保护拦截，到「系统设置 → 隐私与安全性 → \
+                 完全磁盘访问权限」给本程序授权后重试）",
+                source.display(),
+                err
+            ))
+        }
+    };
+
+    let known_names = id.executable_names();
+    if metadata.is_file() {
+        let name = source.file_name().and_then(|value| value.to_str()).unwrap_or("");
+        if !known_names.iter().any(|known| known.eq_ignore_ascii_case(name)) {
+            return Err(format!(
+                "选中的不是 {} 可执行文件: {}（应选 {} 本身，或它所在的目录）",
+                id.as_str(),
+                source.display(),
+                known_names.join(" / ")
+            ));
+        }
+        return Ok(source.to_path_buf());
+    }
+
+    if !metadata.is_dir() {
+        return Err(format!("既不是文件也不是目录: {}", source.display()));
+    }
+
+    // 目录：直接子项 → bin/ 子目录 → 再往下浅搜一层（版本目录里常见 bin/openconnect）
+    for name in known_names {
+        let direct = source.join(name);
+        if direct.is_file() {
+            return Ok(direct);
+        }
+        let in_bin = source.join("bin").join(name);
+        if in_bin.is_file() {
+            return Ok(in_bin);
+        }
+    }
+    for name in known_names {
+        if let Some(found) = find_file_below(source, name, 2)
+            .into_iter()
+            .find(|path| path.is_file())
+        {
+            return Ok(found);
+        }
+    }
+
+    Err(format!(
+        "没有找到 {}：请选可执行文件本身、它所在的目录，或安装目录（例如 Homebrew 的 9.21 版本目录）",
+        known_names.join(" / ")
+    ))
+}
+
+/// 把 Homebrew Cellar 里的版本路径改指到稳定的 `prefix/bin/`。
+///
+/// `.../Cellar/openconnect/9.21/bin/openconnect` 里的版本号会随 `brew upgrade` 变，
+/// 直接软链过去升级一次就断链；`prefix/bin/openconnect` 是 brew 自己维护的稳定软链。
+/// 不是 Cellar 结构（自定义目录、手工编译的二进制）就原样返回。
+#[cfg(unix)]
+pub fn stable_binary_path(binary: &Path) -> PathBuf {
+    let name = match binary.file_name() {
+        Some(name) => name,
+        None => return binary.to_path_buf(),
+    };
+    let mut dir = binary.parent();
+    while let Some(current) = dir {
+        let is_cellar = current
+            .file_name()
+            .and_then(|part| part.to_str())
+            .map(|part| part == "Cellar")
+            .unwrap_or(false);
+        if is_cellar {
+            if let Some(prefix) = current.parent() {
+                let stable = prefix.join("bin").join(name);
+                if stable.is_file() {
+                    return stable;
+                }
+            }
+            break;
+        }
+        dir = current.parent();
+    }
+    binary.to_path_buf()
+}
+
+/// 在托管目录里登记一个指向现有二进制的软链（macOS/Linux 不复制文件）。
+///
+/// 为什么不学 Windows 那样复制：
+/// - Homebrew 的 openconnect 通过绝对路径加载自己前缀里的动态库，拷出来的副本只是
+///   碰巧能跑，`brew upgrade` 之后依赖就失配；
+/// - 复制要先读用户目录里的文件，而自定义前缀恰好容易被权限/隐私策略挡住 ——
+///   现场报的就是 `复制 openconnect 失败: Permission denied (os error 13)`。
+///
+/// 软链只写不读源文件，登记完再做一次 `--version` 校验，断链和权限问题当场暴露。
+#[cfg(unix)]
+pub fn link_binary(id: AppId, binary: &Path, data_dir: &Path) -> Result<PathBuf, String> {
+    let name = binary
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| {
+            id.executable_names()
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(value))
+        })
+        .ok_or_else(|| format!("不是 {} 的可执行文件: {}", id.as_str(), binary.display()))?;
+
+    let target_dir = managed_dir(id, data_dir);
+    std::fs::create_dir_all(&target_dir)
+        .map_err(|e| format!("创建目标目录失败 {}: {}", target_dir.display(), e))?;
+
+    let link = target_dir.join(name);
+    // 重复登记要能覆盖：symlink 已存在时再建会 EEXIST
+    if link.symlink_metadata().is_ok() {
+        std::fs::remove_file(&link)
+            .map_err(|e| format!("清理旧的托管副本失败 {}: {}", link.display(), e))?;
+    }
+
+    std::os::unix::fs::symlink(binary, &link)
+        .map_err(|e| format!("登记软链失败 {}: {}", link.display(), e))?;
+    Ok(link)
 }
 
 /// 删除程序托管的副本
@@ -717,8 +881,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data);
     }
 
+    /// 「指定位置」登记的那份只在系统里没有标准安装时才顶上。
+    ///
+    /// 反过来也成立：系统路径里已经有一份（用户后来把 openconnect 装回去了），就该用
+    /// 系统那份，界面上的「指定路径」也随之不再显示。
     #[test]
-    fn managed_copy_is_preferred_over_nothing() {
+    fn manual_registration_is_used_only_without_standard_install() {
         let data = temp_dir("managed");
         let dir = managed_dir(AppId::Openconnect, &data);
         std::fs::create_dir_all(&dir).unwrap();
@@ -735,8 +903,22 @@ mod tests {
         };
         let location = locate(AppId::Openconnect, &ctx, "");
         assert!(location.available);
-        assert_eq!(location.source, "managed");
-        assert_eq!(location.path, exe.to_string_lossy());
+
+        // 本机标准路径里有没有装：有就断言系统优先，没有才轮到登记的那份
+        let standard = location
+            .candidates
+            .iter()
+            .find(|candidate| candidate.source == "system" && candidate.exists);
+        match standard {
+            Some(candidate) => {
+                assert_eq!(location.source, "system", "标准安装要优先于手动登记");
+                assert_eq!(location.path, candidate.path);
+            }
+            None => {
+                assert_eq!(location.source, "managed");
+                assert_eq!(location.path, exe.to_string_lossy().to_string());
+            }
+        }
 
         let _ = std::fs::remove_dir_all(&data);
     }
@@ -914,5 +1096,169 @@ mod tests {
         let probe = "sh";
         let found = search_path(&[probe]);
         assert!(!found.is_empty(), "PATH 里应该能找到 {}", probe);
+    }
+
+    /// 优先级：专用路径 > 标准安装位置 > 「指定位置」登记 > PATH
+    ///
+    /// 现场场景：先手动指定 `~/hb`，后来 openconnect 换到标准前缀，再点「检测」必须
+    /// 变成系统那份、界面上不再显示「已指定」的路径。顺序反了就会一直用旧登记。
+    #[test]
+    fn standard_install_outranks_manual_registration() {
+        assert!(source_priority("custom") < source_priority("system"));
+        assert!(source_priority("system") < source_priority("managed"));
+        assert!(source_priority("managed") < source_priority("path"));
+        // 注册表是 Windows 上的「系统里装好的」，和固定安装位置同档，别被排到最后
+        assert_eq!(source_priority("registry"), source_priority("system"));
+    }
+
+    /// collect 的输出必须真的按上面的优先级排好（稳定排序，同来源内部不串位）
+    #[test]
+    fn candidates_are_ordered_by_source_priority() {
+        let root = temp_dir("collect-order");
+        let ctx = AppContext {
+            data_dir: Some(root.join("data")),
+            ..AppContext::default()
+        };
+        let collected = collect(
+            AppId::Openconnect,
+            &ctx,
+            AppId::Openconnect.executable_names(),
+        );
+
+        let ranks: Vec<u8> = collected
+            .iter()
+            .map(|(_, source)| source_priority(source))
+            .collect();
+        assert!(
+            ranks.windows(2).all(|pair| pair[0] <= pair[1]),
+            "候选没按来源优先级排好: {:?}",
+            collected
+        );
+
+        // 本机装了标准版时，它必须排在登记的那份前面（没装就跳过这半段断言）
+        let system_at = collected.iter().position(|(_, source)| source == "system");
+        let managed_at = collected.iter().position(|(_, source)| source == "managed");
+        if let (Some(system_at), Some(managed_at)) = (system_at, managed_at) {
+            assert!(
+                system_at < managed_at,
+                "标准安装位置要排在「指定位置」登记之前: {:?}",
+                collected
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 用户可能直接选二进制、选 bin 目录、选 Cellar 的版本目录 —— 三种都得认
+    #[cfg(unix)]
+    #[test]
+    fn resolve_binary_accepts_file_bin_dir_and_version_dir() {
+        let root = temp_dir("resolve-source");
+        let version_dir = root.join("hb/Cellar/openconnect/9.21");
+        let bin = version_dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let binary = bin.join("openconnect");
+        std::fs::write(&binary, b"stub").unwrap();
+
+        assert_eq!(
+            resolve_binary(AppId::Openconnect, &binary).unwrap(),
+            binary,
+            "选中可执行文件本身"
+        );
+        assert_eq!(
+            resolve_binary(AppId::Openconnect, &bin).unwrap(),
+            binary,
+            "选中 bin 目录"
+        );
+        assert_eq!(
+            resolve_binary(AppId::Openconnect, &version_dir).unwrap(),
+            binary,
+            "选中 Cellar 的版本目录（可执行文件在 bin/ 里）"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 选错文件不能硬塞：名字对不上就直接报错
+    #[cfg(unix)]
+    #[test]
+    fn resolve_binary_rejects_unrelated_file() {
+        let root = temp_dir("resolve-wrong");
+        let other = root.join("TODO");
+        std::fs::write(&other, b"stub").unwrap();
+        let error = resolve_binary(AppId::Openconnect, &other).unwrap_err();
+        assert!(error.contains("不是 openconnect"), "实际错误: {}", error);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Homebrew 的 `<prefix>/bin/openconnect` 是软链：选它必须当成可执行文件，
+    /// 不能因为 lstat 看到的是 symlink 就判成「既不是文件也不是目录」
+    #[cfg(unix)]
+    #[test]
+    fn resolve_binary_follows_symlink() {
+        let root = temp_dir("resolve-symlink");
+        let real = root.join("Cellar/openconnect/9.21/bin/openconnect");
+        std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+        std::fs::write(&real, b"stub").unwrap();
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        let link = root.join("bin/openconnect");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        assert_eq!(
+            resolve_binary(AppId::Openconnect, &link).unwrap(),
+            link,
+            "brew 的 prefix/bin 入口是软链，选它要能识别成可执行文件"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Cellar 里的版本目录会随 brew 升级消失，软链必须优先指 prefix/bin
+    #[cfg(unix)]
+    #[test]
+    fn cellar_binary_prefers_stable_prefix_bin() {
+        let root = temp_dir("stable-path");
+        let prefix = root.join("hb");
+        let binary = prefix.join("Cellar/openconnect/9.21/bin/openconnect");
+        std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        std::fs::write(&binary, b"stub").unwrap();
+
+        // prefix/bin 还没有时原样返回
+        assert_eq!(stable_binary_path(&binary), binary);
+
+        std::fs::create_dir_all(prefix.join("bin")).unwrap();
+        std::os::unix::fs::symlink(&binary, prefix.join("bin/openconnect")).unwrap();
+        assert_eq!(
+            stable_binary_path(&binary),
+            prefix.join("bin/openconnect"),
+            "brew 升级后 Cellar 版本目录会变，软链要指向稳定的 prefix/bin"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 托管副本必须是软链：不能复制二进制，也不能动源文件
+    #[cfg(unix)]
+    #[test]
+    fn link_binary_registers_symlink_instead_of_copying() {
+        let root = temp_dir("link-binary");
+        let data = root.join("data");
+        let binary = root.join("hb/bin/openconnect");
+        std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        std::fs::write(&binary, b"stub").unwrap();
+
+        let link = link_binary(AppId::Openconnect, &binary, &data).unwrap();
+        assert_eq!(
+            link,
+            managed_dir(AppId::Openconnect, &data).join("openconnect")
+        );
+        let meta = std::fs::symlink_metadata(&link).unwrap();
+        assert!(meta.file_type().is_symlink(), "托管副本必须是软链");
+        assert_eq!(std::fs::read_link(&link).unwrap(), binary);
+        assert!(binary.is_file(), "源文件必须原样保留");
+
+        // 重复登记要能覆盖，不能 EEXIST
+        link_binary(AppId::Openconnect, &binary, &data).unwrap();
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -6,9 +6,10 @@ fn default_true() -> bool {
 
 /// 连接器类型。现在只有 openconnect 一条通道，两个取值等价，
 /// 保留枚举是为了不改存储格式，将来扩通道时直接加取值即可。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ConnectorKind {
+    #[default]
     Auto,
     Openconnect,
 }
@@ -27,12 +28,6 @@ impl<'de> Deserialize<'de> for ConnectorKind {
             "openconnect" => ConnectorKind::Openconnect,
             _ => ConnectorKind::Auto,
         })
-    }
-}
-
-impl Default for ConnectorKind {
-    fn default() -> Self {
-        ConnectorKind::Auto
     }
 }
 
@@ -91,7 +86,7 @@ impl VpnPhase {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VpnRule {
     pub id: String,
-    /// 只有三类会生效：DOMAIN / DOMAIN-SUFFIX / IP-CIDR（见 `rule_engine::RuleKind`）
+    /// 只有两类会生效：DOMAIN / DOMAIN-SUFFIX（见 `rule_engine::RuleKind`；`IP-CIDR` 已下线）
     pub kind: String,
     pub value: String,
     #[serde(default = "default_policy_str")]
@@ -284,6 +279,21 @@ pub struct NetworkSnapshot {
     pub local_subnets: Vec<String>,
 }
 
+/// 服务端下发的「公司内网」范围（AnyConnect 的 `CISCO_DEF_DOMAIN` + split-include）。
+///
+/// 这份范围**只用于界面/日志展示，任何模式下都不参与分流**：走 VPN 的唯一
+/// 依据是用户规则。保留它是因为现场排查时「服务端说内网在哪」和「客户端实际
+/// 接管了什么」必须能对照着看，否则规则空着却通内网的现象无从解释。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ServerScope {
+    /// 服务端下发的默认域名（已归一化，小写、无首尾点）
+    #[serde(default)]
+    pub domains: Vec<String>,
+    /// 服务端下发的 split-include 网段（已归一化为 `a.b.c.d/len`）
+    #[serde(default)]
+    pub cidrs: Vec<String>,
+}
+
 /// 会话状态：worker 写入 status.json，主进程轮询后推给前端
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VpnStatus {
@@ -333,6 +343,9 @@ pub struct VpnStatus {
     /// 连接前的网络快照
     #[serde(default)]
     pub snapshot: Option<NetworkSnapshot>,
+    /// 服务端下发的内网范围：只展示，不自动生效
+    #[serde(default)]
+    pub server_scope: ServerScope,
     /// 失败原因
     #[serde(default)]
     pub error: String,
@@ -364,6 +377,7 @@ impl Default for VpnStatus {
             mtu: 0,
             routes: Vec::new(),
             snapshot: None,
+            server_scope: ServerScope::default(),
             error: String::new(),
             pid: 0,
             started_at: String::new(),
@@ -594,5 +608,22 @@ mod tests {
                 "这些连接字段必须参与通道身份计算"
             );
         }
+    }
+
+    /// 服务端下发范围要能落进 status.json 并原样回到前端（只展示，不生效）。
+    #[test]
+    fn status_serializes_server_scope_for_display() {
+        let mut status = VpnStatus::default();
+        status.server_scope.domains.push("example.com".to_string());
+        status.server_scope.cidrs.push("198.51.100.0/24".to_string());
+        let json = serde_json::to_value(&status).unwrap();
+        assert_eq!(json["server_scope"]["domains"][0], "example.com");
+        assert_eq!(json["server_scope"]["cidrs"][0], "198.51.100.0/24");
+        let back: VpnStatus = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            back.server_scope.domains,
+            vec!["example.com".to_string()],
+            "重新读 status.json 时展示字段不能丢"
+        );
     }
 }

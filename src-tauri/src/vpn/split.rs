@@ -13,7 +13,11 @@
 //! | 命中域名的解析交给本机转发器 | 写 `/etc/resolver/<域名>` | NRPT 规则指向 `127.0.0.1:53` |
 //! | 本机转发器把查询交给 VPN DNS | `127.0.0.1:53` 转发器 | 同一个 `127.0.0.1:53` 转发器 |
 //! | 解析出来的内网 IP 进隧道 | 转发器在应答前注入 `/32` 路由 | 同左 |
-//! | `IP-CIDR` / 服务端 split-include | 直接注入隧道路由 | 同左 |
+//! | `直连` 例外 | 转发器按查询名判 [`SplitPlan::tunnels`]，例外不注入 `/32` | 同左；回退路径的系统缓存扫描同一判定 |
+//!
+//! 严格规则模式：分流计划只由用户规则决定。服务端下发的默认域名
+//! （`CISCO_DEF_DOMAIN`）与 split-include 网段**不在这里注入**，只由 worker
+//! 写进 `status.server_scope` 供界面展示，避免出现「规则空着却通内网」的隐式行为。
 //!
 //! 默认路由、系统 DNS、其它流量一律不动 —— 结构上不可能再出现「一连上就断网」。
 //!
@@ -25,10 +29,10 @@
 //!
 //! 代价（必须让用户知道）：
 //! - `DOMAIN-KEYWORD` / `PROCESS-NAME` / `DST-PORT` 没有数据面可用，做不到；
-//! - 域名只覆盖「系统解析器（getaddrinfo）」这条路：自带 DoH/DoT 的应用不受控
-//!   （但它解析出来的 IP 若命中 IP-CIDR 规则，照样能进隧道）。
+//! - 域名只覆盖「系统解析器（getaddrinfo）」这条路：自带 DoH/DoT 的应用不受控；
+//! - 网段（`IP-CIDR`）规则已下线：只能整段注入、无法按网段排除，与其半生效不如不做。
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -89,32 +93,119 @@ const PROBE_TIMEOUT: Duration = Duration::from_millis(2500);
 #[cfg(target_os = "windows")]
 const RESOLVE_ROUND_DEADLINE: Duration = Duration::from_secs(5);
 
+/// 本会话见过的 DNS 应答：查询名 -> A 记录。
+///
+/// 为什么需要它：`/32` 只在转发器看到 DNS 应答时才注入，而应用（浏览器、
+/// 系统解析器）会缓存答案。规则热更新把某个名字**改成走 VPN**（例如删掉
+/// 「直连」例外）时，应用很可能不再发查询，于是永远等不到注入时机，表现
+/// 就是「规则改了但没生效，断开重连才好」。这里把见过的答案记下来，重新
+/// 布线时按新规则把该进隧道的地址补注入。
+pub type DnsMemo = Arc<Mutex<BTreeMap<String, BTreeSet<Ipv4Addr>>>>;
+
+/// 记账上限：够现场排障用就行，不为一条账目做 LRU（超了整体清空重来）。
+const MEMO_MAX_NAMES: usize = 1024;
+
 // ============================== 规则 → 计划 ==============================
+
+/// 一条域名规则的数据面语义：匹配范围 + 走向。
+///
+/// 和用户规则一一对应，只是已经归一化：`DOMAIN` 只匹配自身，`DOMAIN-SUFFIX`
+/// 匹配自身和任意子域；`policy` 决定命中后走 VPN 还是直连（直连 = 例外）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DomainRule {
+    /// 小写、去通配符/尾点的域名
+    pub pattern: String,
+    /// true = `DOMAIN`（精确匹配），false = `DOMAIN-SUFFIX`（含子域）
+    pub exact: bool,
+    pub policy: Policy,
+}
 
 /// 规则翻译成「路由注入模式能做的事」。
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct SplitPlan {
-    /// 需要按域名分流的域名（小写、去通配符）
+    /// 域名规则全集（走 VPN 的 + 直连例外），保留用户规则里的先后顺序
+    pub rules: Vec<DomainRule>,
+    /// 需要按域名分流解析的域名（只含走 VPN 的，小写、去通配符）
     pub domains: Vec<String>,
-    /// 直接注入隧道的网段（`IP-CIDR` 规则）
-    pub cidrs: Vec<String>,
     /// 这个模式下做不到的规则，以及需要用户知道的行为差异
     pub notes: Vec<String>,
 }
 
+impl SplitPlan {
+    /// 一个域名最终走不走隧道。
+    ///
+    /// 取「最具体」的命中规则：pattern 越长越具体；长度相同时 `DOMAIN` 比
+    /// `DOMAIN-SUFFIX` 具体；仍然相同时先出现的规则胜出。这条语义让「直连」
+    /// 规则能当例外用——`DOMAIN hlwapi.example.com → 直连` 会盖住父级
+    /// `DOMAIN-SUFFIX example.com → 走 VPN`，不需要任何域名特判。
+    pub fn tunnels(&self, name: &str) -> bool {
+        tunnels_domain(&self.rules, name)
+    }
+}
+
+/// 同 [`SplitPlan::tunnels`]，给转发器和系统缓存扫描共用（它们只带规则集）。
+pub fn tunnels_domain(rules: &[DomainRule], name: &str) -> bool {
+    let name = name.trim().trim_end_matches('.').to_ascii_lowercase();
+    let mut best: Option<(usize, Policy)> = None;
+    for rule in rules {
+        let Some(score) = match_score(rule, &name) else {
+            continue;
+        };
+        match best {
+            // `>=`：分数相同时先出现的规则胜出
+            Some((best_score, _)) if best_score >= score => {}
+            _ => best = Some((score, rule.policy)),
+        }
+    }
+    matches!(best, Some((_, Policy::Vpn)))
+}
+
+/// 这个名字是否落在某条域名规则里（不管走向）。
+///
+/// 记账（[`DnsMemo`]）时用它筛掉与规则无关的缓存条目：Windows 回退路径扫的是
+/// 整个 DNS 缓存，不筛的话 `www.baidu.com` 这类噪音也会占额度、还会被 1024 条
+/// 上限清掉真正有用的记录。
+#[cfg(any(target_os = "windows", test))]
+fn covered_by_rules(rules: &[DomainRule], name: &str) -> bool {
+    rules.iter().any(|rule| match_score(rule, name).is_some())
+}
+
+/// 规则对某个名字的命中分：没命中返回 `None`，命中返回「具体度」。
+///
+/// 具体度 = 域名长度 × 2 + 是否完整域名——长度按字符算，但域名都是 ASCII
+/// （[`normalize_domain`] 保证了），所以等价于标签层级；同一域名下
+/// `DOMAIN`（+1）比 `DOMAIN-SUFFIX` 具体。
+fn match_score(rule: &DomainRule, name: &str) -> Option<usize> {
+    let exact = name == rule.pattern;
+    let hit = exact || (!rule.exact && name.ends_with(&format!(".{}", rule.pattern)));
+    hit.then(|| rule.pattern.len() * 2 + usize::from(rule.exact))
+}
+
 /// 把规则集翻译成路由注入计划。
 ///
-/// 只有「走 VPN」的规则需要动作：「直连」规则在这个模式里天然满足（默认就是直连），
-/// 不用翻译，也不用提示。
+/// 「走 VPN」的规则决定哪些流量进隧道；「直连」的域名规则是**例外**，
+/// 用更具体的匹配把某个子域从父级后缀里摘出来。整条链路（DNS 分流、`/32`
+/// 注入、Windows 缓存扫描）都按 [`SplitPlan::tunnels`] 的结论走，所以例外
+/// 不会出现「解析走了 VPN、路由却没装上」这种半截状态。
+///
+/// `IP-CIDR` 规则已下线：`RuleKind::parse` 会拒绝它，并给出一条说明性提示
+/// （网段路由只能整段注入、无法按网段排除，半生效不如不做）。
 pub fn plan(rules: &[VpnRule], default_policy: &str) -> SplitPlan {
     let mut out = SplitPlan::default();
     for rule in rules {
         if !rule.enabled {
             continue;
         }
-        if !matches!(Policy::parse(&rule.policy), Ok(Policy::Vpn)) {
-            continue;
-        }
+        let policy = match Policy::parse(&rule.policy) {
+            Ok(policy) => policy,
+            Err(e) => {
+                push_unique(
+                    &mut out.notes,
+                    format!("{} {}：{}", rule.kind, rule.value, e),
+                );
+                continue;
+            }
+        };
         let kind = match RuleKind::parse(&rule.kind) {
             Ok(kind) => kind,
             Err(e) => {
@@ -126,25 +217,32 @@ pub fn plan(rules: &[VpnRule], default_policy: &str) -> SplitPlan {
             }
         };
         match kind {
-            RuleKind::Domain | RuleKind::DomainSuffix => match normalize_domain(&rule.value) {
-                Some(domain) => push_unique(&mut out.domains, domain),
-                None => push_unique(
-                    &mut out.notes,
-                    format!("{} {} 不是合法域名，已跳过", kind.as_str(), rule.value),
-                ),
-            },
-            RuleKind::IpCidr => match route::parse_cidr(&rule.value) {
-                Ok((net, prefix)) => {
+            RuleKind::Domain | RuleKind::DomainSuffix => {
+                let Some(domain) = normalize_domain(&rule.value) else {
                     push_unique(
-                        &mut out.cidrs,
-                        format!("{}/{}", Ipv4Addr::from(net), prefix),
+                        &mut out.notes,
+                        format!("{} {} 不是合法域名，已跳过", kind.as_str(), rule.value),
                     );
+                    continue;
+                };
+                let exact = matches!(kind, RuleKind::Domain);
+                if matches!(policy, Policy::Vpn) {
+                    push_unique(&mut out.domains, domain.clone());
                 }
-                Err(e) => push_unique(
-                    &mut out.notes,
-                    format!("IP-CIDR {} 无法解析（{}），已跳过", rule.value, e),
-                ),
-            },
+                // 同一条规则写两遍只留一条；不同走向的同名规则都保留，交给
+                // 「具体度相同时先出现的胜出」去定胜负。
+                let duplicate = out
+                    .rules
+                    .iter()
+                    .any(|item| item.pattern == domain && item.exact == exact && item.policy == policy);
+                if !duplicate {
+                    out.rules.push(DomainRule {
+                        pattern: domain,
+                        exact,
+                        policy,
+                    });
+                }
+            }
         }
     }
     if matches!(Policy::parse(default_policy), Ok(Policy::Vpn)) {
@@ -155,37 +253,6 @@ pub fn plan(rules: &[VpnRule], default_policy: &str) -> SplitPlan {
         );
     }
     out
-}
-
-impl SplitPlan {
-    /// 并入一个域名（服务端下发的默认域名、规则里的域名后缀都走这里）。
-    /// 返回是否真的新增了。
-    pub fn add_domain(&mut self, raw: &str) -> bool {
-        match normalize_domain(raw) {
-            Some(domain) => add_unique(&mut self.domains, domain),
-            None => false,
-        }
-    }
-
-    /// 并入一个网段（服务端下发的 split-include 也走这里，校验/归一化一致）。
-    /// 返回是否真的新增了。
-    pub fn add_cidr(&mut self, raw: &str) -> bool {
-        match route::parse_cidr(raw) {
-            Ok((net, prefix)) => add_unique(
-                &mut self.cidrs,
-                format!("{}/{}", Ipv4Addr::from(net), prefix),
-            ),
-            Err(_) => false,
-        }
-    }
-}
-
-fn add_unique(list: &mut Vec<String>, item: String) -> bool {
-    if list.contains(&item) {
-        return false;
-    }
-    list.push(item);
-    true
 }
 
 fn push_unique(list: &mut Vec<String>, item: String) {
@@ -273,11 +340,17 @@ fn question_end(packet: &[u8]) -> Option<usize> {
 /// 路由注入分流的运行时状态：DNS 分流线程 + 我们装出去的路由 + 解析器配置。
 pub struct SplitTunnel {
     domains: Vec<String>,
+    /// 域名规则全集（含直连例外）：注入 `/32` 前用它判断这个地址该不该进隧道
+    rules: Vec<DomainRule>,
+    /// VPN 服务器自己的公网 IP：绝不能把它们的路由指向隧道，否则隧道会自己抓自己
+    server_ips: Vec<Ipv4Addr>,
+    /// 本会话见过的 DNS 应答，规则热更新时用来补注入
+    memo: DnsMemo,
     tun_dev: String,
     /// Windows：隧道接口索引；macOS 恒为 0（那边按接口名操作）
     tun_index: u32,
     vpn_dns: Vec<Ipv4Addr>,
-    /// 固定要维护的路由（VPN DNS + `IP-CIDR` 规则 + 服务端 split-include）
+    /// 固定要维护的路由（VPN DNS 的 `/32`）
     static_routes: Vec<String>,
     /// 从 DNS 应答里学到的内网 IP（动态注入，断开时按它回收）
     dynamic: Arc<Mutex<BTreeSet<Ipv4Addr>>>,
@@ -310,25 +383,40 @@ impl SplitTunnel {
         tun_dev: &str,
         tun_index: u32,
         vpn_dns: &[Ipv4Addr],
+        server_ips: &[Ipv4Addr],
+        memo: DnsMemo,
         plan: SplitPlan,
     ) -> Result<Self, String> {
-        if plan.domains.is_empty() && plan.cidrs.is_empty() {
-            return Err(
-                "规则里没有可用的分流动作：域名请用「域名后缀」，网段请用 IP-CIDR".to_string(),
-            );
+        if plan.domains.is_empty() {
+            return Err("规则里没有可用的分流动作：请加一条「域名后缀 → 走 VPN」".to_string());
         }
         // 上一轮被 SIGKILL 时留下的解析器配置先清掉，否则清不干净的域名
         // 会一直指向一个已经断掉的 DNS（macOS）或一条过期规则（Windows）。
         cleanup_stale(session);
 
-        // 只有域名规则需要按域名分流解析；纯 IP-CIDR 分流不碰 DNS，
-        // 免得白白和别的 DNS 服务/规则撞车。
-        let need_dns = !plan.domains.is_empty();
-        if need_dns && vpn_dns.is_empty() {
+        // 直连例外会跟着父级后缀进本机转发器，但不会被注入 `/32`；日志里点名，
+        // 免得现场看到「这个域名的查询走了 VPN DNS」就以为分流没按规则走。
+        let exceptions: Vec<String> = plan
+            .rules
+            .iter()
+            .filter(|rule| matches!(rule.policy, Policy::Direct))
+            .map(|rule| rule.pattern.clone())
+            .collect();
+        if !exceptions.is_empty() {
+            session.append_log(&format!(
+                "[分流] 直连例外：{}（查询仍由本机转发器代答，但不为它们注入隧道路由）",
+                exceptions.join(", ")
+            ));
+        }
+
+        if vpn_dns.is_empty() {
             return Err("服务端没有下发 DNS 地址，内网域名无法解析".to_string());
         }
         let mut me = SplitTunnel {
             domains: plan.domains.clone(),
+            rules: plan.rules.clone(),
+            server_ips: server_ips.to_vec(),
+            memo: Arc::clone(&memo),
             tun_dev: tun_dev.to_string(),
             tun_index,
             vpn_dns: vpn_dns.to_vec(),
@@ -349,21 +437,30 @@ impl SplitTunnel {
             thread: None,
         };
 
-        if let Err(e) = me.install_routes(&plan.cidrs) {
+        if let Err(e) = me.install_routes() {
             me.teardown();
             return Err(e);
         }
-        if need_dns {
-            if let Err(e) = me.install_resolver(session) {
-                me.teardown();
-                return Err(e);
-            }
-            if let Err(e) = me.start_resolver(session) {
-                me.teardown();
-                return Err(e);
-            }
-            flush_dns_cache();
+        // 规则热更新：应用可能缓存着旧答案、不再发查询，这里按记过的答案
+        // 把「现在该走隧道」的地址补注入 `/32`（现场：删掉直连例外后仍直连）。
+        // 放在启动转发器之前，免得和「刚好这时来一条查询」抢着装同一条路由。
+        let restored = remembered_injections(&me.memo, &me.rules, &me.server_ips);
+        if !restored.is_empty() {
+            session.append_log(&format!(
+                "[分流] 按记过的 DNS 答案补注入 {} 个地址（应用可能还缓存着旧答案）",
+                restored.len()
+            ));
+            inject_ips(&restored, &me.tun_dev, me.tun_index, &me.dynamic, session);
         }
+        if let Err(e) = me.install_resolver(session) {
+            me.teardown();
+            return Err(e);
+        }
+        if let Err(e) = me.start_resolver(session) {
+            me.teardown();
+            return Err(e);
+        }
+        flush_dns_cache();
         Ok(me)
     }
 
@@ -371,13 +468,12 @@ impl SplitTunnel {
         self.tun_index
     }
 
-    /// VPN DNS + IP-CIDR 规则：装成隧道的固定路由。
-    fn install_routes(&mut self, cidrs: &[String]) -> Result<(), String> {
+    /// VPN DNS：装成指向隧道的固定 `/32` 路由（否则 DNS 查询出不去）。
+    fn install_routes(&mut self) -> Result<(), String> {
         let mut wanted: Vec<String> = Vec::new();
         for ip in &self.vpn_dns {
             wanted.push(format!("{}/32", ip));
         }
-        wanted.extend(cidrs.iter().cloned());
         for cidr in &wanted {
             add_tunnel_route(cidr, &self.tun_dev, self.tun_index())?;
             if !self.static_routes.contains(cidr) {
@@ -489,12 +585,27 @@ impl SplitTunnel {
         let dynamic = Arc::clone(&self.dynamic);
         let queries = Arc::clone(&self.dns_queries);
         let stop = Arc::clone(&self.stop);
-        let log = session.clone();
+        let rules = self.rules.clone();
+        let server_ips = self.server_ips.clone();
+        let memo = Arc::clone(&self.memo);
+        let session = session.clone();
         let handle = std::thread::Builder::new()
             .name("ws-dns-forwarder".to_string())
             .spawn(move || {
                 forward_loop(
-                    socket, upstreams, tun_dev, tun_index, dynamic, queries, stop, log,
+                    socket,
+                    ForwarderCtx {
+                        upstreams,
+                        tun_dev,
+                        tun_index,
+                        dynamic,
+                        queries,
+                        stop,
+                        rules,
+                        server_ips,
+                        memo,
+                        session,
+                    },
                 )
             })
             .map_err(|e| format!("启动 DNS 转发线程失败：{}", e))?;
@@ -702,7 +813,10 @@ impl SplitTunnel {
     ///   「还没人访问过」和「服务端轮询地址」两种情况。
     #[cfg(target_os = "windows")]
     fn start_resolve_thread(&mut self, session: &VpnSession) -> Result<(), String> {
-        let domains = self.domains.clone();
+        let domains = self.tunnel_domains();
+        let rules = self.rules.clone();
+        let server_ips = self.server_ips.clone();
+        let memo = Arc::clone(&self.memo);
         let upstreams: Vec<SocketAddrV4> = self
             .vpn_dns
             .iter()
@@ -715,7 +829,20 @@ impl SplitTunnel {
         let log = session.clone();
         let handle = std::thread::Builder::new()
             .name("ws-dns-resolver".to_string())
-            .spawn(move || resolve_loop(domains, upstreams, tun_dev, tun_index, dynamic, stop, log))
+            .spawn(move || {
+                resolve_loop(
+                    domains,
+                    rules,
+                    server_ips,
+                    memo,
+                    upstreams,
+                    tun_dev,
+                    tun_index,
+                    dynamic,
+                    stop,
+                    log,
+                )
+            })
             .map_err(|e| format!("启动按域名解析线程失败：{}", e))?;
         self.thread = Some(handle);
         Ok(())
@@ -726,7 +853,7 @@ impl SplitTunnel {
     /// 这条链路是「系统解析器 -> 按域名分流 -> 隧道 -> VPN DNS」，
     /// 任一段断了都能在 worker.log 里一眼看出来。
     pub fn spawn_self_check(&self, session: VpnSession) {
-        let domains = self.domains.clone();
+        let domains = self.tunnel_domains();
         let dynamic = Arc::clone(&self.dynamic);
         if domains.is_empty() {
             return;
@@ -907,6 +1034,18 @@ impl SplitTunnel {
         self.domains.len()
     }
 
+    /// 需要主动解析 / 自检的域名：走 VPN 的规则里，本身没被「直连例外」盖掉的。
+    ///
+    /// 只影响「我们主动去查谁」，不影响 resolver/NRPT 的安装范围——父级后缀
+    /// 即使裸域名被排除，子域仍可能需要分流解析。
+    fn tunnel_domains(&self) -> Vec<String> {
+        self.domains
+            .iter()
+            .filter(|domain| tunnels_domain(&self.rules, domain))
+            .cloned()
+            .collect()
+    }
+
     pub fn static_route_count(&self) -> usize {
         self.static_routes.len()
     }
@@ -997,33 +1136,46 @@ pub fn cleanup_stale(session: &VpnSession) {
     }
 }
 
-/// 转发线程主体（macOS / Windows）：收本机 DNS Client 的查询 -> 经隧道问 VPN DNS
-/// -> 注入路由 -> 回包。
+/// 转发线程的运行参数。
+///
+/// 单独拧出来是因为 `forward_loop` 原来有 8 个位置参数，调用点很难看出哪个是
+/// 域名清单、哪个是动态路由集合；收成一个结构体后，线程闭包里只搬一份。
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-fn forward_loop(
-    socket: UdpSocket,
+struct ForwarderCtx {
     upstreams: Vec<SocketAddrV4>,
     tun_dev: String,
     tun_index: u32,
     dynamic: Arc<Mutex<BTreeSet<Ipv4Addr>>>,
     queries: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,
+    /// 域名规则全集：按查询名字判断该不该注入 `/32`（直连例外在这里生效）
+    rules: Vec<DomainRule>,
+    /// VPN 服务器自己的公网 IP：跳过，不给它们注入隧道路由
+    server_ips: Vec<Ipv4Addr>,
+    /// 见过的 DNS 应答（与 SplitTunnel 共享）
+    memo: DnsMemo,
     session: VpnSession,
-) {
+}
+
+/// 转发线程主体（macOS / Windows）：收本机 DNS Client 的查询 -> 经隧道问 VPN DNS
+/// -> 注入路由 -> 回包。
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn forward_loop(socket: UdpSocket, ctx: ForwarderCtx) {
     // 收包超时自己设一遍：调用方忘了设的话，`recv_from` 会一直阻塞，
     // stop 标志检查不到，teardown 里的 join 就永远回不来。
     let _ = socket.set_read_timeout(Some(POLL_TIMEOUT));
     let upstream = match UdpSocket::bind("0.0.0.0:0") {
         Ok(socket) => socket,
         Err(e) => {
-            session.append_log(&format!("[分流] 转发器打不开上游 socket：{}", e));
+            ctx.session
+                .append_log(&format!("[分流] 转发器打不开上游 socket：{}", e));
             return;
         }
     };
     let _ = upstream.set_read_timeout(Some(UPSTREAM_TIMEOUT));
     let mut query = [0u8; 1500];
     let mut reply = [0u8; 4096];
-    while !stop.load(Ordering::Relaxed) {
+    while !ctx.stop.load(Ordering::Relaxed) {
         let (len, from) = match socket.recv_from(&mut query) {
             Ok(item) => item,
             Err(_) => continue, // 超时：回头看一眼 stop 标志
@@ -1031,9 +1183,9 @@ fn forward_loop(
         if len < 12 {
             continue;
         }
-        queries.fetch_add(1, Ordering::Relaxed);
+        ctx.queries.fetch_add(1, Ordering::Relaxed);
         let mut answer: Option<Vec<u8>> = None;
-        for dns in &upstreams {
+        for dns in &ctx.upstreams {
             if upstream.send_to(&query[..len], *dns).is_err() {
                 continue;
             }
@@ -1050,7 +1202,7 @@ fn forward_loop(
         }
         match answer {
             Some(resp) => {
-                install_dynamic_routes(&resp, &tun_dev, tun_index, &dynamic, &session);
+                install_dynamic_routes(&resp, &ctx);
                 let _ = socket.send_to(&resp, from);
             }
             None => {
@@ -1067,21 +1219,37 @@ fn forward_loop(
 /// Windows 必须在 DNS 应答回给应用之前装好路由；多 A 记录时逐条起 PowerShell
 /// 会把回包拖到 DNS Client 超时，所以先把新地址攒起来，一条 PowerShell 批量装。
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-fn install_dynamic_routes(
-    packet: &[u8],
-    tun_dev: &str,
-    tun_index: u32,
-    dynamic: &Arc<Mutex<BTreeSet<Ipv4Addr>>>,
-    session: &VpnSession,
-) {
+fn install_dynamic_routes(packet: &[u8], ctx: &ForwarderCtx) {
+    let ForwarderCtx {
+        tun_dev,
+        tun_index,
+        dynamic,
+        rules,
+        server_ips,
+        memo,
+        session,
+        ..
+    } = ctx;
+    let answers = dns_client::parse_a_records(packet);
+    // 见过的答案一律记账（包括直连例外的）：应用缓存着旧答案时不会再发查询，
+    // 规则热更新要靠这份账把「现在该进隧道的名字」补注入 `/32`。
+    // 问题名解析不出来时只按老行为处理（宁可多注入，也不要漏掉分流）。
+    if let Some(name) = dns_client::parse_question_name(packet) {
+        record_answers(memo, &name, &answers);
+        // 直连例外的查询也会进到转发器（它在父级后缀的 resolver/NRPT 范围里）：
+        // 应答照常回给应用，但不能按它注入 `/32`，否则「直连」就变成走 VPN 了。
+        if !tunnels_domain(rules, &name) {
+            return;
+        }
+    }
     let candidates: Vec<Ipv4Addr> = {
         let set = match dynamic.lock() {
             Ok(set) => set,
             Err(_) => return,
         };
         let mut out = Vec::new();
-        for ip in dns_client::parse_a_records(packet) {
-            if usable_tunnel_ip(ip) && !set.contains(&ip) && !out.contains(&ip) {
+        for ip in answers {
+            if injectable(ip, server_ips) && !set.contains(&ip) && !out.contains(&ip) {
                 out.push(ip);
             }
         }
@@ -1090,25 +1258,81 @@ fn install_dynamic_routes(
     if candidates.is_empty() {
         return;
     }
+    inject_ips(&candidates, tun_dev, *tun_index, dynamic, session);
+}
+
+/// 记下「查询名 -> 见过的 A 记录」，供规则热更新时补注入。空答案（NXDOMAIN、
+/// 只有 AAAA 等）不记，免得白占记账额度。
+fn record_answers(memo: &DnsMemo, name: &str, ips: &[Ipv4Addr]) {
+    if ips.is_empty() {
+        return;
+    }
+    let Ok(mut map) = memo.lock() else {
+        return;
+    };
+    if !map.contains_key(name) && map.len() >= MEMO_MAX_NAMES {
+        map.clear();
+    }
+    map.entry(name.to_string()).or_default().extend(ips.iter().copied());
+}
+
+/// 规则热更新后要立刻补注入的地址：记过的名字里，按新规则该走隧道的。
+fn remembered_injections(
+    memo: &DnsMemo,
+    rules: &[DomainRule],
+    server_ips: &[Ipv4Addr],
+) -> Vec<Ipv4Addr> {
+    let Ok(map) = memo.lock() else {
+        return Vec::new();
+    };
+    let mut out: Vec<Ipv4Addr> = Vec::new();
+    for (name, ips) in map.iter() {
+        if !tunnels_domain(rules, name) {
+            continue;
+        }
+        for ip in ips {
+            if injectable(*ip, server_ips) && !out.contains(ip) {
+                out.push(*ip);
+            }
+        }
+    }
+    out
+}
+
+/// 把一组地址装成 `/32` 隧道路由（macOS / Windows 的具体做法不同）。
+///
+/// Windows 必须一条 PowerShell 批量装：逐条起进程会把 DNS 回包拖到超时。
+/// 故意不挂平台的 `cfg`：`SplitTunnel::apply` 要能在没有路由实现的平台上编译
+/// （那里连 `install_routes` 都会失败，这里保持空实现即可）。
+fn inject_ips(
+    ips: &[Ipv4Addr],
+    tun_dev: &str,
+    tun_index: u32,
+    dynamic: &Arc<Mutex<BTreeSet<Ipv4Addr>>>,
+    session: &VpnSession,
+) {
+    if ips.is_empty() {
+        return;
+    }
+    let _ = (tun_dev, tun_index);
 
     #[cfg(target_os = "windows")]
     {
-        let cidrs: Vec<String> = candidates.iter().map(|ip| format!("{}/32", ip)).collect();
+        let cidrs: Vec<String> = ips.iter().map(|ip| format!("{}/32", ip)).collect();
         match route::ensure_onlink_routes(&cidrs, tun_index, 1) {
             Ok(()) => {
                 if let Ok(mut set) = dynamic.lock() {
-                    for ip in &candidates {
+                    for ip in ips {
                         set.insert(*ip);
                     }
                 }
-                for ip in &candidates {
+                for ip in ips {
                     session.append_log(&format!("[分流] 内网 IP {} 已注入隧道 {}", ip, tun_dev));
                 }
             }
             Err(e) => session.append_log(&format!(
                 "[分流] 内网 IP {} 注入隧道失败：{}",
-                candidates
-                    .iter()
+                ips.iter()
                     .map(ToString::to_string)
                     .collect::<Vec<_>>()
                     .join(", "),
@@ -1117,15 +1341,19 @@ fn install_dynamic_routes(
         }
     }
 
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = (ips, tun_dev, tun_index, dynamic, session);
+    }
+
     #[cfg(target_os = "macos")]
     {
-        let _ = tun_index;
-        for ip in candidates {
+        for ip in ips {
             let cidr = format!("{}/32", ip);
             match add_tunnel_route(&cidr, tun_dev, 0) {
                 Ok(()) => {
                     if let Ok(mut set) = dynamic.lock() {
-                        set.insert(ip);
+                        set.insert(*ip);
                     }
                     session.append_log(&format!("[分流] 内网 IP {} 已注入隧道 {}", ip, tun_dev));
                 }
@@ -1133,6 +1361,15 @@ fn install_dynamic_routes(
             }
         }
     }
+}
+
+/// 解析出来的地址能不能装 `/32` 隧道路由。
+///
+/// 除了不可路由的地址，还要排掉 VPN 服务器自己的公网 IP：给服务器 IP 装上隧道
+/// 路由，等于把隧道的 TLS/DTLS 流量再塞回隧道，直接打环（现场日志里出现过
+/// 「内网 IP 203.0.113.10 已注入隧道」，那是 VPN 服务器地址）。
+fn injectable(ip: Ipv4Addr, server_ips: &[Ipv4Addr]) -> bool {
+    usable_tunnel_ip(ip) && !server_ips.contains(&ip)
 }
 
 /// 一个解析出来的地址值不值得为它加 `/32` 隧道路由。
@@ -1150,6 +1387,9 @@ fn usable_tunnel_ip(ip: Ipv4Addr) -> bool {
 #[cfg(target_os = "windows")]
 fn resolve_loop(
     domains: Vec<String>,
+    rules: Vec<DomainRule>,
+    server_ips: Vec<Ipv4Addr>,
+    memo: DnsMemo,
     upstreams: Vec<SocketAddrV4>,
     tun_dev: String,
     tun_index: u32,
@@ -1169,7 +1409,7 @@ fn resolve_loop(
         let mut found: Vec<Ipv4Addr> = Vec::new();
         // 回退路径下用户态看不到子域查询，但 DNS Client 的缓存里有应用刚解析过的
         // 名字。每轮扫一遍，`DOMAIN-SUFFIX` 的任意子域也能补进隧道。
-        match scan_system_dns_cache(&domains, &dynamic, &session) {
+        match scan_system_dns_cache(&rules, &server_ips, &dynamic, &memo, &session) {
             Ok(ips) => found.extend(ips),
             Err(e) => {
                 if cache_error.as_deref() != Some(e.as_str()) {
@@ -1184,7 +1424,7 @@ fn resolve_loop(
         if round % CACHE_ROUNDS_PER_RESOLVE == 0 {
             found.extend(resolve_all(&domains, &upstreams));
         }
-        match sync_dynamic_routes(&found, tun_index, &tun_dev, &dynamic, &session) {
+        match sync_dynamic_routes(&found, tun_index, &tun_dev, &dynamic, &session, &server_ips) {
             Ok(added) => {
                 if !last_error.is_empty() {
                     session.append_log("[分流] 内网地址注入隧道已恢复");
@@ -1228,21 +1468,35 @@ fn resolve_loop(
     }
 }
 
-/// 扫系统 DNS Client 缓存，挑出属于已配置域名（含子域）的 A 记录（Windows）。
+/// 扫系统 DNS Client 缓存，挑出该进隧道的 A 记录（Windows）。
 ///
 /// 回退路径（NRPT 直连 VPN DNS）下应用解析过的名字会留在缓存里，这是唯一能在
 /// 「应用拿到地址之后」补装 `/32` 的时机；最多晚一个 [`CACHE_POLL_INTERVAL`]。
 /// 只返回还没注入过的地址，并顺手记一行「哪个子域带来的」，现场一眼能对上。
+/// 直连例外在这里同样生效：规则判定为直连的名字不会补路由。
+///
+/// 缓存里的每一条（含直连例外的）都先进 [`DnsMemo`]：回退路径没有转发器，
+/// 热更新又会在 teardown 里清空 DNS Client 缓存（`Clear-DnsClientCache`），
+/// 只靠「等应用重新查询」的话删掉例外又要等到重连；记下账才能在重新布线时
+/// 立刻补注入。
 #[cfg(target_os = "windows")]
 fn scan_system_dns_cache(
-    domains: &[String],
+    rules: &[DomainRule],
+    server_ips: &[Ipv4Addr],
     dynamic: &Arc<Mutex<BTreeSet<Ipv4Addr>>>,
+    memo: &DnsMemo,
     session: &VpnSession,
 ) -> Result<Vec<Ipv4Addr>, String> {
     let value = crate::winps::run_json(&build_dns_cache_script())?;
     let known: BTreeSet<Ipv4Addr> = dynamic.lock().map(|set| set.clone()).unwrap_or_default();
     let mut out: Vec<Ipv4Addr> = Vec::new();
-    for (name, ip) in parse_dns_cache(value, domains) {
+    for (name, ip) in parse_dns_cache(value) {
+        if covered_by_rules(rules, &name) {
+            record_answers(memo, &name, &[ip]);
+        }
+        if !tunnels_domain(rules, &name) || !injectable(ip, server_ips) {
+            continue;
+        }
         if known.contains(&ip) || out.contains(&ip) {
             continue;
         }
@@ -1263,13 +1517,13 @@ fn build_dns_cache_script() -> String {
         .to_string()
 }
 
-/// 从 `Get-DnsClientCache` 的 JSON 里挑出「属于这些域名（含子域）」的可路由地址。
+/// 把 `Get-DnsClientCache` 的 JSON 解析成「名字 -> 可路由地址」。
 ///
-/// 后缀边界必须按标签算：`notexample.com` 不能被 `example.com` 命中，
-/// 所以判断的是 `name == domain` 或 `name.ends_with("." + domain)`，
-/// 而不是简单的字符串包含。
+/// 这里**不做规则过滤**：回退路径要先把缓存里看到的名字记进 [`DnsMemo`]
+/// （含直连例外的），再由调用方按 [`tunnels_domain`] 决定注不注入。过滤逻辑
+/// 只有一份，别在这里再抄一遍——两边不一致就会出现「例外在回退路径上失效」。
 #[cfg(any(target_os = "windows", test))]
-fn parse_dns_cache(value: serde_json::Value, domains: &[String]) -> Vec<(String, Ipv4Addr)> {
+fn parse_dns_cache(value: serde_json::Value) -> Vec<(String, Ipv4Addr)> {
     let mut out: Vec<(String, Ipv4Addr)> = Vec::new();
     for item in crate::winps::json_array(value) {
         let Some(name) = item.get("Entry").and_then(|v| v.as_str()) else {
@@ -1285,12 +1539,6 @@ fn parse_dns_cache(value: serde_json::Value, domains: &[String]) -> Vec<(String,
             continue;
         }
         let name = name.trim().trim_end_matches('.').to_ascii_lowercase();
-        let matched = domains
-            .iter()
-            .any(|domain| name == *domain || name.ends_with(&format!(".{domain}")));
-        if !matched {
-            continue;
-        }
         if out.iter().any(|(n, i)| *n == name && *i == ip) {
             continue;
         }
@@ -1390,10 +1638,11 @@ fn sync_dynamic_routes(
     tun_dev: &str,
     dynamic: &Arc<Mutex<BTreeSet<Ipv4Addr>>>,
     session: &VpnSession,
+    server_ips: &[Ipv4Addr],
 ) -> Result<usize, String> {
     let mut wanted: Vec<Ipv4Addr> = Vec::new();
     for ip in found {
-        if usable_tunnel_ip(*ip) && !wanted.contains(ip) {
+        if injectable(*ip, server_ips) && !wanted.contains(ip) {
             wanted.push(*ip);
         }
     }
@@ -1505,6 +1754,30 @@ mod tests {
         }
     }
 
+    /// 把缓存条目按规则过滤成「该进隧道」的部分（Windows 回退路径的判定）。
+    fn tunnel_cache_entries(
+        value: serde_json::Value,
+        rules: &[DomainRule],
+    ) -> Vec<(String, Ipv4Addr)> {
+        parse_dns_cache(value)
+            .into_iter()
+            .filter(|(name, _)| tunnels_domain(rules, name))
+            .collect()
+    }
+
+    /// 构造「一组走 VPN 的域名后缀规则」，给 `parse_dns_cache` 那类只看规则集的
+    /// 函数用。
+    fn suffix_rules(domains: &[&str]) -> Vec<DomainRule> {
+        domains
+            .iter()
+            .map(|domain| DomainRule {
+                pattern: (*domain).to_string(),
+                exact: false,
+                policy: Policy::Vpn,
+            })
+            .collect()
+    }
+
     #[test]
     fn plan_extracts_suffix_rules_and_dedupes() {
         let rules = vec![
@@ -1514,18 +1787,143 @@ mod tests {
         ];
         let plan = plan(&rules, "DIRECT");
         assert_eq!(plan.domains, vec!["example.com", "oa.example.com"]);
-        assert!(plan.cidrs.is_empty());
         assert!(plan.notes.is_empty(), "不该有提示：{:?}", plan.notes);
     }
 
     #[test]
-    fn plan_skips_direct_rules_entirely() {
+    fn plan_keeps_direct_domains_as_exceptions() {
         let rules = vec![
             rule("DOMAIN-SUFFIX", "baidu.com", "DIRECT"),
             rule("DOMAIN-SUFFIX", "example.com", "VPN"),
         ];
         let plan = plan(&rules, "DIRECT");
+        // 直连规则不进「要按域名分流解析」的名单，但会作为例外保留
         assert_eq!(plan.domains, vec!["example.com"]);
+        assert_eq!(plan.rules.len(), 2);
+        assert!(!plan.tunnels("www.baidu.com"));
+    }
+
+    /// 现场（macOS）：`DOMAIN-SUFFIX example.com → 走 VPN` 时，
+    /// `DOMAIN hlwapi.example.com → 直连` 必须把这个子域从分流里摘出来。
+    #[test]
+    fn direct_rule_excludes_a_subdomain_from_a_suffix_rule() {
+        let rules = vec![
+            rule("DOMAIN", "hlwapi.example.com", "DIRECT"),
+            rule("DOMAIN-SUFFIX", "example.com", "VPN"),
+        ];
+        let plan = plan(&rules, "DIRECT");
+        assert!(
+            !plan.tunnels("hlwapi.example.com"),
+            "直连例外必须盖住父级后缀"
+        );
+        assert!(plan.tunnels("oa.example.com"));
+        assert!(plan.tunnels("example.com"));
+        // 例外本身不需要按域名分流解析
+        assert_eq!(plan.domains, vec!["example.com"]);
+    }
+
+    #[test]
+    fn exact_direct_rule_only_excludes_itself() {
+        let plan = plan(
+            &[
+                rule("DOMAIN-SUFFIX", "example.com", "VPN"),
+                rule("DOMAIN", "hlwapi.example.com", "DIRECT"),
+            ],
+            "DIRECT",
+        );
+        assert!(!plan.tunnels("hlwapi.example.com"));
+        assert!(
+            plan.tunnels("x.hlwapi.example.com"),
+            "完整域名例外只作用于它自己"
+        );
+    }
+
+    #[test]
+    fn suffix_direct_rule_excludes_the_whole_subtree() {
+        let plan = plan(
+            &[
+                rule("DOMAIN-SUFFIX", "example.com", "VPN"),
+                rule("DOMAIN-SUFFIX", "hlwapi.example.com", "DIRECT"),
+            ],
+            "DIRECT",
+        );
+        assert!(!plan.tunnels("hlwapi.example.com"));
+        assert!(!plan.tunnels("a.hlwapi.example.com"));
+        assert!(plan.tunnels("oa.example.com"));
+    }
+
+    /// 例外的判定只看「谁更具体」，和规则在列表里排第几无关。
+    #[test]
+    fn exception_wins_by_specificity_not_by_order() {
+        for direct_first in [true, false] {
+            let direct = rule("DOMAIN", "hlwapi.example.com", "DIRECT");
+            let vpn = rule("DOMAIN-SUFFIX", "example.com", "VPN");
+            let rules = if direct_first {
+                vec![direct, vpn]
+            } else {
+                vec![vpn, direct]
+            };
+            let plan = plan(&rules, "DIRECT");
+            assert!(!plan.tunnels("hlwapi.example.com"), "顺序不该影响结论");
+            assert!(plan.tunnels("oa.example.com"));
+        }
+    }
+
+    /// 现场只拿 example.com 举例；换个域名排除行为必须一模一样。
+    #[test]
+    fn exclusion_is_generic_for_any_suffix() {
+        let plan = plan(
+            &[
+                rule("DOMAIN-SUFFIX", "example.org", "VPN"),
+                rule("DOMAIN", "test.example.org", "DIRECT"),
+            ],
+            "DIRECT",
+        );
+        assert!(!plan.tunnels("test.example.org"));
+        assert!(plan.tunnels("prod.example.org"));
+        assert!(plan.tunnels("bate.example.org"));
+    }
+
+    /// Windows 回退路径扫系统 DNS 缓存时，直连例外的地址不能被补成隧道路由。
+    #[test]
+    fn dns_cache_skips_direct_exceptions() {
+        let rules = plan(
+            &[
+                rule("DOMAIN-SUFFIX", "example.com", "VPN"),
+                rule("DOMAIN", "hlwapi.example.com", "DIRECT"),
+            ],
+            "DIRECT",
+        )
+        .rules;
+        let value = serde_json::json!([
+            {"Entry": "hlwapi.example.com", "Data": "203.0.113.11"},
+            {"Entry": "oa.example.com", "Data": "192.0.2.41"},
+        ]);
+        let got = tunnel_cache_entries(value, &rules);
+        assert_eq!(
+            got,
+            vec![(
+                "oa.example.com".to_string(),
+                "192.0.2.41".parse().unwrap()
+            )]
+        );
+    }
+
+    /// `IP-CIDR` 已下线：老配置里留着它时，计划里要给出「已下线」的说明，
+    /// 而不是静默丢弃。
+    #[test]
+    fn retired_ip_cidr_is_reported() {
+        let rules = vec![
+            rule("DOMAIN-SUFFIX", "example.com", "VPN"),
+            rule("IP-CIDR", "10.10.3.0/24", "VPN"),
+        ];
+        let plan = plan(&rules, "DIRECT");
+        assert_eq!(plan.domains, vec!["example.com"]);
+        assert!(
+            plan.notes.iter().any(|note| note.contains("已下线")),
+            "{:?}",
+            plan.notes
+        );
     }
 
     #[test]
@@ -1534,18 +1932,12 @@ mod tests {
             rule("DOMAIN-KEYWORD", "corp", "VPN"),
             rule("PROCESS-NAME", "Lark", "VPN"),
             rule("DST-PORT", "8080", "VPN"),
+            rule("IP-CIDR", "10.10.3.0/24", "VPN"),
         ];
         let plan = plan(&rules, "DIRECT");
         assert!(plan.domains.is_empty());
-        assert_eq!(plan.notes.len(), 3, "每类不支持的规则都要给出一条提示");
+        assert_eq!(plan.notes.len(), 4, "每类不支持的规则都要给出一条提示");
         assert!(plan.notes[0].contains("DOMAIN-SUFFIX"));
-    }
-
-    #[test]
-    fn plan_normalises_ip_cidr() {
-        let rules = vec![rule("IP-CIDR", "10.10.3.7/16", "VPN")];
-        let plan = plan(&rules, "DIRECT");
-        assert_eq!(plan.cidrs, vec!["10.10.0.0/16"]);
     }
 
     #[test]
@@ -1572,7 +1964,7 @@ mod tests {
             // 大小写 / 末尾点归一化
             {"Entry": "CAS.example.com.", "Data": "192.0.2.42"},
         ]);
-        let got = parse_dns_cache(value, &["example.com".to_string()]);
+        let got = tunnel_cache_entries(value, &suffix_rules(&["example.com"]));
         assert_eq!(
             got,
             vec![
@@ -1589,6 +1981,87 @@ mod tests {
         );
     }
 
+    /// 现场只拿 example.com 举例；换个域名必须一模一样 —— 代码里不许有域名特例。
+    #[test]
+    fn suffix_rule_is_generic_for_any_domain() {
+        let rules = vec![rule("DOMAIN-SUFFIX", "example.org", "VPN")];
+        assert_eq!(plan(&rules, "DIRECT").domains, vec!["example.org"]);
+
+        let value = serde_json::json!([
+            {"Entry": "test.example.org", "Data": "10.10.0.11"},
+            {"Entry": "prod.example.org", "Data": "10.10.0.12"},
+            {"Entry": "bate.example.org", "Data": "10.10.0.13"},
+            {"Entry": "example.org", "Data": "10.10.0.10"},
+            // 后缀边界：不能被 example.org 命中
+            {"Entry": "notexample.org", "Data": "10.10.0.99"},
+        ]);
+        let got = tunnel_cache_entries(value, &suffix_rules(&["example.org"]));
+        let names: Vec<&str> = got.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "test.example.org",
+                "prod.example.org",
+                "bate.example.org",
+                "example.org"
+            ]
+        );
+    }
+
+    /// Windows 回退路径没有转发器，缓存里的名字是唯一的线索；而热更新的
+    /// teardown 会 `Clear-DnsClientCache`，所以扫描时必须先记账，删掉直连例外
+    /// 才能立刻补注入（否则又要等应用重新查询/重连）。
+    #[test]
+    fn fallback_cache_scan_feeds_the_memo() {
+        let memo = DnsMemo::default();
+        let cache = serde_json::json!([
+            {"Entry": "hlwapi.example.com", "Data": "203.0.113.11"},
+            {"Entry": "oa.example.com", "Data": "192.0.2.41"},
+        ]);
+        for (name, ip) in parse_dns_cache(cache) {
+            record_answers(&memo, &name, &[ip]);
+        }
+
+        let with_exception = plan(
+            &[
+                rule("DOMAIN-SUFFIX", "example.com", "VPN"),
+                rule("DOMAIN", "hlwapi.example.com", "DIRECT"),
+            ],
+            "DIRECT",
+        );
+        assert_eq!(
+            remembered_injections(&memo, &with_exception.rules, &[]),
+            vec![Ipv4Addr::new(192, 0, 2, 41)]
+        );
+
+        let without_exception = plan(&[rule("DOMAIN-SUFFIX", "example.com", "VPN")], "DIRECT");
+        assert_eq!(
+            remembered_injections(&memo, &without_exception.rules, &[]),
+            vec![
+                Ipv4Addr::new(203, 0, 113, 11),
+                Ipv4Addr::new(192, 0, 2, 41)
+            ]
+        );
+    }
+
+    /// 记账只看「落不落在某条规则里」：跟规则无关的缓存条目（公网域名）
+    /// 不该占 [`MEMO_MAX_NAMES`] 的额度。
+    #[test]
+    fn memo_recording_only_covers_rule_names() {
+        let rules = plan(
+            &[
+                rule("DOMAIN-SUFFIX", "example.com", "VPN"),
+                rule("DOMAIN", "hlwapi.example.com", "DIRECT"),
+            ],
+            "DIRECT",
+        )
+        .rules;
+        assert!(covered_by_rules(&rules, "oa.example.com"));
+        assert!(covered_by_rules(&rules, "hlwapi.example.com"));
+        assert!(!covered_by_rules(&rules, "www.baidu.com"));
+        assert!(!covered_by_rules(&rules, "notexample.com"));
+    }
+
     #[test]
     fn dns_cache_ignores_unrelated_domains_and_duplicates() {
         let value = serde_json::json!([
@@ -1596,19 +2069,15 @@ mod tests {
             {"Entry": "a.example.com", "Data": "10.0.0.1"},
             {"Entry": "b.other.com", "Data": "10.0.0.2"},
         ]);
-        let got = parse_dns_cache(value, &["example.com".to_string()]);
+        let got = tunnel_cache_entries(value, &suffix_rules(&["example.com"]));
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].0, "a.example.com");
     }
 
     #[test]
     fn dns_cache_tolerates_null_and_empty_output() {
-        assert!(parse_dns_cache(serde_json::Value::Null, &["example.com".to_string()]).is_empty());
-        assert!(parse_dns_cache(
-            serde_json::json!({"Entry": "a.example.com"}),
-            &["example.com".to_string()]
-        )
-        .is_empty());
+        assert!(parse_dns_cache(serde_json::Value::Null).is_empty());
+        assert!(parse_dns_cache(serde_json::json!({"Entry": "a.example.com"})).is_empty());
     }
 
     #[test]
@@ -1665,19 +2134,24 @@ mod tests {
             std::thread::spawn(move || {
                 forward_loop(
                     stub,
-                    vec![SocketAddrV4::new(
-                        match upstream_addr.ip() {
-                            std::net::IpAddr::V4(v4) => v4,
-                            _ => unreachable!(),
-                        },
-                        upstream_addr.port(),
-                    )],
-                    "utun-test".to_string(),
-                    0,
-                    dynamic,
-                    Arc::new(AtomicUsize::new(0)),
-                    stop,
-                    session,
+                    ForwarderCtx {
+                        upstreams: vec![SocketAddrV4::new(
+                            match upstream_addr.ip() {
+                                std::net::IpAddr::V4(v4) => v4,
+                                _ => unreachable!(),
+                            },
+                            upstream_addr.port(),
+                        )],
+                        tun_dev: "utun-test".to_string(),
+                        tun_index: 0,
+                        dynamic,
+                        queries: Arc::new(AtomicUsize::new(0)),
+                        stop,
+                        rules: suffix_rules(&["example.com"]),
+                        server_ips: Vec::new(),
+                        memo: DnsMemo::default(),
+                        session,
+                    },
                 )
             })
         };
@@ -1685,7 +2159,6 @@ mod tests {
         // 假上游：收到查询后回一个带 A 记录的应答（问题段用压缩指针指回去）
         let upstream_worker = {
             let upstream = upstream.try_clone().expect("克隆上游 socket");
-            let upstream_addr = upstream_addr;
             std::thread::spawn(move || {
                 let mut buf = [0u8; 512];
                 let (len, from) = upstream.recv_from(&mut buf).expect("上游应收到查询");
@@ -1726,6 +2199,109 @@ mod tests {
         let _ = handle.join();
     }
 
+    /// 直连例外的应答也要记账：热更新把例外删掉后，靠这份账补注入 `/32`。
+    ///
+    /// 这条链路是现场 bug 的关键——应用缓存着旧答案、不再发查询，只能靠转发器
+    /// 曾经看到的应答；例外名字的应答同样要有记录。
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn forwarder_remembers_answers_even_for_direct_exceptions() {
+        let dir = crate::test_support::TempDir::new("split-forwarder-memo");
+        let session = VpnSession::new(dir.path().to_path_buf());
+        let _ = session.ensure();
+
+        let stub = UdpSocket::bind("127.0.0.1:0").expect("绑定测试转发器");
+        let stub_addr = stub.local_addr().expect("转发器地址");
+        let upstream = UdpSocket::bind("127.0.0.1:0").expect("绑定假上游");
+        let upstream_addr = upstream.local_addr().expect("上游地址");
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let dynamic = Arc::new(Mutex::new(BTreeSet::new()));
+        let dynamic_probe = Arc::clone(&dynamic);
+        let memo = DnsMemo::default();
+        let memo_probe = Arc::clone(&memo);
+        let rules = plan(
+            &[
+                rule("DOMAIN-SUFFIX", "example.com", "VPN"),
+                rule("DOMAIN", "hlwapi.example.com", "DIRECT"),
+            ],
+            "DIRECT",
+        )
+        .rules;
+        let handle = {
+            let stop = Arc::clone(&stop);
+            let dynamic = Arc::clone(&dynamic);
+            let memo = Arc::clone(&memo);
+            let session = session.clone();
+            std::thread::spawn(move || {
+                forward_loop(
+                    stub,
+                    ForwarderCtx {
+                        upstreams: vec![SocketAddrV4::new(
+                            match upstream_addr.ip() {
+                                std::net::IpAddr::V4(v4) => v4,
+                                _ => unreachable!(),
+                            },
+                            upstream_addr.port(),
+                        )],
+                        tun_dev: "utun-test".to_string(),
+                        tun_index: 0,
+                        dynamic,
+                        queries: Arc::new(AtomicUsize::new(0)),
+                        stop,
+                        rules,
+                        server_ips: Vec::new(),
+                        memo,
+                        session,
+                    },
+                )
+            })
+        };
+
+        let upstream_worker = {
+            let upstream = upstream.try_clone().expect("克隆上游 socket");
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 512];
+                let (len, from) = upstream.recv_from(&mut buf).expect("上游应收到查询");
+                let mut resp = buf[..len].to_vec();
+                resp[2] |= 0x80;
+                resp[6..8].copy_from_slice(&1u16.to_be_bytes());
+                resp.extend_from_slice(&[0xC0, 0x0C]);
+                resp.extend_from_slice(&[0x00, 0x01]);
+                resp.extend_from_slice(&[0x00, 0x01]);
+                resp.extend_from_slice(&[0x00, 0x00, 0x00, 0x3c]);
+                resp.extend_from_slice(&[0x00, 0x04]);
+                resp.extend_from_slice(&[10, 10, 3, 17]);
+                let _ = upstream.send_to(&resp, from);
+            })
+        };
+
+        let client = UdpSocket::bind("127.0.0.1:0").expect("绑定客户端");
+        client
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("设置超时");
+        let query = dns_client::build_query("hlwapi.example.com", 0x5321).expect("构造查询");
+        client.send_to(&query, stub_addr).expect("发给本机转发器");
+        let mut buf = [0u8; 1024];
+        let (len, _) = client.recv_from(&mut buf).expect("应当收到应答");
+        assert_eq!(dns_client::parse_a_records(&buf[..len]).len(), 1);
+
+        let injected = dynamic_probe.lock().map(|set| set.len()).unwrap_or(0);
+        assert_eq!(injected, 0, "直连例外不该注入 /32");
+        let remembered = memo_probe
+            .lock()
+            .map(|map| map.get("hlwapi.example.com").cloned().unwrap_or_default())
+            .unwrap_or_default();
+        assert!(
+            remembered.contains(&Ipv4Addr::new(10, 10, 3, 17)),
+            "例外名字的答案也要记账：{remembered:?}"
+        );
+
+        upstream_worker.join().expect("假上游线程");
+        stop.store(true, Ordering::Relaxed);
+        let _ = handle.join();
+    }
+
     /// Windows 的按域名解析：主动向 VPN DNS 查 A 记录，答什么就要拿到什么。
     #[cfg(target_os = "windows")]
     #[test]
@@ -1760,9 +2336,86 @@ mod tests {
         assert_eq!(got, vec![Ipv4Addr::new(10, 10, 3, 17)]);
     }
 
+    /// 「只有 `DOMAIN-SUFFIX example.com → 走 VPN`」时，`hlwapi.example.com`
+    /// 落回父级后缀规则：算**走 VPN**（例外一删就是这个状态）。
     #[test]
-    fn dynamic_ips_skip_addresses_that_must_not_be_routed() {
-        assert!(usable_tunnel_ip(Ipv4Addr::new(10, 10, 3, 17)));
+    fn a_subdomain_falls_back_to_the_suffix_rule() {
+        let plan = plan(&[rule("DOMAIN-SUFFIX", "example.com", "VPN")], "DIRECT");
+        assert!(plan.tunnels("hlwapi.example.com"));
+        assert!(plan.tunnels("oa.example.com"));
+        assert!(!plan.tunnels("hlwapi.example.com.cn"));
+        assert!(!plan.tunnels("hlwapi.notexample.com"));
+    }
+
+    /// 规则热更新把某个名字从「直连例外」改回「走 VPN」后，要能按记过的
+    /// DNS 答案立刻补注入——应用缓存着旧答案、不再发查询（现场 bug：
+    /// 删掉例外后仍然直连，断开重连才正常）。
+    #[test]
+    fn hot_rule_change_reinjects_remembered_answers() {
+        let memo = DnsMemo::default();
+        record_answers(
+            &memo,
+            "hlwapi.example.com",
+            &[Ipv4Addr::new(203, 0, 113, 11)],
+        );
+        record_answers(
+            &memo,
+            "oa.example.com",
+            &[Ipv4Addr::new(192, 0, 2, 41)],
+        );
+        record_answers(&memo, "empty.example.com", &[]); // 空答案不该记账
+
+        let with_exception = plan(
+            &[
+                rule("DOMAIN-SUFFIX", "example.com", "VPN"),
+                rule("DOMAIN", "hlwapi.example.com", "DIRECT"),
+            ],
+            "DIRECT",
+        );
+        let stayed = remembered_injections(&memo, &with_exception.rules, &[]);
+        assert!(
+            !stayed.contains(&Ipv4Addr::new(203, 0, 113, 11)),
+            "例外还在时 hlwapi 不能被补注入：{stayed:?}"
+        );
+        assert!(stayed.contains(&Ipv4Addr::new(192, 0, 2, 41)));
+
+        let without_exception = plan(&[rule("DOMAIN-SUFFIX", "example.com", "VPN")], "DIRECT");
+        let got = remembered_injections(&memo, &without_exception.rules, &[]);
+        assert_eq!(
+            got,
+            vec![
+                Ipv4Addr::new(203, 0, 113, 11),
+                Ipv4Addr::new(192, 0, 2, 41),
+            ]
+        );
+    }
+
+    /// 补注入同样要守「VPN 服务器自己的地址不进隧道」。
+    #[test]
+    fn remembered_answers_skip_the_vpn_server() {
+        let memo = DnsMemo::default();
+        let server = Ipv4Addr::new(203, 0, 113, 10);
+        record_answers(&memo, "vpn.example.com", &[server]);
+        let plan = plan(&[rule("DOMAIN-SUFFIX", "example.com", "VPN")], "DIRECT");
+        assert!(remembered_injections(&memo, &plan.rules, &[server]).is_empty());
+    }
+
+    #[test]
+    fn dns_memo_is_capped() {
+        let memo = DnsMemo::default();
+        for i in 0..(MEMO_MAX_NAMES + 5) {
+            record_answers(
+                &memo,
+                &format!("n{i}.example.test"),
+                &[Ipv4Addr::new(10, 0, 0, 1)],
+            );
+        }
+        let len = memo.lock().map(|map| map.len()).unwrap_or(0);
+        assert!(len <= MEMO_MAX_NAMES, "记账要有上限：{len}");
+    }
+
+    #[test]
+    fn dynamic_ips_skip_addresses_that_must_not_be_routed() {        assert!(usable_tunnel_ip(Ipv4Addr::new(10, 10, 3, 17)));
         assert!(!usable_tunnel_ip(Ipv4Addr::new(127, 0, 0, 1)));
         assert!(!usable_tunnel_ip(Ipv4Addr::new(0, 0, 0, 0)));
         assert!(!usable_tunnel_ip(Ipv4Addr::new(224, 0, 0, 1)));
@@ -1770,25 +2423,14 @@ mod tests {
         assert!(!usable_tunnel_ip(Ipv4Addr::new(255, 255, 255, 255)));
     }
 
+    /// VPN 服务器自己的公网 IP 不能被注入隧道，否则隧道的 TLS/DTLS 会打环。
     #[test]
-    fn plan_absorbs_server_pushed_scope() {
-        // 服务端下发的默认域名 + split-include 网段都要能被并入计划（这套校验和
-        // 规则里的域名/网段完全一致），重复的不重复加。
-        let mut plan = SplitPlan::default();
-        assert!(plan.add_domain("example.com."));
-        assert!(!plan.add_domain("example.com"), "重复域名不该重复加");
-        assert!(
-            !plan.add_domain("*.example.com"),
-            "通配写法归一化后仍是同一个"
-        );
-        assert!(plan.add_cidr("198.51.100.7/22"));
-        assert_eq!(plan.cidrs, vec!["198.51.100.0/24"], "网段要归一化");
-        assert!(
-            !plan.add_cidr("198.51.100.9/22"),
-            "归一化后同一个网段不重复加"
-        );
-        assert!(!plan.add_cidr("not-a-cidr"));
-        assert_eq!(plan.domains, vec!["example.com"]);
+    fn vpn_server_ip_is_never_injected_into_the_tunnel() {
+        let server = Ipv4Addr::new(203, 0, 113, 10);
+        assert!(!injectable(server, &[server]));
+        assert!(injectable(Ipv4Addr::new(10, 10, 3, 17), &[server]));
+        assert!(injectable(server, &[]));
+        assert!(!injectable(Ipv4Addr::new(127, 0, 0, 1), &[server]));
     }
 
     #[test]

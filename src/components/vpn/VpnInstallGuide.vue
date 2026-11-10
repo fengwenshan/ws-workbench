@@ -3,7 +3,7 @@ import type { InstallGuide } from '@/types/vpn'
 
 defineProps<{
   guide: InstallGuide | null
-  /** 是否允许「一键导入 openconnect」 */
+  /** 是否允许「指定 openconnect 位置」（Windows 用内置副本，不显示） */
   canImport: boolean
 }>()
 
@@ -46,9 +46,9 @@ async function copyCommand(command: string) {
     <div v-if="canImport" class="guide-import">
       <div class="import-text">
         <strong>已经有 openconnect 了？</strong>
-        <span>直接选它所在的那个目录，程序会把 openconnect.exe 和同目录的 DLL 复制到自己的数据目录里，不需要管理员权限。</span>
+        <span>选中那个 openconnect 可执行文件即可（Homebrew 的在 Cellar/openconnect/9.21/bin/ 下）。程序只记住这个路径，不复制文件，brew 升级后会自动跟着走。</span>
       </div>
-      <button class="btn btn-primary" @click="emit('import')">一键导入</button>
+      <button class="btn btn-primary" @click="emit('import')">指定位置</button>
     </div>
 
     <div v-if="guide.links.length > 0" class="guide-links">
