@@ -96,8 +96,7 @@ fn scan(app: &AppHandle) -> Vec<OpenWithApp> {
 fn platform_open(app: &AppHandle, app_id: &str, dir: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        let _ = app;
-        mac_open(app_id, dir)
+        mac_open(app, app_id, dir)
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -127,6 +126,12 @@ const MAC_CATALOG: &[MacApp] = &[
         name: "访达",
         bundles: &[],
         fixed: Some("/System/Library/CoreServices/Finder.app"),
+    },
+    MacApp {
+        id: "deepseek",
+        name: "DeepSeek",
+        bundles: &["DeepSeek Harness.app"],
+        fixed: None,
     },
     MacApp {
         id: "vscode",
@@ -220,6 +225,14 @@ fn mac_bundle_path(spec: &MacApp) -> Option<PathBuf> {
             .map(|root| root.join(name))
             .find(|path| path.exists())
     })
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn deepseek_bundle_path() -> Option<PathBuf> {
+    MAC_CATALOG
+        .iter()
+        .find(|spec| spec.id == "deepseek")
+        .and_then(mac_bundle_path)
 }
 
 /// 找出一个 `.app` 真正该用的图标文件。
@@ -321,7 +334,7 @@ fn mac_scan() -> Vec<OpenWithApp> {
 }
 
 #[cfg(target_os = "macos")]
-fn mac_open(app_id: &str, dir: &str) -> Result<(), String> {
+fn mac_open(app: &AppHandle, app_id: &str, dir: &str) -> Result<(), String> {
     let spec = MAC_CATALOG
         .iter()
         .find(|spec| spec.id == app_id)
@@ -331,6 +344,11 @@ fn mac_open(app_id: &str, dir: &str) -> Result<(), String> {
     // 访达就用 shell open，等价于双击目录
     if spec.id == "finder" {
         return crate::commands::open_path(dir);
+    }
+
+    // DeepSeek 不能把目录当参数传：写请求文件后唤起，工作区由 DSH 插件打开
+    if spec.id == "deepseek" {
+        return crate::commands::deepseek::open_dir_workspace(app, dir);
     }
 
     let output = Command::new("/usr/bin/open")
@@ -369,6 +387,7 @@ const DESKTOP_EDITORS: &[(&str, &str, crate::apps::AppId)] = &[
     ("rustrover", "RustRover", crate::apps::AppId::Rustrover),
     ("cursor", "Cursor", crate::apps::AppId::Cursor),
     ("trae", "Trae", crate::apps::AppId::Trae),
+    ("deepseek", "DeepSeek", crate::apps::AppId::DeepSeek),
 ];
 
 /// 非 macOS 菜单里的一项。
@@ -666,6 +685,9 @@ fn other_open(app: &AppHandle, app_id: &str, dir: &str) -> Result<(), String> {
     if app_id == "powershell" {
         return crate::commands::open_powershell_dir(dir);
     }
+    if app_id == "deepseek" {
+        return crate::commands::deepseek::open_dir_workspace(app, dir);
+    }
     let app_id = match app_id {
         "vscode" => crate::apps::AppId::Vscode,
         "idea" => crate::apps::AppId::Idea,
@@ -819,6 +841,21 @@ mod tests {
                 assert_eq!(&bytes[..4], b"\x89PNG", "{} 的图标不是 PNG", app.name);
             }
         }
+    }
+
+    /// 「用 DeepSeek 打开」排在访达之后，名字就叫 DeepSeek
+    #[test]
+    fn mac_catalog_puts_deepseek_after_finder() {
+        let ids: Vec<&str> = MAC_CATALOG.iter().map(|spec| spec.id).collect();
+        let finder = ids.iter().position(|id| *id == "finder").unwrap();
+        let deepseek = ids.iter().position(|id| *id == "deepseek").unwrap();
+        assert_eq!(deepseek, finder + 1);
+        let spec = MAC_CATALOG
+            .iter()
+            .find(|spec| spec.id == "deepseek")
+            .unwrap();
+        assert_eq!(spec.name, "DeepSeek");
+        assert_eq!(spec.bundles, &["DeepSeek Harness.app"]);
     }
 
     /// 回归：带 `CFBundleIconFile` 的包必须用声明的那张 icns，不能拿 Resources 里第一张

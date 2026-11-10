@@ -18,6 +18,8 @@ pub enum AppId {
     Rustrover,
     Cursor,
     Trae,
+    /// DeepSeek Harness 桌面版：点「打开方式 → DeepSeek」时把目录作为工作区交给它
+    DeepSeek,
     /// VPN 唯一的连接程序：命令行版 openconnect。
     /// Windows 上优先用随程序分发的内置副本，macOS 上走 Homebrew 装的那份。
     Openconnect,
@@ -33,6 +35,7 @@ impl AppId {
         AppId::Rustrover,
         AppId::Cursor,
         AppId::Trae,
+        AppId::DeepSeek,
         AppId::Openconnect,
     ];
 
@@ -46,6 +49,7 @@ impl AppId {
             AppId::Rustrover => "rustrover",
             AppId::Cursor => "cursor",
             AppId::Trae => "trae",
+            AppId::DeepSeek => "deepseek",
             AppId::Openconnect => "openconnect",
         }
     }
@@ -67,6 +71,7 @@ impl AppId {
             AppId::Rustrover => "RustRover",
             AppId::Cursor => "Cursor",
             AppId::Trae => "Trae",
+            AppId::DeepSeek => "DeepSeek",
             AppId::Openconnect => "OpenConnect（命令行）",
         }
     }
@@ -81,6 +86,7 @@ impl AppId {
             AppId::Rustrover => "在 RustRover 里打开项目目录",
             AppId::Cursor => "在 Cursor 里打开项目目录",
             AppId::Trae => "在 Trae 里打开项目目录",
+            AppId::DeepSeek => "在 DeepSeek Harness 里打开项目工作区",
             AppId::Openconnect => {
                 "VPN 唯一的连接程序：支持免手输密码自动登录，\
                  也只有它能按网段精确分流。"
@@ -114,6 +120,7 @@ impl AppId {
                 "trae.cmd",
                 "trae.bat",
             ],
+            AppId::DeepSeek => &["DeepSeek Harness.exe", "DeepSeek.exe"],
             AppId::Openconnect => &["openconnect.exe", "openconnect"],
         }
     }
@@ -129,6 +136,7 @@ impl AppId {
             AppId::Rustrover => &["RustRover"],
             AppId::Cursor => &["Cursor"],
             AppId::Trae => &["Trae"],
+            AppId::DeepSeek => &["DeepSeek Harness"],
             AppId::Openconnect => &["OpenConnect"],
         }
     }
@@ -157,6 +165,12 @@ impl AppId {
                 "Programs\\TRAE SOLO CN",
                 "Programs\\Trae CN",
                 "Programs\\Trae",
+            ],
+            AppId::DeepSeek => &[
+                "DeepSeek Harness",
+                "Programs\\DeepSeek Harness",
+                "DeepSeek",
+                "Programs\\DeepSeek",
             ],
             AppId::Openconnect => &["OpenConnect", "openconnect"],
         }
@@ -209,6 +223,9 @@ impl AppId {
             AppId::Rustrover => &["/Applications/RustRover.app/Contents/MacOS/rustrover"],
             AppId::Cursor => &["/Applications/Cursor.app/Contents/MacOS/Cursor"],
             AppId::Trae => &["/Applications/Trae.app/Contents/MacOS/Trae"],
+            AppId::DeepSeek => &[
+                "/Applications/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness",
+            ],
             AppId::Openconnect => &[
                 "/opt/homebrew/bin/openconnect",
                 "/opt/homebrew/opt/openconnect/bin/openconnect",
