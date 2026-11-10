@@ -1,73 +1,71 @@
 #!/usr/bin/env bash
-# 把 dsh-open-workspace 插件装进本机 DeepSeek Harness 的 desktop profile。
-#
-# 生产用户不需要手动跑：ws-workbench 点「打开方式 → DeepSeek」时会自动安装（弹窗确认）。
-# 这个脚本用于：开发机手动安装、CI/临时 DSH_HOME、排障卸载。
+# 从本地 zip 安装 / 卸载 DeepSeek 工作区插件（开发 / 离线用；生产走 ws-workbench 设置 → 资源）。
 #
 # 用法：
-#   scripts/dsh-plugin-install.sh            # 安装 / 更新
+#   scripts/dsh-plugin-install.sh --zip dsh-open-workspace-0.1.0.zip
 #   scripts/dsh-plugin-install.sh --uninstall
 #
 # 环境变量：DSH_HOME（默认 ~/.dsh）
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SRC="$ROOT/dsh-plugin/dsh-open-workspace"
 DSH_HOME="${DSH_HOME:-$HOME/.dsh}"
-PROFILE="$DSH_HOME/profiles/desktop"
-MANIFEST="$PROFILE/package.json"
-BACKUP="$PROFILE/package.json.ws-workbench.bak"
+PROFILE_DIR="$DSH_HOME/profiles/desktop"
 PLUGIN_NAME="dsh-open-workspace"
+STORE_DIR="$DSH_HOME/plugins/$PLUGIN_NAME"
+ACTIVE_DIR="$PROFILE_DIR/node_modules/$PLUGIN_NAME"
+MANIFEST="$PROFILE_DIR/package.json"
 
-if [ ! -f "$MANIFEST" ]; then
-  echo "找不到 $MANIFEST —— 先打开一次 DeepSeek Harness 让它初始化 desktop profile。" >&2
-  exit 1
-fi
+die() { echo "错误: $*" >&2; exit 1; }
 
-if [ "${1:-}" = "--uninstall" ]; then
-  python3 - "$MANIFEST" "$PLUGIN_NAME" <<'PY'
+uninstall() {
+  rm -rf "$STORE_DIR" "$ACTIVE_DIR"
+  python3 - "$MANIFEST" <<'PYEOF'
 import json, sys
-path, name = sys.argv[1], sys.argv[2]
+path = sys.argv[1]
 with open(path) as f:
     data = json.load(f)
-data.get("dependencies", {}).pop(name, None)
+data.get("dependencies", {}).pop("dsh-open-workspace", None)
 bundles = data.get("dsh", {}).get("profile", {}).get("bundles", [])
-if name in bundles:
-    bundles.remove(name)
+if "dsh-open-workspace" in bundles:
+    bundles.remove("dsh-open-workspace")
 with open(path, "w") as f:
     json.dump(data, f, ensure_ascii=False, indent=2)
-    f.write("\n")
-PY
-  rm -rf "$PROFILE/node_modules/$PLUGIN_NAME" "$DSH_HOME/plugins/$PLUGIN_NAME"
-  echo "已卸载 ${PLUGIN_NAME}（重启 DeepSeek 生效）。"
-  exit 0
-fi
+PYEOF
+  echo "已卸载。重启 DeepSeek Harness 生效。"
+}
 
-[ -f "$BACKUP" ] || cp "$MANIFEST" "$BACKUP"
-mkdir -p "$DSH_HOME/plugins" "$PROFILE/node_modules"
-rm -rf "$DSH_HOME/plugins/$PLUGIN_NAME" "$PROFILE/node_modules/$PLUGIN_NAME"
-cp -R "$SRC" "$DSH_HOME/plugins/$PLUGIN_NAME"
-cp -R "$SRC" "$PROFILE/node_modules/$PLUGIN_NAME"
-
-python3 - "$MANIFEST" "$PLUGIN_NAME" <<'PY'
+install_zip() {
+  local zip="$1"
+  [ -f "$zip" ] || die "找不到 zip: $zip"
+  [ -f "$MANIFEST" ] || die "DeepSeek 还没初始化：先打开一次 DeepSeek Harness"
+  local tmp
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' RETURN
+  unzip -q "$zip" -d "$tmp/dsh-open-workspace"
+  for f in package.json cordis.patch.yml lib/index.mjs lib/client.js README.md; do
+    [ -f "$tmp/dsh-open-workspace/$f" ] || die "zip 缺少 $f"
+  done
+  mkdir -p "$STORE_DIR" "$ACTIVE_DIR"
+  cp -R "$tmp/dsh-open-workspace/." "$STORE_DIR/"
+  cp -R "$tmp/dsh-open-workspace/." "$ACTIVE_DIR/"
+  [ -f "$MANIFEST.ws-workbench.bak" ] || cp "$MANIFEST" "$MANIFEST.ws-workbench.bak"
+  python3 - "$MANIFEST" <<'PYEOF'
 import json, sys
-path, name = sys.argv[1], sys.argv[2]
+path = sys.argv[1]
 with open(path) as f:
     data = json.load(f)
-changed = False
-deps = data.setdefault("dependencies", {})
-if name not in deps:
-    deps[name] = "link:../../plugins/dsh-open-workspace"
-    changed = True
-profile = data.setdefault("dsh", {}).setdefault("profile", {})
-bundles = profile.setdefault("bundles", [])
-if name not in bundles:
-    bundles.append(name)
-    changed = True
-if changed:
-    with open(path, "w") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-        f.write("\n")
-PY
+data.setdefault("dependencies", {})["dsh-open-workspace"] = "link:../../plugins/dsh-open-workspace"
+bundles = data.setdefault("dsh", {}).setdefault("profile", {}).setdefault("bundles", [])
+if "dsh-open-workspace" not in bundles:
+    bundles.append("dsh-open-workspace")
+with open(path, "w") as f:
+    json.dump(data, f, ensure_ascii=False, indent=2)
+PYEOF
+  echo "已安装。重启 DeepSeek Harness 生效。"
+}
 
-echo "已安装 ${PLUGIN_NAME}（重启 DeepSeek 生效）。"
+case "${1:-}" in
+  --zip) install_zip "${2:?--zip 需要 zip 路径}" ;;
+  --uninstall) uninstall ;;
+  *) die "用法: $0 --zip <path> | --uninstall" ;;
+esac

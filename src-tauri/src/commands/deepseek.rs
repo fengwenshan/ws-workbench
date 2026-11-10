@@ -2,11 +2,10 @@
 //!
 //! ws-workbench 与 DSH 只通过 `$DSH_HOME/open-workspace.json` 通信：点菜单时写请求，
 //! DSH 里的 `dsh-open-workspace` 插件消费后调 `workspaces.create` +
-//! `uiWorkspace.openWorkspace`，落到左侧工作区。插件源码在
-//! `dsh-plugin/dsh-open-workspace/`，用 include_str! 编进二进制，安装包里一定有。
+//! `uiWorkspace.openWorkspace`，落到左侧工作区。插件本体在独立仓库
+//! （release zip 由「设置 → 资源」下载安装），这里只维护 profile 里的文件与清单。
 
 use serde::{Deserialize, Serialize};
-use sm3::{Digest, Sm3};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
