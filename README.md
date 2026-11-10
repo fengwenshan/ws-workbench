@@ -155,7 +155,7 @@ const canPack = computed(() => projectType.value === 'layui')
   整个生命周期跟着「连接」按钮走，状态只体现在日志里（`[启动]` / `[elevate]` 行）。
   注册失败（组策略禁止建任务）不影响本次连接，schtasks 的原始输出落在会话目录的
   `create-task.log` 里；这种机器只能每次连接弹一次系统授权框。
-- macOS：`osascript ... with administrator privileges`
+- macOS：`osascript ... with administrator privileges`。macOS 没有类似「注册计划任务免 UAC」的持久授权机制，所以**每次点「连接」都会弹一次系统授权框、要输一次密码**；断开后 worker 会自行收尾退出，不常驻 root 进程。这是刻意的取舍：少一次输密码就得常驻特权进程或写 sudoers 免密，安全面更大。
 
 > 换新包时**覆盖解压到同一个目录**，任务的 `/TR` 里 exe 路径不变，升级后也完全不会弹 UAC；
 > 解压到日期命名的新目录则会多一次 UAC（这一次会把任务挪到新路径）。
