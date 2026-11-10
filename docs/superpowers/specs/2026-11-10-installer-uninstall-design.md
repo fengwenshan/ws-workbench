@@ -154,7 +154,7 @@ Windows 使用 Tauri NSIS 安装器自带的标准卸载器（Apps & Features）
 
 ## 9. 验证记录（macOS，2026-11-10）
 
-- `cargo test --lib`：489 passed / 0 failed / 4 ignored。
+- `cargo test --lib`：全量通过（最终 492 passed / 0 failed / 4 ignored；本次新增 6 个 `uninstall_info` 测试）。
 - `cargo check --bins`：通过。
 - `pnpm build`：通过。
 - `bash scripts/macos/test-uninstall.sh`：三条 dry-run 场景通过（保留数据、删除全部、进程不退时零删除）。
