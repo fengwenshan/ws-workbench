@@ -842,7 +842,7 @@ async function handlePack(project: any, asZip: boolean = false) {
         </Form>
       </Modal>
 
-      <!-- 添加项目弹窗：目录已在点击「添加项目」时选好，这里补名称与输出目录 -->
+      <!-- 添加项目弹窗：目录已在点击「添加项目」时选好，这里先确认名称，再补目录与输出目录 -->
       <Modal
         v-model:open="showAddForm"
         title="添加项目"
@@ -858,16 +858,6 @@ async function handlePack(project: any, asZip: boolean = false) {
           layout="vertical"
           @submit.prevent
         >
-          <FormItem label="项目目录">
-            <div class="dir-row">
-              <Input
-                :value="newProjectSource"
-                :title="newProjectSource"
-                readonly
-              />
-              <Button @click="selectNewSource">重新选择</Button>
-            </div>
-          </FormItem>
           <FormItem
             label="项目名称"
             name="name"
@@ -881,6 +871,16 @@ async function handlePack(project: any, asZip: boolean = false) {
               placeholder="项目名称"
               @keydown.enter.prevent="submitProjectForm"
             />
+          </FormItem>
+          <FormItem label="项目目录">
+            <div class="dir-row">
+              <Input
+                :value="newProjectSource"
+                :title="newProjectSource"
+                readonly
+              />
+              <Button @click="selectNewSource">重新选择</Button>
+            </div>
           </FormItem>
           <FormItem label="输出目录（可选，默认为项目目录-dist）">
             <div class="dir-row">
