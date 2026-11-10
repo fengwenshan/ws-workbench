@@ -1327,18 +1327,21 @@ async function runDeepseek() {
   }
 
   const action = status.plugin_installed ? '更新' : '安装'
+  let installedNow = false
   if (!status.plugin_installed || status.needs_update) {
     const agreed = await askInstall(status, action)
     if (!agreed) return
     status = await installDeepseekPlugin()
+    installedNow = true
     message.success(`DeepSeek 工作区插件已${action}`)
     emit('log', 'info', `DeepSeek 工作区插件已${action}: ${status.installed_version}`)
   }
 
-  const wasRunning = status.dsh_running
+  // 只有「这次刚装/刚更新」且 DSH 正开着才需要重启；插件已就绪时点一次就直接打开
+  const restartNeeded = installedNow && status.dsh_running
   await openDeepseekWorkspace(props.path)
   emit('log', 'info', `用 DeepSeek 打开: ${props.path}`)
-  if (wasRunning) {
+  if (restartNeeded) {
     Modal.info({
       title: '重启 DeepSeek 后工作区才生效',
       content:
