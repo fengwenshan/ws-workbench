@@ -1,6 +1,6 @@
 # ws-workbench
 
-基于 Tauri 2 的桌面工作台，把交付日常收进一个窗口：分组/项目管理、Markdown 笔记与加密附件、Layui 项目打包、VPN 规则分流、Hosts 在线编辑、运行环境自检；还带一份加密落盘的剪贴板历史（文本 / 图片 / 图文，macOS / Windows）。主页按「分组 → 项目」组织内容，系统 / 代理 / 设置从左侧图标栏进入；关闭窗口不退出应用，常驻系统托盘（左键弹快捷面板，右键只有「显示主界面 / 退出」两项）。
+基于 Tauri 2 的桌面工作台，把交付日常收进一个窗口：分组/项目管理、Markdown 笔记与加密附件、Layui 项目打包、VPN 规则分流、Hosts 在线编辑、运行环境自检；还带一份加密落盘的剪贴板历史（文本 / 图片 / 图文，macOS / Windows）。主页按「分组 → 项目」组织内容，系统 / 代理 / 设置从左侧图标栏进入；关闭窗口不退出应用，常驻系统托盘（左键弹快捷面板，右键有「显示主界面 / 检查更新 / 退出」）。
 
 ## 功能
 
@@ -8,7 +8,7 @@
 
 - 两级结构：分组 → 项目。默认分组不可删除，但组内项目可删；分组与项目都支持拖拽排序，项目可以在分组之间拖动
 - 分组和项目各自带一份 Markdown 笔记、一组加密附件（上传目录统一在「设置 → 附件上传」里配）
-- 项目配置：源目录、输出目录。目录旁边是「打开方式」分体按钮：左半边固定用默认应用打开（访达 / 资源管理器），右半边是「用某个应用打开」的动作列表，点哪一项就立刻用那个应用打开当前目录，不切换、也不记住上次选了谁，菜单里给默认项标「（默认）」。macOS 列访达、DeepSeek、VS Code、Trae、Cursor、Xcode、IntelliJ IDEA、PyCharm、WebStorm、GoLand、iTerm、终端，图标从各应用的 `.icns` 里取；Windows 列资源管理器、VS Code、IntelliJ IDEA、PyCharm、WebStorm、GoLand、RustRover、Cursor、Trae、DeepSeek、终端、PowerShell，图标用 `PrivateExtractIcons` 从 exe 里取 64px PNG——终端取的是 Windows Terminal 的 `WindowsTerminal.exe`（`WindowsApps\wt.exe` 只是 0 字节别名），`.cmd` 启动器（如 Trae 的 `bin\trae.cmd`）会先解析出它真正启动的 exe 再取图标，否则拿到的是脚本或快捷方式的通用图标。打开失败会弹提示而不是静默无反应；目录不存在时自动退到最近存在的上级目录。Windows 上「打开」统一走 `ShellExecuteW`（也就是资源管理器里双击那条路），不再用 `CreateProcess`——后者必须带 `CREATE_NO_WINDOW` 才不闪黑框，控制台程序因此拿不到窗口（终端、PowerShell 点了没反应就是这个原因）。VS Code / Trae / Cursor 这类 Electron 编辑器改走它们自带的 `bin\code.cmd`、`bin\trae.cmd`（直接给 `.exe` 传目录在部分机器上什么都不发生，由 CLI 负责单实例转发和「在哪个窗口打开」），图标仍然从真正的 exe 上取
+- 项目配置：源目录、输出目录。源目录的「打开方式」分体按钮挪到了配置页顶栏右侧（源目录 / 输出目录两行只留「选择」）：左半边固定用默认应用打开（访达 / 资源管理器），右半边是「用某个应用打开」的动作列表，点哪一项就立刻用那个应用打开当前目录，不切换、也不记住上次选了谁，菜单里给默认项标「（默认）」。macOS 列访达、DeepSeek、VS Code、Trae、Cursor、Xcode、IntelliJ IDEA、PyCharm、WebStorm、GoLand、iTerm、终端，图标从各应用的 `.icns` 里取；Windows 列资源管理器、VS Code、IntelliJ IDEA、PyCharm、WebStorm、GoLand、RustRover、Cursor、Trae、DeepSeek、终端、PowerShell，图标用 `PrivateExtractIcons` 从 exe 里取 64px PNG——终端取的是 Windows Terminal 的 `WindowsTerminal.exe`（`WindowsApps\wt.exe` 只是 0 字节别名），`.cmd` 启动器（如 Trae 的 `bin\trae.cmd`）会先解析出它真正启动的 exe 再取图标，否则拿到的是脚本或快捷方式的通用图标。打开失败会弹提示而不是静默无反应；目录不存在时自动退到最近存在的上级目录。Windows 上「打开」统一走 `ShellExecuteW`（也就是资源管理器里双击那条路），不再用 `CreateProcess`——后者必须带 `CREATE_NO_WINDOW` 才不闪黑框，控制台程序因此拿不到窗口（终端、PowerShell 点了没反应就是这个原因）。VS Code / Trae / Cursor 这类 Electron 编辑器改走它们自带的 `bin\code.cmd`、`bin\trae.cmd`（直接给 `.exe` 传目录在部分机器上什么都不发生，由 CLI 负责单实例转发和「在哪个窗口打开」），图标仍然从真正的 exe 上取
 - 用 DeepSeek 打开：点 `DeepSeek` 会把当前项目目录交给 DeepSeek Harness——左侧没有这个目录就新增工作区，有就直接选中，并打开该工作区的空白新会话。DSH 侧靠一个独立发布的小插件（[@fengwenshan/dsh-open-workspace](https://github.com/fengwenshan/dsh-open-workspace)，按 tag 构建 zip 发到 GitHub Release 并同步 [Gitee](https://gitee.com/feng_wenshan/dsh-open-workspace) 的 `dist` 分支；「设置 → 资源」优先从 Gitee raw 下载，Gitee 不通再回退 GitHub）：点 `DeepSeek` 先检测本机有没有装 DeepSeek Harness（没装就提示先装）；装了但没装插件、或本地插件版本比远端最新版旧，会提示去「设置 → 资源」下载 / 更新，装完重启一次 DeepSeek 生效（10 分钟内的打开请求重启后自动生效）；DSH 没初始化过（profile 不存在）时会提示先打开一次。手动安装 / 卸载用 `scripts/dsh-plugin-install.sh --zip <zip路径>`（`--uninstall` 卸载）。
 - 新建项目时识别类型（Layui / Vue2 / Vue3 / React / SpringBoot / Spring / Struts2 / Java）和版本控制远端（Git / SVN），并做源目录校验；项目名称下方的 Git / SVN 标签和仓库地址都可以点击复制
 
@@ -192,13 +192,14 @@ openconnect 探测失败时，代理页给出按平台区分的安装引导：ma
 
 左侧图标栏第四个工具（`⌘/Ctrl+4`），四个页签（弹窗拦截仅 Windows 可见）：
 
-- **软件卸载**：Windows 读注册表 `Uninstall` 键（HKLM 64/32 位、HKCU），macOS 扫 `/Applications` 与 `~/Applications`；支持按名称/发布者/位置搜索，按名称、大小、安装日期排序（顺序记在本地）。点「确认卸载」先只读检测应用是否在运行：不在运行直接卸载；在运行则弹二次确认（显示进程数与进程名），确认后先按平台正常退出（macOS `NSRunningApplication.terminate()`、Windows `CloseMainWindow()`），5 秒内退不干净就中止本次卸载并提示手动退出，不强制结束进程。卸载执行 `UninstallString`（MSI 的 `/I` 自动换成 `/X`，需要时一次 UAC），macOS 把 `.app` 移入废纸篓；没有卸载命令的条目提供「强制移除」（Windows 删注册表项）。卸载后按 bundle id / 注册表键匹配固定残留位，并对 macOS 用户目录做低置信度深扫（厂商二级目录、helper 容器、ByHost 等，最多 200 条、默认不勾选）；残留按「文件系统 / 注册表」分组、带置信度展示，勾选删除后自动重扫，已删条目从列表消失。
+- **软件卸载**：Windows 读注册表 `Uninstall` 键（HKLM 64/32 位、HKCU），macOS 扫 `/Applications` 与 `~/Applications`；支持按名称/发布者/位置搜索，按名称、大小、安装日期排序（顺序记在本地）。行内「卸载」打开独立卸载窗口（820×560，macOS 隐藏标题、红绿灯浮在内容上）：按「程序文件 / 支持文件 / 缓存文件」列出关联文件——程序文件 = 主 `.app` + Spotlight/兜底目录找到的同 id 副本，支持/缓存复用残留规则；带大小、版本、置信度，high/medium 默认勾选，low 只列出不勾选，底部「全选」可全选，应用本体始终必选。点「确认删除」先只读检测是否在运行：不在运行直接执行；在运行弹二次确认（进程数与进程名），点「强制退出」先按平台正常退出（macOS `NSRunningApplication.terminate()`、Windows `CloseMainWindow()`），3 秒内退不干净就逐进程强杀（macOS `SIGKILL`、Windows `taskkill /PID … /T /F`），每 250ms 重新检测并补杀重启出来的新进程，全部进程消失后才继续（总上限约 20 秒，退不干净即中止并提示）。随后先跑应用自带卸载程序（macOS 主 `.app` 移入废纸篓；MSI 的 `/I` 自动换 `/X`，需要时一次 UAC），再按本次扫描白名单删除勾选的关联文件：卸载程序已删掉的路径记「跳过」不算失败，需 root 的条目走一次合并授权；结果页给出删除/跳过/失败明细，部分失败可重试，卸载/删除后主列表自动刷新。运行中的应用本体不出现在列表里，命令层也会再拦一次——不能卸载自己。
+- **卸载 ws-workbench 自己**：macOS 安装包（DMG）里带一个「卸载 ws-workbench.command」。双击后先正常退出应用，退不掉会询问是否强制退出；**所有相关进程归零后才继续**，否则直接报「卸载失败」且不删除任何文件。继续后会列出应用本体、数据目录、附件上传目录、剪贴板图片和 WebView 缓存，默认**保留用户数据**，也可以选择「删除全部数据」（二次确认，附件/数据库删除后不可恢复）。自定义到应用数据目录之外的附件目录只提醒、不自动删；真实路径由应用启动/保存设置时写入 `uninstall-info.txt`（纯路径，不含密钥）。Windows 继续使用安装器自带的标准卸载器（设置 → 应用 → 卸载），NSIS 数据清理页待 Windows 实机实现。
 - **弹窗拦截**（仅 Windows）：默认关闭，开启后后台线程每 800ms `EnumWindows` 扫可见顶层窗口，按「工具窗口 / 不抢焦点 / 始终置顶 / 无标题 / 尺寸异常 / 类名与标题广告线索 / 进程不在前台」打分，可疑窗口进列表并通过 `popup-detected` 事件实时推给界面。两档模式：**检测模式**（默认）只记录，每条由用户点「关闭 / 隐藏」，同进程 5 秒限流；**拦截模式**（可选，默认关）命中闸门后自动处理——分数达阈值、至少两条命中原因、不在系统进程/外壳窗口保护表、不在忽略名单、同进程冷却 5 秒、每分钟最多 6 个（熔断），设置存 `<data_dir>/popup-settings.json`。「忽略」按进程名记到同目录 `popup-ignore.json`。不注入、不装驱动、不杀进程。
 - **屏幕休眠**：阻止系统空闲睡眠（参考 Amphetamine 的公开电源断言方案），并支持「自动保持规则」（Triggers）：指定 App 运行时 / 接通电源时 / 连接外接显示器时自动保持，条件失效自动释放；手动开启优先，规则只释放自己开的会话。规则存 `<data_dir>/sleep-triggers.json`，后台 5 秒探测一次（`sysinfo` 进程列表、`pmset -g batt` / `GetSystemPowerStatus`、CoreGraphics 活动屏幕数 / `GetSystemMetrics(SM_CMONITORS)`），全部只读、不需要管理员权限。macOS 用 IOKit `IOPMAssertionCreateWithName`（`PreventUserIdleSystemSleep`，不勾「允许屏幕关闭」时再加 `PreventUserIdleDisplaySleep`，断言名 `ws-workbench Keep Awake`）；Windows 用专用线程持有 `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED [| ES_DISPLAY_REQUIRED])`。时长按会话式菜单选（参考 Amphetamine 的「开启新会话」）：不限时 / 5·10·15·20·25·30·45 分钟 / 1·2·3·4·6·8·12 小时，或自定义小时+分钟，点时长立即开始一个会话，到点自动释放（状态查询还有一道惰性回收）；不需要 root / 管理员，也不做登录级保活。
-- **Hosts**：把系统 hosts 的完整内容直接读进等宽编辑器，想加什么行就加什么行，`⌘/Ctrl+S` 保存整份文件（保存前自动备份 + 一次系统授权，取消不会改动文件）。路径固定：macOS `/etc/hosts`，Windows `%SystemRoot%\System32\drivers\etc\hosts`；「备份 N」可展开最近 30 份备份并还原（路径见「打开目录」按钮的提示）。编辑器按 hosts 格式高亮注释 / IPv4 / IPv6 / 主机名，非法地址标红；超过 32 KB 自动关闭高亮，避免大文件输入卡顿。非 UTF-8 的 hosts 会拒绝编辑，避免写坏原有内容；CRLF 文件会保持原来的换行风格。
+- **Hosts**：把系统 hosts 的完整内容直接读进等宽编辑器，想加什么行就加什么行，`⌘/Ctrl+S` 保存整份文件（保存前自动备份 + 一次系统授权，取消不会改动文件）。路径固定：macOS `/etc/hosts`，Windows `%SystemRoot%\System32\drivers\etc\hosts`；「备份 N」可展开最近 30 份备份并还原（路径见「打开目录」按钮的提示）。编辑器是 Monaco（VS Code 内核，本地打包、首次打开 Hosts 页签时懒加载）：行号对齐、注释 / IPv4 / IPv6 / 主机名高亮、非法地址标红，支持撤销重做、查找替换（`⌘/Ctrl+F`）、多光标与右键菜单。非 UTF-8 的 hosts 会拒绝编辑，避免写坏原有内容；CRLF 文件会保持原来的换行风格。
 安全约束：普通删除只进废纸篓；需 root 的条目走一次提权批处理（`rm -rf` / `Remove-Item`，不经过废纸篓，删除前会明确提示）；所有路径过白名单校验，`/`、主目录、`/System`、`/usr`、`C:\Windows` 等硬拒绝；`pkgutil` 安装收据只读展示；系统应用（SIP / `com.apple.*`）不提供卸载。macOS 的废纸篓走 `NSFileManager` API，不会弹「控制 Finder」的自动化授权。弹窗拦截不做注入/驱动/进程结束；屏幕休眠不碰合盖与主动睡眠。
 
-已知限制：Windows 侧只做了交叉编译检查与验收清单，未实机跑卸载/UAC/弹窗检测；残留以精确匹配为主，深扫可能漏报（不认识的自定义目录名）也可能多报（通用名字的目录），所以 low 条目默认不勾选；托盘常驻应用可能拦截正常退出，此时卸载会中止并提示手动退出；弹窗检测是「显示后处理」（弹窗会闪一下），UIPI 下关不掉管理员窗口，UAC / 锁屏 / 网页内嵌广告看不到；macOS 登录项在未授权「自动化」时只读。
+已知限制：Windows 侧只做了代码审查与交叉编译尝试（本机缺 MSVC SDK，第三方 `ring` 构建失败），未实机跑卸载/UAC/强制退出/弹窗检测；残留以精确匹配为主，深扫可能漏报（不认识的自定义目录名）也可能多报（通用名字的目录），所以 low 条目默认不勾选；强制退出会连同 bundle 内的 helper/XPC 一起 `SIGKILL`、可能丢掉未保存的数据（二次确认里已提示），仍有进程退不掉时卸载会中止并提示手动退出；卸载窗口的关联文件清单已过滤 `~/.Trash`，不会顺手清空废纸篓；弹窗检测是「显示后处理」（弹窗会闪一下），UIPI 下关不掉管理员窗口，UAC / 锁屏 / 网页内嵌广告看不到；macOS 登录项在未授权「自动化」时只读。
 
 **托盘快捷面板**：左键点菜单栏/任务栏图标弹出柠檬式的无边框小面板（`quick.html`，360 宽，高度随当前页签内容自动调整，失焦或再点一次托盘图标收起），两个页签：
 
@@ -228,13 +229,13 @@ openconnect 探测失败时，代理页给出按平台区分的安装引导：ma
 
 ### 设置
 
-显示运行环境（操作系统、架构、可执行文件后缀、是否需要提权、配置文件位置、各网卡的 MAC 与全部 IP —— 多 IP 逐条列出），以及附件实际落盘位置（可直接打开目录）。
+顶部「检查更新」卡片显示当前版本，只有查到更高版本时才多显示一行高亮的「最新版本」并出现「立即更新」（右上角「重新检测」会顺带检查一次更新）；下载/安装进度就地显示，下载中断后点「重试」会从断点续传（见「自动更新」）；下面显示运行环境（操作系统、架构、可执行文件后缀、是否需要提权、配置文件位置、各网卡的 MAC 与全部 IP —— 多 IP 逐条列出），以及附件实际落盘位置（可直接打开目录）。
 
 「用编辑器打开项目」与非 Windows 的 VPN 连接器探测共用同一套应用查找逻辑，优先级为专用路径 > 标准安装位置 > 已登记的副本 > 内置资源 > PATH（Windows 上还有注册表，位置在标准安装位置之前）；其中「指定位置」入口只对 openconnect 开放（Windows 版用内置副本，不提供该入口）。Windows 的 VPN 探测是例外：只认安装包内置副本，不查注册表、安装目录或 PATH。macOS 与 Linux 下分别检查 `/Applications`、Homebrew 前缀以及 PATH 里的 `/usr/bin`、`/usr/local/bin`。
 
 ### 托盘
 
-右键菜单只有两项：**显示主界面** / **退出**。左键单击图标弹出快捷面板（VPN / 休眠两个页签，见上），菜单只在右键时出现。点「退出」等于结束整个应用和它拉起的进程：先给 worker 写停止标记（`stop.flag`），然后主进程立刻退出，托盘和任务栏图标当场消失；worker 是独立进程，会自己杀掉 openconnect、还原路由和 DNS 后退出（见上面的 `main.pid` / 心跳兜底），因此不需要卡住界面等它收尾，也就不用承受「点了退出好几秒图标才消失」。唯一代价是：从解压目录直接运行便携版时，退出后立刻删目录可能会被 worker 短暂占用，等一两秒再删即可。关闭主窗口只是隐藏，应用继续在托盘里运行。
+右键菜单三项：**显示主界面** / **检查更新** / **退出**。左键单击图标弹出快捷面板（VPN / 休眠两个页签，见上），菜单只在右键时出现。点「检查更新」会先把主界面叫出来、切到设置页并立刻检查一次，检查结果同时反映在设置页卡片和标题栏「更新」按钮上。点「退出」等于结束整个应用和它拉起的进程：先给 worker 写停止标记（`stop.flag`），然后主进程立刻退出，托盘和任务栏图标当场消失；worker 是独立进程，会自己杀掉 openconnect、还原路由和 DNS 后退出（见上面的 `main.pid` / 心跳兜底），因此不需要卡住界面等它收尾，也就不用承受「点了退出好几秒图标才消失」。唯一代价是：从解压目录直接运行便携版时，退出后立刻删目录可能会被 worker 短暂占用，等一两秒再删即可。关闭主窗口只是隐藏，应用继续在托盘里运行。
 
 快捷面板是独立的透明无边框窗口：点面板外部（失焦）或再点一次托盘图标收起，面板上没有关闭按钮，也没有底部操作栏（打开主窗口走托盘右键菜单）；窗口高度按当前页签内容自适应，切换 VPN / 休眠会重新量一次，不会留固定高度那种底部空白。macOS 的透明窗口依赖 Tauri 的 `macos-private-api` feature（`Cargo.toml` + `tauri.conf.json` 的 `macOSPrivateApi`），**直装/DMG 渠道没问题，但用不了 Mac App Store**。
 
@@ -254,7 +255,7 @@ macOS 的应用菜单做了汉化，点 Dock 图标会把窗口重新显示出�
 | 数据面 | 路由注入（隧道 /32 + 按域名 DNS），不抓包 |
 | 存储加密 | SM4-CBC + HMAC-SM3；主密钥由 macOS 钥匙串 / Windows DPAPI 托管 |
 | 插件 | dialog、shell、store、updater、process；clipboard-manager（剪贴板历史）、global-shortcut（默认 `⌘⇧V` 呼出，可在管理页改） |
-| 关键 crate | `ignore`、`zip`、`chrono`、`uuid`、`tempfile`、`sm4`、`hmac`、`cbc`、`nix` |
+| 关键 crate | `ignore`、`zip`、`chrono`、`uuid`、`tempfile`、`sm4`、`hmac`、`cbc`、`nix`、`reqwest`、`minisign-verify` |
 
 ## 环境要求
 
@@ -295,15 +296,17 @@ powershell -ExecutionPolicy Bypass -File scripts\dev-restart.ps1
 
 开发构建（`pnpm exec tauri dev` / 本地 debug 二进制）的应用名是 `ws-workbench-dev`，发布版是 `ws-workbench`，两者可以同机同时各开一个：
 
-- macOS：Dock 磁贴名、窗口标题显示 `ws-workbench-dev`；**菜单栏左上角那个应用名改不动，别指望它**——那是 AppKit 按应用身份画的，不是我们菜单里的文字。已经试过并排除：改可执行文件名、`NSProcessInfo.setProcessName`、`build.rs` 往二进制 `Info.plist` 里注入 `CFBundleName`（`otool -X -s __TEXT __info_plist` 确认嵌进去的是 `ws-workbench-dev`）、启动后补写 `NSApp.mainMenu` 第 0 项的 title（每 200ms 到每秒重写一次）：前三个都无效，补写能让菜单项 title 真的变成 `ws-workbench-dev`（读回来也是），但菜单栏显示始终是 `ws-workbench`，系统会按应用身份重新画。所以开发版靠这几处区分：Dock 名、窗口标题、托盘面板的 `dev` 标签、主窗口标题栏更新按钮后面的 `dev` 标签
+- macOS：Dock 磁贴名、窗口标题显示 `ws-workbench-dev`；**菜单栏左上角那个应用名改不动，别指望它**——那是 AppKit 按应用身份画的，不是我们菜单里的文字。已经试过并排除：改可执行文件名、`NSProcessInfo.setProcessName`、`build.rs` 往二进制 `Info.plist` 里注入 `CFBundleName`（`otool -X -s __TEXT __info_plist` 确认嵌进去的是 `ws-workbench-dev`）、启动后补写 `NSApp.mainMenu` 第 0 项的 title（每 200ms 到每秒重写一次）：前三个都无效，补写能让菜单项 title 真的变成 `ws-workbench-dev`（读回来也是），但菜单栏显示始终是 `ws-workbench`，系统会按应用身份重新画。所以开发版靠这几处区分：Dock 图标右下角的 `dev` 角标、Dock 磁贴名、窗口标题、菜单栏右上角托盘图标正中的镂空小圆点（图标颜色仍由系统按菜单栏明暗染色，和发布版一致）、托盘右键菜单顶部那行禁用的构建标识、托盘面板的 `dev` 标签、主窗口标题栏更新按钮后面的 `dev` 标签
   - Dock 磁贴名 = **可执行文件名**：开发构建的 bin target 直接叫 `ws-workbench-dev`（`target/debug/ws-workbench-dev`），打包时由 `tauri.conf.json` 顶层的 `mainBinaryName: "ws-workbench"` 把产物改名回 `ws-workbench`；
+  - Dock / 托盘图标：开发版用带 `dev` 标识的一套图标——Dock 走 `icons/dev/icon-dev.png`（正式图标 + 右下角白底蓝字 `dev` 角标，`set_dock_icon` 在 debug 下换用）；macOS 菜单栏托盘走 `icons/tray/tray-dev-template-36.png`（和发布版**同一张模板图**，只在箱体正中镂空一个透明小圆点：模板图会被系统按菜单栏明暗染色，所以开发版颜色和发布版完全一样，镂空处直接透出菜单栏背景，18pt 见方、不比发布版宽）；Windows / Linux 托盘用右下角带 `dev` 角标的彩色应用图标（`icons/dev/32x32-dev.png`）；发布版仍是正式图标；资产由 `design/icons/tools/build.py` 生成
   - `src-tauri/build.rs` 在 debug profile 下仍会把 `bundle.macOS.bundleName` 合并进 `TAURI_CONFIG`，让二进制里嵌的 `Info.plist` 的 `CFBundleName`、`NSRunningApplication.localizedName` 是 `ws-workbench-dev`（release profile 不注入）；对菜单栏没用，只是让系统信息/关于面板里的名字一致
-- Windows：自绘标题栏、窗口标题、任务栏都显示 `ws-workbench-dev`；单实例互斥量也按构建区分（`ws-workbench-single-instance` / `ws-workbench-dev-single-instance`）
+- Windows：自绘标题栏、窗口标题、任务栏都显示 `ws-workbench-dev`；窗口 / 任务栏 / exe 文件图标换成右下角带 `dev` 角标的彩色图标（`icons/dev/*`，启动时 `set_dev_window_icon` 设窗口图标，exe 资源由 `build.rs` 嵌入 `icon-dev.ico`），托盘图标用右下角带角标的彩色应用图标 `icons/dev/32x32-dev.png`（浅色任务栏也认得出）；托盘右键菜单最上面多一行禁用的 `ws-workbench-dev（开发版）`；单实例互斥量也按构建区分（`ws-workbench-single-instance` / `ws-workbench-dev-single-instance`）
 - 单实例边界：发布版之间互斥、开发版之间互斥，但一个发布版 + 一个开发版可以并存（不是多开程序）
 - WebView2 用户数据目录按构建分开（`webview` / `webview-dev`），避免两个进程锁同一个目录
 - 数据库与 `config.json` 仍然共用（同一个 identifier），改动会互相可见；因此开发版**不跑剪贴板后台**：不注册全局快捷键、不采集历史（共享库里否则每复制一次会出现两条），也不允许在设置里改快捷键（否则会抢发布版的 `⌘⇧V`、改掉共用的组合键）
 - 开发版**不检查更新**：启动时那次静默检查和每天 10:00/16:00 的定时校验都跳过，标题栏也不显示「更新」按钮——裸二进制装不了更新包，Windows 上还会把 `target/debug/ws-workbench-dev.exe` 覆盖成发布版
-- 开发构建的标识：托盘快捷面板在页签右侧多一个 `dev` 小标签（`QuickPanel.vue` 的 `.qp-dev-tag`），主窗口标题栏在「更新」按钮后面也多一个 `dev` 小标签（`App.vue` 的 `.titlebar-dev-tag`），发布版两处都不渲染；两个窗口的网页标题也按构建名（`ws-workbench-dev`）
+- 界面内的开发版标识：托盘快捷面板在页签右侧多一个 `dev` 小标签（`QuickPanel.vue` 的 `.qp-dev-tag`），主窗口标题栏在「更新」按钮后面也多一个 `dev` 小标签（`App.vue` 的 `.titlebar-dev-tag`），发布版两处都不渲染；两个窗口的网页标题也按构建名（`ws-workbench-dev`）
+- 图标能换的边界：Dock / 任务栏 / 托盘图标都是运行时设置的，开发版能带上 `dev` 角标；Windows 的 **exe 文件图标**（资源管理器、桌面快捷方式、任务栏固定项读的那枚）由 `build.rs` 在 debug + windows 时经 `WindowsAttributes::window_icon_path` 嵌成 `icons/dev/icon-dev.ico`，也跟着变；macOS 的 Finder 文件图标和安装包图标换不了——开发版是裸二进制，没有 bundle 可换（`tauri build --debug` 打出来的 `.app` 也走 `tauri.conf.json` 里正式的 `icon.icns`）
 - 名称来源细节：`tauri dev` 实际是 `cargo run --no-default-features`（关掉 `custom-protocol`），这时 `tauri-codegen` 才会把 `Info.plist` 嵌进二进制；`tauri build` 带 `custom-protocol` 且打包成 `.app`，名字走包的 `Info.plist`，与开发版互不影响
 - 调试这类「名字没变」的问题注意：dev 版有单实例互斥，旧进程没退干净时再启动 `tauri dev`，新进程会直接退出、把旧窗口顶到前面，看起来就像「重启了还是旧名字」；先确认 `pgrep -fl ws-workbench` 没有输出再启动
 - 开发构建的 exe / 进程名变了，所以按进程名找本应用的脚本都用通配：`ws-workbench*`（`dev-restart.ps1`、`collect-vpn-logs.ps1`）；前端 cleaner 的「不自动处理本应用窗口」按当前 exe 名兜底比较，开发版也命中
@@ -331,7 +334,7 @@ Windows 安装包（NSIS 的 `exe` 与 WiX 的 `msi`）必须在 Windows 主机�
 | `GITHUB_TOKEN` | GitHub 令牌（CI 里由 Actions 注入），创建发行版、上传附件、推送更新清单必需 |
 | `TAURI_BUNDLES=app` | 只打 app、跳过 Tauri 的 dmg 打包脚本，受限环境配 `--dmg` 使用 |
 
-发布版本的唯一来源是 git tag：CI 把 `vX.Y.Z` 里的 `X.Y.Z` 通过 `tauri build --config` 注入，不改源文件。发布流程：打 tag → 构建（含更新签名）→ 上传安装包到 GitHub 发行版（同名 tag）→ 合并生成本平台的 `updates/latest.json` 条目并提交回 `main`。清单与安装包都在 GitHub，客户端从 `raw.githubusercontent.com` 读清单、从发行版下载安装包。
+发布版本的唯一来源是 git tag：CI 把 `vX.Y.Z` 里的 `X.Y.Z` 通过 `tauri build --config` 注入，不改源文件。发布流程：打 tag → 构建（含更新签名）→ 上传安装包到 GitHub 发行版（同名 tag）→ 合并生成本平台的 `updates/latest.json` 条目并提交回 `main` → 串行跑一次 Gitee 镜像（`gitee-sync` job），把三个更新载荷传到 Gitee 发行版并把清单里的下载地址换成 Gitee。客户端先从 Gitee 读清单，读不到再用 GitHub 清单兜底。
 
 ```bash
 git tag v1.0.16
@@ -352,11 +355,34 @@ macOS 两个架构都在 `macos-latest`（arm64）上跑，Intel 版用 `--targe
 
 跑之前必须配一个仓库密钥：`TAURI_SIGNING_PRIVATE_KEY`（本机 `~/.tauri/ws-workbench.key` 的全文），没配会在预检步骤直接退出。
 
-两个 job 会同时改 `updates/latest.json`，脚本用「快进到远端最新 → 以远端为基线合并本平台条目 → 推送被拒就撤销重试」来避免互相覆盖。CI 自己推回 `main` 的清单提交带 `[skip ci]`，且工作流只由 tag 触发，不会自触发。
+两个构建 job 会同时改 `updates/latest.json`，脚本用「快进到远端最新 → 以远端为基线合并本平台条目 → 推送被拒就撤销重试」来避免互相覆盖。CI 自己推回 `main` 的清单提交带 `[skip ci]`，且工作流只由 tag 触发，不会自触发。
+
+三个构建 job 之后还有一个串行的 `gitee-sync` job（`needs: [macos, windows]`）：`scripts/gitee-sync.mjs` 把三份更新载荷传到 Gitee 同名 tag 的发行版，再把 Gitee 仓库里和 GitHub `main` 上的两份 `updates/latest.json` 的下载地址都改成 Gitee。它需要：
+
+- 仓库密钥 `GITEE_TOKEN`：Gitee → 设置 → 私人令牌，勾选 `projects`（仓库读写）权限
+- 一个**公开**的 Gitee 仓库：默认 `feng_wenshan/ws-workbench`，可用仓库变量 `GITEE_REPO` 覆盖；清单分支默认取仓库的默认分支（Gitee 新建仓库默认是 `master`），可用 `GITEE_BRANCH` 覆盖。**客户端端点里的分支名必须和它一致**
+
+Gitee 仓库只需要建好、勾选「使用 Readme 文件初始化」保证默认分支存在（代码不用镜像过去）；第一次发版时脚本会自动建 tag 和发行版。`GITEE_TOKEN` 没配、仓库是私有的、或附件上传失败时，这个 job 会失败并说明原因，但 GitHub 侧的发行版与清单已经发布，不影响原有流程（清单里失败的平台保留 GitHub 地址）。清单里的 `signature` 不随镜像改动（只改 `url`），Gitee 上的包和 GitHub 上的包是同一份构建产物，插件用同一把 minisign 公钥校验。
+
+还没配好 Gitee 时发布不受影响：Gitee 那一步会失败（GitHub 侧照旧）。配好之后可以在 Actions 里手动跑一次 **Gitee Backfill**（`.github/workflows/gitee-backfill.yml`，`workflow_dispatch`）：它按当前 `updates/latest.json` 的版本从 GitHub 发行版下载三个更新载荷补传 Gitee，并把清单地址改成 Gitee——已经在用旧版本的客户端下次检查更新就能直接从 Gitee 下包，不用等下一个版本。
+
+本地也可以手动补跑某次发版（需要 `GITEE_TOKEN`）：
+
+```bash
+node scripts/gitee-sync.mjs --version 1.0.19 --dir release --dry-run   # 只看计划
+GITEE_TOKEN=xxx node scripts/gitee-sync.mjs --version 1.0.19 --dir release
+```
 
 ## 自动更新
 
-更新端点为 `https://raw.githubusercontent.com/fengwenshan/ws-workbench/main/updates/latest.json`，用 minisign 公钥（指纹 `9CB4E4B1ECEF3353`）校验签名。清单与安装包都走 GitHub；如果目标机器访问不到 GitHub，可以自建镜像，改 `src-tauri/tauri.conf.json` 的 `plugins.updater.endpoints` 即可。
+更新端点按顺序尝试（`src-tauri/tauri.conf.json` 的 `plugins.updater.endpoints`）：
+
+1. `https://gitee.com/feng_wenshan/ws-workbench/raw/master/updates/latest.json`（Gitee 镜像，国内优先）
+2. `https://raw.githubusercontent.com/fengwenshan/ws-workbench/main/updates/latest.json`（GitHub 清单兜底）
+
+Gitee 仓库的默认分支可能是 `master`（Gitee 新建仓库默认）或 `main`，所以 Gitee 的 `master`、`main` 两个 raw 地址都列上了：不存在的那个分支直接 404，插件会顺延到下一个（客户端清单只会写在仓库的默认分支上）。
+
+`check()` 带 10 秒超时（`src/composables/useUpdater.ts` 的 `CHECK_TIMEOUT_MS`）：第一个端点超时或 404 才会切到下一个，否则第一端点被网络卡住时会一直挂在「检查中」。更新包用 minisign 公钥（指纹 `9CB4E4B1ECEF3353`）校验签名；清单里的下载地址指向哪台机器都可以（清单本身不签名，换镜像不用重新签包）。
 
 `updates/latest.json` 的结构：
 
@@ -366,16 +392,20 @@ macOS 两个架构都在 `macos-latest`（arm64）上跑，Intel 版用 `--targe
   "notes": "ws-workbench v1.0.17",
   "pub_date": "2026-11-09T08:20:35Z",
   "platforms": {
-    "windows-x86_64": { "signature": "...", "url": "https://github.com/fengwenshan/ws-workbench/releases/download/v1.0.17/ws-workbench-setup.exe" },
-    "darwin-aarch64": { "signature": "...", "url": "https://github.com/fengwenshan/ws-workbench/releases/download/v1.0.17/ws-workbench_aarch64.app.tar.gz" },
-    "darwin-x86_64": { "signature": "...", "url": "https://github.com/fengwenshan/ws-workbench/releases/download/v1.0.17/ws-workbench_x86_64.app.tar.gz" }
+    "windows-x86_64": { "signature": "...", "url": "https://gitee.com/feng_wenshan/ws-workbench/releases/download/v1.0.17/ws-workbench-setup.exe" },
+    "darwin-aarch64": { "signature": "...", "url": "https://gitee.com/feng_wenshan/ws-workbench/releases/download/v1.0.17/ws-workbench_aarch64.app.tar.gz" },
+    "darwin-x86_64": { "signature": "...", "url": "https://gitee.com/feng_wenshan/ws-workbench/releases/download/v1.0.17/ws-workbench_x86_64.app.tar.gz" }
   }
 }
 ```
 
+镜像发布后清单里的 `url` 指向 Gitee；某个平台镜像失败时保留 GitHub 地址。
+
 > `updates/latest.json` 由发布脚本生成；仓库里这份仍是旧记录，下次发版会按平台条目重写。
 
-客户端启动时静默校验一次，之后每天 10:00 与 16:00 各校验一次；平时标题栏不显示更新入口，只有发现新版本时才在原位置显示「更新」按钮，点它下载安装（装好后按钮变成「重启生效」）。不弹横幅、不额外提示。
+客户端启动时静默校验一次，之后每天 10:00 与 16:00 各校验一次；打开「设置 → 检查更新」可以看到当前版本 / 最新版本，点右上角「重新检测」立刻检查一次（进设置页时若距上次检查超过 5 分钟也会静默补查一次），托盘右键「检查更新」也会打开设置页并立刻检查。网络不通导致检查失败时，设置页卡片会直接把失败原因显示出来（静默补查失败也显示，不会悄悄吞掉）。平时标题栏不显示更新入口，只有发现新版本时才在原位置显示「更新」按钮，点它下载安装（装好后按钮变成「重启生效」）。不弹横幅、不额外提示。
+
+安装包下载走 `src-tauri/src/updates.rs` 的自研断点续传，不用插件自带的 `Update::download`：插件把整包读进内存，网络中断后点重试只能从 0 开始。这里按 HTTP `Range` 把数据直接写进 `<app_cache_dir>/updater/<版本>-<下载URL哈希>/update.part`，失败保留半成品，下次同版本重试从断点继续（服务端不支持 Range 时退化为整包重下）；连接 30 秒建不起来、或 120 秒收不到数据就报错，避免界面卡在某个百分比不动。下完用清单里的 minisign 签名校验，通过才落成 `update.pkg` 并交给插件的 `Update::install` 安装。缓存目录把下载 URL 也算进去（同版本换镜像时不会把两个源的半成品拼在一起），安装成功后会清掉其他版本的缓存。失败后点「重试」会先重新确认服务端版本：失败期间如果已经发了更高版本，就改下最新的（不复用旧版本的 `.part`）；只有这次确认也失败（网络不通）时才继续从原断点续传。开发构建允许检查版本但不提供安装入口（避免覆盖 `target/debug` 的 dev 可执行文件），Rust 侧安装命令也会拒绝。
 
 更新与 VPN 的边界：点「更新」时如果 VPN 正在连接 / 已连接，先弹确认框，确认后**先下载安装包、再断开 VPN、最后才安装**——顺序不能反。原因是安装阶段 worker 必须已经退出：Windows 上 worker 和主程序是同一个 `ws-workbench.exe`，它没退时安装包替换不了文件（而且 worker 是提权的，安装程序未必收得掉）；macOS 上旧 worker 还活着的话，更新重启后新界面显示「未连接」，但隧道和路由还在旧进程那边。断开走 `vpn_prepare_update`：写停止标记后最多等 10 秒让 worker 杀 openconnect、还原路由和 DNS，超时直接取消这次更新并提示手动断开，绝不把安装做到一半。VPN 没连时这一步直接放行。
 
@@ -428,13 +458,14 @@ VPN 会话目录同时被主进程和提权 worker 使用，因此不做路径�
 - 域名分流只覆盖系统解析器（getaddrinfo）：自带 DoH/DoT 的应用不受控
 - Windows 上按域名解析出来的 `/32` 由本机转发器在回包前注入；NRPT 退回旧路径时最多晚约 3~15 秒生效。服务端下发的内网范围（默认域名 / split-include）只展示、不参与分流，所以不会再有「服务端一推就接管」的隐式路由
 - 规则与代理模式的改动都会热生效（worker 轮询 `rules.json` / `mode` 后重新布线），不需要断开重连
-- 系统清理的 Windows 运行时行为（注册表枚举、UAC 卸载、工作集/待机列表）只做了交叉编译检查，需按设计文档第 9 节的 Windows 清单实机验收
+- 系统清理的 Windows 运行时行为（注册表枚举、UAC 卸载、工作集/待机列表）只做了交叉编译检查，需按设计文档第 9 节的 Windows 清单实机验收；Windows 安装器自带卸载器目前只删程序文件，数据/附件清理与「进程未退出则中止」的 NSIS 钩子待 Windows 实机实现（计划见 `docs/superpowers/plans/2026-11-10-installer-uninstall.md` 的 Phase W）
 - `~/.Trash` 内容受 TCC 保护，删除结果以「原路径消失 + trash API 成功」为准
 - 卸载残留只做精确匹配（bundle id / 注册表键 / 精确应用名），存在非标准目录的数据需要手动清理
 - 托盘快捷面板的原生弹出（真实点菜单栏图标）受 macOS 辅助功能/屏幕录制权限限制，自动化测试只覆盖了页面渲染、位置计算与 `cargo check`，首次使用请手动点一下确认弹窗位置与失焦收起
 - 快捷面板的透明圆角窗口在 macOS 上依赖 `macos-private-api`，因此不支持 Mac App Store 渠道
 - 剪贴板历史在 macOS / Windows 启用（Linux 不启用）；历史加密落 SQLite、图片附件单独密文存放，**不联网**；默认快捷键在应用运行期间全局生效，会占用其它 app 的同款组合，可在「系统 → 剪贴板」齿轮里改。富文本回贴是尽力而为：依赖 source app 是否写入 HTML、目标 app 是否接受 HTML，图片过多或过大时可能降级成纯文本
 - Hosts 在线编辑需要管理员授权；Windows 的提权写入 / UAC 取消 / DNS flush 只做了代码审查，需实机验收；非 UTF-8 的 hosts 文件会被拒绝编辑；没有语法校验，写错条目需自己负责（可随时从备份还原）
+- 更新包的断点续传只在「同版本 + 同下载 URL」内有效；服务端不支持 Range 时会退化为整包重下，系统清掉应用缓存目录后重试也会从 0 开始。Windows 上的「下载 → 退出 → 安装 → 重启」全链路只做了代码审查，需实机验收
 
 ## 目录结构
 
@@ -458,6 +489,7 @@ src-tauri/src/
   crypto.rs        字符串密文信封（SM4-CBC + HMAC-SM3）与主密钥托管
   filecrypto.rs    附件流式加密容器 WST1
   packer.rs        打包：遍历、包含规则过滤、复制、流式 ZIP
+  updates.rs       更新包断点续传下载 + minisign 校验（安装交给 updater 插件）
   models.rs        AppConfig / 分组 / 项目 / 附件元信息 / 默认包含规则
   platform.rs      操作系统判定
   netinfo.rs       本机网卡 MAC / IP（Windows 走 PowerShell，macOS/Linux 走 getifaddrs）
@@ -466,8 +498,9 @@ src-tauri/src/
   clipboard.rs     剪贴板历史核心：changeCount 采集、内容分类、面板定位（纯逻辑带单测）
   clipboard/       rich.rs（HTML 图文抽取 / 还原 / 哈希 / 缩略图）、store.rs（SQLite 读写与附件路径）
   hosts/           Hosts 在线编辑：内容校验（mod.rs）、备份（store.rs）、提权写入（file.rs）
-  cleaner/         系统工具：安装列表/卸载/残留扫描 + 屏幕休眠、弹窗拦截的后端
-    running.rs     卸载前运行检测与优雅退出（sysinfo + NSRunningApplication / PowerShell CloseMainWindow）
+  cleaner/         系统工具：安装列表/卸载/关联文件/残留扫描 + 屏幕休眠、弹窗拦截的后端
+    related.rs     卸载窗口关联文件清单组装（分组 / 默认勾选 / 使用情况文案）
+    running.rs     运行检测、优雅退出与强制退出（sysinfo + NSRunningApplication / PowerShell CloseMainWindow，force_quit 先终止、退不掉再 SIGKILL / taskkill）
     sleep.rs       防休眠（macOS IOKit 断言 / Windows SetThreadExecutionState）
     popup.rs       弹窗检测（仅 Windows：EnumWindows 轮询 + 启发式打分）
     *_macos.rs / *_windows.rs  平台实现，按 cfg 拆文件
@@ -497,7 +530,7 @@ src/
     settings/      SettingsPanel
     cleaner/       CleanerPanel / InstalledAppsPanel / MemoryPanel / AppIcon /
                    PopupPanel / SleepPanel / StartupPanel / DefaultAppsPanel
-    hosts/         HostsEditor（整文件在线编辑 + 备份还原）
+    hosts/         HostsEditor（整文件在线编辑 + 备份还原，编辑区是 Monaco）
     clipboard/     ClipboardManager（「系统 → 剪贴板」管理页签）
   composables/     useConfig / usePack / useVpn / useCleaner / useApps / useUpdater /
                    useWorkbenchLayout / useEntitySelection / useProjectForm /
@@ -505,7 +538,8 @@ src/
                    useDefaultApps / useHosts / useClipboardHistory
   api/             后端命令的类型化封装（config / project / system / attachments / apps / cleaner /
                    sleep / startup / popup / defaultapps / clipboard / hosts）
-  utils/           通用小工具（time / dialog / path / error）
+  editor/          Monaco 集成（hosts 语言 / 主题 / worker，首次打开 Hosts 页签才加载）
+  utils/           通用小工具（time / dialog / path / error / hostsTokens）
   types/           前后端共享的数据结构（含 cleaner / sleep / startup / popup / defaultapps / hosts / clipboard）
   quick/           托盘快捷面板（独立入口：quick.html + main.ts + QuickPanel.vue）
   clipboard/       剪贴板历史面板（独立入口：clipboard.html + main.ts + ClipboardPanel.vue）

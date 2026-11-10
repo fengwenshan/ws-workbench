@@ -9,6 +9,7 @@
 //! 这里只放平台无关的公共小工具与 `CleanerState`，避免平台文件互相引用。
 
 pub mod installer;
+pub mod related;
 pub mod running;
 pub mod trash_guard;
 // 「系统」工具页新增页签，每个 tab 一个子模块（设计 2026-11-07 第 3 节）
@@ -32,7 +33,7 @@ pub use models::*;
 
 use std::sync::Mutex;
 
-/// 安装列表缓存。
+/// 安装列表缓存 + 卸载窗口的进程内状态。
 ///
 /// 枚举一次要 1~3 秒（Windows 要读注册表 + 算目录大小，macOS 要遍历 bundle），
 /// 切页签不该重扫，所以缓存放在后端；`scanning` 用来拒绝重复触发的并发扫描
@@ -41,6 +42,13 @@ use std::sync::Mutex;
 pub struct CleanerState {
     pub apps: Mutex<Option<Vec<InstalledApp>>>,
     pub scanning: Mutex<bool>,
+    /// 卸载窗口当前的目标应用（打开窗口时写入；复用窗口换目标时覆盖）
+    pub pending_uninstall: Mutex<Option<InstalledApp>>,
+    /// 最近一次关联文件扫描的白名单：(app_id, 本次扫描存在的路径)。
+    ///
+    /// `cleaner_delete_related` 只允许删这个集合里的路径（设计 4.4），
+    /// 防止前端传任意路径进来。
+    pub related_paths: Mutex<Option<(String, Vec<String>)>>,
 }
 
 impl CleanerState {

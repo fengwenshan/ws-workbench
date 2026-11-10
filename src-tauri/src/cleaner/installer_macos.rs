@@ -10,7 +10,9 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use super::models::{CleanerProgress, InstalledApp, LeftoverItem, UninstallOutcome};
+use super::models::{
+    CleanerProgress, InstalledApp, LeftoverItem, RelatedFileItem, RelatedFiles, UninstallOutcome,
+};
 use super::{dir_size_limited, format_date, home_dir, path_size};
 
 /// 从 Info.plist 读出来的 bundle 元数据
@@ -120,10 +122,49 @@ fn scan_bundles() -> Vec<PathBuf> {
     bundles
 }
 
+/// `.app` 目录（不要求能解析 Info.plist：半残副本也要能被列出来清理）
+fn is_app_dir(path: &Path) -> bool {
+    path.extension().and_then(|ext| ext.to_str()) == Some("app") && path.is_dir()
+}
+
 fn is_app_bundle(path: &Path) -> bool {
-    path.extension().and_then(|ext| ext.to_str()) == Some("app")
-        && path.is_dir()
-        && path.join("Contents").join("Info.plist").is_file()
+    is_app_dir(path) && path.join("Contents").join("Info.plist").is_file()
+}
+
+// ============================== 自身识别 ==============================
+
+/// 当前进程所在的 `.app` 包。
+///
+/// 发布版从 `.app/Contents/MacOS/<bin>` 启动，向上一定能找到 `.app`；
+/// dev 构建是 `target/debug/ws-workbench-dev` 这样的裸二进制，返回 None
+/// —— 此时「不能卸载自己」的过滤不生效（列表里也不会有裸二进制）。
+pub(crate) fn current_app_bundle() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    app_bundle_from_exe(&exe)
+}
+
+/// 从可执行文件路径向上找第一个 `.app` 目录祖先（单测注入 exe 用）。
+///
+/// 要求是**目录**且后缀为 `.app`，避免把恰好以 `.app` 结尾的可执行文件误判成包。
+pub(crate) fn app_bundle_from_exe(exe: &Path) -> Option<PathBuf> {
+    let bundle = exe.ancestors().find(|ancestor| {
+        ancestor.extension().and_then(|ext| ext.to_str()) == Some("app") && ancestor.is_dir()
+    })?;
+    Some(bundle.canonicalize().unwrap_or_else(|_| bundle.to_path_buf()))
+}
+
+/// 目标 bundle 是否就是当前运行的应用本体（canonical 路径比较，软链也能识别）。
+pub(crate) fn is_self_bundle(bundle: &Path) -> bool {
+    let Some(self_bundle) = current_app_bundle() else {
+        return false;
+    };
+    same_path(&self_bundle, bundle)
+}
+
+fn same_path(left: &Path, right: &Path) -> bool {
+    let left = left.canonicalize().unwrap_or_else(|_| left.to_path_buf());
+    let right = right.canonicalize().unwrap_or_else(|_| right.to_path_buf());
+    left == right
 }
 
 /// 列表主流程：先枚举（快），再 8 个 worker 并发取图标/算大小。
@@ -192,6 +233,13 @@ pub fn list_apps(emit: &(dyn Fn(CleanerProgress) + Sync)) -> Vec<InstalledApp> {
         left.name
             .to_lowercase()
             .cmp(&right.name.to_lowercase())
+    });
+    // 不能卸载自己：过滤掉当前运行的 `.app` 本体。
+    // dev 裸二进制不在 bundle 内（current_app_bundle 为 None），不会误过滤。
+    let self_bundle = current_app_bundle();
+    apps.retain(|app| match (&self_bundle, app.id.strip_prefix("mac:")) {
+        (Some(self_bundle), Some(path)) => !same_path(self_bundle, Path::new(path)),
+        _ => true,
     });
     apps
 }
@@ -772,6 +820,313 @@ pub fn scan_leftovers(
     Ok(items)
 }
 
+// ============================== 关联文件（卸载窗口，设计 4.2） ==============================
+
+/// 兜底扫描根：Spotlight 不可用/无结果时只扫这些目录的一层 `.app`。
+fn fallback_bundle_roots() -> Vec<PathBuf> {
+    let mut roots = vec![PathBuf::from("/Applications"), PathBuf::from("/Users/Shared")];
+    if let Some(home) = home_dir() {
+        roots.push(home.join("Applications"));
+        roots.push(home.join("Desktop"));
+        roots.push(home.join("Downloads"));
+    }
+    roots
+}
+
+/// `mdfind "kMDItemCFBundleIdentifier == <id>"` 的结果；命令失败/未索引返回空。
+fn mdfind_apps(bundle_id: &str) -> Vec<PathBuf> {
+    let bundle_id = bundle_id.trim();
+    if bundle_id.is_empty() {
+        return Vec::new();
+    }
+    let query = format!("kMDItemCFBundleIdentifier == {}", bundle_id);
+    let Ok(output) = std::process::Command::new("mdfind").arg(&query).output() else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(PathBuf::from)
+        .collect()
+}
+
+/// 扫一个目录的一层 `.app`（兜底扫描用，不递归子目录）
+fn scan_apps_one_level(root: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| is_app_bundle(path))
+        .collect()
+}
+
+/// 副本过滤：只留存在的 `.app`，排除主 bundle、废纸篓、`/System`；去重排序。
+fn filter_bundle_copies(candidates: Vec<PathBuf>, main: &Path) -> Vec<PathBuf> {
+    let main = main.canonicalize().unwrap_or_else(|_| main.to_path_buf());
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    let mut out: Vec<PathBuf> = Vec::new();
+    for candidate in candidates {
+        // 设计 4.2：mdfind 结果只要求「以 .app 结尾且存在」；不强制可解析，
+        // 半残（Info.plist 缺失）的副本也要能列出来清理
+        if !is_app_dir(&candidate) {
+            continue;
+        }
+        // 系统应用永远不列（也不允许删）
+        if candidate.starts_with("/System") {
+            continue;
+        }
+        // 已经在废纸篓里的副本不列：删它等于永久删除，不属于「卸载」语义
+        if candidate
+            .components()
+            .any(|component| component.as_os_str() == ".Trash")
+        {
+            continue;
+        }
+        let canonical = candidate.canonicalize().unwrap_or_else(|_| candidate.clone());
+        if canonical == main {
+            continue;
+        }
+        if !seen.insert(canonical.clone()) {
+            continue;
+        }
+        out.push(canonical);
+    }
+    out.sort();
+    out
+}
+
+/// 主 bundle 之外的其它 `.app` 副本（程序文件组）。
+///
+/// 先按 bundle id 走 Spotlight（同一个应用可能被复制到多个目录）；命令不可用
+/// 或没有结果时兜底扫描常见目录，并用 `Info.plist` 的 bundle id 精确比对。
+pub(crate) fn app_bundle_copies(bundle: &Path, bundle_id: &str) -> Vec<PathBuf> {
+    let mut candidates = mdfind_apps(bundle_id);
+    if candidates.is_empty() {
+        candidates = fallback_bundle_roots()
+            .iter()
+            .flat_map(|root| scan_apps_one_level(root))
+            .filter(|path| bundle_id_matches(path, bundle_id))
+            .collect();
+    }
+    filter_bundle_copies(candidates, bundle)
+}
+
+/// 单测版本：只扫给定目录（一层）并按 bundle id 校验，不调用 `mdfind`。
+#[cfg(test)]
+pub(crate) fn app_bundle_copies_in(
+    bundle: &Path,
+    bundle_id: &str,
+    roots: &[PathBuf],
+) -> Vec<PathBuf> {
+    let candidates: Vec<PathBuf> = roots
+        .iter()
+        .flat_map(|root| scan_apps_one_level(root))
+        .filter(|path| bundle_id_matches(path, bundle_id))
+        .collect();
+    filter_bundle_copies(candidates, bundle)
+}
+
+fn bundle_id_matches(bundle: &Path, bundle_id: &str) -> bool {
+    !bundle_id.trim().is_empty()
+        && read_bundle_info(bundle)
+            .and_then(|info| info.bundle_id)
+            .is_some_and(|id| id == bundle_id.trim())
+}
+
+/// `mdls -raw -name kMDItemLastUsedDate` 的原始输出
+fn mdls_last_used(bundle: &Path) -> Option<String> {
+    let output = std::process::Command::new("mdls")
+        .args(["-raw", "-name", "kMDItemLastUsedDate", "--"])
+        .arg(bundle)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if text.is_empty() || text == "(null)" {
+        return None;
+    }
+    Some(text)
+}
+
+/// 「使用情况」文案：今天 / 7 天内 / 30 天内 / 最近未使用；取不到返回空串。
+/// 文案映射本身在 `related::last_used_text_from`（平台无关，设计 4.1）。
+pub(crate) fn last_used_text(bundle: &Path) -> String {
+    let Some(raw) = mdls_last_used(bundle) else {
+        return String::new();
+    };
+    super::related::last_used_text_from(&raw, chrono::Local::now().fixed_offset())
+}
+
+/// 一个 `.app` 包 → 程序文件条目（不存在返回 None）
+fn bundle_related_item(path: &Path, name: &str, version: &str) -> Option<RelatedFileItem> {
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    Some(RelatedFileItem {
+        path: path.to_string_lossy().to_string(),
+        name: name.to_string(),
+        kind: "app_bundle".to_string(),
+        size_bytes: if meta.is_dir() {
+            path_size(path)
+        } else {
+            meta.len()
+        },
+        is_dir: meta.is_dir(),
+        version: version.to_string(),
+        confidence: "high".to_string(),
+        requires_elevation: false,
+        exists: true,
+        selected: false,
+    })
+}
+
+/// 展示名：路径最后一段（macOS 这里的条目都是普通文件/目录）
+fn item_display_name(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.to_string_lossy().to_string())
+}
+
+/// 是否位于废纸篓（`~/.Trash` 前缀，或任一路径组件为 `.Trash`）。
+///
+/// 关联文件清单绝不列废纸篓条目：`trash_guard::trash_path` 对废纸篓内的路径走
+/// `remove_permanently`（永久删除），而卸载窗口的「全选」会把这些条目送进删除
+/// 命令 —— 等于顺手清空用户废纸篓，不属于「卸载」语义。
+fn is_trash_path(path: &Path) -> bool {
+    let under_home_trash = home_dir()
+        .map(|home| path.starts_with(home.join(".Trash")))
+        .unwrap_or(false);
+    under_home_trash
+        || path
+            .components()
+            .any(|component| component.as_os_str() == ".Trash")
+}
+
+/// 关联文件清单的废纸篓过滤：程序文件副本在 `filter_bundle_copies` 里已过滤，
+/// 这里对支持/缓存（`mac_leftover_candidates` 会带 `~/.Trash/<应用名>` 这类 low
+/// 条目）再兜一层，保证整个 `RelatedFiles` 里不会出现任何废纸篓路径。
+fn retain_non_trash(items: &mut Vec<RelatedFileItem>) {
+    items.retain(|item| !is_trash_path(Path::new(&item.path)));
+}
+
+/// 卸载窗口的关联文件清单（macOS）。
+///
+/// 程序文件 = 主 bundle + Spotlight 找到的其它副本；支持/缓存复用
+/// `mac_leftover_candidates` 的规则按 kind 映射；`pkgutil` 收据不列（设计 2）。
+pub(crate) fn related_files(
+    app_id: &str,
+    hint: Option<&InstalledApp>,
+    emit: &dyn Fn(CleanerProgress),
+) -> Result<RelatedFiles, String> {
+    let bundle = bundle_from_id(app_id)?;
+    let info = read_bundle_info(&bundle).or_else(|| {
+        // 应用已被移入废纸篓：用列表缓存兜底（与 scan_leftovers 一致）
+        hint.map(|app| BundleInfo {
+            bundle_id: Some(app.detail.clone()).filter(|id| !id.is_empty()),
+            name: app.name.clone(),
+            version: app.version.clone(),
+            executable: None,
+        })
+    });
+    let (bundle_id, name, version) = match info {
+        Some(info) => (
+            info.bundle_id.unwrap_or_default(),
+            info.name,
+            info.version,
+        ),
+        None => (
+            String::new(),
+            bundle
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            String::new(),
+        ),
+    };
+
+    emit(CleanerProgress::new(
+        "related_files",
+        "scanning",
+        0,
+        0,
+        format!("正在扫描 {} 的关联文件…", name),
+    ));
+
+    let mut items: Vec<RelatedFileItem> = Vec::new();
+
+    // 程序文件 1：主 bundle
+    if let Some(item) = bundle_related_item(&bundle, &name, &version) {
+        items.push(item);
+    }
+    // 程序文件 2：其它副本（按 bundle id；版本取副本自己的 Info.plist）
+    for copy in app_bundle_copies(&bundle, &bundle_id) {
+        let copy_info = read_bundle_info(&copy).unwrap_or_default();
+        let copy_name = if copy_info.name.trim().is_empty() {
+            copy.file_stem()
+                .map(|stem| stem.to_string_lossy().to_string())
+                .unwrap_or_else(|| name.clone())
+        } else {
+            copy_info.name
+        };
+        let copy_version = if copy_info.version.trim().is_empty() {
+            version.clone()
+        } else {
+            copy_info.version
+        };
+        if let Some(item) = bundle_related_item(&copy, &copy_name, &copy_version) {
+            items.push(item);
+        }
+    }
+
+    // 支持 / 缓存：复用现有残留规则（不包含 pkgutil 收据）。
+    // `mac_leftover_candidates` 里的 low 条目（深扫命中的厂商目录、
+    // `~/.Trash/<应用名>` 等）照常参与组装；low 默认不勾选（由
+    // `build_related_files` 统一决定），只有用户显式「全选」才会被删除。
+    for leftover in mac_leftover_candidates(&bundle_id, &name) {
+        let path = PathBuf::from(&leftover.path);
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        items.push(RelatedFileItem {
+            path: leftover.path.clone(),
+            name: item_display_name(&path),
+            kind: leftover.kind,
+            size_bytes: if meta.is_dir() {
+                path_size(&path)
+            } else {
+                meta.len()
+            },
+            is_dir: meta.is_dir(),
+            version: String::new(),
+            confidence: leftover.confidence,
+            requires_elevation: leftover.requires_elevation,
+            exists: true,
+            selected: false,
+        });
+    }
+
+    // 废纸篓里的条目绝不进清单：全选会把它送进删除，而废纸篓路径是永久删除
+    // （见 `is_trash_path` 注释）。程序文件副本已提前过滤，这里覆盖支持/缓存。
+    retain_non_trash(&mut items);
+
+    let last_used = last_used_text(&bundle);
+    let files = super::related::build_related_files(app_id, items, last_used);
+    emit(CleanerProgress::new(
+        "related_files",
+        "done",
+        files.item_count,
+        files.item_count,
+        format!("找到 {} 个关联文件", files.item_count),
+    ));
+    Ok(files)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1012,5 +1367,183 @@ mod tests {
         // 指回上层的符号链接：跟随就会无限递归
         std::os::unix::fs::symlink(dir.path(), app.join("loop")).unwrap();
         assert_eq!(dir_size_limited(&dir.path().join("Loop.app"), 64, 10_000), 10);
+    }
+
+    // ============================== 自身识别 ==============================
+
+    #[test]
+    fn current_app_bundle_is_none_for_bare_binary() {
+        // cargo test 的二进制在 target/debug/deps 下，不在 .app 内：
+        // dev 构建必须返回 None，否则「不能卸载自己」会把整个列表清空
+        assert!(
+            current_app_bundle().is_none(),
+            "测试二进制不应被识别成 .app 内的进程"
+        );
+    }
+
+    #[test]
+    fn app_bundle_from_exe_walks_up_to_dot_app() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = dir.path().join("Foo.app");
+        let exe = bundle.join("Contents/MacOS/foo");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, b"x").unwrap();
+
+        let found = app_bundle_from_exe(&exe).expect("应能向上找到 .app");
+        assert_eq!(found.file_name().unwrap(), "Foo.app");
+        // canonicalize 之后应等于 bundle 的真实路径（/var → /private/var 也一致）
+        assert_eq!(found, bundle.canonicalize().unwrap());
+
+        // 不在 bundle 内的普通二进制返回 None
+        let plain = dir.path().join("plain-bin");
+        std::fs::write(&plain, b"x").unwrap();
+        assert!(app_bundle_from_exe(&plain).is_none());
+    }
+
+    #[test]
+    fn is_self_bundle_is_false_for_other_bundles() {
+        // 测试进程不在 .app 内 → 任何 bundle 都不算自己
+        assert!(!is_self_bundle(Path::new("/Applications/Foo.app")));
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = dir.path().join("Foo.app");
+        std::fs::create_dir_all(&bundle).unwrap();
+        assert!(!is_self_bundle(&bundle));
+    }
+
+    // ============================== 关联文件（卸载窗口） ==============================
+
+    fn write_bundle(root: &Path, name: &str, bundle_id: &str, version: &str) -> PathBuf {
+        let bundle = root.join(format!("{}.app", name));
+        let contents = bundle.join("Contents");
+        std::fs::create_dir_all(contents.join("MacOS")).unwrap();
+        std::fs::write(
+            contents.join("Info.plist"),
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>{bundle_id}</string>
+<key>CFBundleName</key><string>{name}</string>
+<key>CFBundleShortVersionString</key><string>{version}</string>
+<key>CFBundleVersion</key><string>1</string>
+</dict></plist>"#
+            ),
+        )
+        .unwrap();
+        bundle
+    }
+
+    fn related_item(path: &str, kind: &str, confidence: &str) -> RelatedFileItem {
+        RelatedFileItem {
+            path: path.to_string(),
+            name: Path::new(path)
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            kind: kind.to_string(),
+            size_bytes: 1,
+            is_dir: true,
+            version: String::new(),
+            confidence: confidence.to_string(),
+            requires_elevation: false,
+            exists: true,
+            selected: false,
+        }
+    }
+
+    #[test]
+    fn is_trash_path_matches_home_trash_and_trash_component() {
+        let home = home_dir().expect("测试环境应该有 HOME");
+        assert!(is_trash_path(&home.join(".Trash/Foo.app")));
+        assert!(is_trash_path(Path::new("/Volumes/Backup/.Trash/Foo.app")));
+        assert!(!is_trash_path(Path::new("/Applications/Foo.app")));
+        assert!(!is_trash_path(&home.join("Library/Caches/com.example.foo")));
+        // 名字里带 .Trash 但不是路径组件的目录不算
+        assert!(!is_trash_path(Path::new("/Applications/.Trashy/Foo.app")));
+    }
+
+    #[test]
+    fn related_list_never_contains_trash_entries() {
+        let home = home_dir().expect("测试环境应该有 HOME");
+        let mut items = vec![
+            related_item("/Applications/Foo.app", "app_bundle", "high"),
+            // `mac_leftover_candidates` 会给的两条废纸篓 low 条目（支持/缓存也要过滤）
+            related_item(
+                &home.join(".Trash").join("Foo").to_string_lossy(),
+                "cache",
+                "low",
+            ),
+            related_item(
+                &home.join(".Trash").join("com.example.foo").to_string_lossy(),
+                "cache",
+                "low",
+            ),
+            // 非废纸篓的 low 条目不受影响：照常列出、但默认不勾选
+            related_item(
+                "/Users/me/Library/Caches/com.example.foo/vendor",
+                "cache",
+                "low",
+            ),
+        ];
+        retain_non_trash(&mut items);
+        let files = super::super::related::build_related_files(
+            "mac:/Applications/Foo.app",
+            items,
+            String::new(),
+        );
+        let paths: Vec<&str> = files
+            .groups
+            .iter()
+            .flat_map(|group| group.items.iter().map(|item| item.path.as_str()))
+            .collect();
+        assert!(
+            paths.iter().all(|path| !path.contains("/.Trash/")),
+            "关联文件清单里不应出现废纸篓条目: {:?}",
+            paths
+        );
+        assert!(
+            paths.iter().any(|path| path.ends_with("vendor")),
+            "非废纸篓的 low 条目照常列出: {:?}",
+            paths
+        );
+        let low = files
+            .groups
+            .iter()
+            .flat_map(|group| group.items.iter())
+            .find(|item| item.confidence == "low")
+            .expect("应有 low 条目");
+        assert!(!low.selected, "low 默认不勾选；全选是用户显式动作");
+    }
+
+    #[test]
+    fn app_bundle_copies_in_finds_copies_and_skips_trash() {
+        let dir = tempfile::tempdir().unwrap();
+        let apps = dir.path().join("Applications");
+        let trash = dir.path().join(".Trash");
+        std::fs::create_dir_all(&apps).unwrap();
+        std::fs::create_dir_all(&trash).unwrap();
+
+        let main = write_bundle(&apps, "Main", "com.example.foo", "1.0.0");
+        let _copy = write_bundle(&apps, "Copy", "com.example.foo", "1.1.0");
+        // 不同 bundle id 的 .app 不能算副本
+        let _other = write_bundle(&apps, "Other", "com.example.bar", "2.0.0");
+        // 废纸篓里的同名副本不列（删它等于永久删除）
+        let _trashed = write_bundle(&trash, "OldCopy", "com.example.foo", "0.9.0");
+
+        let copies = app_bundle_copies_in(
+            &main,
+            "com.example.foo",
+            &[apps.clone(), trash.clone()],
+        );
+        assert_eq!(copies.len(), 1, "实际副本: {:?}", copies);
+        assert_eq!(
+            copies[0].file_name().unwrap().to_string_lossy(),
+            "Copy.app",
+            "应只保留同 bundle id 且非废纸篓的副本"
+        );
+        // 主 bundle 自己不会出现在副本列表里
+        assert!(!copies.iter().any(|path| path.file_name().unwrap() == "Main.app"));
+        // 不同 id 的不会出现
+        assert!(!copies.iter().any(|path| path.file_name().unwrap() == "Other.app"));
     }
 }

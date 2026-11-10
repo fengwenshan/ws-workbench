@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { Modal, message } from 'ant-design-vue'
 import { formatSize, useHosts } from '@/composables/useHosts'
 import { platform } from '@/platform'
-import { HOSTS_HIGHLIGHT_LIMIT, highlightHosts } from '@/utils/hostsHighlight'
+import { createHostsEditor, type HostsEditorHandle } from '@/editor/monacoHosts'
 
 /**
  * Hosts 在线编辑页签（系统页 -> Hosts）。
@@ -11,6 +11,10 @@ import { HOSTS_HIGHLIGHT_LIMIT, highlightHosts } from '@/utils/hostsHighlight'
  * 直接把系统 hosts 的完整内容读进一个等宽编辑器，不再解析成条目表：
  * 想加什么行就加什么行，`⌘/Ctrl+S` 保存整份文件（保存前自动备份 + 一次系统授权）。
  * 备份列表里可以还原；取消授权不会改动文件。
+ *
+ * 编辑区用 Monaco（VS Code 内核）：行号、语法着色、光标定位、撤销重做、查找替换都由它负责，
+ * 不再手写「透明 textarea + 叠层高亮 + 自绘行号」那套（那个方案在文件以换行结尾、滚到最底部时
+ * 两层排版会差一行，点哪都错一行；见 docs/superpowers/specs/2026-11-10-hosts-monaco-editor-design.md）。
  */
 const props = defineProps<{
   /** 当前页签是否激活（CleanerPanel 的 tab === 'hosts' && 整个工具页可见） */
@@ -19,23 +23,15 @@ const props = defineProps<{
 
 const hosts = useHosts()
 
-const editorRef = ref<HTMLTextAreaElement | null>(null)
-const gutterRef = ref<HTMLDivElement | null>(null)
-const highlightRef = ref<HTMLPreElement | null>(null)
+const editorMount = ref<HTMLDivElement | null>(null)
+const editorLoading = ref(false)
+const editorError = ref('')
 const showBackups = ref(false)
-/** IME 组字中：先关掉叠层高亮，让 textarea 自己显示候选文本 */
-const composing = ref(false)
-
-/** 编辑器行号（1..n） */
-const lineNumbers = computed(() =>
-  Array.from({ length: hosts.lineCount }, (_, index) => index + 1),
-)
-
-/** 文件太大就退回纯文本：高亮要重排整份内容，没必要为几 MB 的异常文件卡住输入 */
-const highlightEnabled = computed(() => hosts.size <= HOSTS_HIGHLIGHT_LIMIT)
-/** 组字中或文件过大时关闭叠层，textarea 直接显示原文 */
-const showHighlight = computed(() => highlightEnabled.value && !composing.value)
-const highlighted = computed(() => (showHighlight.value ? highlightHosts(hosts.draft) : ''))
+let editor: HostsEditorHandle | null = null
+/** 防止并发创建（watch 与 onMounted 都可能触发） */
+let mounting = false
+/** 组件是否已卸载：Monaco 是异步加载的，加载完可能已经卸载，别把编辑器挂到脱离文档的容器上 */
+let unmounted = false
 
 const saveShortcut = platform.is_macos ? '⌘S' : 'Ctrl+S'
 
@@ -51,50 +47,75 @@ watch(
     } else if (!hosts.dirty) {
       void hosts.refreshStatus()
     }
+    // antd Tabs 未激活的页签是 display:none，切回来要重新量一次尺寸
+    void nextTick(() => editor?.layout())
   },
   { immediate: true },
 )
 
-/** 输入框里的 Tab 插入两个空格，避免焦点跳走（hosts 缩进习惯） */
-function handleEditorKeydown(event: KeyboardEvent): void {
-  if (event.key !== 'Tab' || event.metaKey || event.ctrlKey || event.altKey) return
-  const element = editorRef.value
-  if (!element) return
-  event.preventDefault()
-  const start = element.selectionStart
-  const end = element.selectionEnd
-  const indent = '  '
-  hosts.draft = hosts.draft.slice(0, start) + indent + hosts.draft.slice(end)
-  void nextTick(() => {
-    element.selectionStart = start + indent.length
-    element.selectionEnd = start + indent.length
-  })
-}
+/** 容器渲染好（文件可读 + 页签激活）之后再创建编辑器 */
+watch(
+  [() => hosts.status?.readable, () => props.active],
+  () => {
+    // watch 回调（pre flush）早于 DOM 更新，等一帧再拿容器
+    void nextTick(mountEditor)
+  },
+  { immediate: true },
+)
 
-/** IME 组字结束：恢复高亮层，并把新 pre 的滚动位置对齐到光标处 */
-function endCompose(): void {
-  composing.value = false
-  void nextTick(syncScroll)
-}
-
-// 叠层从无到有（IME 结束 / 大文件回退恢复）时，pre 的滚动位置要补一次
-watch(showHighlight, () => {
-  void nextTick(syncScroll)
-})
-
-function syncScroll(): void {
-  const element = editorRef.value
-  if (!element) return
-  if (gutterRef.value) gutterRef.value.scrollTop = element.scrollTop
-  // 高亮层在 textarea 下面，靠同一份 scrollTop/scrollLeft 对齐
-  if (highlightRef.value) {
-    highlightRef.value.scrollTop = element.scrollTop
-    highlightRef.value.scrollLeft = element.scrollLeft
+async function mountEditor(): Promise<void> {
+  if (editor || mounting) return
+  if (!props.active || !hosts.status?.readable) return
+  const container = editorMount.value
+  if (!container) return
+  mounting = true
+  editorLoading.value = true
+  editorError.value = ''
+  try {
+    const handle = await createHostsEditor(container, {
+      value: hosts.draft,
+      onChange: (value) => {
+        hosts.draft = value
+      },
+      onSave: () => {
+        void handleSave()
+      },
+    })
+    if (unmounted) {
+      handle.dispose()
+      return
+    }
+    editor = handle
+  } catch (error) {
+    editorError.value = `编辑器加载失败：${error instanceof Error ? error.message : String(error)}`
+  } finally {
+    mounting = false
+    editorLoading.value = false
   }
 }
 
+/** 外部改动（刷新 / 还原 / 首次加载）推进编辑器；用户自己打字时两边已经相等，不会回环 */
+watch(
+  () => hosts.draft,
+  (draft) => {
+    editor?.setValue(draft)
+  },
+)
+
+watch(
+  () => hosts.saving,
+  (saving) => {
+    editor?.setReadOnly(saving)
+  },
+)
+
 async function handleSave(): Promise<void> {
   if (hosts.saving || !hosts.status?.readable) return
+  // 以编辑器内容为准：刚敲完就按 ⌘S 时，draft 可能还差一次同步
+  if (editor) {
+    const current = editor.getValue()
+    if (current !== hosts.draft) hosts.draft = current
+  }
   if (!hosts.dirty) {
     message.info('没有需要保存的改动')
     return
@@ -150,7 +171,7 @@ async function handleOpenDir(): Promise<void> {
   if (!ok) message.error(hosts.error || '打开 hosts 目录失败')
 }
 
-/** ⌘/Ctrl+S 全局保存（只在 Hosts 页签激活时生效） */
+/** ⌘/Ctrl+S 全局保存（只在 Hosts 页签激活时生效；编辑器内有同一条命令） */
 function handleWindowKeydown(event: KeyboardEvent): void {
   if (!props.active) return
   if (!(event.metaKey || event.ctrlKey) || event.altKey) return
@@ -161,10 +182,15 @@ function handleWindowKeydown(event: KeyboardEvent): void {
 
 onMounted(() => {
   window.addEventListener('keydown', handleWindowKeydown)
+  // immediate 的 watch 早于 DOM 挂载，这里再补一次
+  void nextTick(mountEditor)
 })
 
 onUnmounted(() => {
+  unmounted = true
   window.removeEventListener('keydown', handleWindowKeydown)
+  editor?.dispose()
+  editor = null
 })
 </script>
 
@@ -244,43 +270,16 @@ onUnmounted(() => {
       <button class="btn btn-secondary" @click="handleRefresh">重试</button>
     </div>
     <div v-else class="hosts-code">
-      <div ref="gutterRef" class="hosts-gutter" aria-hidden="true">
-        <div class="hosts-gutter-inner">
-          <span v-for="line in lineNumbers" :key="line">{{ line }}</span>
-        </div>
-      </div>
-      <div class="hosts-editarea">
-        <!-- 叠层高亮：pre 只负责着色，textarea 透明文字负责光标 / 选区 / 输入 -->
-        <pre
-          v-if="showHighlight"
-          ref="highlightRef"
-          class="hosts-highlight"
-          aria-hidden="true"
-        ><code v-html="highlighted" /></pre>
-        <textarea
-          ref="editorRef"
-          v-model="hosts.draft"
-          class="hosts-textarea"
-          :class="{ 'is-plain': !showHighlight }"
-          spellcheck="false"
-          autocomplete="off"
-          autocapitalize="off"
-          autocorrect="off"
-          wrap="off"
-          placeholder="127.0.0.1 localhost"
-          @keydown="handleEditorKeydown"
-          @scroll="syncScroll"
-          @compositionstart="composing = true"
-          @compositionend="endCompose"
-        />
+      <div ref="editorMount" class="hosts-monaco" />
+      <div v-if="editorLoading" class="hosts-editor-status">正在加载编辑器…</div>
+      <div v-else-if="editorError" class="hosts-editor-status is-error">
+        <span>{{ editorError }}</span>
+        <button class="btn btn-secondary" type="button" @click="mountEditor">重试</button>
       </div>
     </div>
 
-    <div v-if="hosts.dirty || !highlightEnabled" class="hosts-foot">
-      <span v-if="!highlightEnabled" class="hosts-foot-note">
-        文件较大（{{ formatSize(hosts.size) }}），已关闭语法高亮
-      </span>
-      <span v-if="hosts.dirty" class="hosts-foot-dirty">有未保存改动</span>
+    <div v-if="hosts.dirty" class="hosts-foot">
+      <span class="hosts-foot-dirty">有未保存改动</span>
     </div>
   </div>
 </template>
@@ -428,128 +427,39 @@ onUnmounted(() => {
   cursor: default;
 }
 
-/* ===== 编辑器 ===== */
+/* ===== 编辑器（Monaco） ===== */
 .hosts-code {
+  position: relative;
   flex: 1;
   min-height: 0;
-  display: flex;
   border: 1px solid var(--border-color);
   border-radius: 8px;
   background: var(--bg-primary);
   overflow: hidden;
 }
 
-.hosts-gutter {
-  flex-shrink: 0;
-  width: 46px;
-  padding: 10px 8px 10px 0;
-  overflow: hidden;
-  background: var(--bg-secondary);
-  border-right: 1px solid var(--border-color);
-  color: var(--text-muted);
-  text-align: right;
-  user-select: none;
+.hosts-monaco {
+  position: absolute;
+  inset: 0;
 }
 
-.hosts-gutter-inner {
+.hosts-editor-status {
+  position: absolute;
+  inset: 0;
   display: flex;
-  flex-direction: column;
-  font-size: 12px;
-  line-height: 1.7;
-  font-family: 'SF Mono', Menlo, Consolas, monospace;
-}
-
-.hosts-editarea {
-  position: relative;
-  flex: 1;
-  min-width: 0;
-}
-
-/* 高亮层与输入层必须用完全相同的排版，否则文字会错位 */
-.hosts-highlight,
-.hosts-textarea {
-  margin: 0;
-  padding: 10px 12px;
-  font-family: 'SF Mono', Menlo, Consolas, monospace;
-  font-size: 12px;
-  line-height: 1.7;
-  letter-spacing: normal;
-  tab-size: 2;
-  white-space: pre;
-}
-
-.hosts-highlight {
-  position: absolute;
-  inset: 0;
-  overflow: hidden;
-  background: transparent;
-  color: var(--text-primary);
-  pointer-events: none;
-  user-select: none;
-}
-
-.hosts-highlight code {
-  display: block;
-  font: inherit;
-}
-
-.hosts-textarea {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  border: 0;
-  outline: none;
-  resize: none;
-  background: transparent;
-  /* 文字交给下面的高亮层显示，textarea 只保留光标 / 选区 / 输入能力 */
-  color: transparent;
-  caret-color: var(--text-primary);
-  overflow: auto;
-}
-
-/* 大文件 / IME 组字时回退成普通输入框 */
-.hosts-textarea.is-plain {
-  color: var(--text-primary);
-}
-
-.hosts-textarea::placeholder {
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  background: var(--bg-primary);
   color: var(--text-muted);
+  font-size: 13px;
 }
 
-.hosts-textarea::selection {
-  background: rgba(59, 130, 246, 0.25);
+.hosts-editor-status.is-error {
+  color: var(--danger);
 }
 
-.hosts-textarea:focus {
-  box-shadow: inset 0 0 0 1px rgba(59, 130, 246, 0.35);
-}
-
-/* ===== hosts 语法着色 ===== */
-.hosts-editor :deep(.tok-comment) {
-  color: var(--text-muted);
-  font-style: italic;
-}
-.hosts-editor :deep(.tok-ip) {
-  color: #2563eb;
-  font-weight: 600;
-}
-.hosts-editor :deep(.tok-ip6) {
-  color: #7c3aed;
-  font-weight: 600;
-}
-.hosts-editor :deep(.tok-host) {
-  color: #047857;
-}
-.hosts-editor :deep(.tok-invalid) {
-  color: #dc2626;
-  text-decoration: underline wavy rgba(220, 38, 38, 0.55);
-}
-
-.hosts-foot-note {
-  color: #b45309;
-}
-
+/* ===== 底部 ===== */
 .hosts-foot-dirty {
   flex-shrink: 0;
   color: #b45309;

@@ -39,6 +39,7 @@ import {
   readFileSync,
   readdirSync,
   copyFileSync,
+  chmodSync,
   writeFileSync,
   rmSync,
   statSync,
@@ -205,6 +206,15 @@ function createDmg(platform, version) {
   try {
     execFileSync('cp', ['-R', join(dir, appName), join(stage, appName)], { stdio: 'inherit' })
     symlinkSync('/Applications', join(stage, 'Applications'))
+
+    // 安装包自带的卸载程序：放在 dmg 根目录，不随 app 一起被删除。
+    const uninstallerSource = join(ROOT, 'scripts/macos/uninstall-ws-workbench.command')
+    const uninstallerName = '卸载 ws-workbench.command'
+    if (!existsSync(uninstallerSource)) {
+      throw new Error(`缺少卸载脚本: ${uninstallerSource}`)
+    }
+    copyFileSync(uninstallerSource, join(stage, uninstallerName))
+    chmodSync(join(stage, uninstallerName), 0o755)
 
     log('生成 dmg（makehybrid + UDZO 压缩）…')
     // convert 不会覆盖已存在的输出，重复构建时要先删掉

@@ -233,18 +233,25 @@ pub fn load_settings(app: &AppHandle) -> AppSettings {
 pub fn save_settings(app: &AppHandle, settings: &AppSettings) -> Result<(), String> {
     set_settings_cache(settings);
     let mut errors: Vec<String> = Vec::new();
-    match save_settings_to_store(app, settings) {
-        Ok(()) => return Ok(()),
-        Err(e) => errors.push(format!("store: {}", e)),
-    }
-    match save_settings_to_file(app, settings) {
-        Ok(()) => return Ok(()),
-        Err(e) => errors.push(format!("file: {}", e)),
-    }
-    Err(format!(
-        "设置保存失败（已保存在内存中，重启后会丢失）：{}",
-        errors.join("; ")
-    ))
+    let result = match save_settings_to_store(app, settings) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            errors.push(format!("store: {}", e));
+            match save_settings_to_file(app, settings) {
+                Ok(()) => Ok(()),
+                Err(e) => {
+                    errors.push(format!("file: {}", e));
+                    Err(format!(
+                        "设置保存失败（已保存在内存中，重启后会丢失）：{}",
+                        errors.join("; ")
+                    ))
+                }
+            }
+        }
+    };
+    // 路径清单写入失败不影响设置保存；卸载时找不到会回退默认路径。
+    crate::uninstall_info::refresh(app, settings);
+    result
 }
 
 /// 追加候选目录（去重）

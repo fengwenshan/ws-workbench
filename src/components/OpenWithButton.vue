@@ -21,7 +21,13 @@ import {
 } from '@/api/system'
 import type { LogLevel } from '@/types'
 
-const props = defineProps<{ path: string }>()
+const props = defineProps<{
+  path: string
+  /** 紧凑尺寸：放进标题栏时跟 26px 高的小按钮同高 */
+  compact?: boolean
+  /** 目录说明，拼进提示文字里（如「源目录」「输出目录」） */
+  hint?: string
+}>()
 const emit = defineEmits<{
   log: [level: LogLevel, message: string]
 }>()
@@ -38,9 +44,10 @@ const hasPath = computed(() => props.path.trim().length > 0)
 const current = computed<OpenWithApp | null>(() => apps.value[0] ?? null)
 
 const mainTitle = computed(() => {
-  if (!hasPath.value) return '还没有选择目录'
+  const what = props.hint || '目录'
+  if (!hasPath.value) return `还没有选择${what}`
   const name = current.value?.name ?? '默认应用'
-  return `用 ${name} 打开`
+  return `用 ${name} 打开${what}`
 })
 
 onMounted(async () => {
@@ -182,13 +189,14 @@ function glyph(app: OpenWithApp | null) {
 </script>
 
 <template>
-  <div ref="root" class="open-with">
-    <div class="ow-split" :class="{ 'is-open': open, 'is-busy': busy }">
+  <div ref="root" class="open-with" :class="{ 'is-compact': compact }">
+    <div class="ow-split" :class="{ 'is-open': open, 'is-busy': busy, 'is-compact': compact }">
       <button
         type="button"
         class="ow-main"
         :disabled="!hasPath || busy || !current"
         :title="mainTitle"
+        :aria-label="mainTitle"
         @click="openCurrent"
       >
         <img v-if="current?.icon" class="ow-icon" :src="current.icon" alt="" />
@@ -254,6 +262,42 @@ function glyph(app: OpenWithApp | null) {
 .ow-split:hover,
 .ow-split.is-open {
   border-color: var(--primary);
+}
+
+/* 紧凑版：标题栏里跟 26px 高的小按钮保持一致，宽度按比例收窄 */
+.ow-split.is-compact {
+  height: 26px;
+  border-radius: 6px;
+}
+.ow-split.is-compact .ow-main {
+  width: 30px;
+}
+.ow-split.is-compact .ow-arrow {
+  width: 20px;
+}
+.ow-split.is-compact .ow-icon {
+  width: 15px;
+  height: 15px;
+  border-radius: 3px;
+}
+.ow-split.is-compact .ow-glyph {
+  width: 15px;
+  height: 15px;
+  border-radius: 3px;
+  font-size: 10px;
+}
+.open-with.is-compact .ow-menu {
+  top: calc(100% + 4px);
+  min-width: 180px;
+}
+.open-with.is-compact .ow-item {
+  padding: 6px 8px;
+  font-size: 13px;
+}
+.open-with.is-compact .ow-item .ow-icon {
+  width: 16px;
+  height: 16px;
+  border-radius: 3px;
 }
 
 .ow-main,

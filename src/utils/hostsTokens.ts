@@ -1,27 +1,24 @@
 /**
- * hosts 文件语法高亮：把整份内容转成带 `<span>` 的 HTML，供编辑器叠层渲染。
+ * hosts 文件语法 tokenize：纯函数，不依赖编辑器。
  *
  * hosts 的格式很简单：`IP 主机名 [别名...] [# 注释]`，所以不引第三方语法库，
  * 手写一个按行扫描的 tokenizer：
  * - 注释：`#` 到行尾（整行注释 / 行尾注释都算）；
- * - IPv4 / IPv6：第一个非空白 token 必须能解析成地址，否则标红；
- * - 主机名：地址之后的非空白 token，校验字符与长度，非法标红；
- * - 空白原样保留（叠层渲染必须保证文本与 textarea 完全一致，否则高亮会错位）。
+ * - IPv4 / IPv6：第一个非空白 token 必须能解析成地址，否则算非法；
+ * - 主机名：地址之后的非空白 token，校验字符与长度，非法算非法；
+ * - 空白原样保留：token 按顺序拼接后必须与入参逐字符一致。
  *
- * 文件很大时前端会关闭高亮（见 `HOSTS_HIGHLIGHT_LIMIT`），避免每次按键都重排整份内容。
+ * `src/editor/monacoHosts.ts` 把它接成 Monaco 的 tokens provider，
+ * token 种类直接映射成主题里的 scope。
  */
-
-/** 超过这个字节数就不做高亮：hosts 正常只有几 KB，大文件交给纯文本编辑 */
-export const HOSTS_HIGHLIGHT_LIMIT = 32 * 1024
 
 export type HostsTokenKind = 'plain' | 'comment' | 'ip' | 'ip6' | 'host' | 'invalid'
 
 export interface HostsToken {
   kind: HostsTokenKind
-  /** 原文片段（不含 HTML 转义） */
+  /** 原文片段 */
   text: string
 }
-
 
 /** 主机名 / 域名：字母数字 `_` 开头，标签内允许 `-`，整体 ≤253；允许末尾的点（绝对域名） */
 const HOST_LABEL_RE = /^[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?$/
@@ -86,45 +83,4 @@ export function tokenizeHostsLine(line: string): HostsToken[] {
   if (comment) tokens.push({ kind: 'comment', text: comment })
   if (bom) tokens.unshift({ kind: 'plain', text: bom })
   return tokens
-}
-
-const TOKEN_CLASS: Record<HostsTokenKind, string> = {
-  plain: '',
-  comment: 'tok-comment',
-  ip: 'tok-ip',
-  ip6: 'tok-ip6',
-  host: 'tok-host',
-  invalid: 'tok-invalid',
-}
-
-function escapeHtml(text: string): string {
-  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-}
-
-/** 单行高亮（带缓存：打字时只有改动的那几行会重新 token 化） */
-const lineCache = new Map<string, string>()
-
-function highlightLine(line: string): string {
-  const cached = lineCache.get(line)
-  if (cached !== undefined) return cached
-  const html = tokenizeHostsLine(line)
-    .map((token) => {
-      const className = TOKEN_CLASS[token.kind]
-      const escaped = escapeHtml(token.text)
-      return className ? `<span class="${className}">${escaped}</span>` : escaped
-    })
-    .join('')
-  if (lineCache.size > 4000) lineCache.clear()
-  lineCache.set(line, html)
-  return html
-}
-
-/**
- * 整份内容 → 高亮 HTML。
- *
- * 输出文本内容（去掉 `<span>` 后）必须与原内容逐字符一致，否则叠层会错位；
- * 换行用 `\n` 原样保留，在 `<pre>` 里渲染成换行。
- */
-export function highlightHosts(content: string): string {
-  return content.split('\n').map(highlightLine).join('\n')
 }

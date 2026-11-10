@@ -45,6 +45,14 @@ libc = "0.2"
 nix = { version = "0.29", features = ["net", "ioctl", "socket", "fs"] }
 tauri-plugin-updater = "2.11.0"
 tauri-plugin-process = "2.3.1"
+# 更新包断点续传：自己发 Range 请求，所以直接用插件同一套 reqwest / rustls。
+# updater 插件关掉了 reqwest 的默认特性，改用 rustls 的 no-provider，
+# 运行时必须由我们自己装 ring provider（见 updates::ensure_crypto_provider），
+# 否则构建 HTTP 客户端会 panic；版本和特性都跟插件保持一致，避免拉第二份实现。
+reqwest = { version = "0.13", default-features = false, features = ["stream"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+# 更新包签名校验（minisign），和插件用的是同一个库
+minisign-verify = "0.2"
 # 剪贴板历史：官方剪贴板读写 + 全局快捷键（Option+V）
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-global-shortcut = "2"
@@ -63,6 +71,10 @@ sysinfo = { version = "0.40", default-features = false, features = ["system"] }
 trash = "5.3"
 # 读 macOS 应用的 Info.plist
 plist = "1"
+
+[dev-dependencies]
+# updates 模块的测试要直接 await 断点续传的下载函数（本机 mock HTTP 服务）
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 [features]
 default = ["custom-protocol"]

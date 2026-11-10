@@ -22,12 +22,16 @@ mod process;
 mod winps;
 #[cfg(test)]
 pub(crate) mod test_support;
+/// 更新包断点续传下载 + 安装
+mod updates;
+/// 安装包卸载程序读取的路径清单
+mod uninstall_info;
 pub mod vpn;
 
 use tauri::{
-    menu::{Menu, MenuItem},
+    menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager, Runtime, WindowEvent,
+    AppHandle, Emitter, Manager, Runtime, WindowEvent,
 };
 
 /// 应用基础名（发布版显示名）
@@ -136,11 +140,29 @@ pub(crate) fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
 
 // 托盘图标：macOS 用模板图（黑 + 透明），系统会按菜单栏明暗自动反色；
 // Windows 直接用应用图标（彩色），白色线条图在浅色任务栏上会看不清。
+//
+// 开发版整套换成带 dev 标识的变体。macOS 菜单栏这里刻意沿用发布版那张模板图
+// （系统按菜单栏明暗染色，开发版的颜色和发布版完全一样），只在箱体正中镂空一个
+// 透明小圆点——镂空处透出菜单栏背景，不引入新颜色，18pt 见方、不比发布版宽。
+// Windows / Linux 托盘用右下角带 dev 角标的彩色应用图标（浅色任务栏上也认得出）。
 fn tray_icon_image() -> Option<tauri::image::Image<'static>> {
+    let dev = is_dev_build();
     let bytes: &'static [u8] = if cfg!(target_os = "macos") {
-        include_bytes!("../icons/tray/tray-template-36.png")
+        if dev {
+            // 开发版：模板图 + 正中镂空点，仍交给系统着色
+            include_bytes!("../icons/tray/tray-dev-template-36.png")
+        } else {
+            include_bytes!("../icons/tray/tray-template-36.png")
+        }
     } else if cfg!(target_os = "windows") {
-        include_bytes!("../icons/32x32.png")
+        if dev {
+            include_bytes!("../icons/dev/32x32-dev.png")
+        } else {
+            include_bytes!("../icons/32x32.png")
+        }
+    } else if dev {
+        // Linux 托盘：带 dev 角标的彩色应用图标
+        include_bytes!("../icons/dev/32x32-dev.png")
     } else {
         include_bytes!("../icons/tray/tray-white-48.png")
     };
@@ -150,6 +172,8 @@ fn tray_icon_image() -> Option<tauri::image::Image<'static>> {
 // macOS 的 Dock 图标来自 .app 包里的 icns；`tauri dev` 跑的是裸二进制，
 // 没有 bundle，Dock 会退回系统那个黑底「exec」占位图标。
 // 启动时显式设一次 applicationIconImage，dev 和安装包的观感就一致了。
+// 开发版这里换成右下角带 dev 角标的图：Dock 里和生产版一眼分开，
+// 而不是只靠磁贴上的小字标题。
 #[cfg(target_os = "macos")]
 fn set_dock_icon() {
     use objc2::{AllocAnyThread, MainThreadMarker};
@@ -159,13 +183,35 @@ fn set_dock_icon() {
     let Some(mtm) = MainThreadMarker::new() else {
         return;
     };
-    let data = NSData::with_bytes(include_bytes!("../icons/icon-source.png"));
+    let bytes: &'static [u8] = if is_dev_build() {
+        include_bytes!("../icons/dev/icon-dev.png")
+    } else {
+        include_bytes!("../icons/icon-source.png")
+    };
+    let data = NSData::with_bytes(bytes);
     let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) else {
         return;
     };
     let app = NSApplication::sharedApplication(mtm);
     // SAFETY: setup 在主线程执行；NSApplication 只允许主线程访问
     unsafe { app.setApplicationIconImage(Some(&image)) };
+}
+
+// 开发版把主窗口图标也换成带角标的那张：Windows 的任务栏 / Alt-Tab 读的是
+// 窗口图标，不会跟着托盘图标走；macOS 上 set_icon 是 no-op，Dock 由
+// set_dock_icon 负责，所以这里不用按平台分支。
+fn set_dev_window_icon<R: Runtime>(app: &AppHandle<R>) {
+    if !is_dev_build() {
+        return;
+    }
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    if let Ok(icon) =
+        tauri::image::Image::from_bytes(include_bytes!("../icons/dev/128x128@2x-dev.png"))
+    {
+        let _ = window.set_icon(icon);
+    }
 }
 
 // macOS 顶部菜单栏汉化（Tauri 默认菜单是英文的）
@@ -815,6 +861,13 @@ pub fn run() {
             commands::cleaner_uninstall_app,
             commands::cleaner_scan_leftovers,
             commands::cleaner_delete_leftovers,
+            // 软件卸载独立窗口（2026-11-10 设计 3.1）：
+            // 打开窗口 / 读目标 / 关联文件 / 强制退出 / 白名单删除
+            commands::cleaner_open_uninstall_window,
+            commands::cleaner_uninstall_target,
+            commands::cleaner_related_files,
+            commands::cleaner_force_quit,
+            commands::cleaner_delete_related,
             // 「系统」页新增页签：屏幕休眠 / 弹窗拦截（仅 Windows）
             commands::keepawake_status,
             commands::keepawake_start,
@@ -855,6 +908,9 @@ pub fn run() {
             commands::hosts_backups,
             commands::hosts_restore,
             commands::hosts_open_file_dir,
+            // 更新包断点续传：下载 / 安装（前端 useUpdater 调用）
+            updates::update_download_resumed,
+            updates::update_install_resumed,
         ])
         .setup(|app| {
             // 先建主窗口：窗口配置在 tauri.conf.json 里，但 create: false 交给这里
@@ -868,6 +924,8 @@ pub fn run() {
             // dev 模式（裸二进制）Dock 会显示系统占位图标，这里补上真实图标
             #[cfg(target_os = "macos")]
             set_dock_icon();
+            // 开发版的任务栏 / 窗口图标同样换成带 dev 角标的那张
+            set_dev_window_icon(app.handle());
             // macOS 顶部菜单栏汉化
             setup_app_menu(app.handle())?;
 
@@ -909,10 +967,31 @@ pub fn run() {
             vpn::commands::start_status_poller(app.handle().clone());
 
             // 托盘：关掉窗口后应用仍在后台运行，从托盘菜单重新打开或退出。
-            // 只保留两项：页面入口和 VPN 动作都在主界面里，托盘越简单越不容易点错。
+            // 菜单只保留必要入口：显示 / 检查更新 / 退出，页面里的动作都在主界面里。
+            // 开发版最上面再压一行禁用的构建标识，和安装版的菜单区分开。
+            let build_tag = MenuItem::with_id(
+                app,
+                "build-tag",
+                format!("{}（开发版）", app_display_name()),
+                false,
+                None::<&str>,
+            )?;
             let show = MenuItem::with_id(app, "show", "显示主界面", true, None::<&str>)?;
+            let check_update =
+                MenuItem::with_id(app, "check-update", "检查更新", true, None::<&str>)?;
+            let separator = PredefinedMenuItem::separator(app)?;
+            let dev_separator = PredefinedMenuItem::separator(app)?;
             let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &quit])?;
+            let mut items: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = Vec::new();
+            if is_dev_build() {
+                items.push(&build_tag);
+                items.push(&dev_separator);
+            }
+            items.push(&show);
+            items.push(&check_update);
+            items.push(&separator);
+            items.push(&quit);
+            let menu = Menu::with_items(app, &items)?;
 
             let mut tray = TrayIconBuilder::with_id("main")
                 // 不设 tooltip：菜单栏图标悬浮时不要弹出应用名
@@ -921,6 +1000,13 @@ pub fn run() {
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => show_main_window(app),
+                    "check-update" => {
+                        // 检查更新要用户看得见进度，先把主界面叫出来，
+                        // 再让前端自己去 check()：事件只负责触发，不传版本信息，
+                        // 避免 Rust 侧和前端各查一次、出现两份不一致的结论。
+                        show_main_window(app);
+                        let _ = app.emit("tray-check-update", ());
+                    }
                     "quit" => {
                         // 退出就是整个应用和它拉起的进程都结束：先给 worker 发停止
                         // 请求（写 stop.flag），然后立刻退出主进程。
@@ -946,10 +1032,14 @@ pub fn run() {
                     }
                 });
             if let Some(icon) = tray_icon_image() {
-                // macOS 菜单栏深浅色由系统决定，模板图交给系统着色
+                // macOS 菜单栏深浅色由系统决定，模板图交给系统着色；开发版也是模板图
+                // （开发标识是镂空点，不依赖颜色），所以这里不按构建区分
                 tray = tray.icon(icon).icon_as_template(cfg!(target_os = "macos"));
             }
             tray.build(app)?;
+            // 安装包卸载程序读取的路径清单：启动时先写一份，设置变化时 save_settings 会再写。
+            let settings = crate::config::load_settings(app.handle());
+            crate::uninstall_info::refresh(app.handle(), &settings);
             Ok(())
         })
         .on_window_event(|window, event| {

@@ -103,11 +103,13 @@ export default defineConfig({
   },
   build: {
     rollupOptions: {
-      // 三个页面入口：主窗口 index.html + 托盘快捷面板 quick.html + 剪贴板历史 clipboard.html
+      // 四个页面入口：主窗口 index.html + 托盘快捷面板 quick.html
+      // + 剪贴板历史 clipboard.html + 独立卸载窗口 uninstall.html
       input: {
         main: path.resolve(__dirname, 'index.html'),
         quick: path.resolve(__dirname, 'quick.html'),
         clipboard: path.resolve(__dirname, 'clipboard.html'),
+        uninstall: path.resolve(__dirname, 'uninstall.html'),
       },
     },
   },

@@ -4,6 +4,7 @@ import { Tabs, TabPane } from 'ant-design-vue'
 import ProjectConfigPanel from './ProjectConfig.vue'
 import NoteWorkspace from './NoteWorkspace.vue'
 import AttachmentPanel from './AttachmentPanel.vue'
+import OpenWithButton from './OpenWithButton.vue'
 import type { AttachmentMeta, LogLevel, ProjectConfig } from '@/types'
 
 defineProps<{
@@ -50,6 +51,13 @@ const emit = defineEmits<{
             <button class="btn btn-secondary" @click="configRef.packZip()">打包 ZIP</button>
             <button class="btn btn-primary" @click="configRef.packFiles()">开始打包</button>
           </template>
+          <!-- 源目录的「打开方式」放在标题栏：打包前先开项目目录，配置页那两行不再各放一个 -->
+          <OpenWithButton
+            compact
+            hint="源目录"
+            :path="configRef.headerState.sourceDir"
+            @log="(level, message) => emit('log', level, message)"
+          />
         </div>
       </template>
       <TabPane key="note" tab="笔记">

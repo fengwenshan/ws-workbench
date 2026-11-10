@@ -10,7 +10,7 @@ OUT="$(dirname "$0")/github-hosts.txt"
 
 # 域名|候选IP列表
 DATA='
-github.com|140.82.112.3 140.82.113.3 140.82.114.3 140.82.116.4 140.82.121.3 20.27.177.113 20.26.156.215 20.175.192.147 4.208.26.197 4.228.31.150 20.205.243.169 20.205.243.166
+github.com|20.27.177.113 20.175.192.147 140.82.121.3 140.82.121.4 140.82.112.3 140.82.112.4 140.82.113.3 140.82.113.4 140.82.114.3 140.82.114.4 140.82.116.4 20.26.156.215 4.208.26.197 4.228.31.150
 api.github.com|20.205.243.168 140.82.112.6 140.82.113.6 140.82.116.6
 raw.githubusercontent.com|185.199.108.133 185.199.109.133 185.199.110.133 185.199.111.133
 objects.githubusercontent.com|185.199.108.133 185.199.109.133 185.199.110.133 185.199.111.133
@@ -19,7 +19,7 @@ media.githubusercontent.com|185.199.108.133 185.199.109.133 185.199.110.133 185.
 camo.githubusercontent.com|185.199.108.133 185.199.109.133 185.199.110.133 185.199.111.133
 user-images.githubusercontent.com|185.199.108.133 185.199.109.133 185.199.110.133 185.199.111.133
 github.githubassets.com|185.199.108.215 185.199.109.215 185.199.110.215 185.199.111.215
-codeload.github.com|20.205.243.165 140.82.112.9 140.82.113.9 20.27.177.113
+codeload.github.com|20.205.243.165 140.82.112.9 140.82.113.9
 github.io|185.199.108.153 185.199.109.153 185.199.110.153 185.199.111.153
 '
 
@@ -33,16 +33,39 @@ probe_path() {
     esac
 }
 
+# 内容校验：光看 HTTP 状态码会被假的 "OK" 服务器骗过去
+content_ok() {
+    local sni=$1 body=$2
+    [ -z "$body" ] && return 1
+    case "$sni" in
+        github.com)
+            printf '%s' "$body" | grep -q '<title>GitHub' ;;
+        api.github.com)
+            printf '%s' "$body" | grep -q '"resources"\|rate_limit\|"current_user_url"' ;;
+        raw.githubusercontent.com)
+            [ "${#body}" -gt 10 ] && ! printf '%s' "$body" | grep -q '404: Not Found' ;;
+        github.githubassets.com)
+            printf '%s' "$body" | grep -qi '<svg\|DOCTYPE html' ;;
+        codeload.github.com)
+            [ "${#body}" -gt 20 ] && ! printf '%s' "$body" | grep -q 'Not Found' ;;
+        *)
+            [ "${#body}" -gt 0 ] ;;
+    esac
+}
+
 # 测一个 IP，输出 "成功数 总握手秒数"
 probe_ip() {
     local sni=$1 ip=$2 path=$3 ok=0 sum=0 n=0
     for _ in $(seq 1 "$TRIALS"); do
-        local out code t
-        out=$(curl -s -o /dev/null -w '%{http_code} %{time_appconnect}' \
+        local out code t body
+        # 必须连内容一起取：有些 IP 会返回 200 + 一个 "OK" 字符串冒充成功
+        out=$(curl -s -w '\n%{http_code} %{time_appconnect}' \
               --connect-timeout 4 -m 10 \
               --resolve "$sni:443:$ip" "https://$sni$path" 2>/dev/null)
-        code=${out%% *}; t=${out##* }
-        if [ -n "$code" ] && [ "$code" != "000" ]; then
+        code=$(printf '%s' "$out" | tail -1 | awk '{print $1}')
+        t=$(printf '%s' "$out" | tail -1 | awk '{print $2}')
+        body=$(printf '%s' "$out" | sed '$d')
+        if [ -n "$code" ] && [ "$code" != "000" ] && content_ok "$sni" "$body"; then
             ok=$((ok + 1)); n=$((n + 1))
             sum=$(awk -v a="$sum" -v b="$t" 'BEGIN{print a+b}')
         fi

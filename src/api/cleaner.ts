@@ -1,8 +1,10 @@
 import { invoke } from '@tauri-apps/api/core'
 import type {
   DeleteOutcome,
+  ForceQuitOutcome,
   InstalledApp,
   LeftoverItem,
+  RelatedFiles,
   RunningState,
   UninstallOutcome,
 } from '@/types/cleaner'
@@ -11,6 +13,12 @@ import type {
 
 /** 进度事件名，与后端 `AppHandle.emit("cleaner-progress", …)` 保持一致 */
 export const CLEANER_PROGRESS_EVENT = 'cleaner-progress'
+
+/** 卸载/删除成功后广播：主窗口收到后重新拉安装列表 */
+export const CLEANER_APPS_CHANGED_EVENT = 'cleaner-apps-changed'
+
+/** 卸载窗口被复用、切换目标时广播：窗口重新拉目标与清单 */
+export const CLEANER_TARGET_CHANGED_EVENT = 'cleaner-uninstall-target-changed'
 
 /**
  * 列出已安装应用。
@@ -47,4 +55,37 @@ export function deleteLeftovers(
   paths: string[],
 ): Promise<DeleteOutcome> {
   return invoke<DeleteOutcome>('cleaner_delete_leftovers', { appId, paths })
+}
+
+// ============================ 独立卸载窗口 ============================
+
+/**
+ * 打开独立卸载窗口并把目标切到 `appId`。
+ * 后端保证单例：窗口已存在时聚焦 + 广播 `cleaner-uninstall-target-changed`。
+ */
+export function openUninstallWindow(appId: string): Promise<void> {
+  return invoke<void>('cleaner_open_uninstall_window', { appId })
+}
+
+/** 卸载窗口读取当前目标应用（没有目标时后端报错） */
+export function uninstallTarget(): Promise<InstalledApp> {
+  return invoke<InstalledApp>('cleaner_uninstall_target')
+}
+
+/** 扫描三组关联文件；后端同时把本次扫描到的路径写成删除白名单 */
+export function relatedFiles(appId: string): Promise<RelatedFiles> {
+  return invoke<RelatedFiles>('cleaner_related_files', { appId })
+}
+
+/** 强制退出目标应用的全部相关进程（阻塞到进程归零或超时） */
+export function forceQuitApp(appId: string): Promise<ForceQuitOutcome> {
+  return invoke<ForceQuitOutcome>('cleaner_force_quit', { appId })
+}
+
+/** 删除勾选的关联文件；只接受本次扫描缓存里的路径，已消失的记 skipped */
+export function deleteRelated(
+  appId: string,
+  paths: string[],
+): Promise<DeleteOutcome> {
+  return invoke<DeleteOutcome>('cleaner_delete_related', { appId, paths })
 }

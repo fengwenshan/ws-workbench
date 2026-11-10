@@ -10,7 +10,9 @@
 //! - 真正读注册表、起卸载程序的部分用 `#[cfg(target_os = "windows")]` 隔离。
 
 #[cfg(target_os = "windows")]
-use super::models::{CleanerProgress, InstalledApp, LeftoverItem, UninstallOutcome};
+use super::models::{
+    CleanerProgress, InstalledApp, LeftoverItem, RelatedFileItem, RelatedFiles, UninstallOutcome,
+};
 
 /// 注册表根（枚举顺序即去重优先级：HKLM 64 位 > Wow6432Node > HKCU）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -310,6 +312,26 @@ pub fn split_windows_args(line: &str) -> Vec<String> {
     args
 }
 
+/// 当前进程是否就装在这个安装目录里（Windows 上的「不能卸载自己」判定）。
+///
+/// 两边都按 Windows 规则归一化（小写、反斜杠、去引号/尾随分隔符）后做目录边界
+/// 前缀比较，所以 `C:\Program Files\Foo` 不会把 `C:\Program Files\Foobar` 算成
+/// 自己，大小写差异也不影响。空/盘符根级的 `install_location` 一律不认。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn is_self_install(current_exe: &std::path::Path, install_location: &str) -> bool {
+    let Some(root) = super::running::normalize_win_path(install_location) else {
+        return false;
+    };
+    // 盘符根（`c:` / `c:\`）或空串：几乎任何进程都在它下面，不能用来判定归属
+    if root.len() <= 2 {
+        return false;
+    }
+    let Some(exe) = super::running::normalize_win_path(&current_exe.to_string_lossy()) else {
+        return false;
+    };
+    super::running::win_path_within(&exe, &root)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -425,6 +447,27 @@ mod tests {
 
         // 没有卸载命令 → 强制移除（删注册表条目）
         assert_eq!(uninstall_kind(&entry("Baz", None, "", "")), "force");
+    }
+
+    // ============================== 自身识别（Windows） ==============================
+
+    #[test]
+    fn is_self_install_is_case_insensitive_and_boundary_safe() {
+        let exe = std::path::Path::new(r"C:\Program Files\ws-workbench\ws-workbench.exe");
+        assert!(is_self_install(exe, r"C:\Program Files\ws-workbench"));
+        // 大小写、斜杠、尾随分隔符都归一化
+        assert!(is_self_install(
+            exe,
+            "c:/program files/WS-WORKBENCH//"
+        ));
+        // 同前缀的兄弟目录不是自己
+        assert!(!is_self_install(exe, r"C:\Program Files\ws-workbench-dev"));
+        // 空安装位置 / 盘符根不能用来判定
+        assert!(!is_self_install(exe, ""));
+        assert!(!is_self_install(exe, r"C:\"));
+        assert!(!is_self_install(exe, "C:"));
+        // 完全不相关的安装位置
+        assert!(!is_self_install(exe, r"D:\Other"));
     }
 }
 
@@ -694,12 +737,15 @@ mod win_impl {
                 .to_lowercase()
                 .cmp(&right.name.to_lowercase())
         });
+        // 不能卸载自己：当前进程 exe 位于某条目的安装目录内 → 从列表里剔除
+        let current_exe = std::env::current_exe().unwrap_or_default();
+        apps.retain(|app| !is_self_install(&current_exe, &app.install_location));
         emit(CleanerProgress::new(
             "list_apps",
             "done",
             total,
             total,
-            format!("已加载 {} 个应用", total),
+            format!("已加载 {} 个应用", apps.len()),
         ));
         Ok(apps)
     }
@@ -1107,7 +1153,150 @@ mod win_impl {
         }
         roots
     }
+
+    // ============================== 关联文件（卸载窗口，设计 4.2） ==============================
+
+    /// 安装目录候选：列表缓存 + 注册表 `InstallLocation` / `DisplayIcon` 目录 /
+    /// `UninstallString` 可执行文件所在目录（安装位置为空时的兜底）。
+    fn install_dirs(app_id: &str, hint: Option<&InstalledApp>) -> Vec<PathBuf> {
+        let mut dirs: Vec<PathBuf> = Vec::new();
+        let mut push = |path: PathBuf| {
+            if path.is_dir() && !dirs.contains(&path) {
+                dirs.push(path);
+            }
+        };
+        if let Some(app) = hint {
+            let location = app.install_location.trim().trim_matches('"');
+            if !location.is_empty() {
+                push(PathBuf::from(location));
+            }
+        }
+        if let Ok((hive, key_path)) = parse_app_id(app_id) {
+            if let Ok(key) = open_entry_key(hive, key_path) {
+                let location = read_string(&key, "InstallLocation");
+                let location = location.trim().trim_matches('"');
+                if !location.is_empty() {
+                    push(PathBuf::from(location));
+                }
+                if let Some(icon) = display_icon_path(&read_string(&key, "DisplayIcon")) {
+                    if let Some(parent) = icon.parent() {
+                        push(parent.to_path_buf());
+                    }
+                }
+                if let Some(command) =
+                    parse_uninstall_command(&read_string(&key, "UninstallString"), false)
+                {
+                    if let Some(parent) = Path::new(&command.program).parent() {
+                        push(parent.to_path_buf());
+                    }
+                }
+            }
+        }
+        dirs
+    }
+
+    /// 一个存在的文件/目录 → 关联文件条目
+    fn related_item_from_path(
+        path: &Path,
+        kind: &str,
+        confidence: &str,
+        requires_elevation: bool,
+    ) -> RelatedFileItem {
+        let size_bytes = if path.is_dir() {
+            crate::cleaner::dir_size_limited(path, 4, 200_000)
+        } else {
+            std::fs::symlink_metadata(path).map(|meta| meta.len()).unwrap_or(0)
+        };
+        RelatedFileItem {
+            path: path.to_string_lossy().to_string(),
+            name: path
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| path.to_string_lossy().to_string()),
+            kind: kind.to_string(),
+            size_bytes,
+            is_dir: path.is_dir(),
+            version: String::new(),
+            confidence: confidence.to_string(),
+            requires_elevation,
+            exists: true,
+            selected: false,
+        }
+    }
+
+    /// 残留条目 → 关联文件条目（注册表项展示键名，其余展示最后一段文件名）
+    fn related_item_from_leftover(item: LeftoverItem) -> RelatedFileItem {
+        let name = match crate::cleaner::trash_guard::split_registry_id(&item.path) {
+            Some((_, key_path)) => key_path
+                .rsplit('\\')
+                .next()
+                .unwrap_or(key_path)
+                .to_string(),
+            None => Path::new(&item.path)
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| item.path.clone()),
+        };
+        RelatedFileItem {
+            path: item.path,
+            name,
+            kind: item.kind,
+            size_bytes: item.size_bytes,
+            is_dir: item.is_dir,
+            version: String::new(),
+            confidence: item.confidence,
+            requires_elevation: item.requires_elevation,
+            exists: item.exists,
+            selected: false,
+        }
+    }
+
+    /// 卸载窗口的关联文件清单（Windows）。
+    ///
+    /// 程序文件 = 安装目录（以及安装位置缺失时的兜底目录）；支持/缓存 =
+    /// 现有残留扫描结果按 kind 映射（registry/shortcut → 支持文件，
+    /// cache/log → 缓存文件）。`pkgutil` 收据是 macOS 概念，这里没有。
+    pub fn related_files(
+        app_id: &str,
+        hint: Option<&InstalledApp>,
+        emit: &dyn Fn(CleanerProgress),
+    ) -> Result<RelatedFiles, String> {
+        emit(CleanerProgress::new(
+            "related_files",
+            "scanning",
+            0,
+            0,
+            "正在扫描关联文件…",
+        ));
+
+        let mut items: Vec<RelatedFileItem> = Vec::new();
+        // 1) 程序文件：安装目录
+        for dir in install_dirs(app_id, hint) {
+            items.push(related_item_from_path(
+                &dir,
+                "install_dir",
+                "high",
+                false,
+            ));
+        }
+        // 2) 支持 / 缓存：复用残留扫描（含注册表项与快捷方式）
+        for leftover in scan_leftovers(app_id, hint, emit)? {
+            items.push(related_item_from_leftover(leftover));
+        }
+
+        let files = crate::cleaner::related::build_related_files(app_id, items, String::new());
+        emit(CleanerProgress::new(
+            "related_files",
+            "done",
+            files.item_count,
+            files.item_count,
+            format!("找到 {} 个关联文件", files.item_count),
+        ));
+        Ok(files)
+    }
 }
 
 #[cfg(target_os = "windows")]
-pub use win_impl::{install_root_candidates, list_apps, scan_leftovers, uninstall};
+pub use win_impl::{
+    install_root_candidates, list_apps, related_files, scan_leftovers, uninstall,
+};

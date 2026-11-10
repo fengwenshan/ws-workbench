@@ -177,6 +177,7 @@ export function useCleaner() {
       const message = errorText(err, '删除失败')
       const outcome: DeleteOutcome = {
         trashed: 0,
+        skipped: 0,
         failed: paths.map((path) => ({ path, error: message })),
       }
       deleteOutcome.value = outcome

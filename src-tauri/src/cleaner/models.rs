@@ -67,6 +67,9 @@ pub struct LeftoverItem {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DeleteOutcome {
     pub trashed: usize,
+    /// 跳过数：卸载程序已删掉、或扫描后消失的路径不算失败（设计 3 节）
+    #[serde(default)]
+    pub skipped: usize,
     pub failed: Vec<DeleteFailure>,
 }
 
@@ -110,4 +113,108 @@ pub struct RunningState {
     pub running: bool,
     pub processes: usize,
     pub names: Vec<String>,
+}
+
+// ============================== 卸载窗口：关联文件清单（设计 3 节） ==============================
+
+/// 关联文件分组：program / support / cache
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RelatedFileGroup {
+    /// "program" | "support" | "cache"
+    pub id: String,
+    /// 「程序文件」|「支持文件」|「缓存文件」
+    pub label: String,
+    pub items: Vec<RelatedFileItem>,
+}
+
+/// 一条关联文件（文件、目录或 Windows 注册表项）
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RelatedFileItem {
+    /// 文件/目录绝对路径；Windows 注册表项为 `win:{hive}|{key_path}`
+    pub path: String,
+    /// 展示名（应用名 / 目录名 / 注册表键名）
+    pub name: String,
+    /// app_bundle/app_data/cache/preference/container/launch_agent/log/
+    /// crash_report/install_dir/registry/shortcut
+    pub kind: String,
+    /// 目录按 `path_size` 限深统计
+    pub size_bytes: u64,
+    pub is_dir: bool,
+    /// 仅 app_bundle；未知为空串
+    pub version: String,
+    /// high / medium / low
+    pub confidence: String,
+    pub requires_elevation: bool,
+    pub exists: bool,
+    /// 默认勾选：confidence != "low"（由 `related::build_related_files` 统一赋值）
+    pub selected: bool,
+}
+
+/// 卸载窗口的三组关联文件清单
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RelatedFiles {
+    pub app_id: String,
+    pub groups: Vec<RelatedFileGroup>,
+    /// 所有条目合计
+    pub total_bytes: u64,
+    pub item_count: usize,
+    /// 「今天使用过」/「7天内使用过」/「30天内使用过」/「最近未使用」/ ""
+    pub last_used: String,
+}
+
+/// 强制退出结果（设计 3 节）
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ForceQuitOutcome {
+    /// true = 所有相关进程已退出
+    pub ok: bool,
+    /// 结束时仍在运行的进程数（ok 时为 0）
+    pub processes: usize,
+    pub names: Vec<String>,
+    pub message: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn related_files_serializes_snake_case() {
+        let files = RelatedFiles {
+            app_id: "mac:/Applications/Foo.app".to_string(),
+            groups: vec![RelatedFileGroup {
+                id: "program".to_string(),
+                label: "程序文件".to_string(),
+                items: vec![RelatedFileItem {
+                    path: "/Applications/Foo.app".to_string(),
+                    name: "Foo".to_string(),
+                    kind: "app_bundle".to_string(),
+                    size_bytes: 1024,
+                    is_dir: true,
+                    version: "1.0.0".to_string(),
+                    confidence: "high".to_string(),
+                    requires_elevation: false,
+                    exists: true,
+                    selected: true,
+                }],
+            }],
+            total_bytes: 1024,
+            item_count: 1,
+            last_used: "今天使用过".to_string(),
+        };
+        let json = serde_json::to_string(&files).unwrap();
+        assert!(json.contains("\"size_bytes\""), "实际: {json}");
+        assert!(json.contains("\"last_used\""), "实际: {json}");
+        assert!(json.contains("\"item_count\""), "实际: {json}");
+        assert!(json.contains("\"requires_elevation\""), "实际: {json}");
+        assert!(!json.contains("sizeBytes"), "不应出现 camelCase: {json}");
+        assert!(!json.contains("lastUsed"), "不应出现 camelCase: {json}");
+    }
+
+    #[test]
+    fn delete_outcome_skipped_defaults_to_zero_and_is_optional() {
+        // 旧前端/旧数据里没有 skipped 字段时反序列化不能失败（serde default）
+        let outcome: DeleteOutcome = serde_json::from_str(r#"{"trashed":2,"failed":[]}"#).unwrap();
+        assert_eq!(outcome.trashed, 2);
+        assert_eq!(outcome.skipped, 0);
+    }
 }

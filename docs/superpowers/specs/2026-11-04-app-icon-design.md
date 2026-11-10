@@ -144,3 +144,20 @@ cp design/icons/dist/tray/tray-template-36.png design/icons/dist/tray/tray-white
 - 程序坞图标的字形投影在高斯模糊阶段完成，纯 SVG 源里没有投影，方便二次编辑。
 - 工具箱正面视角在超大尺寸下略带「手提箱」感；128px 以下 Dock 尺寸与其它应用并排时辨识良好（见预览图）。若后续想更强工具感，可在箱体加两道冲压筋，但会牺牲小尺寸干净度。
 - Linux 托盘没有模板图机制，白色图标在浅色面板上对比度有限，必要时可换深色版或按主题切换。
+
+## 9. 开发版角标（2026-11-10 增补）
+
+开发构建和安装版可以同机并存，光靠名字还不够——Dock / 任务栏里两个几乎一样的磁贴很容易点错。开发版因此用一套带角标的图标（评审选定白底方案）：
+
+| 项目 | 值 |
+| --- | --- |
+| 角标 | 220 × 100 圆角矩形，圆角 30；1024 画布坐标 (640, 784)–(860, 884) |
+| 底色 | `#FFFFFF`（96% 不透明，让底层渐变透一点出来） |
+| 文字 | `dev`，Helvetica Neue Bold 56px，`#2C63F0`（界面主色） |
+| 投影 | 墨色 `#061023`、偏移 (0, 8)、高斯 10、38% |
+| 位置 | 落在 squircle 圆弧安全区内，上沿正好压在箱体下沿之下，不挡工具箱字形 |
+| 小尺寸 | 32 / 64px 时角标退化成白底小色块；128px 以上 `dev` 可读 |
+
+菜单栏图标不改宽度、也不改颜色：发布版是 18pt 的模板图（系统按菜单栏明暗染色，深色栏白、浅色栏黑）；开发版沿用同一张模板图，只在箱体视觉中心镂空一个透明小圆点（36 画布圆心 (18, 24.4)、直径 8，约 4pt），镂空处直接透出菜单栏背景，不引入新颜色，画布仍是 18pt 见方。评审后已弃用的两版：「工具箱 + `dev` 字样」加宽版（菜单栏项约 49pt）太占位置；「品牌渐变字形 + `#F59E0B` 黄点」会改掉图标原色（模板图整张被系统染色，本来就画不出彩色圆点）。
+
+产物：`dist/ws-workbench-icon-dev-1024.png`、`src-tauri/icons/dev/`（512 / 256 / 128 / 64 / 32 的 PNG + `icon-dev.ico`）、`src-tauri/icons/tray/tray-dev-template-36.png`（`dist/tray/tray-dev-template-36.png` 同步一份）。Windows / Linux 的托盘不用模板图，沿用带 `dev` 角标的彩色应用图标 `icons/dev/32x32-dev.png`。运行时按 `debug_assertions` 选用：Dock 走 `set_dock_icon()`，Windows 窗口 / 任务栏走 `set_dev_window_icon()`，托盘走 `tray_icon_image()`；Windows 的 exe 文件图标在读不到运行时设置的资源管理器里，所以 `build.rs` 在 debug + windows 时用 `WindowsAttributes::window_icon_path` 把 `icon-dev.ico` 嵌进 exe（发布构建不嵌）。macOS 的 Finder 文件图标和安装包图标不跟构建变——开发版是裸二进制，没有 bundle 可换。

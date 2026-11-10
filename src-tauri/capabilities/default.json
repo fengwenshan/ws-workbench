@@ -1,11 +1,12 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "默认权限（主窗口 + 托盘快捷面板 + 剪贴板面板）",
+  "description": "默认权限（主窗口 + 托盘快捷面板 + 剪贴板面板 + 软件卸载窗口）",
   "windows": [
     "main",
     "quick-panel",
-    "clipboard-panel"
+    "clipboard-panel",
+    "uninstall"
   ],
   "permissions": [
     "core:default",

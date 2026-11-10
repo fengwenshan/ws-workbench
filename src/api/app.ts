@@ -1,6 +1,7 @@
 //! 应用自身的元信息（名字随构建变化：发布版 ws-workbench，开发版 ws-workbench-dev）
 
 import { invoke } from '@tauri-apps/api/core'
+import { getVersion } from '@tauri-apps/api/app'
 
 /** 当前构建的应用显示名；调用失败时回退到发布版名字 */
 export async function getAppName(): Promise<string> {
@@ -8,6 +9,15 @@ export async function getAppName(): Promise<string> {
     return await invoke<string>('app_name')
   } catch {
     return 'ws-workbench'
+  }
+}
+
+/** 当前应用版本号（如 1.0.19）；调用失败时返回空串，由界面显示占位 */
+export async function getAppVersion(): Promise<string> {
+  try {
+    return await getVersion()
+  } catch {
+    return ''
   }
 }
 

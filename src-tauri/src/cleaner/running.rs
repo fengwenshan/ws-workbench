@@ -10,10 +10,15 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use super::models::{CleanerProgress, InstalledApp, RunningState};
+use super::models::{CleanerProgress, ForceQuitOutcome, InstalledApp, RunningState};
 
 pub(crate) const QUIT_TIMEOUT: Duration = Duration::from_secs(5);
 pub(crate) const QUIT_POLL: Duration = Duration::from_millis(250);
+
+/// 强制退出：先给「正常退出」的等待窗口（设计 4.3）
+pub(crate) const FORCE_TERMINATE_WAIT: Duration = Duration::from_secs(3);
+/// 强杀后的总轮询上限（3s + 17s ≈ 20s，设计 4.3）
+pub(crate) const FORCE_KILL_TIMEOUT: Duration = Duration::from_secs(17);
 
 /// 一个「属于该应用」的进程。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,6 +124,60 @@ pub(crate) fn wait_until_gone_with_limits<F: FnMut() -> usize>(
     }
 }
 
+/// 强制退出的纯逻辑（设计 4.3）：先正常退出，超时后强杀，再轮询到归零。
+///
+/// 返回 `(剩余进程数, 文案)`；成功时 `(0, "")`。轮询期间**每轮都重新 detect**，
+/// 所以「杀掉后应用自己重启」的新 pid 会继续被强杀，直到归零或总超时。
+///
+/// `detect` / `terminate` / `kill` 都由调用方注入：平台实现传真实闭包，
+/// 单测用短时长 + 假进程列表验证顺序与重试逻辑。
+pub(crate) fn force_quit_with_limits<D, T, K>(
+    mut detect: D,
+    mut terminate: T,
+    mut kill: K,
+    terminate_wait: Duration,
+    kill_timeout: Duration,
+    poll: Duration,
+) -> (usize, String)
+where
+    D: FnMut() -> Vec<RunningProcess>,
+    T: FnMut(),
+    K: FnMut(&[RunningProcess]),
+{
+    if detect().is_empty() {
+        return (0, String::new());
+    }
+    // 先走「正常退出」：能自己退就别强杀，避免正在编辑的数据丢失
+    terminate();
+    if wait_until_gone_with_limits(|| detect().len(), terminate_wait, poll) {
+        return (0, String::new());
+    }
+
+    let mut waited = Duration::ZERO;
+    loop {
+        let current = detect();
+        if current.is_empty() {
+            return (0, String::new());
+        }
+        if waited >= kill_timeout {
+            let state = running_state_from(current.clone());
+            let message = if state.names.is_empty() {
+                format!("仍有 {} 个进程未退出", current.len())
+            } else {
+                format!(
+                    "仍有 {} 个进程未退出：{}",
+                    current.len(),
+                    state.names.join("、")
+                )
+            };
+            return (current.len(), message);
+        }
+        kill(&current);
+        std::thread::sleep(poll);
+        waited += poll;
+    }
+}
+
 /// 检测应用是否仍在运行（只读）。
 pub fn detect(app: &InstalledApp) -> RunningState {
     running_state_from(platform_detect(app))
@@ -149,6 +208,69 @@ pub fn quit(app: &InstalledApp, emit: &dyn Fn(CleanerProgress)) -> Result<(), St
         app.name,
         remaining.max(1)
     ))
+}
+
+/// 强制退出应用的全部相关进程（设计 4.3、卸载窗口用）。
+///
+/// 流程：检测 → 空则直接成功；否则先正常退出、3s 轮询；仍有进程就逐 pid
+/// `kill -9`（Windows `taskkill /T /F`），再轮询 ≤17s，期间每轮重新检测并
+/// 对重启出来的新进程继续强杀；归零才算成功。
+///
+/// 自身拦截由命令层先做（`installer::is_self_app`）。
+pub fn force_quit(
+    app: &InstalledApp,
+    emit: &dyn Fn(CleanerProgress),
+) -> Result<ForceQuitOutcome, String> {
+    let initial = platform_detect(app);
+    if initial.is_empty() {
+        return Ok(ForceQuitOutcome {
+            ok: true,
+            processes: 0,
+            names: Vec::new(),
+            message: format!("「{}」未在运行", app.name),
+        });
+    }
+    emit(CleanerProgress::new(
+        "force_quit",
+        "waiting",
+        0,
+        initial.len(),
+        format!("正在退出「{}」（{} 个进程）…", app.name, initial.len()),
+    ));
+
+    let (remaining, timeout_message) = force_quit_with_limits(
+        || platform_detect(app),
+        || platform_terminate(app, &initial),
+        |processes| platform_kill(processes),
+        FORCE_TERMINATE_WAIT,
+        FORCE_KILL_TIMEOUT,
+        QUIT_POLL,
+    );
+
+    // 归零后再确认一次：极端情况下最后 250ms 内应用又被拉起来
+    let state = running_state_from(platform_detect(app));
+    let ok = remaining == 0 && !state.running;
+    let processes = if ok { 0 } else { state.processes.max(remaining) };
+    let message = if ok {
+        format!("「{}」已全部退出", app.name)
+    } else if timeout_message.is_empty() {
+        format!("仍有 {} 个进程未退出", processes)
+    } else {
+        timeout_message
+    };
+    emit(CleanerProgress::new(
+        "force_quit",
+        "done",
+        processes,
+        processes,
+        message.clone(),
+    ));
+    Ok(ForceQuitOutcome {
+        ok,
+        processes,
+        names: state.names,
+        message,
+    })
 }
 
 /// 枚举进程（pid / 显示名 / exe）。exe 读不到时保留 None，由平台规则决定是否使用。
@@ -251,6 +373,19 @@ fn platform_terminate(app: &InstalledApp, processes: &[RunningProcess]) {
     }
 }
 
+/// macOS 强杀：逐 pid `SIGKILL`（`kill -9` 的等价调用）。
+///
+/// `kill` 失败（进程已退出 / 无权限）不影响后续轮询：下一轮 `detect` 会给出
+/// 真实状态，退不掉的进程最终由超时判定报出。
+#[cfg(target_os = "macos")]
+fn platform_kill(processes: &[RunningProcess]) {
+    for process in processes {
+        unsafe {
+            libc::kill(process.pid as libc::pid_t, libc::SIGKILL);
+        }
+    }
+}
+
 // ============================== Windows 平台 ==============================
 
 /// Windows 公共父目录：安装位置写成这些目录时不能用来判定进程归属。
@@ -330,6 +465,17 @@ fn platform_terminate(_app: &InstalledApp, processes: &[RunningProcess]) {
     let _ = crate::winps::run_with_timeout_ms(&script, std::time::Duration::from_secs(15));
 }
 
+/// Windows 强杀：`taskkill /PID <pid> /T /F`（含子进程树）。
+#[cfg(target_os = "windows")]
+fn platform_kill(processes: &[RunningProcess]) {
+    for process in processes {
+        let pid = process.pid.to_string();
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &pid, "/T", "/F"])
+            .output();
+    }
+}
+
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn platform_detect(_app: &InstalledApp) -> Vec<RunningProcess> {
     Vec::new()
@@ -337,6 +483,9 @@ fn platform_detect(_app: &InstalledApp) -> Vec<RunningProcess> {
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn platform_terminate(_app: &InstalledApp, _processes: &[RunningProcess]) {}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn platform_kill(_processes: &[RunningProcess]) {}
 
 #[cfg(test)]
 mod tests {
@@ -422,6 +571,98 @@ mod tests {
             Duration::from_millis(10),
         );
         assert!(gone);
+    }
+
+    // ============================== 强制退出（纯逻辑） ==============================
+
+    #[test]
+    fn force_quit_returns_ok_when_quit_gracefully() {
+        let processes = std::cell::RefCell::new(vec![proc(1, "Foo", None)]);
+        let kill_calls = std::cell::Cell::new(0);
+        let (remaining, message) = force_quit_with_limits(
+            || processes.borrow().clone(),
+            || processes.borrow_mut().clear(),
+            |_| kill_calls.set(kill_calls.get() + 1),
+            Duration::ZERO,
+            Duration::from_millis(50),
+            Duration::from_millis(1),
+        );
+        assert_eq!(remaining, 0);
+        assert!(message.is_empty());
+        assert_eq!(kill_calls.get(), 0, "正常退出后不应再强杀");
+    }
+
+    #[test]
+    fn force_quit_kills_after_terminate_timeout() {
+        let killed = std::cell::Cell::new(false);
+        let (remaining, message) = force_quit_with_limits(
+            || {
+                if killed.get() {
+                    Vec::new()
+                } else {
+                    vec![proc(7, "Foo", None)]
+                }
+            },
+            || {},
+            |_| killed.set(true),
+            Duration::from_millis(20),
+            Duration::from_millis(100),
+            Duration::from_millis(2),
+        );
+        assert_eq!(remaining, 0);
+        assert!(message.is_empty());
+        assert!(killed.get(), "3s 内没退出应强杀");
+    }
+
+    #[test]
+    fn force_quit_kills_restarted_process() {
+        // 杀掉后又重启：新 pid 也要继续杀，直到归零
+        let kill_calls = std::cell::Cell::new(0);
+        let (remaining, _) = force_quit_with_limits(
+            || match kill_calls.get() {
+                0 => vec![proc(1, "Foo", None)],
+                1 => vec![proc(2, "Foo", None)],
+                _ => Vec::new(),
+            },
+            || {},
+            |_| kill_calls.set(kill_calls.get() + 1),
+            Duration::from_millis(10),
+            Duration::from_millis(300),
+            Duration::from_millis(2),
+        );
+        assert_eq!(remaining, 0);
+        assert_eq!(kill_calls.get(), 2, "重启出来的新进程也要再杀一次");
+    }
+
+    #[test]
+    fn force_quit_times_out_when_process_never_exits() {
+        let kill_calls = std::cell::Cell::new(0);
+        let (remaining, message) = force_quit_with_limits(
+            || vec![proc(1, "Foo", None)],
+            || {},
+            |_| kill_calls.set(kill_calls.get() + 1),
+            Duration::from_millis(5),
+            Duration::from_millis(15),
+            Duration::from_millis(2),
+        );
+        assert_eq!(remaining, 1);
+        assert!(message.contains("未退出"), "实际文案: {message}");
+        assert!(kill_calls.get() >= 1);
+    }
+
+    #[test]
+    fn force_quit_detects_already_gone_without_terminating() {
+        let terminate_calls = std::cell::Cell::new(0);
+        let (remaining, _) = force_quit_with_limits(
+            Vec::new,
+            || terminate_calls.set(terminate_calls.get() + 1),
+            |_| {},
+            Duration::from_millis(10),
+            Duration::from_millis(10),
+            Duration::from_millis(1),
+        );
+        assert_eq!(remaining, 0);
+        assert_eq!(terminate_calls.get(), 0, "应用未运行时不该调退出");
     }
 
     #[test]

@@ -111,7 +111,14 @@ fn allowed_roots() -> Vec<PathBuf> {
             // 废纸篓里被精确匹配到的条目：本来就在废纸篓里，删除=真正删除，
             // 所以单独放开（见 trash_path 里的说明）
             roots.push(home.join(".Trash"));
+            // 卸载窗口会列出「同一个应用被复制到桌面/下载」的其它副本
+            // （design 4.2 的兜底扫描目录）。这些副本只有出现在本次关联文件扫描
+            // 结果里才会被勾选删除，白名单仍只认具体目录，主目录本身依旧拒绝。
+            roots.push(home.join("Desktop"));
+            roots.push(home.join("Downloads"));
         }
+        // 同上，/Users/Shared 是多用户共享目录，也只放开「本次扫描命中」的副本
+        roots.push(PathBuf::from("/Users/Shared"));
         for sub in [
             "Application Support",
             "Caches",
@@ -618,6 +625,14 @@ mod tests {
         assert!(is_allowed(&home.join("Library/Application Support/Foo")));
         assert!(is_allowed(&home.join("Applications/Foo.app")));
         assert!(is_allowed(Path::new("/Library/LaunchDaemons/com.example.foo.plist")));
+        // 关联文件扫描的兜底目录：应用副本可能被放在桌面/下载/共享目录
+        assert!(is_allowed(&home.join("Desktop/Foo.app")));
+        assert!(is_allowed(&home.join("Downloads/Foo.app")));
+        assert!(is_allowed(Path::new("/Users/Shared/Foo.app")));
+        // 但白名单根自身（桌面/下载目录）永远不能删
+        assert!(!is_allowed(&home.join("Desktop")));
+        assert!(!is_allowed(&home.join("Downloads")));
+        assert!(!is_allowed(Path::new("/Users/Shared")));
     }
 
     #[test]

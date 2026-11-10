@@ -5,8 +5,13 @@
  * invoke 参数按 Tauri 习惯用 camelCase，见 `src/api/cleaner.ts`。
  */
 
-/** 后台任务：安装列表扫描 / 残留扫描 / 卸载执行 */
-export type CleanerTask = 'list_apps' | 'scan_leftovers' | 'uninstall'
+/** 后台任务：安装列表扫描 / 残留扫描 / 卸载执行 / 关联文件扫描 / 强制退出 */
+export type CleanerTask =
+  | 'list_apps'
+  | 'scan_leftovers'
+  | 'uninstall'
+  | 'related_files'
+  | 'force_quit'
 
 /** 任务阶段（`cleaner-progress` 事件里用） */
 export type CleanerPhase =
@@ -101,10 +106,77 @@ export interface DeleteFailure {
   error: string
 }
 
-/** 批量删除结果：成功条数 + 逐条失败原因 */
+/** 批量删除结果：成功条数 + 跳过条数 + 逐条失败原因 */
 export interface DeleteOutcome {
+  /** 成功移入废纸篓的条数 */
   trashed: number
+  /** 卸载程序已经删掉 / 扫描后消失的路径，不算失败（后端 serde 默认 0） */
+  skipped: number
   failed: DeleteFailure[]
+}
+
+// ============================ 关联文件（独立卸载窗口） ============================
+
+/** 关联文件分组 id，与后端 `RelatedFileGroup.id` 一致 */
+export type RelatedFileGroupId = 'program' | 'support' | 'cache'
+
+/** 关联文件条目类型，与后端 `RelatedFileItem.kind` 一致 */
+export type RelatedFileKind =
+  | 'app_bundle'
+  | 'app_data'
+  | 'cache'
+  | 'preference'
+  | 'container'
+  | 'launch_agent'
+  | 'log'
+  | 'crash_report'
+  | 'install_dir'
+  | 'registry'
+
+/** 卸载窗口里的一条关联文件（后端扫描结果，字段 snake_case） */
+export interface RelatedFileItem {
+  /** 文件/目录绝对路径；Windows 注册表项为 "win:{hive}|{key_path}" */
+  path: string
+  /** 展示名（应用名 / 目录名 / 注册表键名） */
+  name: string
+  kind: RelatedFileKind | string
+  size_bytes: number
+  is_dir: boolean
+  /** 仅 app_bundle 有版本号；未知为空串 */
+  version: string
+  confidence: LeftoverConfidence | string
+  requires_elevation: boolean
+  exists: boolean
+  /** 默认勾选：confidence != "low" */
+  selected: boolean
+}
+
+/** 关联文件分组：程序文件 / 支持文件 / 缓存文件 */
+export interface RelatedFileGroup {
+  id: RelatedFileGroupId | string
+  label: string
+  items: RelatedFileItem[]
+}
+
+/** `cleaner_related_files` 的返回值：三组清单 + 合计 */
+export interface RelatedFiles {
+  app_id: string
+  groups: RelatedFileGroup[]
+  /** 所有条目合计字节数 */
+  total_bytes: number
+  item_count: number
+  /** "今天使用过" / "7天内使用过" / "30天内使用过" / "最近未使用" / "" */
+  last_used: string
+}
+
+/** `cleaner_force_quit` 的返回值：是否已全部退出 */
+export interface ForceQuitOutcome {
+  /** true = 所有相关进程已退出 */
+  ok: boolean
+  /** 结束时仍在运行的进程数（ok 时为 0） */
+  processes: number
+  names: string[]
+  message: string
 }
 
 /** 残留扫描 / 卸载进度事件 `cleaner-progress` 的 payload */

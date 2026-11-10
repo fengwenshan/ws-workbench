@@ -8,7 +8,6 @@ import {
 import { checkDir } from '@/api/system'
 import { pickDirectory } from '@/utils/dialog'
 import { basename, joinPath } from '@/utils/path'
-import OpenWithButton from './OpenWithButton.vue'
 
 const sourceTextarea = ref<HTMLTextAreaElement | null>(null)
 const outputTextarea = ref<HTMLTextAreaElement | null>(null)
@@ -304,6 +303,8 @@ const headerState = reactive({
   canPack,
   typeLabel,
   sourceMissing,
+  /** 标题栏「用其它应用打开」要用：源目录（取本地编辑值，不等防抖保存） */
+  sourceDir: computed(() => localProject.value?.source_dir || ''),
 })
 
 defineExpose({
@@ -358,10 +359,6 @@ defineExpose({
             @input="onSourceChange"
           ></textarea>
           <button class="btn btn-pick" @click="selectSourceDir">选择</button>
-          <OpenWithButton
-            :path="localProject!.source_dir"
-            @log="(level, message) => emit('log', level, message)"
-          />
         </div>
         <p v-if="sourceMissing" class="dir-missing-hint">
           ⚠ 源目录已不存在，打包与类型识别暂不可用。重新选择一个目录即可恢复，项目笔记、附件和排除规则都不会丢。
@@ -380,10 +377,6 @@ defineExpose({
             @input="onOutputChange"
           ></textarea>
           <button class="btn btn-pick" @click="selectOutputDir">选择</button>
-          <OpenWithButton
-            :path="localProject!.output_dir"
-            @log="(level, message) => emit('log', level, message)"
-          />
         </div>
       </div>
 
@@ -407,7 +400,8 @@ defineExpose({
 .config-body {
   flex: 1;
   overflow-y: auto;
-  padding: 20px;
+  /* 和其它页签（笔记 / 上传）对齐：内容区不加内边距，只留底部 12px，避免比别的页多缩进 */
+  padding: 0 0 12px;
 }
 .type-tip {
   margin-top: 12px;
