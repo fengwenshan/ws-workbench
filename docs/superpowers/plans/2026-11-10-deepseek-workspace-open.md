@@ -77,13 +77,22 @@
       "patch": "./cordis.patch.yml"
     },
     "client": {
-      "platform": "web"
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-api-workspace-controller",
+        "@deepseek-ai/dsh-client-ui-workspace"
+      ]
     }
   }
 }
 ```
 
 > `private: true` 是有意的：这个插件只随 ws-workbench 分发，不做 npm 发布；pnpm 仍然可以把它当本地依赖。
+>
+> `dsh.client.inject` 是**包名**（给 loader 做加载/预取顺序的元数据），
+> `lib/client.js` 里的 `exports.inject` 是 **cordis 服务名**（`workspaces` / `uiWorkspace`）。
+> 两处都要有：前者让 client bundle 在 HTML 里带 inject 元数据，后者让 `apply` 等服务就绪后
+> 才执行；实测漏掉 `exports.inject` 时 `ctx.workspaces` 是 undefined，插件会静默不消费请求。
 
 - [ ] **Step 2: 写 `cordis.patch.yml`**
 
@@ -273,6 +282,8 @@ window.__ModuleLoader__.load({
     }
 
     exports.apply = apply
+    // cordis 服务注入：缺少这段 apply 会在服务还没注册时被调用
+    exports.inject = ['workspaces', 'uiWorkspace']
 
     return exports
   },
