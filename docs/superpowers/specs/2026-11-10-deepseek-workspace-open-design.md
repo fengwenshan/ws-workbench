@@ -136,8 +136,10 @@ Windows 用 `sysinfo` 查 `DeepSeek Harness.exe` 进程。只影响提示文案�
 - Rust 侧用 `include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../dsh-plugin/..."))`
   把文件编进二进制：dev 与安装包行为一致，不需要 `bundle.resources` 额外配置，也不怕
   资源目录路径差异；`build.rs` 增加 `rerun-if-changed` 让插件改动触发重编译。
-- 版本号：插件 `package.json.version` 即「随包版本」；安装/更新时与已装副本比对，不一致
-  即提示更新。插件行为改动随 ws-workbench 发版一起 bump 插件版本。
+- 版本号 + 内容指纹：插件 `package.json.version` 即「随包版本」，安装/更新时与已装副本
+  比对；同时用 SM3 算随包文件内容指纹，和已装目录逐文件比对——**即使忘了 bump 版本，
+  只要插件源码改过，点击时也会提示更新**（`needs_update=true`）。插件行为改动仍建议随
+  ws-workbench 发版一起 bump 版本，便于外部仓库打 tag。
 - 附带 `scripts/dsh-plugin-install.sh`：在不能运行 ws-workbench 的机器上（CI、本机首次
   手动装、临时 `DSH_HOME` 测试）复用同一套文件布局，便于测试与排障；生产用户走 App 内
   自动安装。

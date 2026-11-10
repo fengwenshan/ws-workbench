@@ -6,6 +6,7 @@
 //! `dsh-plugin/dsh-open-workspace/`，用 include_str! 编进二进制，安装包里一定有。
 
 use serde::{Deserialize, Serialize};
+use sm3::{Digest, Sm3};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -130,6 +131,41 @@ fn bundled_version() -> String {
         .unwrap_or_else(|| "0.0.0".to_string())
 }
 
+/// 插件内容指纹（文件名 + 内容）：只改插件代码、忘 bump 版本时也能识别出已装副本过期
+fn files_fingerprint(files: &[(String, String)]) -> String {
+    let mut hasher = Sm3::new();
+    for (name, content) in files {
+        hasher.update(name.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(content.as_bytes());
+    }
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// 随包插件内容指纹
+fn bundled_fingerprint() -> String {
+    let files: Vec<(String, String)> = PLUGIN_FILES
+        .iter()
+        .map(|(name, content)| ((*name).to_string(), (*content).to_string()))
+        .collect();
+    files_fingerprint(&files)
+}
+
+/// 已装插件内容指纹；任一文件缺失返回 None（按「需要更新」处理）
+fn installed_fingerprint(home: &Path) -> Option<String> {
+    let dir = plugin_active_dir(home);
+    let mut files = Vec::with_capacity(PLUGIN_FILES.len());
+    for (name, _) in PLUGIN_FILES {
+        let content = std::fs::read_to_string(dir.join(name)).ok()?;
+        files.push(((*name).to_string(), content));
+    }
+    Some(files_fingerprint(&files))
+}
+
 fn installed_version(home: &Path) -> Option<String> {
     let raw = std::fs::read_to_string(plugin_active_dir(home).join("package.json")).ok()?;
     let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
@@ -224,7 +260,10 @@ pub(crate) fn status_for_home(home: &Path, app_installed: bool) -> DeepseekPlugi
     let installed = installed_version(home);
     let bundled = bundled_version();
     let plugin_installed = profile_ready && manifest_has_plugin && installed.is_some();
-    let needs_update = plugin_installed && installed.as_deref() != Some(bundled.as_str());
+    // 版本号一致但内容不同（本地改过插件却没 bump 版本）也算过期，点击时照样提示更新
+    let fingerprint_stale = installed_fingerprint(home) != Some(bundled_fingerprint());
+    let needs_update = plugin_installed
+        && (installed.as_deref() != Some(bundled.as_str()) || fingerprint_stale);
     DeepseekPluginStatus {
         dsh_home: home.display().to_string(),
         app_installed,
@@ -582,6 +621,27 @@ mod tests {
         assert_eq!(status.installed_version, "");
         assert!(!status.needs_update);
         assert_eq!(status.dsh_home, home.display().to_string());
+    }
+
+    #[test]
+    fn needs_update_when_installed_files_change_without_version_bump() {
+        let home = test_home("needs-update-fingerprint");
+        install_to_home(&home, false).unwrap();
+        assert!(!status_for_home(&home, false).needs_update, "刚装完应当是最新的");
+
+        let active = plugin_active_dir(&home).join("lib/client.js");
+        let original = std::fs::read_to_string(&active).unwrap();
+        std::fs::write(&active, format!("{original}\n// 本地改动\n")).unwrap();
+        assert!(
+            status_for_home(&home, false).needs_update,
+            "插件内容变了、版本号没变，也应提示更新"
+        );
+
+        std::fs::write(&active, original).unwrap();
+        assert!(
+            !status_for_home(&home, false).needs_update,
+            "内容恢复后不应再提示更新"
+        );
     }
 
     #[test]
