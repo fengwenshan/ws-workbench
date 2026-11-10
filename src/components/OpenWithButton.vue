@@ -8,8 +8,16 @@
  * exe（Windows）转成 PNG。
  */
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { message } from 'ant-design-vue'
-import { listOpenWithApps, openWith, type OpenWithApp } from '@/api/system'
+import { message, Modal } from 'ant-design-vue'
+import {
+  deepseekPluginStatus,
+  installDeepseekPlugin,
+  listOpenWithApps,
+  openDeepseekWorkspace,
+  openWith,
+  type DeepseekPluginStatus,
+  type OpenWithApp,
+} from '@/api/system'
 import type { LogLevel } from '@/types'
 
 const props = defineProps<{ path: string }>()
@@ -68,14 +76,68 @@ function toggle() {
   open.value = !open.value
 }
 
+/** 缺插件/版本旧时弹确认；返回用户是否同意安装 */
+function askInstall(status: DeepseekPluginStatus, action: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    Modal.confirm({
+      title: `${action} DeepSeek 工作区插件`,
+      content:
+        `用 DeepSeek 打开项目需要一个一次性安装的本地小插件：离线、不改 DeepSeek 安装目录、` +
+        `首次安装会备份 profile 清单，装完需要退出并重新打开一次 DeepSeek 才生效。` +
+        `安装位置：${status.dsh_home}/profiles/desktop 与 ${status.dsh_home}/plugins/dsh-open-workspace。`,
+      okText: `${action}插件`,
+      cancelText: '取消',
+      onOk: () => resolve(true),
+      onCancel: () => resolve(false),
+    })
+  })
+}
+
+/** 「打开方式 → DeepSeek」的完整流程：查状态 → 必要时装插件 → 写请求 → 唤起 DSH */
+async function runDeepseek() {
+  let status = await deepseekPluginStatus()
+  if (!status.profile_ready) {
+    Modal.warning({
+      title: 'DeepSeek 还没初始化',
+      content: '请先打开一次 DeepSeek Harness，等它完成初始化后再回来点「DeepSeek」。',
+    })
+    return
+  }
+
+  const action = status.plugin_installed ? '更新' : '安装'
+  if (!status.plugin_installed || status.needs_update) {
+    const agreed = await askInstall(status, action)
+    if (!agreed) return
+    status = await installDeepseekPlugin()
+    message.success(`DeepSeek 工作区插件已${action}`)
+    emit('log', 'info', `DeepSeek 工作区插件已${action}: ${status.installed_version}`)
+  }
+
+  const wasRunning = status.dsh_running
+  await openDeepseekWorkspace(props.path)
+  emit('log', 'info', `用 DeepSeek 打开: ${props.path}`)
+  if (wasRunning) {
+    Modal.info({
+      title: '重启 DeepSeek 后工作区才生效',
+      content:
+        '插件已就绪。请退出并重新打开 DeepSeek Harness：10 分钟内重启会自动打开这个目录；' +
+        '超过 10 分钟的话，重启后再点一次「DeepSeek」即可。',
+    })
+  }
+}
+
 /** 用指定应用打开当前目录：纯动作，不改变按钮上显示的应用 */
 async function run(app: OpenWithApp) {
   if (!hasPath.value || busy.value) return
   busy.value = true
   open.value = false
   try {
-    await openWith(props.path, app.id)
-    emit('log', 'info', `用 ${app.name} 打开: ${props.path}`)
+    if (app.id === 'deepseek') {
+      await runDeepseek()
+    } else {
+      await openWith(props.path, app.id)
+      emit('log', 'info', `用 ${app.name} 打开: ${props.path}`)
+    }
   } catch (err) {
     // 失败时给个可见反馈，否则用户只会觉得「点了没反应」
     message.error(`用 ${app.name} 打开失败: ${err}`)

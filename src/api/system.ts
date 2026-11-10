@@ -37,6 +37,32 @@ export function openWith(path: string, appId: string): Promise<void> {
   return invoke('open_with', { path, appId })
 }
 
+/** DeepSeek 工作区插件状态（后端探测本机 DSH desktop profile） */
+export interface DeepseekPluginStatus {
+  dsh_home: string
+  profile_ready: boolean
+  plugin_installed: boolean
+  installed_version: string
+  bundled_version: string
+  needs_update: boolean
+  dsh_running: boolean
+}
+
+/** 查插件状态：缺插件/版本旧时前端弹确认再装 */
+export function deepseekPluginStatus(): Promise<DeepseekPluginStatus> {
+  return invoke<DeepseekPluginStatus>('deepseek_plugin_status')
+}
+
+/** 安装/更新插件（复制到 DSH profile + 改清单，离线、可回滚） */
+export function installDeepseekPlugin(): Promise<DeepseekPluginStatus> {
+  return invoke<DeepseekPluginStatus>('install_deepseek_plugin')
+}
+
+/** 写打开请求并唤起 DeepSeek（插件消费后新建/选中左侧工作区） */
+export function openDeepseekWorkspace(path: string): Promise<DeepseekPluginStatus> {
+  return invoke<DeepseekPluginStatus>('open_deepseek_workspace', { path })
+}
+
 /** 校验并创建目录，返回规范化后的路径 */
 export function ensureDir(path: string): Promise<string> {
   return invoke<string>('ensure_dir', { path })
