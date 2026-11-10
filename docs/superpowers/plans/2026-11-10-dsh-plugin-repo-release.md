@@ -324,3 +324,10 @@ Expected: 下载成功、结构同 Task 2 Step 7。
 - tag 与版本不一致会让 workflow 失败：发布前先跑 `node -p "require('./package.json').version"` 核对。
 - Linux 上 `zip` 可能未安装：workflow 的 `ubuntu-latest` 自带 zip；本地脚本报 `command not found` 时用 `brew install zip`。
 - 回退：删掉远端 Release/tag 即可，ws-workbench 的版本检查会退回到上一个 latest。
+
+## 实施记录（2026-11-10）
+
+- 已额外加 Gitee 镜像：`scripts/publish-gitee.sh` 把 zip + `latest.json` 推到 Gitee 的 `dist`
+  分支（raw 直链给 ws-workbench 下载）；release 工作流在 GitHub Release 之后自动同步，
+  需要仓库 secret `GITEE_TOKEN`（没配时跳过，客户端回退 GitHub）。
+- `v0.1.0` 的 Gitee `dist` 分支已手工发布，raw 直链可用。

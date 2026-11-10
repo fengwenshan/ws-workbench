@@ -1475,3 +1475,10 @@ git commit -m "..."
 工作区里的文件保持「用户 WIP + 自己的改动」的混合状态，不 `git add`、不 `checkout`。
 提交后用 `git status --short` 与 `git diff <file> | grep '^-'` 核对：只应看到用户 WIP 的差异，
 不应出现自己新代码被删。
+
+## 实施记录（2026-11-10）
+
+- 远端源改为「Gitee `dist` 分支 raw 优先、GitHub Release 兜底」（原计划只有 GitHub API）：
+  国内直连 GitHub 慢/易失败；Gitee 侧只要 git 推送权限、不用 API 令牌，raw 直链实测 0.6s。
+  环境变量换成 `WS_RESOURCE_GITEE_WEB/REPO/BRANCH` + `WS_RESOURCE_GITHUB_API_BASE/REPO`。
+- 因此 Task 1-5 的 `WS_RESOURCE_API_BASE`、`releases/latest` 单源代码以实际实现为准。

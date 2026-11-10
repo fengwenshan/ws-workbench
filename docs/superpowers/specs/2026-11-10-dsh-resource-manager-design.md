@@ -19,7 +19,8 @@
 - 插件源码独立到 `/Users/fengwenshan/wenshan/demo/dsh-open-workspace`，推送到
   `https://github.com/fengwenshan/dsh-open-workspace.git`；tag `vX.Y.Z` 与插件
   `package.json.version` 一一对应。
-- 每个 tag 由 GitHub Actions 自动打 zip 并挂到 GitHub Release（资产名固定）。
+- 每个 tag 由 GitHub Actions 自动打 zip 并挂到 GitHub Release（资产名固定）；同时把 zip
+  同步到 Gitee 仓库的 `dist` 分支（`latest.json` + zip 直链），国内下载优先走 Gitee。
 - ws-workbench「设置」新增「资源」栏目：列出资源、显示本地版本 / 最新版本 / 状态，
   支持下载安装、更新、卸载、刷新；为后面管理 Chrome 插件预留通用模型与占位行。
 - 点「打开方式 → DeepSeek」时：
@@ -32,7 +33,7 @@
 
 - 本期不做 Chrome 插件的下载/安装，只留资源模型与占位 UI。
 - 不做插件自动后台升级；更新由用户点「设置 → 资源」触发。
-- 不做离线内置兜底：没装过插件的用户必须能访问 `api.github.com` 才能装上。
+- 不做离线内置兜底：没装过插件的用户必须能访问 Gitee raw 或 `api.github.com` 才能装上。
 
 ## 4. 术语
 
@@ -40,7 +41,7 @@
 | --- | --- |
 | 资源 | ws-workbench 可下载/安装的附加组件，本期有 DeepSeek 工作区插件、Chrome 插件（占位） |
 | 插件仓库 | `fengwenshan/dsh-open-workspace`，独立 git 仓库 |
-| 最新版本 | 插件仓库 GitHub Release `latest` 的 tag 去掉 `v` 前缀 |
+| 最新版本 | 两个源里最高的版本：Gitee `dist` 分支 `latest.json` 的 `version`、GitHub Release `latest` 的 tag（都去 `v`） |
 | 本地版本 | `$DSH_HOME/profiles/desktop/node_modules/dsh-open-workspace/package.json` 的 `version` |
 | 资源 zip | Release 资产 `dsh-open-workspace-<version>.zip` |
 
@@ -136,8 +137,15 @@ note=「Chrome 插件管理规划中」）。
 ### 7.2 远端版本检查
 
 - 只对 `available=true` 的资源做远端检查；Chrome 占位行跳过。
-- 默认基址 `https://api.github.com`，可用环境变量 `WS_RESOURCE_API_BASE` 覆盖（测试/镜像）。
-- `GET {base}/repos/fengwenshan/dsh-open-workspace/releases/latest` → `tag_name`（去 `v`）。
+- 两个源，默认顺序 Gitee → GitHub（`WS_RESOURCE_SOURCES` 可覆盖，如 `github`）：
+  - Gitee（优先，国内快）：`GET https://gitee.com/feng_wenshan/dsh-open-workspace/raw/dist/latest.json`
+    → `{version, file}`；zip 直链 `.../raw/dist/dsh-open-workspace-<version>.zip`。不用 API 令牌、不限流。
+  - GitHub（兜底）：`GET https://api.github.com/repos/fengwenshan/dsh-open-workspace/releases/latest`
+    → `tag_name` 去 `v`。
+- 各源各自解析后取**最高版本**；下载候选按源顺序（Gitee 在前），逐个尝试直到成功。
+- 环境变量覆盖（测试/镜像）：`WS_RESOURCE_GITEE_WEB`、`WS_RESOURCE_GITEE_REPO`、
+  `WS_RESOURCE_GITEE_BRANCH`（默认 `dist`）、`WS_RESOURCE_GITHUB_API_BASE`、
+  `WS_RESOURCE_GITHUB_REPO`。
 - 内存缓存 5 分钟；`force=true` 强制刷新。
 - 实现方式：`std::process::Command` 调系统 `curl`（macOS / Windows 10+ 自带），
   `curl -sSfL --max-time 8 -H "Accept: application/vnd.github+json" <url>`，不新增 Cargo 依赖。
@@ -230,6 +238,7 @@ note=「Chrome 插件管理规划中」）。
 
 | 场景 | 行为 |
 | --- | --- |
+| Gitee raw 超时/失败 | 自动回退 GitHub Release 检查/下载；两个源都失败才显示错误 |
 | `api.github.com` 超时/失败 | 设置里显示错误 + 重试；点击 DeepSeek 仍可打开（log 警告） |
 | Release 里没有 zip 资产 | 安装失败，提示「发布包缺少 zip 资产」 |
 | zip 结构非法 | 安装失败，提示缺哪个文件，临时目录清理，不改 DSH 文件 |
@@ -249,8 +258,8 @@ note=「Chrome 插件管理规划中」）。
   - zip 缺文件 / name 不符 → 报错且不改动 DSH。
 - DeepSeek 侧单测：保留 `app_installed`、打开请求、启动参数等既有测试；删除内置插件与
   指纹相关测试。
-- 集成测试：用 `python3 -m http.server` 起本地假 GitHub API（`WS_RESOURCE_API_BASE` +
-  `releases/latest` JSON + zip 资产），跑「检查 → 下载 → 安装 → 卸载」全链路。
+- 集成测试：Rust 单测里起本地假 HTTP 服务（假 Gitee raw `latest.json` + zip、假 GitHub Release
+  JSON），跑「两源检查 → 选最高版本 → 下载 → 安装 → 卸载」全链路。
 - 前端：`pnpm build` 类型检查；手动点设置资源卡、点 DeepSeek 各分支。
 - 端到端（在真 DSH 上）：装插件 → 重启 DSH → 点 DeepSeek → 左侧出现/选中工作区并打开空白会话。
 
@@ -263,8 +272,8 @@ note=「Chrome 插件管理规划中」）。
 
 ## 14. 风险与后续
 
-- 国内网络访问 `api.github.com` 可能不稳定；后续可加「镜像基址」配置或走 ws-workbench 已有的
-  Gitee 同步链路（本期不做）。
+- 国内网络访问 `api.github.com` 可能不稳定 → 已加 Gitee `dist` 分支镜像（raw 直链，Gitee 优先、
+  GitHub 兜底）；Gitee 镜像由 release 工作流自动同步（需仓库 secret `GITEE_TOKEN`）。
 - 未登录查询 GitHub API 有 60 次/小时限流；版本检查缓存 5 分钟，正常使用足够。
 - 后续 Chrome 插件：复用 `ResourceStatus` 与 `ResourcePanel`，新增 `kind=chrome-extensions`
   的检查/安装实现（Chrome Web Store API 或本地 crx），资源目录扩展即可，不改 UI 骨架。
@@ -272,9 +281,10 @@ note=「Chrome 插件管理规划中」）。
 ## 实施状态（2026-11-10）
 
 - 插件独立仓库已建并推送：`https://github.com/fengwenshan/dsh-open-workspace`；tag `v0.1.0`
-  的 Release 已由 GitHub Actions 自动构建出 `dsh-open-workspace-0.1.0.zip`（5.4 KB），
-  可用 `GET https://api.github.com/repos/fengwenshan/dsh-open-workspace/releases/assets/<id>`
-  （`Accept: application/octet-stream`）下载，落盘结构与 ws-workbench 安装器约定一致。
+  的 Release 已由 GitHub Actions 自动构建出 `dsh-open-workspace-0.1.0.zip`（5.4 KB）。
+- Gitee 镜像已就绪：`https://gitee.com/feng_wenshan/dsh-open-workspace` 的 `dist` 分支
+  放了 `latest.json` + `dsh-open-workspace-0.1.0.zip`；raw 直链实测 0.6s 下载 5.4KB。
+  客户端默认先读 Gitee raw（`/raw/dist/latest.json`）再下 zip，失败自动回退 GitHub Release。
 - ws-workbench 侧已实现：`commands/resources.rs`（Release 检查 / 下载 / 解压 / 校验、
   版本比较、5 分钟缓存）、`deepseek.rs` 收缩（去掉内置插件与指纹，保留 profile 文件写入与
   清单维护）、设置 → 资源卡片、点击 DeepSeek 新流程；`dsh-plugin/` 已删除。
