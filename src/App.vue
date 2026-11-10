@@ -879,7 +879,7 @@ async function handlePack(project: any, asZip: boolean = false) {
                 :title="newProjectSource"
                 readonly
               />
-              <Button @click="selectNewSource">重新选择</Button>
+              <Button @click="selectNewSource">选择</Button>
             </div>
           </FormItem>
           <FormItem label="输出目录（可选，默认为项目目录-dist）">
