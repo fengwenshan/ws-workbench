@@ -1,14 +1,4 @@
 fn main() {
-    // 插件文件用 include_str! 编进二进制：改动后必须重新编译
-    for file in [
-        "../dsh-plugin/dsh-open-workspace/package.json",
-        "../dsh-plugin/dsh-open-workspace/cordis.patch.yml",
-        "../dsh-plugin/dsh-open-workspace/lib/index.mjs",
-        "../dsh-plugin/dsh-open-workspace/lib/client.js",
-        "../dsh-plugin/dsh-open-workspace/README.md",
-    ] {
-        println!("cargo:rerun-if-changed={}", file);
-    }
     // 开发构建把 macOS 的应用包名也设成 ws-workbench-dev。
     //
     // Dock 磁贴名本来就等于可执行文件名（bin target 已叫 ws-workbench-dev），这里补的是

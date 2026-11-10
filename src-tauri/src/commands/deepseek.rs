@@ -17,45 +17,6 @@ pub const REQUEST_FILE: &str = "open-workspace.json";
 /// 依赖项写进 profile 清单时的 spec
 const PLUGIN_LINK_SPEC: &str = "link:../../plugins/dsh-open-workspace";
 
-/// 随二进制分发的插件文件（相对插件目录）。include_str! 让 dev 和安装包行为一致。
-pub(crate) const PLUGIN_FILES: &[(&str, &str)] = &[
-    (
-        "package.json",
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../dsh-plugin/dsh-open-workspace/package.json"
-        )),
-    ),
-    (
-        "cordis.patch.yml",
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../dsh-plugin/dsh-open-workspace/cordis.patch.yml"
-        )),
-    ),
-    (
-        "lib/index.mjs",
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../dsh-plugin/dsh-open-workspace/lib/index.mjs"
-        )),
-    ),
-    (
-        "lib/client.js",
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../dsh-plugin/dsh-open-workspace/lib/client.js"
-        )),
-    ),
-    (
-        "README.md",
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../dsh-plugin/dsh-open-workspace/README.md"
-        )),
-    ),
-];
-
 /// 插件状态：前端据此决定是否弹安装确认、装完是否提示重启
 #[derive(Debug, Clone, Serialize)]
 pub struct DeepseekPluginStatus {
@@ -65,8 +26,6 @@ pub struct DeepseekPluginStatus {
     pub profile_ready: bool,
     pub plugin_installed: bool,
     pub installed_version: String,
-    pub bundled_version: String,
-    pub needs_update: bool,
     pub dsh_running: bool,
 }
 
@@ -115,55 +74,6 @@ fn plugin_store_dir(home: &Path) -> PathBuf {
 
 fn plugin_active_dir(home: &Path) -> PathBuf {
     profile_dir(home).join("node_modules").join(DSH_PLUGIN_NAME)
-}
-
-fn bundled_version() -> String {
-    PLUGIN_FILES
-        .iter()
-        .find(|(name, _)| *name == "package.json")
-        .and_then(|(_, content)| serde_json::from_str::<serde_json::Value>(content).ok())
-        .and_then(|value| {
-            value
-                .get("version")
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| "0.0.0".to_string())
-}
-
-/// 插件内容指纹（文件名 + 内容）：只改插件代码、忘 bump 版本时也能识别出已装副本过期
-fn files_fingerprint(files: &[(String, String)]) -> String {
-    let mut hasher = Sm3::new();
-    for (name, content) in files {
-        hasher.update(name.as_bytes());
-        hasher.update(b"\0");
-        hasher.update(content.as_bytes());
-    }
-    hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
-/// 随包插件内容指纹
-fn bundled_fingerprint() -> String {
-    let files: Vec<(String, String)> = PLUGIN_FILES
-        .iter()
-        .map(|(name, content)| ((*name).to_string(), (*content).to_string()))
-        .collect();
-    files_fingerprint(&files)
-}
-
-/// 已装插件内容指纹；任一文件缺失返回 None（按「需要更新」处理）
-fn installed_fingerprint(home: &Path) -> Option<String> {
-    let dir = plugin_active_dir(home);
-    let mut files = Vec::with_capacity(PLUGIN_FILES.len());
-    for (name, _) in PLUGIN_FILES {
-        let content = std::fs::read_to_string(dir.join(name)).ok()?;
-        files.push(((*name).to_string(), content));
-    }
-    Some(files_fingerprint(&files))
 }
 
 fn installed_version(home: &Path) -> Option<String> {
@@ -252,26 +162,14 @@ pub(crate) fn merge_profile_manifest(raw: &str) -> Result<(String, bool), String
 }
 
 pub(crate) fn status_for_home(home: &Path, app_installed: bool) -> DeepseekPluginStatus {
-    let manifest = profile_dir(home).join("package.json");
-    let profile_ready = manifest.is_file();
-    let manifest_has_plugin = std::fs::read_to_string(&manifest)
-        .map(|raw| manifest_contains_plugin(&raw))
-        .unwrap_or(false);
-    let installed = installed_version(home);
-    let bundled = bundled_version();
-    let plugin_installed = profile_ready && manifest_has_plugin && installed.is_some();
-    // 版本号一致但内容不同（本地改过插件却没 bump 版本）也算过期，点击时照样提示更新
-    let fingerprint_stale = installed_fingerprint(home) != Some(bundled_fingerprint());
-    let needs_update = plugin_installed
-        && (installed.as_deref() != Some(bundled.as_str()) || fingerprint_stale);
+    let profile_ready = profile_dir(home).join("package.json").is_file();
+    let (plugin_installed, installed_version) = local_plugin_status(home);
     DeepseekPluginStatus {
         dsh_home: home.display().to_string(),
         app_installed,
         profile_ready,
         plugin_installed,
-        installed_version: installed.unwrap_or_default(),
-        bundled_version: bundled,
-        needs_update,
+        installed_version: installed_version.unwrap_or_default(),
         dsh_running: dsh_running(),
     }
 }
@@ -319,21 +217,21 @@ pub(crate) fn write_open_request(home: &Path, target: &Path) -> Result<(), Strin
 }
 
 
-fn write_plugin_files(dir: &Path) -> Result<(), String> {
-    for (name, content) in PLUGIN_FILES {
+fn write_files(dir: &Path, files: &[(String, Vec<u8>)]) -> Result<(), String> {
+    for (name, bytes) in files {
         let path = dir.join(name);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|err| format!("创建插件目录失败 {}: {err}", parent.display()))?;
         }
-        std::fs::write(&path, content)
+        std::fs::write(&path, bytes)
             .map_err(|err| format!("写插件文件失败 {}: {err}", path.display()))?;
     }
     Ok(())
 }
 
 /// 整目录替换：先写临时目录再换名，避免更新到一半把 DSH 启动路径写坏。
-fn replace_plugin_dir(dir: &Path) -> Result<(), String> {
+fn replace_plugin_dir(dir: &Path, files: &[(String, Vec<u8>)]) -> Result<(), String> {
     let parent = dir
         .parent()
         .ok_or_else(|| format!("插件目录没有父目录: {}", dir.display()))?;
@@ -347,7 +245,7 @@ fn replace_plugin_dir(dir: &Path) -> Result<(), String> {
     let old = parent.join(format!(".{name}.old"));
     let _ = std::fs::remove_dir_all(&staging);
     let _ = std::fs::remove_dir_all(&old);
-    write_plugin_files(&staging)?;
+    write_files(&staging, files)?;
     let had_old = dir.exists();
     if had_old {
         std::fs::rename(dir, &old)
@@ -364,36 +262,82 @@ fn replace_plugin_dir(dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// 安装/更新插件；profile 清单最后写，失败只回滚清单（插件目录先换也不影响启动）。
-pub(crate) fn install_to_home(
+/// 按 zip 解出的文件安装/更新插件；profile 清单最后写，失败只回滚清单。
+pub(crate) fn install_plugin_files(
     home: &Path,
-    app_installed: bool,
-) -> Result<DeepseekPluginStatus, String> {
+    files: &[(String, Vec<u8>)],
+) -> Result<(), String> {
     let profile = profile_dir(home);
     let manifest = profile.join("package.json");
     if !manifest.is_file() {
         return Err(
-            "还没有初始化 DeepSeek 的 desktop profile：请先打开一次 DeepSeek Harness，再回来点「DeepSeek」。"
-                .to_string(),
+            "还没有初始化 DeepSeek 的 desktop profile：请先打开一次 DeepSeek Harness".to_string(),
         );
     }
     let raw = std::fs::read_to_string(&manifest)
         .map_err(|err| format!("读 DeepSeek profile 清单失败: {err}"))?;
-    let (next, _) = merge_profile_manifest(&raw)?;
+    let (next, changed) = merge_profile_manifest(&raw)?;
 
-    let backup = profile.join("package.json.ws-workbench.bak");
-    if !backup.exists() {
-        std::fs::copy(&manifest, &backup)
-            .map_err(|err| format!("备份 DeepSeek profile 清单失败: {err}"))?;
+    replace_plugin_dir(&plugin_store_dir(home), files)?;
+    replace_plugin_dir(&plugin_active_dir(home), files)?;
+    if changed {
+        let backup = profile.join("package.json.ws-workbench.bak");
+        if !backup.exists() {
+            std::fs::copy(&manifest, &backup)
+                .map_err(|err| format!("备份 DeepSeek profile 清单失败: {err}"))?;
+        }
+        write_atomic(&manifest, next.as_bytes())
+            .map_err(|err| format!("写 DeepSeek profile 清单失败: {err}"))?;
     }
+    Ok(())
+}
 
-    replace_plugin_dir(&plugin_store_dir(home))?;
-    replace_plugin_dir(&plugin_active_dir(home))?;
-    if let Err(err) = write_atomic(&manifest, next.as_bytes()) {
-        let _ = std::fs::copy(&backup, &manifest);
-        return Err(format!("写 DeepSeek profile 清单失败: {err}"));
+/// 卸载：删两个插件目录，并从 profile 清单移除依赖与 `dsh.profile.bundles` 项（备份保留）。
+pub(crate) fn uninstall_plugin_files(home: &Path) -> Result<(), String> {
+    for dir in [plugin_store_dir(home), plugin_active_dir(home)] {
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir)
+                .map_err(|err| format!("删除插件目录失败 {}: {err}", dir.display()))?;
+        }
     }
-    Ok(status_for_home(home, app_installed))
+    let manifest = profile_dir(home).join("package.json");
+    let Ok(raw) = std::fs::read_to_string(&manifest) else {
+        return Ok(());
+    };
+    let mut value: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|err| format!("DeepSeek profile 清单不是合法 JSON: {err}"))?;
+    if let Some(dependencies) = value
+        .get_mut("dependencies")
+        .and_then(|value| value.as_object_mut())
+    {
+        dependencies.remove(DSH_PLUGIN_NAME);
+    }
+    if let Some(bundles) = value
+        .get_mut("dsh")
+        .and_then(|dsh| dsh.get_mut("profile"))
+        .and_then(|profile| profile.get_mut("bundles"))
+        .and_then(|bundles| bundles.as_array_mut())
+    {
+        bundles.retain(|item| item.as_str() != Some(DSH_PLUGIN_NAME));
+    }
+    let text = serde_json::to_string_pretty(&value).map_err(|err| err.to_string())?;
+    write_atomic(&manifest, format!("{text}\n").as_bytes())
+        .map_err(|err| format!("写 DeepSeek profile 清单失败: {err}"))
+}
+
+/// 本地插件状态：profile 里登记了依赖 + bundle，且 node_modules 里有版本号。
+pub(crate) fn local_plugin_status(home: &Path) -> (bool, Option<String>) {
+    let manifest = profile_dir(home).join("package.json");
+    let Ok(raw) = std::fs::read_to_string(&manifest) else {
+        return (false, None);
+    };
+    if !manifest_contains_plugin(&raw) {
+        return (false, None);
+    }
+    match installed_version(home) {
+        Some(version) => (true, Some(version)),
+        None => (false, None),
+    }
 }
 
 /// DeepSeek Harness 桌面版是否安装：macOS 看 app 包是否存在，Windows 走 AppId 探测。
@@ -461,17 +405,15 @@ pub(crate) fn launch_deepseek(app: &tauri::AppHandle) -> Result<(), String> {
 /// 菜单 / 通用打开路径的入口：校验插件后写请求并启动 DSH
 pub(crate) fn open_dir_workspace(app: &tauri::AppHandle, dir: &str) -> Result<(), String> {
     let home = dsh_home()?;
-    let status = status_for_home(&home, deepseek_app_installed(app));
-    if !status.profile_ready {
+    if !profile_dir(&home).join("package.json").is_file() {
         return Err(
             "还没有初始化 DeepSeek 的 desktop profile：请先打开一次 DeepSeek Harness，再回来点「DeepSeek」。"
                 .to_string(),
         );
     }
-    if !status.plugin_installed || status.needs_update {
+    if !local_plugin_status(&home).0 {
         return Err(
-            "DeepSeek 工作区插件还没安装或需要更新：请回到「打开方式」重新点「DeepSeek」并按提示安装（装完需重启 DeepSeek）。"
-                .to_string(),
+            "还没安装 DeepSeek 工作区插件：去「设置 → 资源」下载安装后再试".to_string(),
         );
     }
     let target = crate::commands::nearest_existing_dir(dir);
@@ -488,10 +430,36 @@ pub fn deepseek_plugin_status(app: tauri::AppHandle) -> Result<DeepseekPluginSta
     Ok(status_for_home(&home, deepseek_app_installed(&app)))
 }
 
+#[derive(Debug, Serialize)]
+pub struct DeepseekPluginUpdate {
+    pub latest_version: Option<String>,
+    pub update_available: bool,
+    pub error: Option<String>,
+}
+
+/// 点「DeepSeek」时查远端插件版本；失败不阻塞打开流程。
 #[tauri::command]
-pub fn install_deepseek_plugin(app: tauri::AppHandle) -> Result<DeepseekPluginStatus, String> {
+pub fn deepseek_plugin_update() -> Result<DeepseekPluginUpdate, String> {
     let home = dsh_home()?;
-    install_to_home(&home, deepseek_app_installed(&app))
+    let (_, installed_version) = local_plugin_status(&home);
+    match crate::commands::resources::latest_plugin_version(false) {
+        Ok(latest) => {
+            let update_available = installed_version
+                .as_deref()
+                .map(|local| crate::commands::resources::version_newer(&latest, local))
+                .unwrap_or(false);
+            Ok(DeepseekPluginUpdate {
+                latest_version: Some(latest),
+                update_available,
+                error: None,
+            })
+        }
+        Err(err) => Ok(DeepseekPluginUpdate {
+            latest_version: None,
+            update_available: false,
+            error: Some(err),
+        }),
+    }
 }
 
 /// 「直接打开 DeepSeek」：不写工作区请求，只启动 / 前置 DSH
@@ -561,6 +529,19 @@ mod tests {
         dir
     }
 
+    fn plugin_files(version: &str) -> Vec<(String, Vec<u8>)> {
+        vec![
+            (
+                "package.json".to_string(),
+                format!(r#"{{"name":"dsh-open-workspace","version":"{version}"}}"#).into_bytes(),
+            ),
+            ("cordis.patch.yml".to_string(), b"- insert: []".to_vec()),
+            ("lib/index.mjs".to_string(), b"export function apply() {}".to_vec()),
+            ("lib/client.js".to_string(), b"window.__x = true;".to_vec()),
+            ("README.md".to_string(), b"# plugin".to_vec()),
+        ]
+    }
+
     #[test]
     fn merge_profile_manifest_adds_plugin_and_bundle() {
         let raw = r#"{"name":"dsh-profile-desktop","private":true,"dsh":{"profile":{"bundles":["@deepseek-ai/dsh-base"]}},"dependencies":{}}"#;
@@ -596,52 +577,13 @@ mod tests {
     }
 
     #[test]
-    fn bundled_plugin_files_are_complete() {
-        assert!(!PLUGIN_FILES.is_empty());
-        for (name, content) in PLUGIN_FILES {
-            assert!(!content.trim().is_empty(), "{} 是空的", name);
-        }
-        let package = PLUGIN_FILES
-            .iter()
-            .find(|(name, _)| *name == "package.json")
-            .map(|(_, content)| *content)
-            .expect("插件包必须有 package.json");
-        let value: serde_json::Value = serde_json::from_str(package).unwrap();
-        assert_eq!(value["name"], "dsh-open-workspace");
-        assert!(value["dsh"]["bundle"]["patch"].is_string());
-        assert_eq!(value["dsh"]["client"]["platform"], "web");
-    }
-
-    #[test]
     fn status_reports_missing_plugin() {
         let home = test_home("status-missing");
         let status = status_for_home(&home, false);
         assert!(status.profile_ready);
         assert!(!status.plugin_installed);
         assert_eq!(status.installed_version, "");
-        assert!(!status.needs_update);
         assert_eq!(status.dsh_home, home.display().to_string());
-    }
-
-    #[test]
-    fn needs_update_when_installed_files_change_without_version_bump() {
-        let home = test_home("needs-update-fingerprint");
-        install_to_home(&home, false).unwrap();
-        assert!(!status_for_home(&home, false).needs_update, "刚装完应当是最新的");
-
-        let active = plugin_active_dir(&home).join("lib/client.js");
-        let original = std::fs::read_to_string(&active).unwrap();
-        std::fs::write(&active, format!("{original}\n// 本地改动\n")).unwrap();
-        assert!(
-            status_for_home(&home, false).needs_update,
-            "插件内容变了、版本号没变，也应提示更新"
-        );
-
-        std::fs::write(&active, original).unwrap();
-        assert!(
-            !status_for_home(&home, false).needs_update,
-            "内容恢复后不应再提示更新"
-        );
     }
 
     #[test]
@@ -672,17 +614,14 @@ mod tests {
     }
 
     #[test]
-    fn install_creates_plugin_files_and_manifest() {
+    fn install_plugin_files_writes_both_dirs_and_manifest() {
         let home = test_home("install");
-        let status = install_to_home(&home, false).unwrap();
-        assert!(status.plugin_installed);
-        assert_eq!(status.installed_version, status.bundled_version);
-        assert!(!status.needs_update);
-        for (name, content) in PLUGIN_FILES {
-            let installed = std::fs::read_to_string(plugin_active_dir(&home).join(name)).unwrap();
-            assert_eq!(&installed, content, "{} 内容不一致", name);
-        }
-        assert!(plugin_store_dir(&home).join("package.json").is_file());
+        install_plugin_files(&home, &plugin_files("0.2.0")).unwrap();
+        let (installed, version) = local_plugin_status(&home);
+        assert!(installed);
+        assert_eq!(version.as_deref(), Some("0.2.0"));
+        assert!(plugin_store_dir(&home).join("lib/client.js").is_file());
+        assert!(plugin_active_dir(&home).join("lib/index.mjs").is_file());
         let manifest = std::fs::read_to_string(profile_dir(&home).join("package.json")).unwrap();
         assert!(manifest_contains_plugin(&manifest));
         assert!(profile_dir(&home)
@@ -691,22 +630,15 @@ mod tests {
     }
 
     #[test]
-    fn install_twice_is_idempotent() {
-        let home = test_home("install-twice");
-        install_to_home(&home, false).unwrap();
-        install_to_home(&home, false).unwrap();
+    fn uninstall_plugin_files_removes_dirs_and_manifest_entries() {
+        let home = test_home("uninstall");
+        install_plugin_files(&home, &plugin_files("0.2.0")).unwrap();
+        uninstall_plugin_files(&home).unwrap();
+        assert!(!plugin_store_dir(&home).exists());
+        assert!(!plugin_active_dir(&home).exists());
+        assert!(!local_plugin_status(&home).0);
         let manifest = std::fs::read_to_string(profile_dir(&home).join("package.json")).unwrap();
-        let value: serde_json::Value = serde_json::from_str(&manifest).unwrap();
-        let bundles = value["dsh"]["profile"]["bundles"].as_array().unwrap();
-        assert_eq!(
-            bundles
-                .iter()
-                .filter(|item| item.as_str() == Some(DSH_PLUGIN_NAME))
-                .count(),
-            1
-        );
-        let deps = value["dependencies"].as_object().unwrap();
-        assert_eq!(deps.len(), 2);
+        assert!(!manifest.contains("dsh-open-workspace"));
     }
 
     #[test]
@@ -717,7 +649,7 @@ mod tests {
             .join("no-profile");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let error = install_to_home(&dir, false).unwrap_err();
+        let error = install_plugin_files(&dir, &plugin_files("0.2.0")).unwrap_err();
         assert!(error.contains("先打开一次 DeepSeek"));
     }
 
@@ -726,19 +658,8 @@ mod tests {
         let home = test_home("broken-manifest");
         let manifest = profile_dir(&home).join("package.json");
         std::fs::write(&manifest, "{oops").unwrap();
-        assert!(install_to_home(&home, false).is_err());
+        assert!(install_plugin_files(&home, &plugin_files("0.2.0")).is_err());
         assert_eq!(std::fs::read_to_string(&manifest).unwrap(), "{oops");
         assert!(!plugin_store_dir(&home).exists());
     }
-
-    #[test]
-    fn backup_is_kept_from_first_install() {
-        let home = test_home("backup");
-        let manifest = profile_dir(&home).join("package.json");
-        let original = std::fs::read_to_string(&manifest).unwrap();
-        install_to_home(&home, false).unwrap();
-        let backup = profile_dir(&home).join("package.json.ws-workbench.bak");
-        assert_eq!(std::fs::read_to_string(backup).unwrap(), original);
-    }
-
 }

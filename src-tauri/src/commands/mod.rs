@@ -3,7 +3,7 @@
 //! `lib.rs` 的 `generate_handler!` 与 VPN 模块仍按 `crate::commands::xxx`
 //! 访问，因此保持扁平重导出。
 
-mod attachments;
+pub(crate) mod attachments;
 mod cleaner;
 mod cleaner_popup;
 mod cleaner_sleep;
@@ -14,6 +14,8 @@ mod config;
 mod deepseek;
 // Hosts 在线编辑
 mod hosts;
+// 「设置 → 资源」：DSH 插件等资源的检查/下载/安装/卸载
+mod resources;
 // `pub(crate)`：cleaner 模块要复用 openwith 里的图标提取（mac_icon / windows_icons）
 pub(crate) mod openwith;
 mod project;
@@ -30,5 +32,6 @@ pub use deepseek::*;
 pub use hosts::*;
 pub use openwith::*;
 pub use project::*;
+pub use resources::*;
 pub use quick::*;
 pub use system::*;
