@@ -25,6 +25,11 @@ const networkError = ref('')
 const networkLoading = ref(false)
 /** 操作失败时的提示（贴在设置页顶部） */
 const message = ref('')
+/** 资源卡：顶部「重新检测」也要一起重查（卡片通过 defineExpose 暴露 recheck） */
+const resourcePanel = ref<InstanceType<typeof ResourcePanel> | null>(null)
+/** 资源检查/安装在忙：顶部按钮显示「检测中…」 */
+const resourceBusy = ref(false)
+const refreshBusy = computed(() => networkLoading.value || resourceBusy.value)
 /** 附件实际落盘目录：设置里的地址，未设置时解析成 App 私有 attachments 目录 */
 const resolvedUploadDir = ref('')
 
@@ -103,7 +108,12 @@ onMounted(() => {
 watch(() => props.defaultUploadDir, loadUploadDir)
 
 async function refreshAll() {
-  await Promise.all([loadNetworkInfo(), loadStorageInfo(), loadUploadDir()])
+  await Promise.all([
+    loadNetworkInfo(),
+    loadStorageInfo(),
+    loadUploadDir(),
+    resourcePanel.value?.recheck() ?? Promise.resolve(),
+  ])
 }
 
 async function openUploadDir() {
@@ -145,8 +155,8 @@ async function run(action: () => Promise<unknown>, failureLabel: string) {
         <h3>设置</h3>
         <p>本机运行环境、网络与附件位置。</p>
       </div>
-      <button class="btn btn-secondary" :disabled="networkLoading" @click="refreshAll">
-        {{ networkLoading ? '检测中…' : '重新检测' }}
+      <button class="btn btn-secondary" :disabled="refreshBusy" @click="refreshAll">
+        {{ refreshBusy ? '检测中…' : '重新检测' }}
       </button>
     </div>
 
@@ -273,7 +283,7 @@ async function run(action: () => Promise<unknown>, failureLabel: string) {
       </p>
     </section>
 
-    <ResourcePanel />
+    <ResourcePanel ref="resourcePanel" @busy="resourceBusy = $event" />
   </div>
 </template>
 
