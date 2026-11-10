@@ -268,3 +268,16 @@ note=「Chrome 插件管理规划中」）。
 - 未登录查询 GitHub API 有 60 次/小时限流；版本检查缓存 5 分钟，正常使用足够。
 - 后续 Chrome 插件：复用 `ResourceStatus` 与 `ResourcePanel`，新增 `kind=chrome-extensions`
   的检查/安装实现（Chrome Web Store API 或本地 crx），资源目录扩展即可，不改 UI 骨架。
+
+## 实施状态（2026-11-10）
+
+- 插件独立仓库已建并推送：`https://github.com/fengwenshan/dsh-open-workspace`；tag `v0.1.0`
+  的 Release 已由 GitHub Actions 自动构建出 `dsh-open-workspace-0.1.0.zip`（5.4 KB），
+  可用 `GET https://api.github.com/repos/fengwenshan/dsh-open-workspace/releases/assets/<id>`
+  （`Accept: application/octet-stream`）下载，落盘结构与 ws-workbench 安装器约定一致。
+- ws-workbench 侧已实现：`commands/resources.rs`（Release 检查 / 下载 / 解压 / 校验、
+  版本比较、5 分钟缓存）、`deepseek.rs` 收缩（去掉内置插件与指纹，保留 profile 文件写入与
+  清单维护）、设置 → 资源卡片、点击 DeepSeek 新流程；`dsh-plugin/` 已删除。
+- 后续发新版：改 `package.json.version` → 提交推 `main` → `git tag v<version> && git push origin v<version>`；
+  ws-workbench「设置 → 资源」点「刷新」即可看到更新。
+- 本机当前状态：`~/.dsh` 里已装 0.1.0（清单 `dsh.profile.bundles` 含 `dsh-open-workspace`，备份文件在）。
