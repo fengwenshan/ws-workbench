@@ -50,9 +50,12 @@ ws-workbench 的「打开方式」分体按钮（`OpenWithButton`）会列出本
 
 ```
 ws-workbench 点「DeepSeek」
-  → 检查 DSH desktop profile / 插件状态
-      ├─ profile 未初始化 → 报错：先打开一次 DeepSeek
-      ├─ 插件未安装/版本旧 → 弹窗确认 → 写插件文件 + 改 profile 清单（备份）
+  → 检查 DSH 是否安装 / desktop profile / 插件状态
+      ├─ DeepSeek 未安装 → 提示先安装（不启动）
+      ├─ 已安装但 profile 未初始化 → 确认后只打开 DeepSeek，让用户完成初始化
+      ├─ 插件未安装/版本旧 → 二次确认：
+      │     ├─ 取消（直接打开 DeepSeek）→ 只唤起 DSH：不装插件、不打开工作区
+      │     └─ 确认 → 写插件文件 + 改 profile 清单（备份）→ 继续下面流程
       └─ 插件就绪
   → 原子写 $DSH_HOME/open-workspace.json  {requestId, path, createdAt}
   → 唤起 / 前置 DeepSeek Harness
@@ -92,9 +95,10 @@ DSH host 的 HTTP 路由只在 DSH 页面内可用（走宿主鉴权），外部
 
 | 命令 | 作用 |
 | --- | --- |
-| `deepseek_plugin_status` | 返回 `{dsh_home, profile_ready, plugin_installed, installed_version, bundled_version, needs_update, dsh_running}` |
+| `deepseek_plugin_status` | 返回 `{dsh_home, app_installed, profile_ready, plugin_installed, installed_version, bundled_version, needs_update, dsh_running}`；`app_installed` 由 macOS app 包 / Windows `AppId` 探测得到，只用于前端提示 |
 | `install_deepseek_plugin` | 安装/更新插件，返回安装后的状态 |
 | `open_deepseek_workspace` | 检查插件就绪 → 写请求文件 → 唤起 DSH（`open -a` / ShellExecuteW） |
+| `open_deepseek_app` | 只唤起 DSH、不写请求文件（用户选择不装插件时用） |
 
 安装动作（幂等）：
 
@@ -115,13 +119,15 @@ Windows 用 `sysinfo` 查 `DeepSeek Harness.exe` 进程。只影响提示文案�
 
 前台交互（`OpenWithButton.vue`，ant-design-vue `Modal.confirm` / `message`）：
 
-- 点 `DeepSeek` → 先取状态：
-  - `profile_ready=false`：提示「先打开一次 DeepSeek Harness 完成初始化」；
-  - 未安装 / 版本旧：弹窗说明「会一次性安装本地插件（离线、写 DSH profile、可回滚）」，
-    确认后安装；取消则中止，不打开 DSH；
+- 点 `DeepSeek` → 先取状态，按顺序处理：
+  - `app_installed=false`：提示「还没安装 DeepSeek Harness，请先安装」，不尝试启动；
+  - `profile_ready=false`：确认「先打开一次 DeepSeek 完成初始化」，确认后只唤起 DSH；
+  - 插件未安装 / 版本旧：二次确认「是否安装工作区插件」——
+    - 取消（文案「直接打开 DeepSeek」）：只唤起 DSH，不装插件、不打开工作区；
+    - 确认（文案「安装插件并打开工作区」）：安装/更新插件，成功后继续走打开工作区流程；
   - 安装后若检测到 DSH 正在运行：提示「需要退出并重新打开 DeepSeek 才生效；已排好打开
     请求，10 分钟内重启会自动打开该目录」；用户手动重启即可（不自动杀进程）；
-  - 已就绪：直接走打开流程。
+  - 插件已就绪：直接走打开流程，不再弹任何确认。
 - 打开成功/失败沿用现有日志 + `message.error` 反馈。
 
 ### 3.4 打进生产包

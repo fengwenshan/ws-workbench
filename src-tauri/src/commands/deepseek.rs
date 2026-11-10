@@ -59,6 +59,8 @@ pub(crate) const PLUGIN_FILES: &[(&str, &str)] = &[
 #[derive(Debug, Clone, Serialize)]
 pub struct DeepseekPluginStatus {
     pub dsh_home: String,
+    /// DeepSeek Harness 桌面版是否安装（前端据此先提示「请先安装」）
+    pub app_installed: bool,
     pub profile_ready: bool,
     pub plugin_installed: bool,
     pub installed_version: String,
@@ -213,7 +215,7 @@ pub(crate) fn merge_profile_manifest(raw: &str) -> Result<(String, bool), String
     Ok((text, changed))
 }
 
-pub(crate) fn status_for_home(home: &Path) -> DeepseekPluginStatus {
+pub(crate) fn status_for_home(home: &Path, app_installed: bool) -> DeepseekPluginStatus {
     let manifest = profile_dir(home).join("package.json");
     let profile_ready = manifest.is_file();
     let manifest_has_plugin = std::fs::read_to_string(&manifest)
@@ -225,6 +227,7 @@ pub(crate) fn status_for_home(home: &Path) -> DeepseekPluginStatus {
     let needs_update = plugin_installed && installed.as_deref() != Some(bundled.as_str());
     DeepseekPluginStatus {
         dsh_home: home.display().to_string(),
+        app_installed,
         profile_ready,
         plugin_installed,
         installed_version: installed.unwrap_or_default(),
@@ -323,7 +326,10 @@ fn replace_plugin_dir(dir: &Path) -> Result<(), String> {
 }
 
 /// 安装/更新插件；profile 清单最后写，失败只回滚清单（插件目录先换也不影响启动）。
-pub(crate) fn install_to_home(home: &Path) -> Result<DeepseekPluginStatus, String> {
+pub(crate) fn install_to_home(
+    home: &Path,
+    app_installed: bool,
+) -> Result<DeepseekPluginStatus, String> {
     let profile = profile_dir(home);
     let manifest = profile.join("package.json");
     if !manifest.is_file() {
@@ -348,7 +354,22 @@ pub(crate) fn install_to_home(home: &Path) -> Result<DeepseekPluginStatus, Strin
         let _ = std::fs::copy(&backup, &manifest);
         return Err(format!("写 DeepSeek profile 清单失败: {err}"));
     }
-    Ok(status_for_home(home))
+    Ok(status_for_home(home, app_installed))
+}
+
+/// DeepSeek Harness 桌面版是否安装：macOS 看 app 包是否存在，Windows 走 AppId 探测。
+/// 只用于前端提示（未安装时先让用户去装）；插件安装仍以 desktop profile 是否存在为准。
+pub(crate) fn deepseek_app_installed(app: &tauri::AppHandle) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = app;
+        crate::commands::deepseek_bundle_path().is_some()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let ctx = crate::commands::app_context(app);
+        crate::apps::locate(crate::apps::AppId::DeepSeek, &ctx, "").available
+    }
 }
 
 /// 唤起 / 前置 DeepSeek Harness（不带目录参数；工作区交给插件消费请求文件后打开）
@@ -401,7 +422,7 @@ pub(crate) fn launch_deepseek(app: &tauri::AppHandle) -> Result<(), String> {
 /// 菜单 / 通用打开路径的入口：校验插件后写请求并启动 DSH
 pub(crate) fn open_dir_workspace(app: &tauri::AppHandle, dir: &str) -> Result<(), String> {
     let home = dsh_home()?;
-    let status = status_for_home(&home);
+    let status = status_for_home(&home, deepseek_app_installed(app));
     if !status.profile_ready {
         return Err(
             "还没有初始化 DeepSeek 的 desktop profile：请先打开一次 DeepSeek Harness，再回来点「DeepSeek」。"
@@ -423,15 +444,22 @@ pub(crate) fn open_dir_workspace(app: &tauri::AppHandle, dir: &str) -> Result<()
 }
 
 #[tauri::command]
-pub fn deepseek_plugin_status() -> Result<DeepseekPluginStatus, String> {
+pub fn deepseek_plugin_status(app: tauri::AppHandle) -> Result<DeepseekPluginStatus, String> {
     let home = dsh_home()?;
-    Ok(status_for_home(&home))
+    Ok(status_for_home(&home, deepseek_app_installed(&app)))
 }
 
 #[tauri::command]
-pub fn install_deepseek_plugin() -> Result<DeepseekPluginStatus, String> {
+pub fn install_deepseek_plugin(app: tauri::AppHandle) -> Result<DeepseekPluginStatus, String> {
     let home = dsh_home()?;
-    install_to_home(&home)
+    install_to_home(&home, deepseek_app_installed(&app))
+}
+
+/// 「直接打开 DeepSeek」：不写工作区请求，只启动 / 前置 DSH
+/// （用户在「是否安装插件」确认框里选「直接打开」时用）
+#[tauri::command]
+pub fn open_deepseek_app(app: tauri::AppHandle) -> Result<(), String> {
+    launch_deepseek(&app)
 }
 
 #[tauri::command]
@@ -445,7 +473,7 @@ pub fn open_deepseek_workspace(
         return Err(format!("路径不存在: {path}"));
     }
     open_dir_workspace(&app, &target.to_string_lossy())?;
-    Ok(status_for_home(&home))
+    Ok(status_for_home(&home, deepseek_app_installed(&app)))
 }
 
 /// DSH 是否在运行（只影响提示文案）：看进程名里有没有 DeepSeek Harness
@@ -548,12 +576,20 @@ mod tests {
     #[test]
     fn status_reports_missing_plugin() {
         let home = test_home("status-missing");
-        let status = status_for_home(&home);
+        let status = status_for_home(&home, false);
         assert!(status.profile_ready);
         assert!(!status.plugin_installed);
         assert_eq!(status.installed_version, "");
         assert!(!status.needs_update);
         assert_eq!(status.dsh_home, home.display().to_string());
+    }
+
+    #[test]
+    fn status_reports_app_installed_flag() {
+        let home = test_home("status-app-installed");
+        // 前端先判 app_installed（未装 DSH 时直接提示安装），与 profile 是否初始化无关
+        assert!(!status_for_home(&home, false).app_installed);
+        assert!(status_for_home(&home, true).app_installed);
     }
 
     #[test]
@@ -578,7 +614,7 @@ mod tests {
     #[test]
     fn install_creates_plugin_files_and_manifest() {
         let home = test_home("install");
-        let status = install_to_home(&home).unwrap();
+        let status = install_to_home(&home, false).unwrap();
         assert!(status.plugin_installed);
         assert_eq!(status.installed_version, status.bundled_version);
         assert!(!status.needs_update);
@@ -597,8 +633,8 @@ mod tests {
     #[test]
     fn install_twice_is_idempotent() {
         let home = test_home("install-twice");
-        install_to_home(&home).unwrap();
-        install_to_home(&home).unwrap();
+        install_to_home(&home, false).unwrap();
+        install_to_home(&home, false).unwrap();
         let manifest = std::fs::read_to_string(profile_dir(&home).join("package.json")).unwrap();
         let value: serde_json::Value = serde_json::from_str(&manifest).unwrap();
         let bundles = value["dsh"]["profile"]["bundles"].as_array().unwrap();
@@ -621,7 +657,7 @@ mod tests {
             .join("no-profile");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let error = install_to_home(&dir).unwrap_err();
+        let error = install_to_home(&dir, false).unwrap_err();
         assert!(error.contains("先打开一次 DeepSeek"));
     }
 
@@ -630,7 +666,7 @@ mod tests {
         let home = test_home("broken-manifest");
         let manifest = profile_dir(&home).join("package.json");
         std::fs::write(&manifest, "{oops").unwrap();
-        assert!(install_to_home(&home).is_err());
+        assert!(install_to_home(&home, false).is_err());
         assert_eq!(std::fs::read_to_string(&manifest).unwrap(), "{oops");
         assert!(!plugin_store_dir(&home).exists());
     }
@@ -640,7 +676,7 @@ mod tests {
         let home = test_home("backup");
         let manifest = profile_dir(&home).join("package.json");
         let original = std::fs::read_to_string(&manifest).unwrap();
-        install_to_home(&home).unwrap();
+        install_to_home(&home, false).unwrap();
         let backup = profile_dir(&home).join("package.json.ws-workbench.bak");
         assert_eq!(std::fs::read_to_string(backup).unwrap(), original);
     }

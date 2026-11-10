@@ -40,6 +40,8 @@ export function openWith(path: string, appId: string): Promise<void> {
 /** DeepSeek 工作区插件状态（后端探测本机 DSH desktop profile） */
 export interface DeepseekPluginStatus {
   dsh_home: string
+  /** DeepSeek Harness 桌面版是否安装（未安装时先提示去装） */
+  app_installed: boolean
   profile_ready: boolean
   plugin_installed: boolean
   installed_version: string
@@ -61,6 +63,10 @@ export function installDeepseekPlugin(): Promise<DeepseekPluginStatus> {
 /** 写打开请求并唤起 DeepSeek（插件消费后新建/选中左侧工作区） */
 export function openDeepseekWorkspace(path: string): Promise<DeepseekPluginStatus> {
   return invoke<DeepseekPluginStatus>('open_deepseek_workspace', { path })
+}
+/** 直接打开 DeepSeek（不写工作区请求；用户拒绝安装插件时用） */
+export function openDeepseekApp(): Promise<void> {
+  return invoke<void>('open_deepseek_app')
 }
 
 /** 校验并创建目录，返回规范化后的路径 */

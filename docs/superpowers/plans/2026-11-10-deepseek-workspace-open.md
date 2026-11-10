@@ -1642,3 +1642,15 @@ Expected: 无未提交的计划内文件（临时目录已在 /tmp，不进仓�
   （若本机没装 target，则在 Windows 机器上跑 Task 4 Step 5 的检查）。
 - 用户手动用 DSH 插件管理器装/卸载同插件时，以 pnpm 为准；我们只追加依赖与 bundle，
   不删用户已有项。
+
+## 落地偏差记录
+
+实现时相对本文档有几处调整（已按实际代码与验证结果更新本计划对应片段）：
+
+- client 插件必须写 `exports.inject = ['workspaces', 'uiWorkspace']`（cordis 服务名），
+  `package.json` 的 `dsh.client.inject` 则填**包名**（loader 预取元数据）；两处都不可少，
+  否则 `apply` 会在服务就绪前执行，插件静默不消费请求。
+- 前端流程改为：未安装 DSH 先提示；已安装但 profile 未初始化时可确认「先打开 DeepSeek」；
+  插件缺失/版本旧时二次确认——取消则只打开 DeepSeek（`open_deepseek_app`，不写请求），
+  确认才安装并继续打开工作区。状态结构体因此多了 `app_installed`。
+- 只有「本次点击刚安装/刚更新插件」且 DSH 正在运行时才提示重启；插件已就绪时点一次直接打开。

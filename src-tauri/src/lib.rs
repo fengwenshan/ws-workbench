@@ -772,6 +772,7 @@ pub fn run() {
             commands::deepseek_plugin_status,
             commands::install_deepseek_plugin,
             commands::open_deepseek_workspace,
+            commands::open_deepseek_app,
             commands::check_dir,
             commands::app_name,
             commands::dev_build,
