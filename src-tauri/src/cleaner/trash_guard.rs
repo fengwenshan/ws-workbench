@@ -616,6 +616,9 @@ mod tests {
         assert!(!is_allowed(Path::new("/Applications/../System/Library/Foo")));
     }
 
+    // `/Applications`、`~/Library` 这些是 macOS 的路径规则；Windows 的白名单
+    // 在 `is_allowed` 的 Windows 分支里单独判断，这条测试只在 macOS 跑。
+    #[cfg(target_os = "macos")]
     #[test]
     fn allows_application_bundles_and_user_library() {
         assert!(is_allowed(Path::new("/Applications/Foo.app")));

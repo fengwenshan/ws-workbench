@@ -33,22 +33,39 @@ pub(crate) fn app_bundle_from_exe(exe: &Path) -> Option<PathBuf> {
 }
 
 /// App 可能用到的缓存/WebView 目录（只返回候选，不判断存在）。
-///
-/// Windows 上这些 macOS 路径不会存在，`collect` 过滤后自然为空。
 fn cache_candidates(home: &Path) -> Vec<PathBuf> {
-    let library = home.join("Library");
-    vec![
-        library.join("Caches").join("com.ws.workbench"),
-        library.join("Caches").join("ws-workbench"),
-        library.join("WebKit").join("com.ws.workbench"),
-        library.join("WebKit").join("ws-workbench"),
-        library.join("HTTPStorages").join("com.ws.workbench"),
-        library
-            .join("Saved Application State")
-            .join("com.ws.workbench.savedState"),
-        library.join("Preferences").join("com.ws.workbench.plist"),
-        library.join("Logs").join("ws-workbench"),
-    ]
+    #[cfg(target_os = "macos")]
+    {
+        let library = home.join("Library");
+        vec![
+            library.join("Caches").join("com.ws.workbench"),
+            library.join("Caches").join("ws-workbench"),
+            library.join("WebKit").join("com.ws.workbench"),
+            library.join("WebKit").join("ws-workbench"),
+            library.join("HTTPStorages").join("com.ws.workbench"),
+            library
+                .join("Saved Application State")
+                .join("com.ws.workbench.savedState"),
+            library.join("Preferences").join("com.ws.workbench.plist"),
+            library.join("Logs").join("ws-workbench"),
+        ]
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let local = home.join("AppData").join("Local");
+        vec![
+            // Tauri 的 app_local_data_dir：WebView2 用户数据与更新缓存都在这里
+            local.join("com.ws.workbench"),
+            local.join("ws-workbench"),
+            // 旧版本/清理模块可能留下的同名目录
+            local.join("EBWebView").join("com.ws.workbench"),
+        ]
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let _ = home;
+        Vec::new()
+    }
 }
 
 /// 只把用户主目录下的路径当成 App 自有数据；避免把项目内开发兜底目录
@@ -188,10 +205,15 @@ fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
 
 #[cfg(not(unix))]
 fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let tmp = parent.join(format!(".{FILE_NAME}.tmp"));
+    std::fs::write(&tmp, text)?;
+    // Windows 的 rename 不覆盖目标：先删旧清单再换名，避免重启后仍读到旧路径。
+    if path.exists() {
+        std::fs::remove_file(path)?;
     }
-    std::fs::write(path, text)
+    std::fs::rename(&tmp, path)
 }
 
 /// 刷新清单：写到所有数据目录 + app_data_dir + cleaner 数据目录。
@@ -263,6 +285,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn cache_candidates_cover_known_app_paths() {
         let home = PathBuf::from("/Users/me");
@@ -279,6 +302,22 @@ mod tests {
         assert!(paths
             .iter()
             .any(|p| p.ends_with("Library/Preferences/com.ws.workbench.plist")));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn cache_candidates_cover_windows_local_app_data() {
+        let home = PathBuf::from(r"C:\Users\me");
+        let paths: Vec<String> = cache_candidates(&home)
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
+        assert!(paths
+            .iter()
+            .any(|p| p.ends_with(r"AppData\Local\com.ws.workbench")));
+        assert!(paths
+            .iter()
+            .any(|p| p.ends_with(r"AppData\Local\ws-workbench")));
     }
 
     #[test]

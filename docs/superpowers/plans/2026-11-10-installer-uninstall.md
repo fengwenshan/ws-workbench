@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust/Tauri 2（AppHandle、路径 API）、Vue 3（卸载窗口守卫）、Bash + osascript（macOS 卸载程序）、NSIS（Windows 后续）、Node（release.mjs DMG 打包）。
 
-**当前状态（2026-11-10）：** Phase 1（macOS）已实现并通过 `cargo test --lib`、`cargo check --bins`、`pnpm build`、卸载脚本 dry-run 测试和 DMG 可执行位验证；Phase W（Windows）尚未执行，需在 Windows 主机上按任务继续。
+**当前状态（2026-11-10）：** Phase 1（macOS）已实现并通过 `cargo test --lib`、`cargo check --bins`、`pnpm build`、卸载脚本 dry-run 测试和 DMG 可执行位验证；Phase W（Windows）已在 Windows 主机实现，`cargo test --lib` 与 NSIS 编译通过，Task W3 的安装/卸载实机验收仍未做。
 
 ---
 
@@ -977,21 +977,22 @@ Expected: exit 0。
 
 ---
 
-## Phase W（Windows，后续在 Windows 主机执行）
+## Phase W（Windows，已实现，待实机验收）
 
-> 本阶段不在当前 macOS 环境执行；在 Windows 主机上按顺序做，每步验收后再进入下一步。
+> 本阶段已在 Windows 主机执行到「编译通过」；Task W3 的安装/卸载实机验收仍未做。
 
 ### Task W1: 确认 NSIS 钩子能力
 
 **Files:** 无（只读检查）
 
-- [ ] 在 Windows 检出仓库，确认 `node_modules/@tauri-apps/cli/config.schema.json` 的
-  `bundle.windows.nsis.installerHooks` 支持 `NSIS_HOOK_PREUNINSTALL` / `NSIS_HOOK_POSTUNINSTALL`（当前 schema 已确认支持）。
-- [ ] 确认 `installMode` 默认/显式值；计划显式设 `currentUser`，保证 `$APPDATA` 指向当前用户。
+- [x] 在 Windows 检出仓库，确认 `node_modules/@tauri-apps/cli/config.schema.json` 的
+  `bundle.windows.nsis.installerHooks` 支持 `NSIS_HOOK_PREUNINSTALL` / `NSIS_HOOK_POSTUNINSTALL`。
+- [x] 确认 `installMode` 默认/显式值；已显式设 `currentUser`，保证 `$APPDATA` 指向当前用户。
 
 ### Task W2: 增加 `src-tauri/nsis/uninstall-hooks.nsh`
 
-- [ ] 创建文件，内容：
+- [x] 创建文件。实际实现比下面的草案多了：`tasklist | find` 退出码判断、10 秒强杀等待、
+  `un.` 前缀函数、静默卸载跳过交互、`upload_custom` 提示、卸载日志。以下草案仅留作历史记录：
 
 ```nsh
 !include "LogicLib.nsh"
@@ -1046,7 +1047,7 @@ Expected: exit 0。
 !macroend
 ```
 
-- [ ] 在 `tauri.conf.json` 的 `bundle.windows.nsis` 增加：
+- [x] 在 `tauri.conf.json` 的 `bundle.windows.nsis` 增加：
 
 ```json
 "nsis": {
@@ -1059,7 +1060,8 @@ Expected: exit 0。
 
 ### Task W3: Windows 验收
 
-- [ ] `pnpm tauri build` 生成 NSIS 安装包；在 Windows 上安装。
+- [x] `pnpm exec tauri build --bundles nsis` 生成 NSIS 安装包（本地验证构建关闭了 updater 签名）。
+- [ ] 在 Windows 上安装构建产物。
 - [ ] 运行 ws-workbench，直接去「设置 → 应用 → 卸载」：应先提示退出/强制退出；进程不退时卸载中止且文件仍在。
 - [ ] 选择「保留数据」：程序删除，`%APPDATA%\com.ws.workbench` 保留。
 - [ ] 选择「删除数据」：数据目录删除；自定义附件目录仍在并有提示。

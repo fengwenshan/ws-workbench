@@ -137,7 +137,7 @@ pub async fn cleaner_open_uninstall_window(
         return Ok(());
     }
 
-    let mut builder = tauri::WebviewWindowBuilder::new(
+    let builder = tauri::WebviewWindowBuilder::new(
         &app,
         UNINSTALL_WINDOW_LABEL,
         tauri::WebviewUrl::App("uninstall.html".into()),
@@ -149,11 +149,9 @@ pub async fn cleaner_open_uninstall_window(
     .maximizable(false);
     // macOS：隐藏标题、红绿灯浮在内容上（截图 1 的样子）；Windows 用原生标题栏
     #[cfg(target_os = "macos")]
-    {
-        builder = builder
-            .hidden_title(true)
-            .title_bar_style(tauri::TitleBarStyle::Overlay);
-    }
+    let builder = builder
+        .hidden_title(true)
+        .title_bar_style(tauri::TitleBarStyle::Overlay);
     let window = builder
         .build()
         .map_err(|err| format!("创建卸载窗口失败: {}", err))?;

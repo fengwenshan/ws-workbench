@@ -354,6 +354,10 @@ fn create_quick_panel(app: &mut tauri::App) -> tauri::Result<()> {
         tauri::WebviewUrl::App("quick.html".into()),
     )
     .title(app_display_name())
+    // 和主窗口共用同一个可写的 WebView2 数据目录；不设时 WebView2 会退回
+    // `%LOCALAPPDATA%\com.ws.workbench`，在受限环境 / 受控文件夹访问下会
+    // 直接以「拒绝访问」让整个 setup hook 失败。
+    .data_directory(webview_data_dir(app))
     .inner_size(QUICK_PANEL_WIDTH, QUICK_PANEL_HEIGHT)
     .resizable(false)
     .maximizable(false)
@@ -394,6 +398,8 @@ fn create_clipboard_panel(app: &mut tauri::App) -> tauri::Result<()> {
         tauri::WebviewUrl::App("clipboard.html".into()),
     )
     .title(app_display_name())
+    // 同上：剪贴板浮层也必须走可写的数据目录，否则第二个 WebView 创建失败
+    .data_directory(webview_data_dir(app))
     .inner_size(clipboard::PANEL_WIDTH, clipboard::PANEL_HEIGHT)
     .resizable(false)
     .maximizable(false)

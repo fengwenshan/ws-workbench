@@ -2,7 +2,7 @@
 
 - 日期：2026-11-10
 - 分支：main（沿用现有 cleaner / release 脚本）
-- 状态：macOS 已实现并验证（2026-11-10）；Windows 计划见 §8，待 Windows 主机执行
+- 状态：macOS 已实现并验证（2026-11-10）；Windows 已按 §8 实现（2026-11-10），编译与单测通过，待 Windows 实机验收
 - 关联：`2026-11-10-uninstall-window-design.md`
 
 ## 1. 背景与目标
@@ -134,23 +134,30 @@ cache_dir=/Users/me/Library/WebKit/com.ws.workbench
 - DMG 构建后挂载：`卸载 ws-workbench.command` 存在且可执行。
 - `cargo test --lib`、`cargo check --bins`、`pnpm build` 全绿。
 
-## 8. Windows（后续在 Windows 主机执行）
+## 8. Windows（已实现，待实机验收）
 
 Windows 使用 Tauri NSIS 安装器自带的标准卸载器（Apps & Features），不额外做应用内入口。
 
-后续增强（需 Windows 实机验证）：
+实现（2026-11-10）：
 
-1. 在 `src-tauri/tauri.conf.json` 的 `bundle.windows.nsis` 增加 `installerHooks`，指向
-   `src-tauri/nsis/uninstall-hooks.nsh`。
+1. `src-tauri/tauri.conf.json` 的 `bundle.windows.nsis` 已增加 `installerHooks`，指向
+   `./nsis/uninstall-hooks.nsh`，并显式设置 `installMode: "currentUser"`。
 2. `NSIS_HOOK_PREUNINSTALL`：
    - `tasklist /FI "IMAGENAME eq ws-workbench.exe"` 检测进程；有则 `MessageBox MB_YESNO`
-     询问强制退出，`taskkill /IM ws-workbench.exe /F`；仍存在则 `Abort`，不删文件。
+     询问强制退出，`taskkill /IM ws-workbench.exe /F /T`；最多等 10 秒，仍存在则 `Abort`，不删文件。
    - 读取 `$APPDATA\com.ws.workbench\uninstall-info.txt`（App 的 sidecar，Windows 路径），
-     展示 `data_dir` / `upload_dir` 路径；`MessageBox MB_YESNO` 询问是否删除用户数据，默认否。
-   - 自定义附件目录（不在 `$APPDATA` / `$LOCALAPPDATA` 下）只提示不删。
-3. `NSIS_HOOK_POSTUNINSTALL`：清理空目录、写日志。
-4. 明确 `installMode: "currentUser"`，保证 `$APPDATA` 指向当前用户，避免提权后删错用户目录。
-5. 在 Windows 主机上验证：运行中卸载被拦、保留/删除数据、附件目录提示、Apps & Features 入口。
+     展示 `data_dir` / `upload_dir` / `cache_dir` 路径；`MessageBox MB_YESNO` 询问是否删除
+     用户数据，默认否。清单缺失时退回内置目录并明确提示。
+   - 自定义附件目录（`upload_custom=1`）只提示不删。
+   - 静默卸载（`/S`）直接跳过以上交互，按「保留数据」处理。
+3. `NSIS_HOOK_POSTUNINSTALL`：清理空目录、写日志到 `%APPDATA%\ws-workbench-uninstall.log`。
+4. App 在启动与保存设置后刷新 sidecar（`src-tauri/src/uninstall_info.rs`），Windows 上除
+   `%APPDATA%` 外也覆盖 `%LOCALAPPDATA%\com.ws.workbench` 等 WebView 缓存目录。
+5. 待实机验证：运行中卸载被拦、保留/删除数据、自定义附件目录提示、Apps & Features 入口。
+
+编译验证：NSIS 3.13 单独编译钩子通过（卸载节内函数必须用 `un.` 前缀，否则 `Call`
+会报 “must be used with function names starting with un.”）；完整 NSIS 安装包由
+`pnpm exec tauri build --bundles nsis` 产出。
 
 ## 9. 验证记录（macOS，2026-11-10）
 
@@ -161,6 +168,17 @@ Windows 使用 Tauri NSIS 安装器自带的标准卸载器（Apps & Features）
 - 开发版真实启动：在临时 HOME 下生成两份 `uninstall-info.txt`（`com.ws.workbench` / `ws-workbench`），权限 600；不再把项目内 `.config` 写进清单。
 - DMG：`TAURI_BUNDLES=app node scripts/release.mjs --no-publish --dmg` 成功，挂载后确认 `卸载 ws-workbench.command` 可执行、`ws-workbench.app` 与 Applications 链接存在。
 - 用构建出的真实 `.app` 跑卸载脚本 dry-run：能识别 bundle id 并走「保留数据」流程。
+
+## 9.1 验证记录（Windows，2026-11-10）
+
+- `cargo test --lib`：488 passed / 0 failed / 3 ignored。Windows 上补了 `format_date`、
+  `trash_guard` macOS 路径测试、`netinfo` 仅 unix 辅助函数、`related::last_used_text_from`
+  的条件编译；`packer` 的「无 VCS」用例在临时目录位于 Git 仓库内时跳过（沙箱把 TEMP
+  指到仓库内，属测试环境限制）。
+- NSIS 3.13 单独编译 `uninstall-hooks.nsh`：通过。发现并修正了卸载节内函数必须用
+  `un.` 前缀的问题（`Function un.wsWb…`），否则 `Call` 直接编译失败。
+- 完整 NSIS 安装包：`pnpm exec tauri build --bundles nsis`（本地验证构建关闭 updater 签名）。
+- 待实机验证：运行中卸载被拦、保留/删除数据、自定义附件目录提示、Apps & Features 入口。
 
 ## 10. 风险与回退
 

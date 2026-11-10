@@ -211,6 +211,9 @@ mod tests {
         assert_eq!(dir_size_limited(&dir, 1, 1000), 0);
     }
 
+    // `format_date` 只在 macOS 编译（Windows 的日期来自注册表字符串），
+    // 测试也只在 macOS 跑，避免 Windows 上整包测试编译失败。
+    #[cfg(target_os = "macos")]
     #[test]
     fn formats_date_or_empty() {
         // 2001-09-09T01:46:40Z

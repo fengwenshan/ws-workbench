@@ -10,6 +10,8 @@
 
 **Spec:** `docs/superpowers/specs/2026-11-10-uninstall-window-design.md`
 
+**当前状态（2026-11-10）：** 已实现并合入 main（提交 `ca82611`）。下方任务 checkbox 保留为实施时的历史记录，未逐项回勾；Windows 侧已编译并通过 `cargo test --lib`，注册表 / UAC / 强杀链路待实机验收。
+
 **并行分工（两个 teammate 写不同的文件，禁止越界）：**
 
 - Rust 后端：Task 1–7、Task 12 的后端部分（`src-tauri/**`）

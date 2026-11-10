@@ -1623,6 +1623,16 @@ mod tests {
     #[test]
     fn detect_vcs_returns_none_for_plain_dir() {
         let dir = tempfile::tempdir().unwrap();
+        // 某些 Windows 环境会把 TEMP 指到仓库内部（典型是开发沙箱）；这时祖先里
+        // 有 `.git`，`detect_vcs` 按设计会识别成 Git，构造不出「无 VCS」场景。
+        // 这是测试环境限制，不是 detect_vcs 的行为问题，跳过即可。
+        if dir.path().ancestors().any(|path| path.join(".git").exists()) {
+            eprintln!(
+                "跳过 detect_vcs_returns_none_for_plain_dir：临时目录位于 Git 仓库内（{}）",
+                dir.path().display()
+            );
+            return;
+        }
         let info = detect_vcs(&dir.path().to_string_lossy());
         assert_eq!(info.vcs_type, VcsType::None);
         assert!(info.url.is_empty());

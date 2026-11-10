@@ -2,7 +2,7 @@
 
 - 日期：2026-11-10
 - 分支：main（沿用现有 cleaner 模块）
-- 状态：待实现
+- 状态：已实现（macOS 已验证；Windows 已编译并通过单测，待实机验收）
 - 关联：`2026-11-06-cleaner-design.md`、`2026-11-09-cleaner-runtime-guard-and-deep-scan-design.md`
 
 ## 1. 背景与目标
@@ -21,7 +21,7 @@
 - 不做 AppCleaner 式的「把任意 .app 拖进来」入口；入口仍是已安装列表。
 - 不改 VPN / 剪贴板 / 打包等其它功能。
 - 不删 `pkgutil` 安装收据（只读，本窗口不列）。
-- Windows 端保持与 macOS 同一套交互，但只做交叉编译检查（本机无法实机验收）。
+- Windows 端保持与 macOS 同一套交互；已在 Windows 主机编译并通过 `cargo test --lib`，但注册表 / UAC / 强杀链路仍需实机验收。
 
 ## 2. 交互流程
 

@@ -117,6 +117,10 @@ pub(crate) fn build_related_files(
 /// 最近未使用；解析失败返回空串（前端隐藏该行）。
 ///
 /// `now` 由调用方注入：生产环境传本地当前时间，单测传固定时间，不依赖时区。
+///
+/// 只有 macOS 的关联文件扫描会读 `mdls` 时间；Windows 侧没有这个文案，
+/// 但单测仍要在所有平台跑这段纯逻辑。
+#[cfg(any(target_os = "macos", test))]
 pub fn last_used_text_from(raw: &str, now: chrono::DateTime<chrono::FixedOffset>) -> String {
     let Ok(parsed) = chrono::DateTime::parse_from_str(raw.trim(), "%Y-%m-%d %H:%M:%S %z") else {
         return String::new();

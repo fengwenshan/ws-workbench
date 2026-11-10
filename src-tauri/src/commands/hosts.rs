@@ -207,7 +207,7 @@ pub fn hosts_open_file_dir() -> Result<(), String> {
 
 // ============================== 集成 smoke ==============================
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

@@ -193,7 +193,7 @@ openconnect 探测失败时，代理页给出按平台区分的安装引导：ma
 左侧图标栏第四个工具（`⌘/Ctrl+4`），四个页签（弹窗拦截仅 Windows 可见）：
 
 - **软件卸载**：Windows 读注册表 `Uninstall` 键（HKLM 64/32 位、HKCU），macOS 扫 `/Applications` 与 `~/Applications`；支持按名称/发布者/位置搜索，按名称、大小、安装日期排序（顺序记在本地）。行内「卸载」打开独立卸载窗口（820×560，macOS 隐藏标题、红绿灯浮在内容上）：按「程序文件 / 支持文件 / 缓存文件」列出关联文件——程序文件 = 主 `.app` + Spotlight/兜底目录找到的同 id 副本，支持/缓存复用残留规则；带大小、版本、置信度，high/medium 默认勾选，low 只列出不勾选，底部「全选」可全选，应用本体始终必选。点「确认删除」先只读检测是否在运行：不在运行直接执行；在运行弹二次确认（进程数与进程名），点「强制退出」先按平台正常退出（macOS `NSRunningApplication.terminate()`、Windows `CloseMainWindow()`），3 秒内退不干净就逐进程强杀（macOS `SIGKILL`、Windows `taskkill /PID … /T /F`），每 250ms 重新检测并补杀重启出来的新进程，全部进程消失后才继续（总上限约 20 秒，退不干净即中止并提示）。随后先跑应用自带卸载程序（macOS 主 `.app` 移入废纸篓；MSI 的 `/I` 自动换 `/X`，需要时一次 UAC），再按本次扫描白名单删除勾选的关联文件：卸载程序已删掉的路径记「跳过」不算失败，需 root 的条目走一次合并授权；结果页给出删除/跳过/失败明细，部分失败可重试，卸载/删除后主列表自动刷新。运行中的应用本体不出现在列表里，命令层也会再拦一次——不能卸载自己。
-- **卸载 ws-workbench 自己**：macOS 安装包（DMG）里带一个「卸载 ws-workbench.command」。双击后先正常退出应用，退不掉会询问是否强制退出；**所有相关进程归零后才继续**，否则直接报「卸载失败」且不删除任何文件。继续后会列出应用本体、数据目录、附件上传目录、剪贴板图片和 WebView 缓存，默认**保留用户数据**，也可以选择「删除全部数据」（二次确认，附件/数据库删除后不可恢复）。自定义到应用数据目录之外的附件目录只提醒、不自动删；真实路径由应用启动/保存设置时写入 `uninstall-info.txt`（纯路径，不含密钥）。Windows 继续使用安装器自带的标准卸载器（设置 → 应用 → 卸载），NSIS 数据清理页待 Windows 实机实现。
+- **卸载 ws-workbench 自己**：macOS 安装包（DMG）里带一个「卸载 ws-workbench.command」。双击后先正常退出应用，退不掉会询问是否强制退出；**所有相关进程归零后才继续**，否则直接报「卸载失败」且不删除任何文件。继续后会列出应用本体、数据目录、附件上传目录、剪贴板图片和 WebView 缓存，默认**保留用户数据**，也可以选择「删除全部数据」（二次确认，附件/数据库删除后不可恢复）。自定义到应用数据目录之外的附件目录只提醒、不自动删；真实路径由应用启动/保存设置时写入 `uninstall-info.txt`（纯路径，不含密钥）。Windows 继续使用安装器自带的标准卸载器（设置 → 应用 → 卸载），安装包里的 NSIS 钩子会在删文件前检查 `ws-workbench.exe`（在运行就问是否强制退出，退不掉直接中止）、读取同一份 `uninstall-info.txt` 展示真实路径，默认保留用户数据，只有明确选择才删 App 自有目录，自定义附件目录只提示不删；静默卸载按保留数据处理。
 - **弹窗拦截**（仅 Windows）：默认关闭，开启后后台线程每 800ms `EnumWindows` 扫可见顶层窗口，按「工具窗口 / 不抢焦点 / 始终置顶 / 无标题 / 尺寸异常 / 类名与标题广告线索 / 进程不在前台」打分，可疑窗口进列表并通过 `popup-detected` 事件实时推给界面。两档模式：**检测模式**（默认）只记录，每条由用户点「关闭 / 隐藏」，同进程 5 秒限流；**拦截模式**（可选，默认关）命中闸门后自动处理——分数达阈值、至少两条命中原因、不在系统进程/外壳窗口保护表、不在忽略名单、同进程冷却 5 秒、每分钟最多 6 个（熔断），设置存 `<data_dir>/popup-settings.json`。「忽略」按进程名记到同目录 `popup-ignore.json`。不注入、不装驱动、不杀进程。
 - **屏幕休眠**：阻止系统空闲睡眠（参考 Amphetamine 的公开电源断言方案），并支持「自动保持规则」（Triggers）：指定 App 运行时 / 接通电源时 / 连接外接显示器时自动保持，条件失效自动释放；手动开启优先，规则只释放自己开的会话。规则存 `<data_dir>/sleep-triggers.json`，后台 5 秒探测一次（`sysinfo` 进程列表、`pmset -g batt` / `GetSystemPowerStatus`、CoreGraphics 活动屏幕数 / `GetSystemMetrics(SM_CMONITORS)`），全部只读、不需要管理员权限。macOS 用 IOKit `IOPMAssertionCreateWithName`（`PreventUserIdleSystemSleep`，不勾「允许屏幕关闭」时再加 `PreventUserIdleDisplaySleep`，断言名 `ws-workbench Keep Awake`）；Windows 用专用线程持有 `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED [| ES_DISPLAY_REQUIRED])`。时长按会话式菜单选（参考 Amphetamine 的「开启新会话」）：不限时 / 5·10·15·20·25·30·45 分钟 / 1·2·3·4·6·8·12 小时，或自定义小时+分钟，点时长立即开始一个会话，到点自动释放（状态查询还有一道惰性回收）；不需要 root / 管理员，也不做登录级保活。
 - **Hosts**：把系统 hosts 的完整内容直接读进等宽编辑器，想加什么行就加什么行，`⌘/Ctrl+S` 保存整份文件（保存前自动备份 + 一次系统授权，取消不会改动文件）。路径固定：macOS `/etc/hosts`，Windows `%SystemRoot%\System32\drivers\etc\hosts`；「备份 N」可展开最近 30 份备份并还原（路径见「打开目录」按钮的提示）。编辑器是 Monaco（VS Code 内核，本地打包、首次打开 Hosts 页签时懒加载）：行号对齐、注释 / IPv4 / IPv6 / 主机名高亮、非法地址标红，支持撤销重做、查找替换（`⌘/Ctrl+F`）、多光标与右键菜单。非 UTF-8 的 hosts 会拒绝编辑，避免写坏原有内容；CRLF 文件会保持原来的换行风格。
@@ -325,6 +325,8 @@ node scripts/release.mjs                    # Windows 版直接在 Windows 主�
 ```
 
 Windows 安装包（NSIS 的 `exe` 与 WiX 的 `msi`）必须在 Windows 主机上构建：Tauri 打 MSI 依赖 WiX Toolset，而 WiX 只有 Windows 可执行文件，交叉编译拿不到。
+
+Windows 安装器启动时，NSIS 会先把自解压内容写到 `%TEMP%`。如果 `%TEMP%` 不可写（受限环境、安全软件拦截、沙箱），会弹出 `NSIS Error: Error writing temporary file. Make sure your temp folder is valid.`——这是运行环境问题，不是安装包损坏。把 `TEMP` / `TMP` 指到一个可写目录再从资源管理器运行安装包即可；构建产物旁的 `安装（临时目录重定向）.cmd` 就是做这件事（把 `TEMP` 设到同目录 `install-tmp` 后启动安装器）。
 
 发布脚本用到的环境变量：
 
@@ -458,7 +460,7 @@ VPN 会话目录同时被主进程和提权 worker 使用，因此不做路径�
 - 域名分流只覆盖系统解析器（getaddrinfo）：自带 DoH/DoT 的应用不受控
 - Windows 上按域名解析出来的 `/32` 由本机转发器在回包前注入；NRPT 退回旧路径时最多晚约 3~15 秒生效。服务端下发的内网范围（默认域名 / split-include）只展示、不参与分流，所以不会再有「服务端一推就接管」的隐式路由
 - 规则与代理模式的改动都会热生效（worker 轮询 `rules.json` / `mode` 后重新布线），不需要断开重连
-- 系统清理的 Windows 运行时行为（注册表枚举、UAC 卸载、工作集/待机列表）只做了交叉编译检查，需按设计文档第 9 节的 Windows 清单实机验收；Windows 安装器自带卸载器目前只删程序文件，数据/附件清理与「进程未退出则中止」的 NSIS 钩子待 Windows 实机实现（计划见 `docs/superpowers/plans/2026-11-10-installer-uninstall.md` 的 Phase W）
+- 系统清理的 Windows 运行时行为（注册表枚举、UAC 卸载、工作集/待机列表）只做了交叉编译检查，需按设计文档第 9 节的 Windows 清单实机验收；安装包的 NSIS 卸载钩子已实现并通过编译，进程未退出则中止、保留/删除数据、自定义附件目录提示仍需在 Windows 实机走一遍（计划见 `docs/superpowers/plans/2026-11-10-installer-uninstall.md` 的 Phase W）
 - `~/.Trash` 内容受 TCC 保护，删除结果以「原路径消失 + trash API 成功」为准
 - 卸载残留只做精确匹配（bundle id / 注册表键 / 精确应用名），存在非标准目录的数据需要手动清理
 - 托盘快捷面板的原生弹出（真实点菜单栏图标）受 macOS 辅助功能/屏幕录制权限限制，自动化测试只覆盖了页面渲染、位置计算与 `cargo check`，首次使用请手动点一下确认弹窗位置与失焦收起

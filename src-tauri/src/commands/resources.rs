@@ -352,20 +352,16 @@ pub(crate) fn uninstall_plugin(home: &Path) -> Result<(), String> {
 }
 
 /// 下载一个候选附件；Gitee 是普通直链，GitHub 的 API asset 地址要带 Accept 头。
+///
+/// 直接读 curl 的 stdout，不落临时文件：Windows 上 `%TEMP%` 可能被受控文件夹
+/// 访问、企业策略或沙箱设成不可写，`curl -o %TEMP%\...` 会以退出码 23 失败，
+/// 但网络其实是通的（版本检查能成功、下载却两个源都报错，现场就是这个现象）。
 fn download_asset(source: &Source, asset: &AssetDto) -> Result<Vec<u8>, String> {
     let url = asset
         .download_url(source.kind)
         .ok_or_else(|| format!("{} 附件缺少下载地址", asset.name))?;
-    let path = std::env::temp_dir().join(format!(
-        "ws-resource-{}-{}.zip",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|value| value.as_millis())
-            .unwrap_or(0)
-    ));
     let mut command = std::process::Command::new("curl");
-    command.args(["-sSfL", "--max-time", "120", "-o", &path.display().to_string()]);
+    command.args(["-sSfL", "--max-time", "120"]);
     if source.kind == SourceKind::Github {
         command.args(["-H", "Accept: application/octet-stream"]);
     }
@@ -374,11 +370,15 @@ fn download_asset(source: &Source, asset: &AssetDto) -> Result<Vec<u8>, String> 
         .output()
         .map_err(|err| format!("系统缺少 curl 或无法执行: {err}"))?;
     if !output.status.success() {
-        let _ = std::fs::remove_file(&path);
-        return Err(format!("下载 {} 失败: {}", asset.name, source.label()));
+        let detail = String::from_utf8_lossy(&output.stderr);
+        let detail = detail.trim();
+        return Err(if detail.is_empty() {
+            format!("下载 {} 失败: {}", asset.name, source.label())
+        } else {
+            format!("下载 {} 失败: {}（{}）", asset.name, source.label(), detail)
+        });
     }
-    let bytes = std::fs::read(&path).map_err(|err| format!("读下载文件失败: {err}"))?;
-    let _ = std::fs::remove_file(&path);
+    let bytes = output.stdout;
     if bytes.is_empty() {
         return Err(format!(
             "从 {} 下载到的插件包是空文件",

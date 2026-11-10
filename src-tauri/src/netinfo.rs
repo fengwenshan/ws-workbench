@@ -13,7 +13,7 @@
 //! 因为网线没插时用户常常正需要这个 MAC。
 
 use std::net::{IpAddr, Ipv6Addr};
-#[cfg(any(unix, test))]
+#[cfg(unix)]
 use std::net::Ipv4Addr;
 
 use serde::{Deserialize, Serialize};
@@ -116,17 +116,17 @@ fn is_ipv6_link_local(ip: &Ipv6Addr) -> bool {
     (ip.segments()[0] & 0xffc0) == 0xfe80
 }
 
-#[cfg(any(unix, test))]
+#[cfg(unix)]
 fn ipv4_prefix(mask: Ipv4Addr) -> u8 {
     u32::from(mask).count_ones() as u8
 }
 
-#[cfg(any(unix, test))]
+#[cfg(unix)]
 fn ipv6_prefix(mask: Ipv6Addr) -> u8 {
     u128::from(mask).count_ones() as u8
 }
 
-#[cfg(any(unix, test))]
+#[cfg(unix)]
 fn format_mac(bytes: &[u8; 6]) -> String {
     bytes
         .iter()
@@ -137,7 +137,7 @@ fn format_mac(bytes: &[u8; 6]) -> String {
 
 /// 物理网卡名称前缀。macOS 是 en0 / en1，Linux 是 eth0 / wlan0 / wlp2s0 / enp3s0 这类。
 /// 仅用于「没有可用 IP 时要不要保留这行」的判断，不影响有 IP 的接口。
-#[cfg(any(unix, test))]
+#[cfg(unix)]
 fn looks_physical(name: &str) -> bool {
     const PREFIXES: &[&str] = &["en", "eth", "em", "wl", "wlan", "enp", "eno", "ens", "wlp"];
     PREFIXES.iter().any(|prefix| name.starts_with(prefix))

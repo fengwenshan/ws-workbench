@@ -45,6 +45,12 @@
     "active": true,
     "targets": "all",
     "createUpdaterArtifacts": true,
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "installerHooks": "./nsis/uninstall-hooks.nsh"
+      }
+    },
     "resources": {
       "resources/zh-Hans.lproj": "zh-Hans.lproj",
       "resources/apps": "apps"
