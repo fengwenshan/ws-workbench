@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref, watch } from "vue";
+import { onMounted, onUnmounted, ref } from "vue";
 import { Button, Modal, message } from "ant-design-vue";
 import {
   resourceInstall,
@@ -7,11 +7,6 @@ import {
   resourceUninstall,
   type ResourceStatus,
 } from "@/api/system";
-
-const props = defineProps<{
-  /** 设置页是否激活（App.vue 的 view === 'settings'）；首次激活时才检查远端版本 */
-  active: boolean;
-}>();
 
 const resources = ref<ResourceStatus[]>([]);
 const loading = ref(false);
@@ -80,16 +75,17 @@ function focus() {
   root.value?.scrollIntoView({ behavior: "smooth", block: "center" });
 }
 
-watch(
-  () => props.active,
-  (active) => {
-    if (active && !loaded) void load(false);
-  },
-  { immediate: true },
-);
+let mountedTimer: ReturnType<typeof setTimeout> | null = null;
 
-onMounted(() => window.addEventListener("ws-focus-resources", focus));
-onUnmounted(() => window.removeEventListener("ws-focus-resources", focus));
+onMounted(() => {
+  // 设置页只挂载一次（v-show 常驻），进来约 0.6s 后静默检查一次，别和首屏抢网络
+  if (!loaded) mountedTimer = setTimeout(() => void load(false), 600);
+  window.addEventListener("ws-focus-resources", focus);
+});
+onUnmounted(() => {
+  if (mountedTimer) clearTimeout(mountedTimer);
+  window.removeEventListener("ws-focus-resources", focus);
+});
 </script>
 
 <template>

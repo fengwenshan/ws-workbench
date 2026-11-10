@@ -273,7 +273,7 @@ async function run(action: () => Promise<unknown>, failureLabel: string) {
       </p>
     </section>
 
-    <ResourcePanel :active="active" />
+    <ResourcePanel />
   </div>
 </template>
 
