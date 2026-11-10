@@ -10,6 +10,8 @@ mod cleaner_sleep;
 // 剪贴板历史（macOS）
 mod clipboard;
 mod config;
+// 「用 DeepSeek 打开」：工作区请求文件 + DSH 插件安装
+mod deepseek;
 // Hosts 在线编辑
 mod hosts;
 // `pub(crate)`：cleaner 模块要复用 openwith 里的图标提取（mac_icon / windows_icons）
@@ -24,6 +26,7 @@ pub use cleaner_popup::*;
 pub use cleaner_sleep::*;
 pub use clipboard::*;
 pub use config::*;
+pub use deepseek::*;
 pub use hosts::*;
 pub use openwith::*;
 pub use project::*;
