@@ -7,8 +7,24 @@ edition = "2021"
 name = "ws_workbench_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+# 开发构建的二进制名带 -dev，发布构建再改回 ws-workbench。
+#
+# macOS 的 Dock 磁贴名取的是**可执行文件名**（菜单栏那个应用菜单名另有一套来源，
+# 见 build.rs 里注入的 CFBundleName）：裸二进制没有 .app 包，`NSProcessInfo.setProcessName`
+# 改不动这两处（试过，重启后仍旧是旧名字），所以开发构建的二进制本身要叫 ws-workbench-dev。
+#   - `tauri dev` 直接 `cargo run`，跑的就是这个 bin target；
+#   - `tauri build` 按 tauri.conf.json 顶层的 mainBinaryName 把产物改名回
+#     ws-workbench，安装包 / 更新载荷 / .app 里的可执行文件都不变。
+# path 必须显式写：tauri CLI 用「src/main.rs 是否已被某个 [[bin]] 占用」判断要不要再
+# 补一个以包名命名的 bin（tauri-cli 的 get_binaries），漏了会多出一个 ws-workbench bin。
+[[bin]]
+name = "ws-workbench-dev"
+path = "src/main.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+# build.rs 里把开发构建的 CFBundleName 合并进 TAURI_CONFIG 用
+serde_json = "1"
 
 [dependencies]
 # macOS 托盘面板要做透明圆角悬浮窗，透明窗口在 macOS 上由这个官方 feature 提供
@@ -83,7 +99,9 @@ winreg = "0.55"
 arboard = "3.7"
 windows = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_Security",
     "Win32_System_DataExchange",
+    "Win32_System_JobObjects",
     "Win32_System_Memory",
     "Win32_System_Power",
     "Win32_System_ProcessStatus",

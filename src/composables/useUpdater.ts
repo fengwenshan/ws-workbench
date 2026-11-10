@@ -1,4 +1,5 @@
 import { ref, computed } from 'vue'
+import { invoke } from '@tauri-apps/api/core'
 import { check } from '@tauri-apps/plugin-updater'
 import { relaunch } from '@tauri-apps/plugin-process'
 import { safeGet, safeSet } from './safeStorage'
@@ -9,6 +10,7 @@ export type UpdateStatus =
   | 'up-to-date'
   | 'available'
   | 'downloading'
+  | 'preparing'
   | 'installed'
   | 'error'
 
@@ -123,7 +125,7 @@ export function useUpdater() {
     totalBytes.value = 0
     percentage.value = 0
     try {
-      await pending.downloadAndInstall((event) => {
+      await pending.download((event) => {
         switch (event.event) {
           case 'Started':
             totalBytes.value = event.data.contentLength ?? 0
@@ -139,6 +141,12 @@ export function useUpdater() {
             break
         }
       })
+      // 下载完再断 VPN：安装阶段才需要 worker 退出（Windows 上它和主程序是同一个
+      // exe，会挡住安装包替换；macOS 上旧 worker 会带着旧隧道继续跑）。
+      // 下载期间用户中途又连上 VPN 的窗口，用这个顺序压到最小。
+      status.value = 'preparing'
+      await invoke('vpn_prepare_update')
+      await pending.install()
       status.value = 'installed'
       return true
     } catch (err: any) {
@@ -149,6 +157,13 @@ export function useUpdater() {
   }
 
   async function restartApp() {
+    // 安装后用户可能又连上了 VPN：重启前尽量先断开。断不掉也要继续重启——
+    // 旧 worker 会在主进程消失后靠 pid / 心跳兜底自行收尾，不会一直挂在后台。
+    try {
+      await invoke('vpn_prepare_update')
+    } catch {
+      // 忽略：这里只是尽量把状态收干净，不阻断「重启生效」
+    }
     await relaunch()
   }
 

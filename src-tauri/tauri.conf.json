@@ -1,6 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "ws-workbench",
+  "mainBinaryName": "ws-workbench",
   "version": "1.0.0",
   "identifier": "com.ws.workbench",
   "build": {

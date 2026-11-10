@@ -354,6 +354,11 @@ fn collect_extra_flavors() -> Vec<(String, Vec<u8>)> {
 pub fn start_poller(app: AppHandle) {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
+        // 开发构建不采集：共享数据库里不会因为两边都在跑而出现重复历史
+        if clipboard_background_disabled_in_dev() {
+            eprintln!("[clipboard] 开发构建不采集剪贴板历史（发布版才启用）");
+            return;
+        }
         std::thread::Builder::new()
             .name("ws-clipboard-poller".to_string())
             .spawn(move || {
@@ -738,9 +743,27 @@ fn save_accelerator(app: &AppHandle, accelerator: &str) -> Result<(), String> {
     store.save().map_err(|err| format!("保存快捷键失败: {err}"))
 }
 
+/// 开发构建（`pnpm exec tauri dev`）不跑剪贴板的后台部分：不注册全局快捷键、不采集历史。
+///
+/// 两个原因：
+/// 1. 全局快捷键是系统级独占：开发版和安装版同时跑时，谁先注册谁拿到，
+///    开发版抢走就会让生产版的面板呼不出来；
+/// 2. 开发版和安装版共用同一个数据库，采集线程两边都跑的话，用户每复制一次
+///    历史里就会出现两条（各自插一条）。剪贴板面板已经开发完，日常开发不需要它。
+///
+/// 发布构建（release）照常注册快捷键、照常采集。
+fn clipboard_background_disabled_in_dev() -> bool {
+    cfg!(debug_assertions)
+}
+
 /// 启动时注册快捷键：优先用户保存的组合，不可用再退回默认值。
 pub fn register_saved_shortcut(app: &AppHandle) {
     use tauri_plugin_global_shortcut::GlobalShortcutExt;
+
+    if clipboard_background_disabled_in_dev() {
+        eprintln!("[clipboard] 开发构建不注册全局快捷键（发布版才启用）");
+        return;
+    }
 
     let saved = match stored_accelerator(app) {
         // 用户主动清空过：不注册快捷键，面板只能从主窗口改回组合后再用
@@ -772,6 +795,10 @@ pub fn register_saved_shortcut(app: &AppHandle) {
 /// 再注销旧的、写回 config.json。
 pub fn apply_shortcut(app: &AppHandle, accelerator: &str) -> Result<String, String> {
     use tauri_plugin_global_shortcut::GlobalShortcutExt;
+
+    if clipboard_background_disabled_in_dev() {
+        return Err("开发构建不注册全局快捷键，请在发布版里修改".to_string());
+    }
 
     let accelerator = accelerator.trim();
     let old = current_accelerator(app);

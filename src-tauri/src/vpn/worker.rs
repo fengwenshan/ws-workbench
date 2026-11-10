@@ -32,6 +32,35 @@ pub const EXIT_OK: i32 = 0;
 pub const EXIT_NO_REQUEST: i32 = 2;
 pub const EXIT_FAILED: i32 = 3;
 
+/// 判断某个 PID 对应的进程是否还在。
+///
+/// worker 用来看主进程是否还活着：任务管理器强杀是「进程直接消失」，
+/// 这条判断比心跳文件更及时，也不受磁盘写失败影响。
+#[cfg(target_os = "windows")]
+fn process_running(pid: u32) -> bool {
+    use windows::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
+    use windows::Win32::System::Threading::{
+        OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+    };
+
+    // SAFETY: 句柄只在本函数内使用，用完立刻关闭。
+    unsafe {
+        let Ok(handle) = OpenProcess(PROCESS_SYNCHRONIZE, false, pid) else {
+            // 打不开一般就是进程已经没了；万一只是权限不足，心跳还会兜底
+            return false;
+        };
+        let state = WaitForSingleObject(handle, 0);
+        let _ = CloseHandle(handle);
+        state == WAIT_TIMEOUT
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn process_running(pid: u32) -> bool {
+    // SAFETY: 信号 0 只做存在性/权限检查，不会给目标进程发任何信号。
+    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+}
+
 struct Worker {
     session: VpnSession,
     request: VpnRequest,
@@ -445,6 +474,17 @@ Get-Service -Name Dnscache | Format-List Status,StartType
     /// （间隔 ≥1s）都过期，并且把实测的秒数写进日志，下次能一眼分辨是
     /// 「主进程真没了」还是「心跳抖动」。
     fn check_parent_alive(&mut self) {
+        // 先看主进程 PID：任务管理器「结束任务」时进程立刻消失，这条路径不用等
+        // 心跳过期。心跳是给「PID 文件还没写进来 / 拿不到」的情况兜底的。
+        if let Some(pid) = self.session.read_gui_pid() {
+            if !process_running(pid) {
+                if !self.parent_lost {
+                    self.parent_lost = true;
+                    self.log("[worker] 主进程已退出（PID 已消失），自动收尾并退出");
+                }
+                return;
+            }
+        }
         if self.last_alive_check.elapsed() < Duration::from_secs(1) {
             return;
         }
@@ -969,6 +1009,20 @@ Get-Service -Name Dnscache | Format-List Status,StartType
             self.request.connector_path,
             spawn_args.join(" ")
         ));
+
+        // Windows：把 openconnect 绑到「随 worker 一起退出」的作业对象上。
+        // worker 被任务管理器强杀 / 崩溃时不会执行清理代码，只有这个作业对象能
+        // 保证 openconnect 跟着结束，隧道不会留在后台。
+        #[cfg(target_os = "windows")]
+        let _tunnel_job = match crate::vpn::win_job::KillOnCloseJob::attach(&child) {
+            Ok(job) => Some(job),
+            Err(err) => {
+                self.log(&format!(
+                    "[隧道] 无法让 openconnect 随 worker 一起退出（{err}），继续连接"
+                ));
+                None
+            }
+        };
 
         let rx = pump_child_output(&mut child);
         self.set_phase(VpnPhase::Connecting, "正在建立隧道并等待服务端下发地址");
@@ -1566,6 +1620,16 @@ mod tests {
     }
 
     #[test]
+    fn process_running_detects_self_and_missing_pid() {
+        assert!(process_running(std::process::id()), "自己的进程必须判成存活");
+        // 999999 远大于系统 pid_max，必然不存在（不能拿负数，Unix 上会被解释成 kill(-1)）
+        assert!(
+            !process_running(999_999),
+            "不存在的 PID 必须判成已退出，否则强杀界面后 worker 不会收尾"
+        );
+    }
+
+    #[test]
     fn single_stale_heartbeat_does_not_kill_the_tunnel() {
         // 现场：CSTP 刚连上，2 秒后 worker 就宣布「心跳已停止」把隧道收了。
         // 现在要求连续两次过期才判定，单次抖动不能误杀。
@@ -1611,6 +1675,38 @@ mod tests {
         worker.last_alive_check = std::time::Instant::now() - std::time::Duration::from_secs(2);
         worker.check_parent_alive();
         assert!(worker.parent_lost, "连续两次过期才算真的没了");
+    }
+
+    #[test]
+    fn dead_gui_pid_is_detected_immediately() {
+        // 界面进程被强杀时 PID 文件里的进程已经不在了，worker 必须立刻收尾，
+        // 不能等到心跳过期（否则用户会觉得「进程都结束了 VPN 还连着」）。
+        let dir = crate::test_support::TempDir::new("worker-session-pid");
+        let session = VpnSession::new(dir.path().to_path_buf());
+        session.ensure().unwrap();
+        session.write_gui_pid(999_999).unwrap();
+        let request = VpnRequest {
+            conn_identity: String::new(),
+            proxy_mode: "rule".to_string(),
+            profile_id: "p".into(),
+            profile_name: "n".into(),
+            server: "s".into(),
+            username: "u".into(),
+            password: "p".into(),
+            protocol: "anyconnect".into(),
+            connector: crate::vpn::models::ConnectorKind::Auto,
+            connector_path: "x".into(),
+            rules: vec![],
+            default_policy: "DIRECT".into(),
+            extra_args: vec![],
+            script_path: "s".into(),
+            hook_exe: "h".into(),
+            created_at: String::new(),
+        };
+        let mut worker = Worker::new(session, request);
+        // 第一次调用就该判定，不需要等第二次心跳
+        worker.check_parent_alive();
+        assert!(worker.parent_lost, "PID 已消失时必须立刻判定主进程没了");
     }
 
     #[test]

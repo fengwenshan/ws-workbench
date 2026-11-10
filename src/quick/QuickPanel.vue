@@ -4,6 +4,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { useConfig } from '@/composables/useConfig'
 import { useVpn } from '@/composables/useVpn'
 import { useKeepAwake } from '@/composables/useKeepAwake'
+import { isDevBuild } from '@/api/app'
 import type { VpnProxyMode } from '@/types/vpn'
 
 /**
@@ -18,6 +19,12 @@ const keepAwake = useKeepAwake()
 
 type Tab = 'vpn' | 'sleep'
 const tab = ref<Tab>('vpn')
+
+/** 开发构建时在页签右侧挂一个 dev 标记，和安装版的面板区分开 */
+const devBuild = ref(false)
+void isDevBuild().then((dev) => {
+  devBuild.value = dev
+})
 
 // ============================== 休眠 ==============================
 
@@ -203,6 +210,7 @@ onUnmounted(() => {
           <span class="qp-dot" :class="keepAwake.active ? 'on' : 'off'" aria-hidden="true" />
         </button>
       </div>
+      <span v-if="devBuild" class="qp-dev-tag" title="开发构建">dev</span>
     </header>
 
     <div class="qp-body">
@@ -377,6 +385,22 @@ body,
   height: 2px;
   border-radius: 2px;
   background: var(--primary);
+}
+
+/* 开发构建标记：小圆角标签，固定在页签右侧 */
+.qp-dev-tag {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 7px;
+  border-radius: 9px;
+  background: var(--bg-tag);
+  color: var(--text-tag);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  user-select: none;
 }
 
 .qp-dot {

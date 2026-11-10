@@ -37,6 +37,8 @@ pub const MODE_FILE: &str = "mode";
 pub const RULES_FILE: &str = "rules.json";
 /// 父进程心跳：主进程连接期间定时刷新 mtime，worker 靠它判断主进程是否还活着
 pub const ALIVE_FILE: &str = "main.alive";
+/// 主进程 PID，worker 用来快速感知「界面进程已经没了」
+pub const GUI_PID_FILE: &str = "main.pid";
 
 /// 日志读取游标。
 ///
@@ -106,6 +108,27 @@ impl VpnSession {
         self.dir.join(ALIVE_FILE)
     }
 
+    /// 主进程 PID 文件：worker 用它判断「父进程还在不在」，比心跳文件快得多
+    pub fn gui_pid_path(&self) -> PathBuf {
+        self.dir.join(GUI_PID_FILE)
+    }
+
+    /// 记下当前主进程 PID（连接前由主进程写入）
+    pub fn write_gui_pid(&self, pid: u32) -> Result<(), String> {
+        self.ensure()?;
+        fs::write(self.gui_pid_path(), pid.to_string())
+            .map_err(|e| format!("写主进程 PID 失败: {}", e))
+    }
+
+    /// 读主进程 PID；没写过或内容坏了都返回 None（worker 退回心跳判断）
+    pub fn read_gui_pid(&self) -> Option<u32> {
+        fs::read_to_string(self.gui_pid_path())
+            .ok()?
+            .trim()
+            .parse()
+            .ok()
+    }
+
     /// 读取当前的运行标识
     pub fn run_id(&self) -> String {
         fs::read_to_string(self.dir.join(RUN_ID_FILE))
@@ -128,6 +151,7 @@ impl VpnSession {
             self.mode_path(),
             self.rules_path(),
             self.alive_path(),
+            self.gui_pid_path(),
             // 这些是上一轮提权/启动/PowerShell 的现场文件，不清理会让新会话的
             // 收集包混入旧内容，误判成「这次也执行了同样的命令」。
             self.dir.join("powershell.log"),
@@ -601,6 +625,18 @@ mod tests {
         assert!(age.as_secs() < 5);
         session.remove_control_files();
         assert!(session.alive_age().is_none());
+    }
+
+    #[test]
+    fn gui_pid_roundtrip_and_cleared_by_prepare() {
+        let session = temp_session("gui-pid");
+        session.prepare().unwrap();
+        assert!(session.read_gui_pid().is_none());
+        session.write_gui_pid(4321).unwrap();
+        assert_eq!(session.read_gui_pid(), Some(4321));
+        // 新会话必须把上一轮的 PID 清掉，否则 worker 会拿旧 PID 判断父进程死活
+        session.prepare().unwrap();
+        assert!(session.read_gui_pid().is_none());
     }
 
     #[test]

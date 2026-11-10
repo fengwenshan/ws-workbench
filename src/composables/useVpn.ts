@@ -24,7 +24,6 @@ import { BUSY_PHASES } from '@/types/vpn'
 /** 后端事件名，与 Rust 侧 vpn/commands.rs 保持一致 */
 const EVENT_STATUS = 'vpn-status'
 const EVENT_LOG = 'vpn-log'
-const EVENT_TRAY = 'vpn-tray'
 
 function emptyStatus(): VpnStatus {
   return {

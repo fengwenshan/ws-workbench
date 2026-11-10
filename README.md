@@ -1,6 +1,6 @@
 # ws-workbench
 
-基于 Tauri 2 的桌面工作台，把交付日常收进一个窗口：分组/项目管理、Markdown 笔记与加密附件、Layui 项目打包、VPN 规则分流、Hosts 在线编辑、运行环境自检；还带一份加密落盘的剪贴板历史（文本 / 图片 / 图文，macOS / Windows）。主页按「分组 → 项目」组织内容，系统 / 代理 / 设置从托盘进入；关闭窗口不退出应用，常驻系统托盘。
+基于 Tauri 2 的桌面工作台，把交付日常收进一个窗口：分组/项目管理、Markdown 笔记与加密附件、Layui 项目打包、VPN 规则分流、Hosts 在线编辑、运行环境自检；还带一份加密落盘的剪贴板历史（文本 / 图片 / 图文，macOS / Windows）。主页按「分组 → 项目」组织内容，系统 / 代理 / 设置从左侧图标栏进入；关闭窗口不退出应用，常驻系统托盘（左键弹快捷面板，右键只有「显示主界面 / 退出」两项）。
 
 ## 功能
 
@@ -185,7 +185,7 @@ openconnect 探测失败时，代理页给出按平台区分的安装引导：ma
 
 ### 系统
 
-左侧图标栏第四个工具（`⌘/Ctrl+4`，托盘菜单里也叫「系统」），四个页签（弹窗拦截仅 Windows 可见）：
+左侧图标栏第四个工具（`⌘/Ctrl+4`），四个页签（弹窗拦截仅 Windows 可见）：
 
 - **软件卸载**：Windows 读注册表 `Uninstall` 键（HKLM 64/32 位、HKCU），macOS 扫 `/Applications` 与 `~/Applications`；支持按名称/发布者/位置搜索，按名称、大小、安装日期排序（顺序记在本地）。点「确认卸载」先只读检测应用是否在运行：不在运行直接卸载；在运行则弹二次确认（显示进程数与进程名），确认后先按平台正常退出（macOS `NSRunningApplication.terminate()`、Windows `CloseMainWindow()`），5 秒内退不干净就中止本次卸载并提示手动退出，不强制结束进程。卸载执行 `UninstallString`（MSI 的 `/I` 自动换成 `/X`，需要时一次 UAC），macOS 把 `.app` 移入废纸篓；没有卸载命令的条目提供「强制移除」（Windows 删注册表项）。卸载后按 bundle id / 注册表键匹配固定残留位，并对 macOS 用户目录做低置信度深扫（厂商二级目录、helper 容器、ByHost 等，最多 200 条、默认不勾选）；残留按「文件系统 / 注册表」分组、带置信度展示，勾选删除后自动重扫，已删条目从列表消失。
 - **弹窗拦截**（仅 Windows）：默认关闭，开启后后台线程每 800ms `EnumWindows` 扫可见顶层窗口，按「工具窗口 / 不抢焦点 / 始终置顶 / 无标题 / 尺寸异常 / 类名与标题广告线索 / 进程不在前台」打分，可疑窗口进列表并通过 `popup-detected` 事件实时推给界面。两档模式：**检测模式**（默认）只记录，每条由用户点「关闭 / 隐藏」，同进程 5 秒限流；**拦截模式**（可选，默认关）命中闸门后自动处理——分数达阈值、至少两条命中原因、不在系统进程/外壳窗口保护表、不在忽略名单、同进程冷却 5 秒、每分钟最多 6 个（熔断），设置存 `<data_dir>/popup-settings.json`。「忽略」按进程名记到同目录 `popup-ignore.json`。不注入、不装驱动、不杀进程。
@@ -229,7 +229,7 @@ openconnect 探测失败时，代理页给出按平台区分的安装引导：ma
 
 ### 托盘
 
-右键菜单：显示主窗口 / 系统 / 代理 / 设置 / 连接 VPN / 断开 VPN / 退出。左键单击图标弹出快捷面板（VPN / 休眠两个页签，见上），菜单只在右键时出现。点「退出」会先请求 worker 收尾再结束进程，否则可能留下没人回收的路由。关闭主窗口只是隐藏，应用继续在托盘里运行。
+右键菜单只有两项：**显示主界面** / **退出**。左键单击图标弹出快捷面板（VPN / 休眠两个页签，见上），菜单只在右键时出现。点「退出」等于结束整个应用和它拉起的进程：先给 worker 写停止标记（`stop.flag`），然后主进程立刻退出，托盘和任务栏图标当场消失；worker 是独立进程，会自己杀掉 openconnect、还原路由和 DNS 后退出（见上面的 `main.pid` / 心跳兜底），因此不需要卡住界面等它收尾，也就不用承受「点了退出好几秒图标才消失」。唯一代价是：从解压目录直接运行便携版时，退出后立刻删目录可能会被 worker 短暂占用，等一两秒再删即可。关闭主窗口只是隐藏，应用继续在托盘里运行。
 
 快捷面板是独立的透明无边框窗口：点面板外部（失焦）或再点一次托盘图标收起，面板上没有关闭按钮，也没有底部操作栏（打开主窗口走托盘右键菜单）；窗口高度按当前页签内容自适应，切换 VPN / 休眠会重新量一次，不会留固定高度那种底部空白。macOS 的透明窗口依赖 Tauri 的 `macos-private-api` feature（`Cargo.toml` + `tauri.conf.json` 的 `macOSPrivateApi`），**直装/DMG 渠道没问题，但用不了 Mac App Store**。
 
@@ -280,11 +280,28 @@ Vite 固定在 8790 端口并开启 `strictPort`，端口被占用会直接失�
 powershell -ExecutionPolicy Bypass -File scripts\dev-restart.ps1
 ```
 
-脚本按仓库路径匹配进程命令行，只结束本仓库的 `ws-workbench`、vite、tauri 进程，不误伤其他项目；检测到 `openconnect` 仍在运行会直接退出，避免留下无人回收的路由。
+脚本按仓库路径匹配进程命令行，只结束本仓库的 `ws-workbench*`（含开发版的 `ws-workbench-dev`）、vite、tauri 进程，不误伤其他项目；检测到 `openconnect` 仍在运行会直接退出，避免留下无人回收的路由。
 
 脚本不经过 pnpm，因为本机 PATH 里的 pnpm 来自 TRAE 自带的 corepack 0.32.0，它给 pnpm 12 生成的 shim 指向 `bin/pnpm.cjs`，而 pnpm 12 只提供 `bin/pnpm.mjs`，调用必然 `MODULE_NOT_FOUND`。脚本改为直接调用 `node_modules\.bin\tauri.cmd`，并用 `-c` 把 `beforeDevCommand` 覆盖成 `npm run dev`。另装一份能跑通的 pnpm 12.5.1 也不合适：它会把 `packageManagerDependencies` 和 `@pnpm/exe.*` 写进 `pnpm-lock.yaml`，CI 用的 pnpm 10 读不懂这个格式。
 
 脚本文件必须保存为带 BOM 的 UTF-8。Windows PowerShell 5.1 对无 BOM 的 `.ps1` 按 ANSI 解码，中文注释会被解成乱码并把脚本解析坏。
+
+### 开发版与安装版同时运行
+
+开发构建（`pnpm exec tauri dev` / 本地 debug 二进制）的应用名是 `ws-workbench-dev`，发布版是 `ws-workbench`，两者可以同机同时各开一个：
+
+- macOS：Dock 磁贴名、窗口标题显示 `ws-workbench-dev`；**菜单栏左上角那个应用名改不动，别指望它**——那是 AppKit 按应用身份画的，不是我们菜单里的文字。已经试过并排除：改可执行文件名、`NSProcessInfo.setProcessName`、`build.rs` 往二进制 `Info.plist` 里注入 `CFBundleName`（`otool -X -s __TEXT __info_plist` 确认嵌进去的是 `ws-workbench-dev`）、启动后补写 `NSApp.mainMenu` 第 0 项的 title（每 200ms 到每秒重写一次）：前三个都无效，补写能让菜单项 title 真的变成 `ws-workbench-dev`（读回来也是），但菜单栏显示始终是 `ws-workbench`，系统会按应用身份重新画。所以开发版靠这几处区分：Dock 名、窗口标题、托盘面板的 `dev` 标签、主窗口标题栏更新按钮后面的 `dev` 标签
+  - Dock 磁贴名 = **可执行文件名**：开发构建的 bin target 直接叫 `ws-workbench-dev`（`target/debug/ws-workbench-dev`），打包时由 `tauri.conf.json` 顶层的 `mainBinaryName: "ws-workbench"` 把产物改名回 `ws-workbench`；
+  - `src-tauri/build.rs` 在 debug profile 下仍会把 `bundle.macOS.bundleName` 合并进 `TAURI_CONFIG`，让二进制里嵌的 `Info.plist` 的 `CFBundleName`、`NSRunningApplication.localizedName` 是 `ws-workbench-dev`（release profile 不注入）；对菜单栏没用，只是让系统信息/关于面板里的名字一致
+- Windows：自绘标题栏、窗口标题、任务栏都显示 `ws-workbench-dev`；单实例互斥量也按构建区分（`ws-workbench-single-instance` / `ws-workbench-dev-single-instance`）
+- 单实例边界：发布版之间互斥、开发版之间互斥，但一个发布版 + 一个开发版可以并存（不是多开程序）
+- WebView2 用户数据目录按构建分开（`webview` / `webview-dev`），避免两个进程锁同一个目录
+- 数据库与 `config.json` 仍然共用（同一个 identifier），改动会互相可见；因此开发版**不跑剪贴板后台**：不注册全局快捷键、不采集历史（共享库里否则每复制一次会出现两条），也不允许在设置里改快捷键（否则会抢发布版的 `⌘⇧V`、改掉共用的组合键）
+- 开发版**不检查更新**：启动时那次静默检查和每天 10:00/16:00 的定时校验都跳过，标题栏也不显示「更新」按钮——裸二进制装不了更新包，Windows 上还会把 `target/debug/ws-workbench-dev.exe` 覆盖成发布版
+- 开发构建的标识：托盘快捷面板在页签右侧多一个 `dev` 小标签（`QuickPanel.vue` 的 `.qp-dev-tag`），主窗口标题栏在「更新」按钮后面也多一个 `dev` 小标签（`App.vue` 的 `.titlebar-dev-tag`），发布版两处都不渲染；两个窗口的网页标题也按构建名（`ws-workbench-dev`）
+- 名称来源细节：`tauri dev` 实际是 `cargo run --no-default-features`（关掉 `custom-protocol`），这时 `tauri-codegen` 才会把 `Info.plist` 嵌进二进制；`tauri build` 带 `custom-protocol` 且打包成 `.app`，名字走包的 `Info.plist`，与开发版互不影响
+- 调试这类「名字没变」的问题注意：dev 版有单实例互斥，旧进程没退干净时再启动 `tauri dev`，新进程会直接退出、把旧窗口顶到前面，看起来就像「重启了还是旧名字」；先确认 `pgrep -fl ws-workbench` 没有输出再启动
+- 开发构建的 exe / 进程名变了，所以按进程名找本应用的脚本都用通配：`ws-workbench*`（`dev-restart.ps1`、`collect-vpn-logs.ps1`）；前端 cleaner 的「不自动处理本应用窗口」按当前 exe 名兜底比较，开发版也命中
 
 ## 构建与发布
 
@@ -355,6 +372,8 @@ macOS 两个架构都在 `macos-latest`（arm64）上跑，Intel 版用 `--targe
 
 客户端启动时静默校验一次，之后每天 10:00 与 16:00 各校验一次；平时标题栏不显示更新入口，只有发现新版本时才在原位置显示「更新」按钮，点它下载安装（装好后按钮变成「重启生效」）。不弹横幅、不额外提示。
 
+更新与 VPN 的边界：点「更新」时如果 VPN 正在连接 / 已连接，先弹确认框，确认后**先下载安装包、再断开 VPN、最后才安装**——顺序不能反。原因是安装阶段 worker 必须已经退出：Windows 上 worker 和主程序是同一个 `ws-workbench.exe`，它没退时安装包替换不了文件（而且 worker 是提权的，安装程序未必收得掉）；macOS 上旧 worker 还活着的话，更新重启后新界面显示「未连接」，但隧道和路由还在旧进程那边。断开走 `vpn_prepare_update`：写停止标记后最多等 10 秒让 worker 杀 openconnect、还原路由和 DNS，超时直接取消这次更新并提示手动断开，绝不把安装做到一半。VPN 没连时这一步直接放行。
+
 ## 配置与数据
 
 业务数据（分组、项目、笔记、附件元信息、VPN 配置、规则集）存在应用私有目录的 `ws-workbench.db`（SQLite）中：表里只留 `id`、`group_id`、`sort_order` 等少量明文列，每行内容序列化成 JSON 后用 SM4 信封加密，存进 `payload` 列。`AppConfig` 与前端命令保持不变，加载时从多表组装，保存时与内存快照做 diff、事务内只写变化的行。
@@ -378,10 +397,13 @@ VPN 会话目录同时被主进程和提权 worker 使用，因此不做路径�
 | `worker.log` / `script.log` | worker 与 vpnc-script 日志 |
 | `stop.flag` | 请求 worker 停止 |
 | `mode` / `rules.json` | 运行期代理模式与规则集（主进程写、worker 轮询后重新布线） |
-| `main.alive` | 父进程心跳，worker 靠它判断主进程是否还活着 |
+| `main.pid` | 主进程 PID，worker 每个循环检查一次，界面进程被强杀时秒级收尾 |
+| `main.alive` | 父进程心跳，`main.pid` 拿不到时的兜底（超过 10 秒没刷新就判主进程已死） |
 | `script/` | 生成的 vpnc-script |
 
 超时与轮询节奏：连接超时 120 秒，守护周期 15 秒，状态轮询 600 毫秒。worker 退出码 `0` 正常、`2` 无请求、`3` 失败。
+
+主进程被强杀（任务管理器结束任务、崩溃）时，worker 会在 200 毫秒内从 `main.pid` 发现父进程消失，按正常流程结束 openconnect、还原路由与 DNS 后退出；`main.alive` 心跳过期是兜底路径（约 12 秒）。如果连 worker 一起被杀，Windows 上 openconnect 挂在带 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 的作业对象里，worker 句柄一关就会被系统结束，隧道不会留在后台（残留的路由/NRPT 规则会在下次连接时由 `cleanup_stale` 清掉）。
 
 ## 平台与限制
 

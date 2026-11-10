@@ -9,10 +9,7 @@ import { useConfig } from "@/composables/useConfig";
 import { usePack } from "@/composables/usePack";
 import { useUpdater } from "@/composables/useUpdater";
 import { useVpn } from "@/composables/useVpn";
-import {
-  useWorkbenchLayout,
-  type AppView,
-} from "@/composables/useWorkbenchLayout";
+import { useWorkbenchLayout } from "@/composables/useWorkbenchLayout";
 import { useEntitySelection } from "@/composables/useEntitySelection";
 import { useProjectForm } from "@/composables/useProjectForm";
 import { useDeleteConfirm } from "@/composables/useDeleteConfirm";
@@ -29,6 +26,19 @@ import SettingsPanel from "@/components/settings/SettingsPanel.vue";
 import CleanerPanel from "@/components/cleaner/CleanerPanel.vue";
 import QuickOpenPalette from "@/components/QuickOpenPalette.vue";
 import AttachmentPreview from "@/components/AttachmentPreview.vue";
+import { getAppName, isDevBuild } from "@/api/app";
+
+/** 标题栏上的应用名：开发构建带 -dev，发布版是 ws-workbench（由 Rust 侧按构建给出） */
+const appName = ref("ws-workbench");
+void getAppName().then((name) => {
+  appName.value = name;
+});
+
+/** 开发构建时在标题栏更新按钮后面挂一个 dev 标签，一眼区分开发版和发布版 */
+const devBuild = ref(false);
+void isDevBuild().then((value) => {
+  devBuild.value = value;
+});
 
 const {
   config,
@@ -275,46 +285,17 @@ const {
   ensureSelection,
 });
 
-// 托盘菜单只负责转发动作，具体行为在这里决定
-let trayUnlisten: UnlistenFn | null = null;
-let navUnlisten: UnlistenFn | null = null;
+// 打开应用先静默检查一次；之后每天 10:00 / 16:00 自动校验。
+// 开发构建一律不查：裸二进制装不了更新（Windows 上还会把 dev 可执行文件覆盖成发布版），
+// 而且开发版和生产版同时开着时没必要两边都去 GitHub 拉清单。
 onMounted(async () => {
-  // 托盘里的页面入口：系统 / 代理 / 设置
-  navUnlisten = await listen<string>("nav-tray", (event) => {
-    const map: Record<string, AppView> = {
-      "nav-cleaner": "cleaner",
-      "nav-proxy": "proxy",
-      "nav-settings": "settings",
-    };
-    const target = map[event.payload];
-    if (target) selectTool(target);
-  });
-
-  trayUnlisten = await listen<string>("vpn-tray", async (event) => {
-    // VPN 动作统一落到「代理」页展示
-    selectTool("proxy");
-    switch (event.payload) {
-      case "vpn-connect":
-        await vpn.toggleConnection();
-        break;
-      case "vpn-disconnect":
-        await vpn.disconnect();
-        break;
-    }
-  });
-});
-onUnmounted(() => {
-  trayUnlisten?.();
-  trayUnlisten = null;
-  navUnlisten?.();
-  navUnlisten = null;
-});
-
-// 打开应用先静默检查一次；之后每天 10:00 / 16:00 自动校验
-onMounted(async () => {
+  if (await isDevBuild()) return;
   await checkUpdate({ silent: true });
 });
-onMounted(startDailyCheck);
+onMounted(async () => {
+  if (await isDevBuild()) return;
+  startDailyCheck();
+});
 onUnmounted(stopDailyCheck);
 
 onMounted(async () => {
@@ -371,23 +352,28 @@ onUnmounted(() => {
 
 const updateBusy = computed(
   () =>
-    updateStatus.value === "checking" || updateStatus.value === "downloading",
+    updateStatus.value === "checking" ||
+    updateStatus.value === "downloading" ||
+    updateStatus.value === "preparing",
 );
 
-// 只有出现新版本时才在标题栏原位置显示蓝色「更新」；平时这块留空
+// 只有出现新版本时才在标题栏原位置显示蓝色「更新」；平时这块留空；开发构建永不显示
 const updateActionable = computed(
   () =>
-    updateStatus.value === "available" ||
-    updateStatus.value === "downloading" ||
-    updateStatus.value === "installed" ||
-    // 下载/安装失败但版本信息还在时保留按钮，给一个「重试」入口
-    (updateStatus.value === "error" && updateInfo.value !== null),
+    !devBuild.value &&
+    (updateStatus.value === "available" ||
+      updateStatus.value === "downloading" ||
+      updateStatus.value === "preparing" ||
+      updateStatus.value === "installed" ||
+      // 下载/安装失败但版本信息还在时保留按钮，给一个「重试」入口
+      (updateStatus.value === "error" && updateInfo.value !== null)),
 );
 
 const updateButtonLabel = computed(() => {
   if (updateStatus.value === "downloading") {
     return `下载中 ${Math.floor(updatePercentage.value)}%`;
   }
+  if (updateStatus.value === "preparing") return "准备中";
   if (updateStatus.value === "installed") return "重启生效";
   if (updateStatus.value === "error") return "重试";
   return "更新";
@@ -399,6 +385,7 @@ const updateButtonTitle = computed(() => {
   }
   if (updateStatus.value === "installed") return "重启应用以完成更新";
   if (updateStatus.value === "downloading") return "正在下载更新";
+  if (updateStatus.value === "preparing") return "正在断开 VPN 并准备安装";
   if (updateStatus.value === "error") return updateError.value;
   return "更新";
 });
@@ -412,6 +399,19 @@ async function installPendingUpdate() {
 
 async function handleUpdateAction() {
   if (updateStatus.value === "available") {
+    // VPN 连着时更新必须先断开：不先问一句，用户会觉得隧道莫名其妙掉了
+    if (vpn.isConnected || vpn.phaseBusy || vpn.connecting) {
+      Modal.confirm({
+        title: "更新前先断开 VPN",
+        content: vpn.isConnected
+          ? "VPN 已连接。安装更新会先断开 VPN（还原路由和 DNS），然后退出并重启应用。"
+          : "VPN 正在连接。安装更新会先取消这次连接，然后退出并重启应用。",
+        okText: "继续更新",
+        cancelText: "取消",
+        onOk: () => installPendingUpdate(),
+      });
+      return;
+    }
     await installPendingUpdate();
     return;
   }
@@ -511,7 +511,7 @@ async function handlePack(project: any, asZip: boolean = false) {
            Windows 自绘标题栏需要品牌标识，保持原样 -->
       <div v-if="!isMac" class="titlebar-brand">
         <img class="app-icon" :src="appIcon" alt="" draggable="false" />
-        <span class="app-name">ws-workbench</span>
+        <span class="app-name">{{ appName }}</span>
       </div>
       <!-- 居中搜索：仿 VS Code 命令中心，点击或 ⌘/Ctrl+P 呼出快速搜索 -->
       <button
@@ -538,6 +538,7 @@ async function handlePack(project: any, asZip: boolean = false) {
         >
           {{ updateButtonLabel }}
         </button>
+        <span v-if="devBuild" class="titlebar-dev-tag" title="开发构建">dev</span>
       </div>
       <div v-if="isWindows" class="window-controls" aria-label="窗口控制">
         <button
@@ -1204,6 +1205,22 @@ async function handlePack(project: any, asZip: boolean = false) {
 }
 .update-btn-titlebar {
   width: auto;
+}
+
+/* 开发版标识：标题栏「更新」按钮后面那个 dev 小标签（发布版不渲染） */
+.titlebar-dev-tag {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 7px;
+  border-radius: 9px;
+  background: var(--bg-tag);
+  color: var(--text-tag);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  user-select: none;
 }
 
 .config-section {

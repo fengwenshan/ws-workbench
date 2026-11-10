@@ -25,15 +25,39 @@ pub(crate) mod test_support;
 pub mod vpn;
 
 use tauri::{
-    menu::{Menu, MenuItem, PredefinedMenuItem},
+    menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Manager, Runtime, WindowEvent,
+    AppHandle, Manager, Runtime, WindowEvent,
 };
 
-/// 托盘菜单里点击 VPN 相关项时推给前端的事件名
-pub const EVENT_VPN_TRAY: &str = "vpn-tray";
-/// 托盘菜单里点击页面入口（清理 / 代理 / 设置）时推给前端的事件名
-pub const EVENT_NAV_TRAY: &str = "nav-tray";
+/// 应用基础名（发布版显示名）
+pub(crate) const APP_BASE_NAME: &str = "ws-workbench";
+
+/// 是否开发构建：`pnpm exec tauri dev` 和本地 debug 二进制都是 true。
+pub(crate) fn is_dev_build() -> bool {
+    cfg!(debug_assertions)
+}
+
+/// 当前构建的应用显示名：开发版拼 `-dev`，和安装版同机同时运行时能一眼区分。
+pub(crate) fn app_display_name() -> String {
+    if is_dev_build() {
+        format!("{APP_BASE_NAME}-dev")
+    } else {
+        APP_BASE_NAME.to_string()
+    }
+}
+
+/// 需要按构建区分开的目录后缀：发布版空串，开发版 `-dev`。
+///
+/// 主要给 WebView2 用户数据目录用：开发版和安装版各用各的，避免两个进程
+/// 锁同一个用户数据目录。
+fn build_dir_suffix() -> &'static str {
+    if is_dev_build() {
+        "-dev"
+    } else {
+        ""
+    }
+}
 
 /// 托盘快捷面板的窗口 label（前端 `/quick.html`）
 pub const QUICK_PANEL_LABEL: &str = "quick-panel";
@@ -73,7 +97,7 @@ fn ensure_single_instance() -> bool {
     const ERROR_ALREADY_EXISTS: i32 = 183;
     const SW_RESTORE: i32 = 9;
 
-    let name: Vec<u16> = "Local\\ws-workbench-single-instance\0"
+    let name: Vec<u16> = format!("Local\\{}-single-instance\0", app_display_name())
         .encode_utf16()
         .collect();
     let handle = unsafe { CreateMutexW(std::ptr::null_mut(), 0, name.as_ptr()) };
@@ -85,7 +109,7 @@ fn ensure_single_instance() -> bool {
 
     if std::io::Error::last_os_error().raw_os_error() == Some(ERROR_ALREADY_EXISTS) {
         // 已有实例：尽量把它从托盘/最小化状态叫出来，然后第二个进程退出。
-        let title: Vec<u16> = "ws-workbench\0".encode_utf16().collect();
+        let title: Vec<u16> = format!("{}\0", app_display_name()).encode_utf16().collect();
         let window = unsafe { FindWindowW(std::ptr::null(), title.as_ptr()) };
         if !window.is_null() {
             unsafe {
@@ -149,7 +173,7 @@ fn set_dock_icon() {
 fn setup_app_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     use tauri::menu::{Menu, PredefinedMenuItem, Submenu};
 
-    let name = app.package_info().name.clone();
+    let name = app_display_name();
 
     let app_menu = Submenu::with_items(
         app,
@@ -216,14 +240,16 @@ fn setup_app_menu<R: Runtime>(_app: &AppHandle<R>) -> tauri::Result<()> {
 fn webview_data_dir(app: &tauri::App) -> std::path::PathBuf {
     let mut candidates: Vec<std::path::PathBuf> = Vec::new();
     if let Ok(base) = app.path().app_local_data_dir() {
-        candidates.push(base.join("webview"));
+        candidates.push(base.join(format!("webview{}", build_dir_suffix())));
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(parent) = exe.parent() {
-            candidates.push(parent.join("webview-data"));
+            candidates.push(parent.join(format!("webview-data{}", build_dir_suffix())));
         }
     }
-    candidates.push(std::env::temp_dir().join("ws-workbench-webview"));
+    candidates.push(
+        std::env::temp_dir().join(format!("{}-webview{}", APP_BASE_NAME, build_dir_suffix())),
+    );
 
     for dir in &candidates {
         if std::fs::create_dir_all(dir).is_ok() {
@@ -255,13 +281,19 @@ fn create_main_window(app: &mut tauri::App) -> tauri::Result<()> {
     // macOS 继续用 Overlay 的原生红绿灯，Linux 也保留系统边框。
     #[cfg(target_os = "windows")]
     let builder = builder.decorations(false);
-    builder
+    let window = builder
         .data_directory(webview_data_dir(app))
         .on_navigation(|url| {
             // 只拦本地文件导航；dev 的 http://localhost 和打包后的 tauri:// 都放行
             url.scheme() != "file"
         })
         .build()?;
+    // 开发版的窗口标题也带 -dev：Windows 单实例靠窗口标题找已有实例，
+    // 任务栏/窗口列表里也能一眼看出是开发版
+    #[cfg(debug_assertions)]
+    let _ = window.set_title(&app_display_name());
+    #[cfg(not(debug_assertions))]
+    let _ = window;
     Ok(())
 }
 
@@ -275,7 +307,7 @@ fn create_quick_panel(app: &mut tauri::App) -> tauri::Result<()> {
         QUICK_PANEL_LABEL,
         tauri::WebviewUrl::App("quick.html".into()),
     )
-    .title("ws-workbench")
+    .title(app_display_name())
     .inner_size(QUICK_PANEL_WIDTH, QUICK_PANEL_HEIGHT)
     .resizable(false)
     .maximizable(false)
@@ -315,7 +347,7 @@ fn create_clipboard_panel(app: &mut tauri::App) -> tauri::Result<()> {
         clipboard::PANEL_LABEL,
         tauri::WebviewUrl::App("clipboard.html".into()),
     )
-    .title("ws-workbench")
+    .title(app_display_name())
     .inner_size(clipboard::PANEL_WIDTH, clipboard::PANEL_HEIGHT)
     .resizable(false)
     .maximizable(false)
@@ -738,6 +770,8 @@ pub fn run() {
             commands::refresh_open_with_apps,
             commands::open_with,
             commands::check_dir,
+            commands::app_name,
+            commands::dev_build,
             commands::get_platform_info,
             commands::get_network_info,
             commands::resolve_upload_dir,
@@ -756,6 +790,7 @@ pub fn run() {
             vpn::commands::vpn_elevation_info,
             vpn::commands::vpn_setup_elevation,
             vpn::commands::vpn_remove_elevation,
+            vpn::commands::vpn_prepare_update,
             vpn::commands::vpn_connect,
             vpn::commands::vpn_set_proxy_mode,
             vpn::commands::vpn_push_rules,
@@ -826,7 +861,6 @@ pub fn run() {
             // dev 模式（裸二进制）Dock 会显示系统占位图标，这里补上真实图标
             #[cfg(target_os = "macos")]
             set_dock_icon();
-
             // macOS 顶部菜单栏汉化
             setup_app_menu(app.handle())?;
 
@@ -842,7 +876,9 @@ pub fn run() {
                     // 连临时目录都写不了：不阻断启动，但把原因打出来，
                     // 免得后面只看到一句没有上下文的「拒绝访问」
                     eprintln!("VPN 会话目录不可用: {}", err);
-                    vpn::session::VpnSession::new(std::env::temp_dir().join("ws-workbench-vpn"))
+                    vpn::session::VpnSession::new(
+                        std::env::temp_dir().join(format!("ws-workbench-vpn{}", build_dir_suffix())),
+                    )
                 }
             };
             if let Err(err) = session.ensure() {
@@ -865,35 +901,11 @@ pub fn run() {
             // 轮询会话目录里的状态文件，把 VPN 状态与日志推给前端
             vpn::commands::start_status_poller(app.handle().clone());
 
-            // 托盘：关掉窗口后应用仍在后台运行，从托盘菜单重新打开或退出
-            let show = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
-            // 页面入口：点一下把窗口唤到前台并切到对应页面
-            let nav_cleaner = MenuItem::with_id(app, "nav-cleaner", "系统", true, None::<&str>)?;
-            let nav_proxy = MenuItem::with_id(app, "nav-proxy", "代理", true, None::<&str>)?;
-            let nav_settings =
-                MenuItem::with_id(app, "nav-settings", "设置", true, None::<&str>)?;
-            let vpn_connect =
-                MenuItem::with_id(app, "vpn-connect", "连接 VPN", true, None::<&str>)?;
-            let vpn_disconnect =
-                MenuItem::with_id(app, "vpn-disconnect", "断开 VPN", true, None::<&str>)?;
+            // 托盘：关掉窗口后应用仍在后台运行，从托盘菜单重新打开或退出。
+            // 只保留两项：页面入口和 VPN 动作都在主界面里，托盘越简单越不容易点错。
+            let show = MenuItem::with_id(app, "show", "显示主界面", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-            let separator = PredefinedMenuItem::separator(app)?;
-            let separator2 = PredefinedMenuItem::separator(app)?;
-            let menu = Menu::with_items(
-                app,
-                &[
-                    &show,
-                    &separator,
-                    &nav_cleaner,
-                    &nav_proxy,
-                    &nav_settings,
-                    &separator2,
-                    &vpn_connect,
-                    &vpn_disconnect,
-                    &separator,
-                    &quit,
-                ],
-            )?;
+            let menu = Menu::with_items(app, &[&show, &quit])?;
 
             let mut tray = TrayIconBuilder::with_id("main")
                 // 不设 tooltip：菜单栏图标悬浮时不要弹出应用名
@@ -902,46 +914,16 @@ pub fn run() {
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => show_main_window(app),
-                    // 页面入口：唤起窗口，让前端切到清理 / 代理 / 设置页
-                    "nav-cleaner" | "nav-proxy" | "nav-settings" => {
-                        show_main_window(app);
-                        let _ = app.emit(EVENT_NAV_TRAY, event.id.as_ref().to_string());
-                    }
-                    // VPN 的配置与规则都在前端，托盘只负责把动作转发过去
-                    "vpn-connect" | "vpn-disconnect" => {
-                        show_main_window(app);
-                        let _ = app.emit(EVENT_VPN_TRAY, event.id.as_ref().to_string());
-                    }
                     "quit" => {
-                        // Windows 便携包从解压目录运行：先等 worker 把
-                        // openconnect 等子进程收掉，再退出主进程，避免用户
-                        // 退出后删目录时报“文件或文件夹已在另一程序打开”。
-                        // 不能阻塞托盘菜单事件线程，所以放到后台线程里等。
-                        #[cfg(target_os = "windows")]
-                        {
-                            // 双保险：正常路径等 worker 收尾后 app.exit；如果 Tauri
-                            // 的 ExitRequested 回调或 tasklist 卡住，12 秒后由看门狗
-                            // 强制结束主进程，避免用户点了“退出”还一直挂在任务管理器里。
-                            std::thread::spawn(|| {
-                                std::thread::sleep(std::time::Duration::from_secs(12));
-                                std::process::exit(0);
-                            });
-                            let app = app.clone();
-                            std::thread::spawn(move || {
-                                vpn::commands::shutdown_and_wait(
-                                    &app,
-                                    std::time::Duration::from_secs(8),
-                                );
-                                app.exit(0);
-                            });
-                        }
-                        #[cfg(not(target_os = "windows"))]
-                        {
-                            // macOS 保持原有行为：这里不等收尾，避免 Dock/菜单
-                            // 退出被卡住；macOS 的 openconnect 进程不占用 .app 目录。
-                            vpn::commands::shutdown(app);
-                            app.exit(0);
-                        }
+                        // 退出就是整个应用和它拉起的进程都结束：先给 worker 发停止
+                        // 请求（写 stop.flag），然后立刻退出主进程。
+                        //
+                        // 不再在这里等 worker 收尾：worker 有两条独立兜底——main.pid
+                        // 里记的主进程消失、以及心跳过期——会自己杀掉 openconnect、
+                        // 还原路由后退出。等它只会让托盘和任务栏图标迟迟不消失，
+                        // 体感上就是「点了退出没反应」。
+                        vpn::commands::shutdown(app);
+                        app.exit(0);
                     }
                     _ => {}
                 })

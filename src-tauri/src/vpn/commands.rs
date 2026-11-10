@@ -113,12 +113,14 @@ fn resolve_session_dir(app: &AppHandle) -> Result<(PathBuf, String), String> {
     }
     // dev 构建在受限环境（受控文件夹访问、沙箱）下可能连本地数据目录都建不出来。
     // 这时退到可执行文件旁：target/debug 对开发进程一定可写，提权 worker 也用同一路径。
+    // 目录名不能叫 `ws-workbench-dev`：开发构建的二进制本身就叫这个名字（macOS 的
+    // Dock / 菜单栏认可执行文件名），同目录下会打架。
     #[cfg(debug_assertions)]
     if let Ok(exe) = std::env::current_exe() {
         if let Some(parent) = exe.parent() {
             candidates.push((
                 "开发目录（可执行文件旁）".to_string(),
-                parent.join("ws-workbench-dev"),
+                parent.join("ws-workbench-vpn-dev"),
             ));
         }
     }
@@ -723,6 +725,9 @@ pub async fn vpn_connect(
         created_at: crate::util::time::now_local_rfc3339(),
     };
     session.write_request(&request)?;
+    // 把主进程 PID 也落盘：worker 每个循环都会看它，界面进程被任务管理器强杀时
+    // 立刻就能发现并收掉隧道，不用等心跳文件过期；心跳文件继续作为兜底。
+    session.write_gui_pid(std::process::id())?;
 
     // 接下来可能弹出 UAC 并等用户点确认，这一步必须放开锁：
     // 否则状态轮询线程会被一起卡住，界面看上去就像死了。
@@ -1263,9 +1268,99 @@ pub fn shutdown_and_wait(app: &AppHandle, timeout: Duration) {
     session.remove_control_files();
 }
 
+/// 安装更新前等 worker 退出的上限。
+///
+/// worker 正常收尾（杀 openconnect、还原路由和 DNS）通常一两秒；10 秒还没退，
+/// 说明它卡在某个 PowerShell / 路由操作上，这时候更该让用户手动处理，
+/// 而不是把安装包塞进一个还占着 exe 的环境里。
+const UPDATE_STOP_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// 更新安装前让 VPN 收尾：连接中 / 已连接时先请求 worker 断开，并等它退出。
+///
+/// 不处理的后果：
+/// - Windows：worker 和主程序是同一个 exe，安装包替换 `ws-workbench.exe` 时会撞上
+///   文件占用；而且 worker 是提权的，安装程序未必收得掉它。
+/// - macOS：更新包替换 `.app` 后如果旧 worker 还在跑，新界面显示「未连接」，
+///   但隧道和路由还挂在旧进程那边，用户看到的就是「VPN 明明没连却还能访问内网」。
+/// - 两边都可能出现：新版本已经装上，旧 worker 还在按旧配置改路由。
+///
+/// 状态停在 `Disconnected` / `Failed` 时直接放行——pid 可能已被系统复用，
+/// 不能因为「看起来还活着」就白等 10 秒。
+#[tauri::command]
+pub async fn vpn_prepare_update(app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || prepare_update_for_install(&app))
+        .await
+        .map_err(|err| format!("等待 VPN 断开失败: {err}"))?
+}
+
+fn prepare_update_for_install(app: &AppHandle) -> Result<(), String> {
+    let Ok(session) = session_of(app) else {
+        return Ok(());
+    };
+    let status = session.read_status();
+    let phase = status
+        .as_ref()
+        .map(|status| status.phase)
+        .unwrap_or(VpnPhase::Disconnected);
+    if !phase_blocks_update(phase) {
+        session.remove_control_files();
+        return Ok(());
+    }
+
+    let pid = status.as_ref().map(|status| status.pid).unwrap_or(0);
+    session.append_log("[更新] VPN 尚未断开，安装前先请求 worker 收尾");
+    elevate::stop_worker(&session);
+
+    let deadline = Instant::now() + UPDATE_STOP_TIMEOUT;
+    while !worker_stopped(&session, pid) {
+        if Instant::now() >= deadline {
+            session.append_log("[更新] worker 10 秒内没有退出，取消这次安装");
+            return Err(
+                "VPN 未能在 10 秒内断开，已取消更新：请到「代理」页手动断开后再点更新"
+                    .to_string(),
+            );
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    session.append_log("[更新] VPN 已断开，可以安装更新");
+    session.remove_control_files();
+    Ok(())
+}
+
+/// 这个阶段是否还需要等 VPN 退出。只有静止态（未连接 / 失败）不用等。
+fn phase_blocks_update(phase: VpnPhase) -> bool {
+    !matches!(phase, VpnPhase::Disconnected | VpnPhase::Failed)
+}
+
+/// worker 是否已经退出：有 pid 就以进程为准；没有 pid（旧状态文件）就看状态阶段。
+fn worker_stopped(session: &VpnSession, pid: u32) -> bool {
+    if pid != 0 {
+        return !is_process_alive(pid);
+    }
+    session
+        .read_status()
+        .map(|status| !phase_blocks_update(status.phase))
+        .unwrap_or(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn update_waits_only_for_live_phases() {
+        // 静止态直接放行：pid 被复用也不能卡更新
+        assert!(!phase_blocks_update(VpnPhase::Disconnected));
+        assert!(!phase_blocks_update(VpnPhase::Failed));
+        // 连接过程中的任何阶段都要先断开
+        assert!(phase_blocks_update(VpnPhase::Preparing));
+        assert!(phase_blocks_update(VpnPhase::Elevating));
+        assert!(phase_blocks_update(VpnPhase::Connecting));
+        assert!(phase_blocks_update(VpnPhase::ConfiguringRoutes));
+        assert!(phase_blocks_update(VpnPhase::Connected));
+        assert!(phase_blocks_update(VpnPhase::Disconnecting));
+    }
 
     #[test]
     fn heartbeat_ignores_the_startup_disconnected_status() {

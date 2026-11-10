@@ -52,3 +52,5 @@ pub mod split;
 pub mod worker;
 #[cfg(target_os = "windows")]
 pub mod win_dns;
+#[cfg(target_os = "windows")]
+pub mod win_job;

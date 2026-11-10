@@ -60,6 +60,23 @@ pub(crate) fn open_path(path: &str) -> Result<(), String> {
     }
 }
 
+/// 当前是不是开发构建（`pnpm exec tauri dev` / debug 二进制）。
+///
+/// 前端据此显示 dev 标记；判断放 Rust 侧，和 `app_name`、单实例、窗口标题
+/// 用的是同一套依据，不会出现「名字带 -dev 但没 dev 标记」这种错位。
+#[tauri::command]
+pub fn dev_build() -> bool {
+    crate::is_dev_build()
+}
+
+/// 当前构建的应用显示名：开发版 `ws-workbench-dev`，发布版 `ws-workbench`。
+///
+/// 前端标题栏用它，保证和 macOS 菜单栏 / Dock、Windows 任务栏上的名字一致。
+#[tauri::command]
+pub fn app_name() -> String {
+    crate::app_display_name()
+}
+
 /// 组装查找上下文：应用数据目录 / 资源目录 / 可执行文件目录。
 ///
 /// 项目打包页、VPN 页共用这一份上下文，保证「用编辑器打开」与连接器探测看到同一批目录。

@@ -1,4 +1,5 @@
-# 重启开发环境：结束旧的 ws-workbench / vite / tauri dev 进程，再重新拉起一份。
+# 重启开发环境：结束旧的 ws-workbench*（发布版 ws-workbench / 开发版 ws-workbench-dev）、
+# vite、tauri dev 进程，再重新拉起一份。
 #
 # 用法：
 #   powershell -ExecutionPolicy Bypass -File scripts\dev-restart.ps1
@@ -45,7 +46,7 @@ if (Get-Process openconnect -ErrorAction SilentlyContinue) {
 $escapedRoot = [regex]::Escape($root)
 $stale = New-Object System.Collections.Generic.List[int]
 
-Get-Process ws-workbench -ErrorAction SilentlyContinue | ForEach-Object { $stale.Add($_.Id) }
+Get-Process -Name 'ws-workbench*' -ErrorAction SilentlyContinue | ForEach-Object { $stale.Add($_.Id) }
 
 Get-CimInstance Win32_Process -Filter "Name = 'node.exe' OR Name = 'cargo.exe'" -ErrorAction SilentlyContinue |
     Where-Object { $_.CommandLine -and $_.CommandLine -match $escapedRoot -and $_.CommandLine -match 'vite|tauri' } |

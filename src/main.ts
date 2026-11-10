@@ -1,5 +1,6 @@
 import { createApp } from 'vue'
 import App from './App.vue'
+import { applyDocumentTitle } from './api/app'
 import 'ant-design-vue/dist/reset.css'
 import './assets/styles/main.css'
 
@@ -29,3 +30,6 @@ for (const type of ['dragenter', 'dragover', 'drop'] as const) {
 }
 
 createApp(App).mount('#app')
+
+// 窗口标题里的应用名按构建变化（开发版 ws-workbench-dev）
+void applyDocumentTitle()

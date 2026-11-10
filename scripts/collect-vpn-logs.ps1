@@ -11,7 +11,7 @@ param(
     # 需要指定目录时显式传 -OutPath。
     [string]$OutPath,
     # Optional extra root(s) to scan. Useful for the dev/portable build, whose
-    # session lives under target\debug\ws-workbench-dev instead of APPDATA.
+    # session lives under target\debug\ws-workbench-vpn-dev instead of APPDATA.
     [string[]]$Root
 )
 
@@ -137,7 +137,7 @@ Save-Command 'dns-listeners' {
     if ($tcp.Count -eq 0) { '(none)' } else { $tcp | Format-Table -AutoSize }
 }
 Save-Command 'openconnect-process' { Get-Process -Name openconnect -ErrorAction SilentlyContinue | Format-List Id,Path,StartTime }
-Save-Command 'ws-workbench-process' { Get-Process -Name 'ws-workbench' -ErrorAction SilentlyContinue | Format-List Id,Path,StartTime }
+Save-Command 'ws-workbench-process' { Get-Process -Name 'ws-workbench*' -ErrorAction SilentlyContinue | Format-List Id,Path,StartTime }
 Save-Command 'processes' { Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Select-Object ProcessId,Name,ExecutablePath | Sort-Object Name | Format-Table -AutoSize }
 Save-Command 'vpn-task' { schtasks.exe /Query /TN WsWorkbenchVpnWorker /V /FO LIST }
 Save-Command 'vpn-task-xml' { schtasks.exe /Query /TN WsWorkbenchVpnWorker /XML }
