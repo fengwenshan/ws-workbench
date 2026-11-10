@@ -2,7 +2,7 @@
 
 - 日期：2026-11-10
 - 分支：main（沿用现有 cleaner / release 脚本）
-- 状态：已确认，待实现（macOS 本期；Windows 计划见 §8）
+- 状态：macOS 已实现并验证（2026-11-10）；Windows 计划见 §8，待 Windows 主机执行
 - 关联：`2026-11-10-uninstall-window-design.md`
 
 ## 1. 背景与目标
@@ -152,7 +152,17 @@ Windows 使用 Tauri NSIS 安装器自带的标准卸载器（Apps & Features）
 4. 明确 `installMode: "currentUser"`，保证 `$APPDATA` 指向当前用户，避免提权后删错用户目录。
 5. 在 Windows 主机上验证：运行中卸载被拦、保留/删除数据、附件目录提示、Apps & Features 入口。
 
-## 9. 风险与回退
+## 9. 验证记录（macOS，2026-11-10）
+
+- `cargo test --lib`：489 passed / 0 failed / 4 ignored。
+- `cargo check --bins`：通过。
+- `pnpm build`：通过。
+- `bash scripts/macos/test-uninstall.sh`：三条 dry-run 场景通过（保留数据、删除全部、进程不退时零删除）。
+- 开发版真实启动：在临时 HOME 下生成两份 `uninstall-info.txt`（`com.ws.workbench` / `ws-workbench`），权限 600；不再把项目内 `.config` 写进清单。
+- DMG：`TAURI_BUNDLES=app node scripts/release.mjs --no-publish --dmg` 成功，挂载后确认 `卸载 ws-workbench.command` 可执行、`ws-workbench.app` 与 Applications 链接存在。
+- 用构建出的真实 `.app` 跑卸载脚本 dry-run：能识别 bundle id 并走「保留数据」流程。
+
+## 10. 风险与回退
 
 - sidecar 丢失：卸载程序回退默认路径，并提示“无法确认自定义附件目录”，不猜测删除。
 - 附件目录自定义到共享目录：只提示不删，避免误删。
