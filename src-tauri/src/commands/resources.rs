@@ -167,7 +167,7 @@ static REMOTE_CACHE: Mutex<Option<(Instant, RemoteResult)>> = Mutex::new(None);
 
 /// 用系统 curl 取文本；macOS / Windows 10+ 自带 curl。
 fn curl_text(url: &str) -> Result<String, String> {
-    let output = std::process::Command::new("curl")
+    let output = crate::process::hidden("curl")
         .args([
             "-sSfL",
             "--max-time",
@@ -360,7 +360,7 @@ fn download_asset(source: &Source, asset: &AssetDto) -> Result<Vec<u8>, String> 
     let url = asset
         .download_url(source.kind)
         .ok_or_else(|| format!("{} 附件缺少下载地址", asset.name))?;
-    let mut command = std::process::Command::new("curl");
+    let mut command = crate::process::hidden("curl");
     command.args(["-sSfL", "--max-time", "120"]);
     if source.kind == SourceKind::Github {
         command.args(["-H", "Accept: application/octet-stream"]);
@@ -457,40 +457,55 @@ fn chrome_placeholder() -> ResourceStatus {
     }
 }
 
+/// 资源清单：DeepSeek 插件那一条要联网查最新版本（`curl`，超时 8 秒 ×2 个源），
+/// 所以必须离开主线程，否则打开「设置 → 资源」时窗口直接卡住。
 #[tauri::command]
-pub fn resource_list(force: bool) -> Result<Vec<ResourceStatus>, String> {
-    let home = dsh_home()?;
-    Ok(vec![dsh_plugin_status(&home, force), chrome_placeholder()])
+pub async fn resource_list(force: bool) -> Result<Vec<ResourceStatus>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let home = dsh_home()?;
+        Ok(vec![dsh_plugin_status(&home, force), chrome_placeholder()])
+    })
+    .await
+    .map_err(|err| format!("读取资源列表失败: {err}"))?
+}
+
+/// 安装要下载 zip（可能十几秒），同样放后台线程。
+#[tauri::command]
+pub async fn resource_install(id: String) -> Result<ResourceStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if id != DSH_PLUGIN_ID {
+            return Err(format!("资源 {id} 暂不支持安装"));
+        }
+        let home = dsh_home()?;
+        let remote = resolve_remote(true)?;
+        let bytes = download_plugin_zip(&remote)?;
+        install_from_zip_bytes(&bytes, &home)?;
+        let mut status = dsh_plugin_status(&home, false);
+        if dsh_running() {
+            status.note = Some("已安装，需要重启 DeepSeek Harness 生效".to_string());
+        }
+        Ok(status)
+    })
+    .await
+    .map_err(|err| format!("安装资源失败: {err}"))?
 }
 
 #[tauri::command]
-pub fn resource_install(id: String) -> Result<ResourceStatus, String> {
-    if id != DSH_PLUGIN_ID {
-        return Err(format!("资源 {id} 暂不支持安装"));
-    }
-    let home = dsh_home()?;
-    let remote = resolve_remote(true)?;
-    let bytes = download_plugin_zip(&remote)?;
-    install_from_zip_bytes(&bytes, &home)?;
-    let mut status = dsh_plugin_status(&home, false);
-    if dsh_running() {
-        status.note = Some("已安装，需要重启 DeepSeek Harness 生效".to_string());
-    }
-    Ok(status)
-}
-
-#[tauri::command]
-pub fn resource_uninstall(id: String) -> Result<ResourceStatus, String> {
-    if id != DSH_PLUGIN_ID {
-        return Err(format!("资源 {id} 暂不支持卸载"));
-    }
-    let home = dsh_home()?;
-    uninstall_plugin(&home)?;
-    let mut status = dsh_plugin_status(&home, false);
-    if dsh_running() {
-        status.note = Some("已卸载，需要重启 DeepSeek Harness 生效".to_string());
-    }
-    Ok(status)
+pub async fn resource_uninstall(id: String) -> Result<ResourceStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if id != DSH_PLUGIN_ID {
+            return Err(format!("资源 {id} 暂不支持卸载"));
+        }
+        let home = dsh_home()?;
+        uninstall_plugin(&home)?;
+        let mut status = dsh_plugin_status(&home, false);
+        if dsh_running() {
+            status.note = Some("已卸载，需要重启 DeepSeek Harness 生效".to_string());
+        }
+        Ok(status)
+    })
+    .await
+    .map_err(|err| format!("卸载资源失败: {err}"))?
 }
 
 #[cfg(test)]

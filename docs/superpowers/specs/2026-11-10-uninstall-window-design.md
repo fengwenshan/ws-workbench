@@ -131,7 +131,7 @@ pub struct ForceQuitOutcome {
 - `cleaner/running.rs`：新增 `force_quit` 与可注入的 `force_quit_with_limits`（纯逻辑 + 单测：先杀后轮询、进程重启后再杀、超时失败）。
 - `cleaner/installer.rs`：新增 `related_files` / `delete_related` 分派；把「给定扫描结果 + 勾选路径 → 按普通/提权/注册表分组删除」抽成内部函数，`delete_leftovers` 与 `delete_related` 共用（区别：前者要求路径仍在扫描结果里且必须存在；后者允许「扫描后消失」记为 skipped）。新增 `is_self_app` 自身判定。
 - `cleaner/installer_macos.rs`：`current_app_bundle()`（从 `std::env::current_exe()` 向上找 `.app`）、列表过滤自身、关联文件候选（程序文件＝安装位置 + Spotlight/mdfind 按 bundle id 找到的其它 `.app` 副本，排除 `~/.Trash`；支持/缓存复用 `mac_leftover_candidates` 的 kind 映射）。
-- `cleaner/installer_windows.rs`：`current_exe` 是否位于目标 `install_location` → 过滤/拦截自身；关联文件候选＝安装目录（程序文件）+ 现有残留条目（app_data/preference/registry/shortcut → 支持文件；cache/log → 缓存文件）。
+- `cleaner/installer_windows.rs`：`current_exe` 是否位于目标 `install_location` → 过滤/拦截自身；关联文件候选＝安装目录（程序文件）+ 现有残留条目（app_data/preference/registry/shortcut → 支持文件；cache/log → 缓存文件）。安装目录候选会过滤整个 `%WINDIR%` 与公共目录根（否则 MSI 的 `msiexec.exe` 会把 `System32` 当成程序文件）；只有拿不到 `InstallLocation`（或目录已不存在）时才用卸载程序所在目录兜底。
 - `commands/cleaner.rs`：新增命令与窗口创建；`CleanerState` 增加 `pending_uninstall: Mutex<Option<InstalledApp>>` 与 `related_paths: Mutex<Option<(String, Vec<String>)>>`（app_id + 白名单）。
 
 ### 4.2 关联文件扫描规则（macOS）
@@ -166,14 +166,16 @@ detect 进程（复用 running::detect 的匹配规则：exe 在 bundle 内 + NS
 - 白名单：`cleaner_related_files` 扫描时把「本次扫描存在的路径」存入 `CleanerState.related_paths`（含 app_id）；`cleaner_delete_related` 只接受该集合内的路径，其它路径记失败「不在本次扫描结果中」。
 - 删除动作沿用 `trash_guard`：普通路径进废纸篓，`/Library` 等需提权路径与注册表键合并成一次系统授权；`/`、主目录、`/System`、`/usr` 等仍硬拒绝。
 - 顺序：先 `cleaner_uninstall_app`（系统卸载），再 `cleaner_delete_related`。macOS 主 `.app` 已被移走 → skipped；Windows 卸载程序已删的路径同理。
+- 卸载成功后前端自动再调一次 `cleaner_related_files`：`cleaner_uninstall_app` 只清应用列表缓存，`pending_uninstall` 保留到删除结束，所以二次扫描仍能取到应用信息。有残留 → 回到勾选页（提示「卸载已完成。重新扫描到 N 项残留」，主按钮变「清理残留」）确认后清理；无残留 → 直接进结果页。
+- Windows 无参数卸载：`start_process_script` 在参数为空时不生成 `-ArgumentList`（PowerShell `Start-Process` 不接受空数组），避免「UninstallString 只有 exe 路径」的应用启动失败。
 - 删除后广播 `cleaner-apps-changed`；主窗口 `loadApps(true)`。
 
 ### 4.5 卸载窗口
 
-- label：`uninstall`，尺寸 820×560（min 760×480），居中，不可最大化；macOS `hiddenTitle + titleBarStyle Overlay`（红绿灯浮在内容上，截图 1 的样子），Windows 用原生标题栏。
+- label：`uninstall`，尺寸 820×560（min 760×480），居中，不可最大化；macOS `hiddenTitle + titleBarStyle Overlay`（红绿灯浮在内容上，截图 1 的样子）；Windows `decorations(false)` + 前端自绘 38px 标题栏（与主窗口一致：品牌、最小化/关闭），不显示系统标题栏。
 - 单例：已存在则 `show + set_focus + set_title`，更新 `pending_uninstall` 并广播 `cleaner-uninstall-target-changed`；关闭后再次打开重新创建。
 - 目标应用不存在（缓存过期）时命令返回「应用信息不存在，请重新扫描列表」。
-- 能力：`src-tauri/capabilities/default.json` 的 `windows` 增加 `uninstall`（复用已有 `core:window:allow-close`）。
+- 能力：`src-tauri/capabilities/default.json` 的 `windows` 增加 `uninstall`（复用已有 `core:window:allow-close`、`core:window:allow-minimize`、`core:window:allow-start-dragging`）。
 
 ## 5. 前端设计
 
@@ -183,7 +185,8 @@ detect 进程（复用 running::detect 的匹配规则：exe 在 bundle 内 + NS
 - `UninstallWindow.vue` 自己管理状态机：
 
 ```text
-loading → ready → (confirm-running) → quitting → uninstalling → deleting → done | error
+loading → ready → (confirm-running) → quitting → uninstalling → rescanning
+        → ready(postScan) → deleting → done | error
 ```
 
 - 组件拆分：
@@ -197,7 +200,8 @@ loading → ready → (confirm-running) → quitting → uninstalling → deleti
   - 底部「全选」三态，反映当前全部条目。
   - 「确认删除」在无勾选时禁用；操作期间按钮转 loading 并禁用。
   - 失败：窗口内错误条 + 「重试 / 关闭」，不静默关闭。
-  - 结果：`已卸载「X」：删除 N 项，跳过 M 项，失败 K 项`，失败逐条列出路径 + 原因，底部「关闭」。
+  - 结果：`已卸载「X」：删除 N 项，跳过 M 项，失败 K 项`，失败逐条列出路径 + 原因，底部「关闭」；有失败时额外给「重试清理」，白名单保留到全部成功（或用户关闭窗口）。
+  - 卸载成功后自动二次扫描：有残留时不直接进结果页，而是回到清单并提示「卸载已完成。重新扫描到 N 项残留，确认后会一并清理。」，按钮变「清理残留」；卸载前已勾选的路径保持勾选，新出现的条目按后端默认置信度勾选；没有残留直接进结果页。
 - 关闭：`getCurrentWindow().close()`；主窗口不跟随关闭。
 
 ### 5.2 主窗口改造

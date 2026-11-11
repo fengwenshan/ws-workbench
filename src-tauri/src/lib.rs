@@ -74,13 +74,12 @@ const QUICK_PANEL_HEIGHT: f64 = 320.0;
 const QUICK_PANEL_MIN_HEIGHT: f64 = 160.0;
 const QUICK_PANEL_MAX_HEIGHT: f64 = 480.0;
 
-/// 前端首屏是否已经调过 `app_ready`。
+/// 主窗口是否已经显示过。
 ///
-/// Windows 单实例的第二份进程会 FindWindow 到主窗口再 ShowWindow 叫到前台；
-/// 冷启动阶段主窗口还藏着、WebView 还没画完，这时强行显示会被系统标成
-/// 「未响应」。所以只有首屏就绪后才允许第二份进程去激活窗口。
-#[cfg(target_os = "windows")]
-static FRONTEND_READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// 启动兜底（8 秒后强制显示主窗口）只兜「从来没显示过」这一种情况：已经显示过
+/// 还不可见，只可能是用户自己把窗口收进了托盘，再强制显示就成了「点了关闭，
+/// 过几秒窗口又自己弹出来」。
+static MAIN_WINDOW_SHOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Windows 上只允许一个 GUI 实例。
 ///
@@ -100,13 +99,9 @@ fn ensure_single_instance() -> bool {
             initial_owner: i32,
             name: *const u16,
         ) -> *mut c_void;
-        fn FindWindowW(class_name: *const u16, window_name: *const u16) -> *mut c_void;
-        fn ShowWindow(window: *mut c_void, command: i32) -> i32;
-        fn SetForegroundWindow(window: *mut c_void) -> i32;
     }
 
     const ERROR_ALREADY_EXISTS: i32 = 183;
-    const SW_RESTORE: i32 = 9;
 
     let name: Vec<u16> = format!("Local\\{}-single-instance\0", app_display_name())
         .encode_utf16()
@@ -119,27 +114,191 @@ fn ensure_single_instance() -> bool {
     }
 
     if std::io::Error::last_os_error().raw_os_error() == Some(ERROR_ALREADY_EXISTS) {
-        // 已有实例：尽量把它从托盘/最小化状态叫出来，然后第二个进程退出。
-        // 首屏还没就绪时不去 ShowWindow：主窗口还藏着，强行显示只会得到
-        // 「未响应」的白窗口；第一个实例很快就自己显示了。
-        let title: Vec<u16> = format!("{}\0", app_display_name()).encode_utf16().collect();
-        let window = unsafe { FindWindowW(std::ptr::null(), title.as_ptr()) };
-        if !window.is_null() && FRONTEND_READY.load(std::sync::atomic::Ordering::Relaxed) {
-            unsafe {
-                ShowWindow(window, SW_RESTORE);
-                SetForegroundWindow(window);
-            }
+        // 已有实例：优先走事件通道，让第一个实例自己把窗口 show 出来；
+        // 它还在冷启动、事件没建好时退回直接改窗口状态。
+        if !win_activation::signal() {
+            activate_existing_main_window();
         }
         return false;
     }
+
+    // 第一个实例：建事件，监听线程在 setup 里起
+    win_activation::create();
 
     // 句柄故意不关闭：它要活到进程结束，命名 mutex 才会一直存在。
     let _ = handle;
     true
 }
 
+/// Windows 上「把已有实例叫到前台」的通道：命名事件 + 第一个实例里的监听线程。
+///
+/// 为什么不在第二个进程里直接 `ShowWindow`：那样只改了窗口的**系统可见性**，
+/// Tauri 自己记的状态还是「隐藏」。用户回到主窗口点关闭时，`CloseRequested` 里
+/// 的 `window.hide()` 一看「本来就没显示」就什么都不做——表现就是「点关闭没反应」；
+/// 最小化/最大化也会因为两边状态对不上而错乱。
+/// 所以第二个进程只负责「敲一下事件」，真正的 show + focus 由第一个实例在
+/// 主线程上通过 Tauri 做，两边状态才会一致。
+#[cfg(target_os = "windows")]
+mod win_activation {
+    use std::ffi::c_void;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateEventW(
+            attributes: *mut c_void,
+            manual_reset: i32,
+            initial_state: i32,
+            name: *const u16,
+        ) -> *mut c_void;
+        fn OpenEventW(access: u32, inherit: i32, name: *const u16) -> *mut c_void;
+        fn SetEvent(handle: *mut c_void) -> i32;
+        fn WaitForSingleObject(handle: *mut c_void, milliseconds: u32) -> u32;
+        fn CloseHandle(handle: *mut c_void) -> i32;
+    }
+    #[link(name = "user32")]
+    extern "system" {
+        fn AllowSetForegroundWindow(process_id: u32) -> i32;
+    }
+
+    /// 只用来发通知，不需要查询状态
+    const EVENT_MODIFY_STATE: u32 = 0x0002;
+    const INFINITE: u32 = 0xFFFF_FFFF;
+    /// 允许任意进程抢前台：第二个进程退出后，第一个实例的 SetForegroundWindow
+    /// 才不会被 Windows 的前台锁挡掉
+    const ASFW_ANY: u32 = 0xFFFF_FFFF;
+
+    static HANDLE: AtomicUsize = AtomicUsize::new(0);
+
+    fn event_name() -> Vec<u16> {
+        format!("Local\\{}-activate\0", crate::app_display_name())
+            .encode_utf16()
+            .collect()
+    }
+
+    /// 第一个实例启动时建事件（自动复位，默认无信号）
+    pub fn create() {
+        let name = event_name();
+        let handle = unsafe { CreateEventW(std::ptr::null_mut(), 0, 0, name.as_ptr()) };
+        if !handle.is_null() {
+            HANDLE.store(handle as usize, Ordering::SeqCst);
+        }
+    }
+
+    /// 第二个实例：允许对方抢前台后敲事件；第一个实例还没建好事件时返回 false
+    pub fn signal() -> bool {
+        let name = event_name();
+        let handle = unsafe { OpenEventW(EVENT_MODIFY_STATE, 0, name.as_ptr()) };
+        if handle.is_null() {
+            return false;
+        }
+        unsafe {
+            AllowSetForegroundWindow(ASFW_ANY);
+            SetEvent(handle);
+            CloseHandle(handle);
+        }
+        true
+    }
+
+    /// 第一个实例的监听线程：等一次信号（自动复位，可以反复等）
+    pub fn wait_once() {
+        let handle = HANDLE.load(Ordering::SeqCst) as *mut c_void;
+        if handle.is_null() {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            return;
+        }
+        unsafe { WaitForSingleObject(handle, INFINITE) };
+    }
+}
+
+/// 按「窗口类 `Tauri Window` + 标题精确等于应用名」找主窗口的 HWND。
+///
+/// 不能用 `FindWindowW(null, 标题)`：实测对**隐藏**（收进托盘）的窗口返回 0，
+/// 而「应用在后台，双击快捷方式」恰好就是隐藏状态。枚举则能找到。
+/// 快捷面板（`<应用名> - 快捷面板`）、剪贴板面板（`<应用名> - 剪贴板`）标题带后缀，
+/// 不会误中。
+#[cfg(target_os = "windows")]
+fn find_main_window() -> *mut std::ffi::c_void {
+    use std::ffi::c_void;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[link(name = "user32")]
+    extern "system" {
+        fn EnumWindows(
+            callback: extern "system" fn(*mut c_void, *mut c_void) -> i32,
+            lparam: *mut c_void,
+        ) -> i32;
+        fn GetClassNameW(hwnd: *mut c_void, buffer: *mut u16, max: i32) -> i32;
+        fn GetWindowTextW(hwnd: *mut c_void, buffer: *mut u16, max: i32) -> i32;
+    }
+
+    static FOUND: AtomicUsize = AtomicUsize::new(0);
+    static TITLE: std::sync::OnceLock<Vec<u16>> = std::sync::OnceLock::new();
+
+    FOUND.store(0, Ordering::SeqCst);
+    TITLE.get_or_init(|| app_display_name().encode_utf16().collect());
+
+    extern "system" fn visit(hwnd: *mut c_void, _lparam: *mut c_void) -> i32 {
+        let mut class = [0u16; 64];
+        let class_len = unsafe { GetClassNameW(hwnd, class.as_mut_ptr(), class.len() as i32) };
+        if class_len <= 0
+            || String::from_utf16_lossy(&class[..class_len as usize]) != "Tauri Window"
+        {
+            return 1;
+        }
+        let mut title = [0u16; 256];
+        let title_len = unsafe { GetWindowTextW(hwnd, title.as_mut_ptr(), title.len() as i32) };
+        if title_len <= 0 {
+            return 1;
+        }
+        let expected = TITLE.get().map(|value| value.as_slice()).unwrap_or(&[]);
+        if &title[..title_len as usize] == expected {
+            FOUND.store(hwnd as usize, Ordering::SeqCst);
+            return 0;
+        }
+        1
+    }
+
+    unsafe { EnumWindows(visit, std::ptr::null_mut()) };
+    FOUND.load(Ordering::SeqCst) as *mut c_void
+}
+
+/// 把窗口恢复并抢到前台。托盘隐藏 / 最小化 / 被别的窗口压着，三种情况都覆盖；
+/// `SetForegroundWindow` 单独用常被前台锁挡掉，`SwitchToThisWindow` 兜底。
+#[cfg(target_os = "windows")]
+fn force_foreground(hwnd: *mut std::ffi::c_void) {
+    use std::ffi::c_void;
+
+    #[link(name = "user32")]
+    extern "system" {
+        fn ShowWindow(hwnd: *mut c_void, command: i32) -> i32;
+        fn BringWindowToTop(hwnd: *mut c_void) -> i32;
+        fn SetForegroundWindow(hwnd: *mut c_void) -> i32;
+        fn SwitchToThisWindow(hwnd: *mut c_void, alt_tab: i32);
+    }
+
+    const SW_RESTORE: i32 = 9;
+    unsafe {
+        ShowWindow(hwnd, SW_RESTORE);
+        BringWindowToTop(hwnd);
+        SwitchToThisWindow(hwnd, 1);
+        SetForegroundWindow(hwnd);
+    }
+}
+
+/// 兜底路径（事件通道不可用时）：直接改窗口状态把它叫出来。
+/// 注意这会绕过 Tauri 的窗口状态，只在命名事件没建好（第一个实例刚启动）时用。
+#[cfg(target_os = "windows")]
+fn activate_existing_main_window() {
+    let hwnd = find_main_window();
+    if !hwnd.is_null() {
+        force_foreground(hwnd);
+    }
+}
+
 // 把主窗口重新显示出来（托盘左键、Dock 图标、快捷面板底部「显示主界面」共用）
 pub(crate) fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
+    MAIN_WINDOW_SHOWN.store(true, std::sync::atomic::Ordering::Relaxed);
     // macOS：托盘面板 / 菜单栏图标触发的点击不会自动激活应用，只 show + set_focus
     // 时窗口会显示在别的应用后面；先激活应用，再显示窗口。
     #[cfg(target_os = "macos")]
@@ -157,8 +316,6 @@ pub(crate) fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
 /// 等这里才显示：Windows 冷启动时 WebView2 初始化 + setup 的同步工作要几秒，
 /// 先亮一个还没画完的白窗口会被系统标成「未响应」，等页面就绪再显示更稳。
 pub(crate) fn on_frontend_ready(app: &AppHandle) {
-    #[cfg(target_os = "windows")]
-    FRONTEND_READY.store(true, std::sync::atomic::Ordering::Relaxed);
     show_main_window(app);
     warm_up_hidden_windows(app);
 }
@@ -329,6 +486,24 @@ fn webview_data_dir<R: Runtime>(app: &AppHandle<R>) -> std::path::PathBuf {
     }
     // 全都建不出来时仍返回首选路径，让 WebView2 自己报出更具体的错误。
     candidates.remove(0)
+}
+
+/// 光标是否还停在剪贴板面板窗口里。
+///
+/// Windows 上拖标题栏会进 SC_MOVE 模态循环，循环一开始窗口先失焦；靠光标位置
+/// 区分「在拖面板」和「点了外面」，避免拖拽被失焦收起逻辑掐断。
+#[cfg(target_os = "windows")]
+fn cursor_inside_panel<R: Runtime>(window: &tauri::Window<R>) -> bool {
+    window
+        .hwnd()
+        .map(|hwnd| clipboard::cursor_inside_hwnd(hwnd.0 as isize))
+        .unwrap_or(false)
+}
+
+/// 非 Windows：没有 SC_MOVE 这套东西，保持「失焦即收起」。
+#[cfg(not(target_os = "windows"))]
+fn cursor_inside_panel<R: Runtime>(_window: &tauri::Window<R>) -> bool {
+    false
 }
 
 /// 创建主窗口。
@@ -711,6 +886,38 @@ fn quick_panel_placement<R: Runtime>(
     })
 }
 
+/// Windows：取某个点所在显示器的**工作区**（系统已经扣掉任务栏、贴边工具栏
+/// 之后的可用矩形，物理像素、左上原点）。
+///
+/// 面板定位必须用它，不能拿整块屏幕去夹：屏幕最下面那一块正好被任务栏盖住，
+/// 面板底边一旦落进去，顶部还在桌面上看得见、底部几行被任务栏压住。托盘图标
+/// 本身就在任务栏里，从托盘弹出的面板必然贴着屏幕底边，所以这个位置最容易踩到。
+///
+/// 任务栏自动隐藏 / 全屏 / 多显示器时 `rcWork` 由系统按当前真实情况算好，比
+/// 自己按「屏幕高 - 任务栏高」估要准。
+#[cfg(target_os = "windows")]
+pub(crate) fn work_area_at(x: i32, y: i32) -> Option<(i32, i32, i32, i32)> {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    };
+
+    let monitor = unsafe { MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST) };
+    let mut info = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    if !unsafe { GetMonitorInfoW(monitor, &mut info) }.as_bool() {
+        return None;
+    }
+    Some((
+        info.rcWork.left,
+        info.rcWork.top,
+        info.rcWork.right - info.rcWork.left,
+        info.rcWork.bottom - info.rcWork.top,
+    ))
+}
+
 /// Windows：托盘 rect / 光标 / 显示器都已经是物理像素，直接用。
 #[cfg(target_os = "windows")]
 fn quick_panel_placement<R: Runtime>(
@@ -730,20 +937,22 @@ fn quick_panel_placement<R: Runtime>(
         ),
         |cursor| (cursor.x as i32, cursor.y as i32),
     );
-    let monitor = app
-        .monitor_from_point(anchor.0 as f64, anchor.1 as f64)
-        .ok()
-        .flatten();
-    let screen = monitor
-        .map(|monitor| {
-            let position = monitor.position();
-            let size = monitor.size();
-            (
-                position.x,
-                position.y,
-                size.width as i32,
-                size.height as i32,
-            )
+    // 优先用系统给的工作区（扣掉任务栏），退回来才是整块显示器
+    let screen = work_area_at(anchor.0, anchor.1)
+        .or_else(|| {
+            app.monitor_from_point(anchor.0 as f64, anchor.1 as f64)
+                .ok()
+                .flatten()
+                .map(|monitor| {
+                    let position = monitor.position();
+                    let size = monitor.size();
+                    (
+                        position.x,
+                        position.y,
+                        size.width as i32,
+                        size.height as i32,
+                    )
+                })
         })
         .unwrap_or((0, 0, 1920, 1080));
     Some(PanelPlacement {
@@ -785,20 +994,26 @@ fn fallback_placement<R: Runtime>(
         ),
         |cursor| (cursor.x as i32, cursor.y as i32),
     );
-    let monitor = app
-        .monitor_from_point(anchor.0 as f64, anchor.1 as f64)
-        .ok()
-        .flatten();
-    let screen = monitor
-        .map(|monitor| {
-            let position = monitor.position();
-            let size = monitor.size();
-            (
-                position.x,
-                position.y,
-                size.width as i32,
-                size.height as i32,
-            )
+    // 和 quick_panel_placement 一致：Windows 上用扣掉任务栏的工作区
+    #[cfg(target_os = "windows")]
+    let work_area = work_area_at(anchor.0, anchor.1);
+    #[cfg(not(target_os = "windows"))]
+    let work_area: Option<(i32, i32, i32, i32)> = None;
+    let screen = work_area
+        .or_else(|| {
+            app.monitor_from_point(anchor.0 as f64, anchor.1 as f64)
+                .ok()
+                .flatten()
+                .map(|monitor| {
+                    let position = monitor.position();
+                    let size = monitor.size();
+                    (
+                        position.x,
+                        position.y,
+                        size.width as i32,
+                        size.height as i32,
+                    )
+                })
         })
         .unwrap_or((0, 0, 1920, 1080));
     Some(PanelPlacement {
@@ -977,6 +1192,15 @@ pub fn run() {
             commands::popup_clear,
             commands::popup_dismiss,
             commands::popup_ignore,
+            commands::popup_ignored,
+            commands::popup_rules,
+            commands::popup_rule_add,
+            commands::popup_rule_remove,
+            commands::popup_rule_toggle,
+            commands::popup_app_toggle,
+            commands::popup_rule_apply,
+            commands::popup_windows,
+            commands::popup_app_meta,
             // 托盘快捷面板：隐藏 / 随页签内容调整高度 / 底部「显示主界面」「退出」
             commands::quick_panel_hide,
             commands::quick_panel_resize,
@@ -1045,6 +1269,18 @@ pub fn run() {
             // 系统清理的列表缓存与扫描标记（设计 3.3）：只有进程内状态，无需落盘
             app.manage(cleaner::CleanerState::new());
 
+            // 弹窗拦截：上次退出时开着就自动恢复，规则立即生效（火绒式的常驻开关）。
+            // 启动线程里做，别让磁盘读取和 EnumWindows 占住 setup 主线程。
+            #[cfg(target_os = "windows")]
+            if cleaner::popup::settings_get().enabled {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    if let Err(err) = cleaner::popup::start(handle) {
+                        eprintln!("弹窗拦截自动开启失败: {err}");
+                    }
+                });
+            }
+
             // 剪贴板历史：运行时状态（变化序列号 / 采集锁 / 当前快捷键）；
             // 采集线程与全局快捷键在 macOS / Windows 启用
             app.manage(clipboard::ClipboardRuntime::new());
@@ -1098,11 +1334,16 @@ pub fn run() {
 
             // 主窗口兜底：前端加载失败（或首屏逻辑异常）时不会调 app_ready，
             // 这里等 8 秒强制显示，避免应用只剩托盘图标、没有任何窗口。
+            // 只兜「从来没显示过」：已经显示过还不可见，只可能是用户自己收进了托盘，
+            // 再强制显示就会变成「点了关闭，过几秒又自己弹出来」。
             let handle = app.handle().clone();
             std::thread::spawn(move || {
                 std::thread::sleep(std::time::Duration::from_secs(8));
                 let inner = handle.clone();
                 let _ = handle.run_on_main_thread(move || {
+                    if MAIN_WINDOW_SHOWN.load(std::sync::atomic::Ordering::Relaxed) {
+                        return;
+                    }
                     if let Some(window) = inner.get_webview_window("main") {
                         if !window.is_visible().unwrap_or(false) {
                             crate::show_main_window(&inner);
@@ -1119,6 +1360,24 @@ pub fn run() {
                 crate::uninstall_info::refresh(&handle, &settings);
             });
 
+            // 双击快捷方式 / 再跑一次 exe：第二个进程敲事件，这里在主线程上走
+            // Tauri 的 show + focus，窗口状态两边一致（关闭、最小化才不会失灵）。
+            #[cfg(target_os = "windows")]
+            {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || loop {
+                    win_activation::wait_once();
+                    let inner = handle.clone();
+                    let _ = handle.run_on_main_thread(move || {
+                        crate::show_main_window(&inner);
+                        let hwnd = find_main_window();
+                        if !hwnd.is_null() {
+                            force_foreground(hwnd);
+                        }
+                    });
+                });
+            }
+
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -1132,20 +1391,29 @@ pub fn run() {
                     );
                 }
                 // 置顶（贴屏幕）时失焦不收起，用户点别的应用面板也留在屏幕上
+                //
+                // 鼠标还在面板里时也不收起：拖标题栏会走 Windows 的 SC_MOVE
+                // 模态循环，循环一开始窗口就收到一次失焦事件（日志实测
+                // Focused(true) → Focused(false) 紧挨着）。以前这条分支会把
+                // 窗口 hide 掉，拖拽当场被掐断，表现就是「点一下头部面板就没了」。
                 if window.label() == clipboard::PANEL_LABEL
                     && !clipboard::is_pinned(window.app_handle())
+                    && !cursor_inside_panel(window)
                 {
                     let _ = window.hide();
                 }
             }
-            // 点关闭只隐藏到后台，不退出应用
+            // 点关闭只隐藏到后台，不退出应用；卸载窗口是一次性窗口，点关闭就
+            // 正常销毁，下次从列表打开时重新创建并重新扫描关联文件。
             if let WindowEvent::CloseRequested { api, .. } = event {
-                api.prevent_close();
-                if window.label() == clipboard::PANEL_LABEL {
-                    // 走统一的收起逻辑：清置顶 + 把焦点还给呼出前的 App
-                    clipboard::hide_panel(window.app_handle());
-                } else {
-                    let _ = window.hide();
+                if window.label() != crate::commands::UNINSTALL_WINDOW_LABEL {
+                    api.prevent_close();
+                    if window.label() == clipboard::PANEL_LABEL {
+                        // 走统一的收起逻辑：清置顶 + 把焦点还给呼出前的 App
+                        clipboard::hide_panel(window.app_handle());
+                    } else {
+                        let _ = window.hide();
+                    }
                 }
             }
         })
@@ -1284,5 +1552,19 @@ mod quick_panel_tests {
         let (x, y) = panel_origin_at((100, 10), PANEL, (0, 0, 320, 300));
         assert_eq!(x, 8);
         assert_eq!(y, 8);
+    }
+
+    /// 真实托盘场景：锚点（托盘图标）就落在任务栏里，比工作区底边还低。
+    /// 用系统工作区（3840x2160 屏、底部 72px 任务栏 → 2088 高）时面板底边
+    /// 必须停在任务栏上沿以内，不能再按整块屏幕去夹（那时会压到任务栏下面）。
+    #[test]
+    fn bottom_taskbar_anchor_stays_inside_work_area() {
+        let work_area = (0, 0, 3840, 2088);
+        let panel = (540u32, 377u32);
+        let (x, y) = panel_origin_at((3660, 2124), panel, work_area);
+        assert_eq!(y, 2088 - panel.1 as i32 - 8, "底边贴着工作区下沿，留 8px");
+        // 托盘图标贴着右边：水平居中会越界，夹到右边缘
+        assert_eq!(x, 3840 - panel.0 as i32 - 8);
+        assert!(y + panel.1 as i32 <= 2088, "面板不能越过任务栏上沿");
     }
 }

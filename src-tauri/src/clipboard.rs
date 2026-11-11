@@ -849,6 +849,34 @@ pub fn set_pinned(app: &AppHandle, pinned: bool) -> bool {
     false
 }
 
+/// 光标是否还停在面板窗口里（Windows）。
+///
+/// 拖标题栏走的是 Windows 的 SC_MOVE 模态循环，循环开始时会先给窗口发一次
+/// `WM_ACTIVATE(WA_INACTIVE)`；失焦处理器如果无脑 `hide()`，拖拽会被当场掐断，
+/// 用户看到的就是「点一下标题栏面板就没了」。鼠标还在面板里就当作「在拖自己」，
+/// 真正点外面时鼠标已经不在面板矩形内。
+#[cfg(target_os = "windows")]
+pub(crate) fn cursor_inside_hwnd(raw: isize) -> bool {
+    use windows::Win32::Foundation::{HWND, POINT, RECT};
+    use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, GetWindowRect};
+
+    let mut point = POINT::default();
+    let mut rect = RECT::default();
+    let ok = unsafe {
+        GetCursorPos(&mut point).is_ok() && GetWindowRect(HWND(raw as *mut _), &mut rect).is_ok()
+    };
+    ok && point.x >= rect.left
+        && point.x < rect.right
+        && point.y >= rect.top
+        && point.y < rect.bottom
+}
+
+/// 非 Windows：沿用原来的「失焦即收起」行为。
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn cursor_inside_hwnd(_raw: isize) -> bool {
+    false
+}
+
 // ============================== 面板显示 ==============================
 
 /// 快捷键处理：去抖 + 只负责显示/聚焦 + 异步补采一次剪贴板。
@@ -1006,15 +1034,26 @@ fn panel_position(_app: &AppHandle, _window: &tauri::WebviewWindow) -> Option<(f
 fn panel_position(app: &AppHandle, window: &tauri::WebviewWindow) -> Option<(f64, f64, bool)> {
     let cursor = app.cursor_position().ok()?;
     let anchor = (cursor.x as i32, cursor.y as i32);
-    let monitor = app.monitor_from_point(cursor.x, cursor.y).ok().flatten()?;
-    let position = monitor.position();
-    let size = monitor.size();
-    let screen = (
-        position.x,
-        position.y,
-        size.width as i32,
-        size.height as i32,
-    );
+    // Windows：先用系统算好的工作区（已扣掉任务栏），否则在屏幕底部呼出时
+    // 面板底边会落到任务栏后面被压住；拿不到工作区再退回整块显示器。
+    #[cfg(target_os = "windows")]
+    let work_area = crate::work_area_at(anchor.0, anchor.1);
+    #[cfg(not(target_os = "windows"))]
+    let work_area: Option<(i32, i32, i32, i32)> = None;
+    let screen = match work_area {
+        Some(area) => area,
+        None => {
+            let monitor = app.monitor_from_point(cursor.x, cursor.y).ok().flatten()?;
+            let position = monitor.position();
+            let size = monitor.size();
+            (
+                position.x,
+                position.y,
+                size.width as i32,
+                size.height as i32,
+            )
+        }
+    };
     let scale = window.scale_factor().ok()?;
     let panel = (
         (PANEL_WIDTH * scale).round() as u32,

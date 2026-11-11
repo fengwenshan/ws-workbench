@@ -427,9 +427,13 @@ onUnmounted(() => {
 <style>
 /* 窗口透明，圆角与描边都画在卡片这一层（和托盘快捷面板一致）。
    这里不能加外投影：窗口正好和卡片一样大，投影会被窗口矩形裁掉，只在
-   四个圆角外侧留下一圈灰色直角。 */
+   四个圆角外侧留下一圈灰色直角。
+
+   选择器必须比 `main.css` 里的 `body { background: ... }` 更具体：
+   全局样式是后加载的，权重相同就会盖掉这里的 transparent，四个圆角外侧
+   于是露出一整块白底（Windows 上就是这个现象）。 */
 html,
-body,
+html body,
 #clipboard-app {
   margin: 0;
   padding: 0;

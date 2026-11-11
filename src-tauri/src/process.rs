@@ -11,6 +11,23 @@ use std::time::{Duration, Instant};
 #[cfg(target_os = "windows")]
 pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+/// 起一个**后台**控制台程序（curl / taskkill / cscript 这类）时用它。
+///
+/// 直接 `Command::new` 从 GUI 进程里拉控制台程序，Windows 会为它新建一个
+/// 控制台窗口——用户看到的就是「启动时闪两个黑框」。这里统一带上
+/// `CREATE_NO_WINDOW`，输出仍然走管道。
+pub fn hidden(program: &str) -> Command {
+    #[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
+    let mut command = Command::new(program);
+    command.stdin(Stdio::null());
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
+}
+
 /// 带超时地执行一个命令，返回 (stdout+stderr, 是否正常退出)
 pub fn run_with_timeout(program: &Path, args: &[&str], timeout: Duration) -> (String, bool) {
     let mut command = Command::new(program);

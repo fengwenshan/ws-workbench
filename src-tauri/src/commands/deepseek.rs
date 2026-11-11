@@ -216,15 +216,24 @@ pub(crate) fn write_open_request(home: &Path, target: &Path) -> Result<(), Strin
 }
 
 
+/// 被系统拒绝写入时补一句能照着做的提示：多半不是程序 bug，而是安全软件/沙箱/受限目录。
+fn io_hint(err: &std::io::Error) -> &'static str {
+    if err.kind() == std::io::ErrorKind::PermissionDenied {
+        "（目标目录不可写：常被安全软件、运行沙箱或受限目录拦住；把程序装到普通目录后重试，或让安全软件放行本程序）"
+    } else {
+        ""
+    }
+}
+
 fn write_files(dir: &Path, files: &[(String, Vec<u8>)]) -> Result<(), String> {
     for (name, bytes) in files {
         let path = dir.join(name);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
-                .map_err(|err| format!("创建插件目录失败 {}: {err}", parent.display()))?;
+                .map_err(|err| format!("创建插件目录失败 {}: {err}{}", parent.display(), io_hint(&err)))?;
         }
         std::fs::write(&path, bytes)
-            .map_err(|err| format!("写插件文件失败 {}: {err}", path.display()))?;
+            .map_err(|err| format!("写插件文件失败 {}: {err}{}", path.display(), io_hint(&err)))?;
     }
     Ok(())
 }
@@ -235,7 +244,7 @@ fn replace_plugin_dir(dir: &Path, files: &[(String, Vec<u8>)]) -> Result<(), Str
         .parent()
         .ok_or_else(|| format!("插件目录没有父目录: {}", dir.display()))?;
     std::fs::create_dir_all(parent)
-        .map_err(|err| format!("创建插件目录失败 {}: {err}", parent.display()))?;
+        .map_err(|err| format!("创建插件目录失败 {}: {err}{}", parent.display(), io_hint(&err)))?;
     let name = dir
         .file_name()
         .and_then(|value| value.to_str())
@@ -248,14 +257,14 @@ fn replace_plugin_dir(dir: &Path, files: &[(String, Vec<u8>)]) -> Result<(), Str
     let had_old = dir.exists();
     if had_old {
         std::fs::rename(dir, &old)
-            .map_err(|err| format!("替换插件目录失败 {}: {err}", dir.display()))?;
+            .map_err(|err| format!("替换插件目录失败 {}: {err}{}", dir.display(), io_hint(&err)))?;
     }
     if let Err(err) = std::fs::rename(&staging, dir) {
         if had_old {
             let _ = std::fs::rename(&old, dir);
         }
         let _ = std::fs::remove_dir_all(&staging);
-        return Err(format!("替换插件目录失败 {}: {err}", dir.display()));
+        return Err(format!("替换插件目录失败 {}: {err}{}", dir.display(), io_hint(&err)));
     }
     let _ = std::fs::remove_dir_all(&old);
     Ok(())
@@ -296,7 +305,7 @@ pub(crate) fn uninstall_plugin_files(home: &Path) -> Result<(), String> {
     for dir in [plugin_store_dir(home), plugin_active_dir(home)] {
         if dir.exists() {
             std::fs::remove_dir_all(&dir)
-                .map_err(|err| format!("删除插件目录失败 {}: {err}", dir.display()))?;
+                .map_err(|err| format!("删除插件目录失败 {}: {err}{}", dir.display(), io_hint(&err)))?;
         }
     }
     let manifest = profile_dir(home).join("package.json");
@@ -437,8 +446,16 @@ pub struct DeepseekPluginUpdate {
 }
 
 /// 点「DeepSeek」时查远端插件版本；失败不阻塞打开流程。
+///
+/// 要联网（`curl`，最坏两个源各 8 秒），放后台线程，别占主线程。
 #[tauri::command]
-pub fn deepseek_plugin_update() -> Result<DeepseekPluginUpdate, String> {
+pub async fn deepseek_plugin_update() -> Result<DeepseekPluginUpdate, String> {
+    tauri::async_runtime::spawn_blocking(plugin_update_blocking)
+        .await
+        .map_err(|err| format!("检查插件更新失败: {err}"))?
+}
+
+fn plugin_update_blocking() -> Result<DeepseekPluginUpdate, String> {
     let home = dsh_home()?;
     let (_, installed_version) = local_plugin_status(&home);
     match crate::commands::resources::latest_plugin_version(false) {

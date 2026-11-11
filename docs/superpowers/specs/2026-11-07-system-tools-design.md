@@ -1,9 +1,9 @@
 # 「系统」工具页扩展设计（屏幕休眠 / 开机自启 / 弹窗拦截 / 默认应用）
 
 > **2026-11-07 后续调整**：用户决定去掉「开机自启」「默认应用」两个页签，前后端代码已删除；
-> 实际页签只剩 `软件卸载 | 弹窗拦截(仅 Windows) | 屏幕休眠`。本文 4.2、4.4 节与相关测试清单
-> 仅作历史设计保留，不再对应代码。屏幕休眠页签也改成了会话式菜单（不限时 / 分钟 / 小时 /
-> 自定义小时+分钟），与 Amphetamine「开启新会话」一致，4.1 节的固定四档时长已过时。
+> 实际页签为 `软件卸载 | 弹窗拦截(仅 Windows) | 屏幕休眠 | Hosts | 剪贴板`。本文 4.2、4.4 节与
+> 相关测试清单仅作历史设计保留，不再对应代码。屏幕休眠页签也改成了会话式菜单（不限时 / 分钟 /
+> 小时 / 自定义小时+分钟），与 Amphetamine「开启新会话」一致，4.1 节的固定四档时长已过时。
 
 - 日期：2026-11-07
 - 分支：feat/uninstaller
@@ -17,14 +17,14 @@
 | 页签 | 能力 | 备注 |
 | --- | --- | --- |
 | 软件卸载 | 不变 | 已有 |
-| 弹窗拦截 | 实时列出可疑广告弹窗（检测 + 可选拦截） | **仅 Windows**，紧跟软件卸载 |
+| 弹窗拦截 | 按应用分组的持久化规则，自动关闭应用弹出的广告 / 附属窗口 | **仅 Windows**，紧跟软件卸载；主窗口保护 |
 | 屏幕休眠 | 阻止系统睡眠 / 屏幕关闭，可定时 | 参考 Amphetamine 的公开 API 做法 |
 | 开机自启 | 列出开机启动项，启用 / 禁用，含本应用登录启动开关 | Windows 注册表/启动文件夹，macOS LaunchAgents + 登录项 |
 | 默认应用 | 查看/修改常见文件类型的默认打开应用 | macOS 可改；Windows 只读 + 「选择默认应用」对话框 + 系统设置入口 |
 
 非目标（本期不做）：
 - 合盖不休眠（macOS `pmset disablesleep` 需 root，有残留风险）、away mode（仅 S3）
-- 弹窗「自动拦截」、DLL 注入、驱动、结束进程；只做检测 + 用户逐条手动关闭/隐藏
+- 弹窗「自动拦截」已实现为持久化规则 + 可选智能模式；不做 DLL 注入、驱动、结束进程，也不处理嵌入应用界面的广告横幅
 - Windows 静默改写 `UserChoice`（Win8+ 有哈希保护，第三方写入会被系统重置，属于破坏行为）
 - 写系统级启动项（HKLM / 公共启动文件夹）——只读展示，需管理员的操作不自动触发
 
@@ -115,24 +115,37 @@ macOS：
 
 安全：只切状态不删除条目；系统范围只读；桌面文件系统只读不写。
 
-### 4.3 弹窗拦截（仅 Windows，检测 + 可选拦截）
+### 4.3 弹窗拦截（仅 Windows，规则拦截 + 启发式检测）
 
-交互：页签顶部「检测」开关（默认关）+「拦截模式」开关（默认关，检测开着时才可开）+ 拦截参数（自动动作 `close`/`hide`、最低可疑分 6/8/10/12）+ 最近弹窗列表（时间 / 进程 / 标题 / 类名 / 尺寸 / 命中特征 / 操作）+「清空」+ 忽略名单（按进程名）。
+交互（照火绒的弹窗拦截）：页签顶部总开关（默认关，开启后持久化，下次启动自动恢复）+ 「N 项弹窗已拦截」标题 + 四格统计（累计拦截 / 覆盖应用 / 拦截规则 / 最近拦截时间）+「拦截规则 | 窗口记录 | 拦截记录」三个分段页签 + 设置条（默认动作 `close` / `hide`、智能拦截开关与阈值、每分钟自动处理上限）。
 
-命令：`popup_status` / `popup_start` / `popup_stop` / `popup_recent` / `popup_clear` / `popup_dismiss(id, action)` / `popup_ignore(process, ignored)` / `popup_settings_get` / `popup_settings_set(settings)`。
+- **拦截规则**：按应用分组（应用图标 / 名称 / 进程名、共 N 项、应用总开关、展开箭头）。展开后逐条显示「软件弹窗名称」（红包 / 软件推荐 / 广告弹窗）、弹窗位置（右下窗口 / 中间窗口 / 任意位置）、拦截次数、单条开关，以及「立即执行 / 删除」。顶部「共 N 条规则 · N 个应用」和火绒的「隐藏未触发规则」过滤；「从窗口添加」打开当前窗口选择器。
+- **窗口记录**：没有命中规则、但特征可疑的窗口进这里；行内可直接「关闭 / 隐藏 / 拦截此类 / 忽略」。窗口一闪而过后记录仍在，用来补规则。文案和火绒一致，不再叫「可疑记录」。
+- **拦截记录**：命中的历史（本次运行，最多 300 条），显示已关闭 / 已隐藏、规则拦截 / 智能拦截与时间。
+- **应用总开关**：一条命令切换该进程下所有规则（`popup_app_toggle`），与单条开关并存；统计里的「N 项弹窗已拦截」是规则持久化命中数之和，不是本次运行记录数。
 
-- 实现：后台线程每 800ms `EnumWindows` 轮询可见顶层窗口（和火绒的定时器 + 枚举思路一致）。首版不用 `SetWinEventHook`：API 面更小、不会被 UIPI 挡事件；代价同样是「先显示后记录」。同一窗口（类名 + 标题）只记一次，窗口标题变化会重新记录。
-- 启发式打分（只用于「可疑」排序，不自动动作）：`WS_EX_TOOLWINDOW` / `WS_EX_NOACTIVATE` / `WS_EX_TOPMOST`、无标题、尺寸异常（< 200×120 或超过屏幕 80%）、`GetWindow(GW_OWNER)` 为空、所属进程不是前台进程、常见广告类名等；每项给分值 + 命中原因字符串。
-- 检测模式（默认）：环形缓冲最多 200 条，新记录通过事件 `popup-detected` 推给前端；列表项操作由用户点击：`dismiss` 执行 `WM_CLOSE` 或 `SW_HIDE`（同进程 5 秒限流），`ignore` 把进程加入忽略名单（存 `<data_dir>/popup-ignore.json`，不动 AppConfig）。
-- 拦截模式（可选，默认关）：命中后自动处理，判定是纯函数 `should_intercept`，全部条件都满足才动手：
-  1. 设置里 `intercept=true`，且 `score >= min_score`；
-  2. 命中原因至少两条（避免单一线索误杀）；
-  3. 不在受保护进程表（`explorer.exe`/`dwm.exe`/`winlogon.exe`/`svchost.exe`/`SearchHost.exe`/本应用等 22 个）与受保护窗口类（`Progman`/`WorkerW`/`Shell_TrayWnd`/`Shell_SecondaryTrayWnd` 等外壳窗口）里；
-  4. 进程不在忽略名单；
-  5. 同进程 5 秒冷却；
-  6. 每分钟自动处理数未达上限（默认 6，熔断防连环误杀）。
-  设置存 `<data_dir>/popup-settings.json`，后端会把 `action`/`min_score`/`max_per_minute` 收进安全范围；列表里被自动处理的记录带「已自动关闭 / 已自动隐藏」标记。
-- 边界（写进 UI 说明）：只能显示后处理（弹窗会闪一下）；UIPI 下关不掉管理员窗口；UAC / 锁屏 / 内嵌广告不可见；不注入、不驱动、不杀进程；拦截模式失败不会重试（下一轮轮询再判断）。
+界面预览（示例数据，截图由真实组件渲染）：
+
+| 拦截记录 | 拦截规则（按应用分组） | 窗口记录 |
+| --- | --- | --- |
+| ![拦截记录](assets/popup-blocker/blocked.png) | ![拦截规则](assets/popup-blocker/rules.png) | ![窗口记录](assets/popup-blocker/pending.png) |
+
+| 添加规则确认框 | 从窗口添加 |
+| --- | --- |
+| ![规则确认框](assets/popup-blocker/rule-dialog.png) | ![窗口选择](assets/popup-blocker/picker.png) |
+
+命令：`popup_status` / `popup_start` / `popup_stop` / `popup_recent` / `popup_clear` / `popup_dismiss(id, action)` / `popup_ignore(process, ignored)` / `popup_ignored` / `popup_settings_get` / `popup_settings_set(settings)` / `popup_rules` / `popup_rule_add(draft, applyNow)` / `popup_rule_remove(id)` / `popup_rule_toggle(id, enabled)` / `popup_app_toggle(process, enabled)` / `popup_rule_apply(rule_id)` / `popup_windows` / `popup_app_meta(paths)`。耗时命令（`start` / `stop` / `rule_apply` / `windows` / `app_meta`）走 `spawn_blocking`，不占 Tauri 主线程。
+
+- **规则模型**：`PopupRule { name, position, process, class_name, title, scope, action, enabled, hits, last_hit_ms }`。`name` 是火绒式短名（红包 / 软件推荐 / 广告弹窗 / 活动弹窗），`position` 是右下窗口 / 中间窗口 / 任意位置；旧规则文件缺这两个字段时加载会按标题 / 类名补全。匹配是纯函数 `rule_matches`：进程忽略大小写必须相等；`class_name` 非空时窗口类相等；`title` 非空时标题包含它（忽略大小写）；两者都空表示「该程序的所有弹窗」。`scope`（`window` / `class` / `app`）只用于展示与新增时裁剪匹配字段，因此「同类弹窗」在广告换标题 / 素材后依然命中。
+- **主窗口保护（关键）**：每个进程的可见顶层窗口里，取最大的「无 owner、非工具窗口、非 NOACTIVATE、有标题、尺寸像正常窗口」的窗口标记为 `is_main`；检测线程和规则执行在匹配规则**之前**就跳过它。因此即使规则范围是「该程序的所有弹窗」（`scope=app`），也只会关掉应用弹出的广告 / 附属窗口，不会关掉应用主窗口。有 owner 的窗口天然算附属窗口，会加分并允许被拦截。限制：一个进程同时开着多个同等正常的窗口时，只保证最大的那个不被 app 规则误伤；对这类程序建议用「同类弹窗」而不是「所有弹窗」。
+- **规则来源**：① 窗口记录点「拦截此类」→ 默认 `class` 范围，可改成「仅此弹窗」（加标题）或「该程序全部」（主窗口仍受保护）；② 「从窗口添加」列出当前可见顶层窗口（带进程、标题、类名、尺寸、位置、可疑分，主窗口和系统窗口标为不可拦截）挑一个；③ 同一匹配条件重复添加会合并到已有规则并重新启用，不会堆重复项。新增时可勾选「立即拦截当前已经打开的同类窗口」，后端对该规则立即扫一遍可见窗口并处理。
+- **检测线程**：每 500ms `EnumWindows` 轮询可见顶层窗口（和火绒的定时器 + 枚举思路一致，API 面比 `SetWinEventHook` 小、不会被 UIPI 挡事件）。先标记主窗口，再匹配启用中的规则：命中就 `WM_CLOSE` / `SW_HIDE` 并记一条「已拦截」；同一个窗口句柄两次动作至少间隔 5 秒（防无视关闭的窗口被连环处理），同一窗口实例只记一条记录。没有命中规则才走启发式打分（`WS_EX_TOOLWINDOW` / `WS_EX_NOACTIVATE` / `WS_EX_TOPMOST`、无标题、尺寸异常、类名与标题广告线索、进程不在前台），可疑窗口用 `popup-detected` 事件推给界面。
+- **窗口记录**：分数 > 0 且没有规则的窗口进「窗口记录」；窗口关闭 / 隐藏后记录自动移除（拦截记录保留作历史，最多 300 条，进程重启清空；每轮 500ms 清理已销毁窗口，避免 HWND 复用后关错窗口）。
+- **智能拦截（可选，默认关）**：没有命中规则时，命中闸门才自动处理——`smart=true`、`score >= min_score`、至少两条命中原因、不在受保护进程 / 窗口类表、不在忽略名单、每分钟自动处理数未达上限（默认 6）。规则拦截不走这个闸门，因为它是用户明确的意图；主窗口闸门始终生效。
+- **硬保护**：`explorer.exe` / `dwm.exe` / 任务栏 / 开始菜单 / 输入法 / 本应用等 22 个进程与 8 类外壳窗口永远不自动处理；新增规则时直接拒绝这类进程。
+- **持久化**：规则存 `<data_dir>/popup-rules.json`（命中次数由检测线程最多每 10 秒懒落盘，停线程时再刷一次）；设置存 `popup-settings.json`（`popup_start` / `popup_stop` 同步总开关 `enabled`，前端传值会被忽略）；忽略名单存 `popup-ignore.json`（按进程名，运行中即时生效）。三份文件都是「写临时文件再改名」，避免写一半被读到；读取时容忍 UTF-8 BOM（PowerShell 5.1 的 `Set-Content -Encoding UTF8` 会写 BOM，旧版本曾因此把规则读成 0 条）。
+- **图标与名称**：`popup_app_meta` 复用 openwith 的 PowerShell 批量图标脚本，额外读 exe 的 `FileDescription` 作展示名，按路径缓存；取不到图标时前端用进程名 + 首字母色块兜底，不影响功能。
+- **边界（写进 UI 说明）**：只能显示后处理（500ms 轮询，弹窗会闪一下）；UIPI 下关不掉管理员窗口；UAC / 锁屏不可见；**网页或应用界面内嵌的广告横幅不是独立窗口，这套方案管不了**，需要在应用内关闭；不注入、不驱动、不杀进程；同一程序不同窗口类需要分别加规则。
 - 非 Windows：模块编译 stub，命令返回「仅 Windows 支持」；前端用 `platform.is_windows` 隐藏页签。
 
 ### 4.4 默认应用
@@ -166,7 +179,18 @@ macOS：
 | 前端构建 | `pnpm build` | 通过（vue-tsc + vite） |
 | 应用启动 | `pnpm tauri dev` | 正常启动，托盘快捷面板创建成功，无 panic |
 
-未做（环境限制）：Windows 实机验收；真实改动系统默认应用（避免动用户既有文件关联，只验证读与候选）；弹窗检测只在 Windows 有效，未实机跑；四页签的浏览器 mock 截图未做（改为真机启动 + 组件代码走查）。
+未做（环境限制）：真实安装包（Program Files / 管理员权限路径）验收；真实改动系统默认应用（避免动用户既有文件关联，只验证读与候选）；弹窗检测只在 Windows 有效，已用 Windows 实机跑通主窗口保护。
+
+### 5.2 弹窗拦截（2026-11-11，Windows 实机）
+
+| 检查 | 命令 / 操作 | 结果 |
+| --- | --- | --- |
+| 弹窗模块单测 | `cargo test --lib cleaner::popup` | 31 passed / 0 failed |
+| 后端编译 | `cargo check --lib` | 通过（仅既有 warning） |
+| 前端类型检查 | `pnpm exec vue-tsc --noEmit` | 通过 |
+| 前端构建 | `pnpm build` | 通过（vue-tsc + vite） |
+| 主窗口保护实机 | 规则 `scope=app`（powershell.exe）+ 900×600 主窗口 + 420×260 owner/工具窗口广告 | 广告窗口 0.44s 内关闭；主窗口保持打开；规则 hits 从 0 持久化为 1 |
+| 旧规则 / BOM 兼容 | `cargo test --lib cleaner::popup::tests::old_rules_get_name_and_position_backfilled`、`json_with_utf8_bom_is_accepted` | 通过（旧规则补 name/position；带 BOM 的 JSON 可读） |
 
 
 ## 6. 已知限制
@@ -175,5 +199,5 @@ macOS：
 
 - 屏幕休眠：只防空闲睡眠/关屏；不拦屏保（macOS 屏幕断言会压制屏保）、合盖、主动睡眠。
 - 开机自启：Windows `StartupApproved` 格式无官方文档，按 Win10/11 观察实现，写坏了有备份可回滚；macOS 登录项依赖自动化授权。
-- 弹窗拦截：检测模式，误报（正常弹窗被标可疑）可忽略，不会自动做事；对管理员窗口无效。
+- 弹窗拦截：只处理应用弹出的独立广告 / 附属窗口，应用主窗口会被自动跳过；网页或应用界面内嵌的广告横幅不是独立窗口，这套方案管不了。按窗口特征识别，极端情况下仍可能误判；对管理员权限窗口（UIPI）发关闭会失败，不计命中。
 - 默认应用：Windows 不能静默改（系统限制），只能引导；macOS 用的 LaunchServices API 已标记 deprecated，但仍是当前唯一可行方式。

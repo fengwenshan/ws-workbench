@@ -249,7 +249,7 @@ fn windows_write_script(content_file: &Path, destination: &Path, result_file: &P
          }}\n\
          try {{\n\
            ipconfig /flushdns | Out-Null\n\
-           $lines += 'WS_FLUSH_OK'\n\
+           if ($LASTEXITCODE -eq 0) {{ $lines += 'WS_FLUSH_OK' }} else {{ $lines += 'WS_FLUSH_FAIL' }}\n\
          }} catch {{\n\
            $lines += 'WS_FLUSH_FAIL'\n\
          }}\n\
@@ -411,6 +411,19 @@ mod tests {
             Path::new(r"C:\temp\result.log"),
         );
         assert!(script.contains("'C:\\it''s\\hosts.txt'"));
+    }
+
+    #[test]
+    fn windows_script_checks_flush_exit_code() {
+        let script = windows_write_script(
+            Path::new(r"C:\temp\hosts.txt"),
+            Path::new(r"C:\Windows\System32\drivers\etc\hosts"),
+            Path::new(r"C:\temp\result.log"),
+        );
+        // 原生命令的非零退出码不会进 catch，必须显式看 $LASTEXITCODE
+        assert!(script.contains("ipconfig /flushdns"));
+        assert!(script.contains("$LASTEXITCODE -eq 0"), "{script}");
+        assert!(script.contains("WS_FLUSH_FAIL"));
     }
 
     #[test]

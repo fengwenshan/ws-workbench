@@ -1,4 +1,4 @@
-//! 卸载前的运行状态检测与优雅退出。
+﻿//! 卸载前的运行状态检测与优雅退出。
 //!
 //! 检测只读、不需要提权；退出先走平台原生「正常退出」通道，
 //! 5 秒内退不干净就失败，由卸载流程中止，不强制杀进程。
@@ -470,7 +470,7 @@ fn platform_terminate(_app: &InstalledApp, processes: &[RunningProcess]) {
 fn platform_kill(processes: &[RunningProcess]) {
     for process in processes {
         let pid = process.pid.to_string();
-        let _ = std::process::Command::new("taskkill")
+        let _ = crate::process::hidden("taskkill")
             .args(["/PID", &pid, "/T", "/F"])
             .output();
     }

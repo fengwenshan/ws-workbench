@@ -20,7 +20,7 @@ use crate::cleaner::models::{
 pub use crate::cleaner::CleanerState;
 
 /// 卸载窗口 label（`capabilities/default.json` 的 windows 里也要列上）
-const UNINSTALL_WINDOW_LABEL: &str = "uninstall";
+pub(crate) const UNINSTALL_WINDOW_LABEL: &str = "uninstall";
 
 /// 从列表缓存里取一条应用信息：卸载/残留扫描在 app id 之外还需要名字等信息，
 /// 而 `UninstallString`/bundle 元数据在应用被删掉后就取不到了，只能靠缓存兜底。
@@ -143,11 +143,19 @@ pub async fn cleaner_open_uninstall_window(
         tauri::WebviewUrl::App("uninstall.html".into()),
     )
     .title(&title)
+    // 和主窗口共用可写的 WebView2 数据目录：不设时 WebView2 会退回
+    // `%LOCALAPPDATA%\com.ws.workbench\EBWebView`，受限环境/受控文件夹访问下
+    // 会以「拒绝访问 / 灾难性故障」让卸载窗口创建失败（与快捷面板同一处理）。
+    .data_directory(crate::webview_data_dir(&app))
     .inner_size(820.0, 560.0)
     .min_inner_size(760.0, 480.0)
     .center()
     .maximizable(false);
-    // macOS：隐藏标题、红绿灯浮在内容上（截图 1 的样子）；Windows 用原生标题栏
+    // Windows：和主窗口一样去掉系统标题栏，由前端画 38px 自定义标题栏
+    // （品牌 + 最小化/关闭）；macOS 继续隐藏标题、红绿灯浮在内容上；
+    // Linux 保留系统边框。
+    #[cfg(target_os = "windows")]
+    let builder = builder.decorations(false);
     #[cfg(target_os = "macos")]
     let builder = builder
         .hidden_title(true)
@@ -179,7 +187,10 @@ pub async fn cleaner_related_files(
     state: State<'_, CleanerState>,
     app_id: String,
 ) -> Result<RelatedFiles, String> {
+    // 卸载成功后列表缓存会失效，但窗口目标还留着；用 pending 兜底，
+    // 让卸载后的二次扫描仍能拿到名字/发布者/安装目录（Uninstall 键可能已被删）。
     let hint = cached_app(&state, &app_id)
+        .or_else(|| pending_target(&state, &app_id))
         .ok_or_else(|| "应用信息不存在，请重新扫描列表".to_string())?;
     if crate::cleaner::installer::is_self_app(&hint) {
         return Err("不能卸载正在运行的应用".to_string());

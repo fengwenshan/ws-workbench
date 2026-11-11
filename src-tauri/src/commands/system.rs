@@ -127,9 +127,14 @@ pub fn get_platform_info() -> PlatformInfo {
 }
 
 /// 本机网络接口（MAC / IP）：设置页「运行环境」展示用
+///
+/// Windows 上要走一次 PowerShell（`Get-NetAdapter`），一两秒；同样不能同步跑在
+/// 主线程上，否则打开设置页时整个窗口会卡住。
 #[tauri::command]
-pub fn get_network_info() -> Result<NetworkInfo, String> {
-    NetworkInfo::current()
+pub async fn get_network_info() -> Result<NetworkInfo, String> {
+    tauri::async_runtime::spawn_blocking(NetworkInfo::current)
+        .await
+        .map_err(|err| format!("读取网络信息失败: {err}"))?
 }
 
 /// Windows Terminal 的图标来源：包里真正的 `WindowsTerminal.exe`。

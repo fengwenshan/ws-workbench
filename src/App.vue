@@ -372,6 +372,16 @@ onMounted(async () => {
 const appWindow = getCurrentWindow();
 const isMaximized = ref(false);
 let resizeUnlisten: UnlistenFn | null = null;
+// 标题栏按钮的 hover 是否允许生效。
+// 收进托盘 / 最小化时窗口只是「隐藏」，WebView 里最后一次 hover 状态会留在
+// 渲染树里，重新显示时关闭键会被画成红色（看起来像闪一下）。所以失焦就关掉
+// hover，等窗口里真的来了鼠标移动再打开。
+const titlebarHoverReady = ref(true);
+let focusUnlisten: UnlistenFn | null = null;
+
+function enableTitlebarHover() {
+  titlebarHoverReady.value = true;
+}
 
 async function syncMaximized() {
   try {
@@ -409,10 +419,23 @@ onMounted(async () => {
   } catch {
     // 窗口事件不可用时不注册，按钮仍可正常切换
   }
+  try {
+    focusUnlisten = await appWindow.onFocusChanged(({ payload: focused }) => {
+      if (!focused) {
+        titlebarHoverReady.value = false;
+      }
+    });
+  } catch {
+    // 拿不到焦点事件时保持 hover 常开，只是可能残留在恢复显示时红一下
+  }
+  window.addEventListener("mousemove", enableTitlebarHover, { passive: true });
 });
 onUnmounted(() => {
   resizeUnlisten?.();
   resizeUnlisten = null;
+  focusUnlisten?.();
+  focusUnlisten = null;
+  window.removeEventListener("mousemove", enableTitlebarHover);
 });
 
 const updateBusy = computed(
@@ -605,7 +628,12 @@ async function handlePack(project: any, asZip: boolean = false) {
         </button>
         <span v-if="devBuild" class="titlebar-dev-tag" title="开发构建">dev</span>
       </div>
-      <div v-if="isWindows" class="window-controls" aria-label="窗口控制">
+      <div
+        v-if="isWindows"
+        class="window-controls"
+        :class="{ 'hover-ready': titlebarHoverReady }"
+        aria-label="窗口控制"
+      >
         <button
           class="window-control"
           type="button"
@@ -1057,7 +1085,7 @@ async function handlePack(project: any, asZip: boolean = false) {
   color: var(--text-secondary);
   cursor: default;
 }
-.window-control:hover {
+.window-controls.hover-ready .window-control:hover {
   background: var(--bg-hover);
   color: var(--text-primary);
 }
@@ -1072,7 +1100,7 @@ async function handlePack(project: any, asZip: boolean = false) {
   stroke: currentColor;
   stroke-width: 1;
 }
-.window-control-close:hover {
+.window-controls.hover-ready .window-control-close:hover {
   background: #c42b1c;
   color: #fff;
 }

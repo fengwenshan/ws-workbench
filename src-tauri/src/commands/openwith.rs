@@ -41,23 +41,37 @@ static CACHE: Mutex<Option<Vec<OpenWithApp>>> = Mutex::new(None);
 // ============================== 命令 ==============================
 
 /// 列出本机可用的打开方式（首次调用会扫描并缓存）
+///
+/// 扫描要读注册表、还要起 PowerShell 批量取图标，冷启动几秒起步。这里必须走
+/// `async` + `spawn_blocking`：同步命令在 Tauri 里跑在主线程上，会把首屏
+/// （`app_ready`）一直堵在后面，表现就是启动时窗口不出来、鼠标一直转圈。
 #[tauri::command]
-pub fn list_open_with_apps(app: AppHandle) -> Vec<OpenWithApp> {
+pub async fn list_open_with_apps(app: AppHandle) -> Vec<OpenWithApp> {
+    tauri::async_runtime::spawn_blocking(move || cached_scan(app))
+        .await
+        .unwrap_or_default()
+}
+
+/// 重新扫描（用户刚装完软件时用）
+#[tauri::command]
+pub async fn refresh_open_with_apps(app: AppHandle) -> Vec<OpenWithApp> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let apps = scan(&app);
+        if let Ok(mut cache) = CACHE.lock() {
+            *cache = Some(apps.clone());
+        }
+        apps
+    })
+    .await
+    .unwrap_or_default()
+}
+
+fn cached_scan(app: AppHandle) -> Vec<OpenWithApp> {
     if let Ok(cache) = CACHE.lock() {
         if let Some(apps) = cache.as_ref() {
             return apps.clone();
         }
     }
-    let apps = scan(&app);
-    if let Ok(mut cache) = CACHE.lock() {
-        *cache = Some(apps.clone());
-    }
-    apps
-}
-
-/// 重新扫描（用户刚装完软件时用）
-#[tauri::command]
-pub fn refresh_open_with_apps(app: AppHandle) -> Vec<OpenWithApp> {
     let apps = scan(&app);
     if let Ok(mut cache) = CACHE.lock() {
         *cache = Some(apps.clone());
@@ -581,6 +595,69 @@ fn real_executable(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
+/// 从可执行文件里顺带读到的展示信息：文件描述 + 图标。
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone)]
+pub(crate) struct WindowsAppMeta {
+    pub name: String,
+    pub icon: Option<String>,
+}
+
+/// 批量取「可执行文件路径 → 展示名 + 64px 图标」，弹窗拦截的规则/记录列表用。
+///
+/// 和 [`windows_icons`] 共用同一段脚本，多读一个 `FileDescription`（资源管理器里
+/// 显示的名字，比如 `WPS Office`）；没有版本信息时退回文件名。
+#[cfg(target_os = "windows")]
+pub(crate) fn windows_app_meta(
+    paths: &[&Path],
+) -> std::collections::HashMap<PathBuf, WindowsAppMeta> {
+    use std::collections::HashMap;
+
+    let mut metas: HashMap<PathBuf, WindowsAppMeta> = HashMap::new();
+    if paths.is_empty() {
+        return metas;
+    }
+    let list = paths
+        .iter()
+        .map(|path| format!("'{}'", path.to_string_lossy().replace('\'', "''")))
+        .collect::<Vec<_>>()
+        .join(",");
+    let script = WINDOWS_ICON_SCRIPT.replace("{LIST}", &list);
+
+    #[derive(serde::Deserialize)]
+    struct MetaEntry {
+        path: String,
+        #[serde(default)]
+        png: String,
+        #[serde(default)]
+        desc: String,
+    }
+
+    let Ok(value) = crate::winps::run_json(&script) else {
+        return metas;
+    };
+    for entry in crate::winps::parse_list::<MetaEntry>(value) {
+        let path = PathBuf::from(&entry.path);
+        let fallback = path
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().to_string())
+            .unwrap_or_else(|| entry.path.clone());
+        let name = entry.desc.trim().to_string();
+        metas.insert(
+            path,
+            WindowsAppMeta {
+                name: if name.is_empty() { fallback } else { name },
+                icon: if entry.png.is_empty() {
+                    None
+                } else {
+                    Some(format!("data:image/png;base64,{}", entry.png))
+                },
+            },
+        );
+    }
+    metas
+}
+
 /// 从一组可执行文件里批量取 64px 图标，返回「可执行文件路径 → data URL」。
 ///
 /// 一次 PowerShell 调用处理整张菜单：`PrivateExtractIcons` 直接向 shell 要
@@ -641,6 +718,8 @@ $paths = @({LIST})
 $out = @()
 foreach ($path in $paths) {
   if (-not (Test-Path -LiteralPath $path)) { continue }
+  $desc = ''
+  try { $desc = ([System.Diagnostics.FileVersionInfo]::GetVersionInfo($path)).FileDescription } catch { }
   $icon = $null
   $handle = [IntPtr]::Zero
   if ($shellReady) {
@@ -662,7 +741,7 @@ foreach ($path in $paths) {
     $bitmap = $icon.ToBitmap()
     $stream = New-Object System.IO.MemoryStream
     $bitmap.Save($stream, [System.Drawing.Imaging.ImageFormat]::Png)
-    $out += [pscustomobject]@{ path = $path; png = [Convert]::ToBase64String($stream.ToArray()) }
+    $out += [pscustomobject]@{ path = $path; png = [Convert]::ToBase64String($stream.ToArray()); desc = [string]$desc }
     $stream.Dispose()
     $bitmap.Dispose()
   } catch { }
@@ -723,6 +802,19 @@ mod windows_tests {
             .expect("explorer.exe 应该能取到图标");
         assert!(icon.starts_with("data:image/png;base64,"), "实际: {}", icon);
         assert!(icon.len() > 200, "图标数据太短: {}", icon.len());
+    }
+
+    /// 弹窗拦截用同一段脚本多取一个 `FileDescription` 当作应用展示名
+    #[test]
+    fn app_meta_reads_display_name_and_icon() {
+        let exe = system_exe("explorer.exe").expect("系统里应该有 explorer.exe");
+        let metas = windows_app_meta(&[exe.as_path()]);
+        let meta = metas
+            .get(exe.as_path())
+            .expect("explorer.exe 应该能取到展示信息");
+        assert!(!meta.name.trim().is_empty(), "展示名不能为空");
+        let icon = meta.icon.as_deref().expect("explorer.exe 应该有图标");
+        assert!(icon.starts_with("data:image/png;base64,"), "实际: {icon}");
     }
 
     /// 取不到图标时安静返回空表，不影响菜单

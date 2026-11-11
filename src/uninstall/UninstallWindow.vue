@@ -3,6 +3,8 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import AppIcon from '@/components/cleaner/AppIcon.vue'
+import appIcon from '@/assets/app-icon.png'
+import { platform } from '@/platform'
 import { formatBytes } from '@/components/cleaner/format'
 import {
   CLEANER_PROGRESS_EVENT,
@@ -28,7 +30,7 @@ import RelatedList from './RelatedList.vue'
  * 软件卸载独立窗口（820×560，由后端 `cleaner_open_uninstall_window` 创建）。
  *
  * 状态机：loading → ready →（运行中则弹强制退出确认）→ quitting → uninstalling
- *        → deleting → done | error
+ *        → rescanning → ready(postScan) → deleting → done | error
  *
  * 请求编排顺序与设计 3.1 一致：
  * 1. `cleaner_uninstall_target` 取目标应用；
@@ -36,7 +38,9 @@ import RelatedList from './RelatedList.vue'
  * 3. 点「确认删除」先 `cleaner_app_running`：运行中弹强制退出确认；
  * 4. 「强制退出」→ `cleaner_force_quit`，进程归零后继续；
  * 5. `cleaner_uninstall_app(quitRunning=false)` 执行系统卸载；
- * 6. `cleaner_delete_related` 删除勾选的关联文件，结果留在窗口内展示。
+ * 6. 卸载成功后自动再扫一次残留：有残留回到 ready（提示「卸载已完成」，
+ *    按钮变为「清理残留」）让用户确认；没有残留直接进 done；
+ * 7. `cleaner_delete_related` 删除勾选的关联文件，结果留在窗口内展示。
  */
 type Phase =
   | 'loading'
@@ -66,6 +70,8 @@ const forceQuitOpen = ref(false)
 const deleteOutcome = ref<DeleteOutcome | null>(null)
 /** 系统卸载已成功、只剩删关联文件：重试时不再走卸载命令 */
 const uninstallDone = ref(false)
+/** 当前清单是否是「卸载完成后二次扫描」的残留确认页 */
+const postScan = ref(false)
 
 const unlisteners: UnlistenFn[] = []
 
@@ -75,6 +81,12 @@ const busy = computed(
     phase.value === 'uninstalling' ||
     phase.value === 'deleting',
 )
+
+/** Windows 自绘标题栏；macOS / Linux 仍用系统窗口装饰 */
+const isWindows = computed(() => platform.is_windows)
+
+/** 标题栏文案：目标应用还没加载出来时退回「卸载」 */
+const windowTitle = computed(() => (app.value ? `卸载 ${app.value.name}` : '卸载'))
 
 const allItems = computed(() => related.value?.groups.flatMap((group) => group.items) ?? [])
 
@@ -162,6 +174,7 @@ async function load(): Promise<void> {
   progressText.value = ''
   deleteOutcome.value = null
   uninstallDone.value = false
+  postScan.value = false
   try {
     const target = await uninstallTarget()
     app.value = target
@@ -291,11 +304,49 @@ async function runUninstall(): Promise<void> {
       return
     }
     uninstallDone.value = true
-    await runDelete()
+    await rescanAfterUninstall()
   } catch (err) {
     phase.value = 'ready'
     actionErrorSource.value = 'uninstall'
     actionError.value = errorText(err, '卸载失败')
+  }
+}
+
+/** 卸载完成后重新扫描残留：有残留进二次确认，没有残留直接完成 */
+async function rescanAfterUninstall(): Promise<void> {
+  const target = app.value
+  if (!target) return
+  phase.value = 'loading'
+  progressText.value = '正在扫描卸载残留…'
+  try {
+    const files = await relatedFiles(target.id)
+    const items = files.groups.flatMap((group) => group.items)
+    related.value = files
+    progressText.value = ''
+    if (items.length === 0) {
+      deleteOutcome.value = null
+      phase.value = 'done'
+      return
+    }
+    // 保留用户卸载前的勾选（包括明确取消的项）；卸载后新出现的条目才按后端默认置信度勾选
+    const previous = selected.value
+    const next: Record<string, boolean> = {}
+    for (const item of items) {
+      const known = Object.prototype.hasOwnProperty.call(previous, item.path)
+      if (known ? previous[item.path] : item.selected) next[item.path] = true
+    }
+    selected.value = withPrimary(next)
+    postScan.value = true
+    phase.value = 'ready'
+  } catch (err) {
+    // 重扫失败不阻断：退回原清单，用户仍可按原勾选删除
+    progressText.value = ''
+    phase.value = 'ready'
+    actionErrorSource.value = 'delete'
+    actionError.value = errorText(
+      err,
+      '卸载已完成，但重新扫描残留失败；仍可删除之前勾选的项目',
+    )
   }
 }
 
@@ -342,6 +393,11 @@ function closeWindow(): void {
   void getCurrentWindow().close()
 }
 
+/** 自绘标题栏的最小化按钮 */
+function minimizeWindow(): void {
+  void getCurrentWindow().minimize()
+}
+
 // ============================ 生命周期 ============================
 
 onMounted(async () => {
@@ -377,6 +433,40 @@ onUnmounted(() => {
 
 <template>
   <div class="unwin">
+    <!-- Windows：自绘标题栏（后端已用 decorations(false) 去掉系统标题栏）。
+         和主界面保持一致的 38px 高度、左侧品牌、右侧最小化/关闭。 -->
+    <header v-if="isWindows" class="unwin-titlebar">
+      <div class="unwin-titlebar-drag" data-tauri-drag-region></div>
+      <div class="unwin-titlebar-brand">
+        <img class="unwin-titlebar-icon" :src="appIcon" alt="" draggable="false" />
+        <span class="unwin-titlebar-name" :title="windowTitle">{{ windowTitle }}</span>
+      </div>
+      <div class="unwin-titlebar-controls">
+        <button
+          type="button"
+          class="unwin-window-btn"
+          title="最小化"
+          aria-label="最小化"
+          @click="minimizeWindow"
+        >
+          <svg viewBox="0 0 12 12" aria-hidden="true">
+            <path d="M2 6h8" />
+          </svg>
+        </button>
+        <button
+          type="button"
+          class="unwin-window-btn unwin-window-btn-close"
+          title="关闭"
+          aria-label="关闭"
+          @click="closeWindow"
+        >
+          <svg viewBox="0 0 12 12" aria-hidden="true">
+            <path d="M2.5 2.5l7 7M9.5 2.5l-7 7" />
+          </svg>
+        </button>
+      </div>
+    </header>
+
     <!-- 顶部：图标 / 名称 / 使用情况 / 合计大小 -->
     <header v-if="app" class="unwin-head">
       <AppIcon
@@ -457,6 +547,10 @@ onUnmounted(() => {
 
       <!-- 清单 / 空态 -->
       <template v-else>
+        <div v-if="postScan" class="unwin-rescan-note">
+          <strong>卸载已完成。</strong>重新扫描到 {{ allItems.length }} 项残留，确认后会一并清理。
+        </div>
+
         <div v-if="actionError" class="unwin-banner" role="alert">
           <span class="unwin-banner-text">{{ actionError }}</span>
           <span class="unwin-banner-actions">
@@ -493,6 +587,14 @@ onUnmounted(() => {
       <template v-if="phase === 'done'">
         <span class="foot-done">{{ hasFailures ? '卸载完成，部分文件未删除' : '卸载完成' }}</span>
         <div class="foot-actions">
+          <button
+            v-if="hasFailures"
+            type="button"
+            class="btn btn-ghost"
+            @click="runDelete"
+          >
+            重试清理
+          </button>
           <button type="button" class="btn btn-primary" @click="closeWindow">关闭</button>
         </div>
       </template>
@@ -500,7 +602,7 @@ onUnmounted(() => {
       <template v-else-if="phase === 'loading' || busy">
         <span class="foot-status">
           <span v-if="busy" class="foot-dot"></span>
-          {{ busy ? statusText : '正在加载…' }}
+          {{ busy ? statusText : progressText || '正在加载…' }}
         </span>
         <div class="foot-actions">
           <button type="button" class="btn btn-ghost" disabled>返回</button>
@@ -548,7 +650,7 @@ onUnmounted(() => {
             :disabled="selectedCount === 0"
             @click="requestDelete"
           >
-            确认删除
+            {{ postScan ? '清理残留' : '确认删除' }}
           </button>
         </div>
       </template>
@@ -564,3 +666,123 @@ onUnmounted(() => {
     />
   </div>
 </template>
+
+<style scoped>
+/* 卸载后二次扫描的提示条 */
+.unwin-rescan-note {
+  flex-shrink: 0;
+  margin: 10px 40px 0;
+  padding: 9px 12px;
+  border: 1px solid rgba(0, 122, 255, 0.22);
+  border-radius: 8px;
+  background: rgba(0, 122, 255, 0.06);
+  color: var(--un-text-secondary);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.unwin-rescan-note strong {
+  color: var(--un-text-strong);
+  font-weight: 600;
+}
+
+/* Windows 自绘标题栏：与主界面 App.vue 的 .titlebar 保持同一套尺寸和交互 */
+.unwin-titlebar {
+  position: relative;
+  flex-shrink: 0;
+  height: 38px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 0 0 16px;
+  border-bottom: 1px solid var(--un-divider);
+  background: #fff;
+  user-select: none;
+}
+
+/* 透明拖动层铺满标题栏，空白处和品牌文字都能拖动窗口 */
+.unwin-titlebar-drag {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+}
+
+.unwin-titlebar > * {
+  z-index: 1;
+}
+
+.unwin-titlebar > .unwin-titlebar-drag {
+  z-index: 0;
+}
+
+.unwin-titlebar-brand {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  z-index: 2;
+  /* 品牌区域只做展示，鼠标事件交给下面的拖动层 */
+  pointer-events: none;
+}
+
+.unwin-titlebar-icon {
+  width: 16px;
+  height: 16px;
+  margin-right: 8px;
+  object-fit: contain;
+  flex-shrink: 0;
+}
+
+.unwin-titlebar-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--un-text-strong);
+}
+
+.unwin-titlebar-controls {
+  display: flex;
+  align-self: stretch;
+  flex-shrink: 0;
+  margin-left: auto;
+  z-index: 2;
+}
+
+.unwin-window-btn {
+  width: 46px;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--un-text-secondary);
+  cursor: default;
+}
+
+.unwin-window-btn:hover {
+  background: var(--un-hover);
+  color: var(--un-text-strong);
+}
+
+.unwin-window-btn-close:hover {
+  background: #c42b1c;
+  color: #fff;
+}
+
+.unwin-window-btn:focus-visible {
+  outline: 1px solid var(--un-blue);
+  outline-offset: -2px;
+}
+
+.unwin-window-btn svg {
+  width: 12px;
+  height: 12px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1;
+}
+</style>

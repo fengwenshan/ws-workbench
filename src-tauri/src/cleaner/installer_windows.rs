@@ -753,23 +753,58 @@ mod win_impl {
     /// 生成 `Start-Process` 提权/普通启动脚本
     fn start_process_script(command: &UninstallCommand) -> String {
         let quote = |value: &str| format!("'{}'", value.replace('\'', "''"));
-        let args = command
-            .args
-            .iter()
-            .map(|arg| quote(arg))
-            .collect::<Vec<_>>()
-            .join(",");
+        // `Start-Process -ArgumentList @()` 会被 PowerShell 参数校验直接拒绝
+        // （Cannot validate argument on parameter 'ArgumentList'），
+        // 没有参数时必须整段省略；否则无参数卸载程序根本启动不了。
+        let argument_list = if command.args.is_empty() {
+            String::new()
+        } else {
+            let args = command
+                .args
+                .iter()
+                .map(|arg| quote(arg))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(" -ArgumentList @({})", args)
+        };
         format!(
-            "$p = Start-Process -FilePath {} -ArgumentList @({}) -Wait -PassThru{}; \
+            "$p = Start-Process -FilePath {}{} -Wait -PassThru{}; \
              if ($null -ne $p) {{ $p.ExitCode }} else {{ 0 }}",
             quote(&command.program),
-            args,
+            argument_list,
             if command.needs_elevation {
                 " -Verb RunAs"
             } else {
                 ""
             }
         )
+    }
+
+    #[cfg(test)]
+    mod script_tests {
+        use super::*;
+
+        #[test]
+        fn omits_empty_argument_list() {
+            let script = start_process_script(&UninstallCommand {
+                program: r"C:\Program Files\Foo\uninst.exe".to_string(),
+                args: Vec::new(),
+                needs_elevation: false,
+            });
+            assert!(!script.contains("-ArgumentList"));
+            assert!(script.contains(r"'C:\Program Files\Foo\uninst.exe'"));
+        }
+
+        #[test]
+        fn keeps_arguments_and_elevation() {
+            let script = start_process_script(&UninstallCommand {
+                program: r"C:\Foo\uninst.exe".to_string(),
+                args: vec!["/S".to_string(), r"/D=C:\Foo Bar".to_string()],
+                needs_elevation: true,
+            });
+            assert!(script.contains(r"-ArgumentList @('/S','/D=C:\Foo Bar')"));
+            assert!(script.contains("-Verb RunAs"));
+        }
     }
 
     /// 卸载（设计 4.2 的 `cleaner_uninstall_app`）。
@@ -1156,19 +1191,61 @@ mod win_impl {
 
     // ============================== 关联文件（卸载窗口，设计 4.2） ==============================
 
+    /// 系统目录和公共父目录本身不能当作应用安装目录。
+    ///
+    /// 典型反例：MSI 的 `UninstallString` 是 `System32\msiexec.exe`，旧逻辑会把
+    /// `C:\Windows\System32` 整个列成「程序文件」并默认勾选；用户一眼看到 6 GB
+    /// 的系统目录，点删除还会被白名单拒绝。整个 `%WINDIR%` 一律拒绝，公共目录
+    /// 只拒绝根目录本身（子目录如 `Program Files\Foo` 仍允许）。
+    fn is_forbidden_install_dir(path: &Path) -> bool {
+        let Some(normalized) = crate::cleaner::running::normalize_win_path(&path.to_string_lossy())
+        else {
+            return true;
+        };
+        if normalized.trim_end_matches('\\').len() <= 2 {
+            return true;
+        }
+        let windows_roots = ["WINDIR", "SystemRoot"]
+            .iter()
+            .filter_map(|name| std::env::var_os(name))
+            .filter_map(|value| {
+                crate::cleaner::running::normalize_win_path(&value.to_string_lossy())
+            })
+            .collect::<Vec<_>>();
+        if windows_roots
+            .iter()
+            .any(|root| crate::cleaner::running::win_path_within(&normalized, root))
+        {
+            return true;
+        }
+        [
+            "ProgramFiles",
+            "ProgramW6432",
+            "ProgramFiles(x86)",
+            "ProgramData",
+            "APPDATA",
+            "LOCALAPPDATA",
+            "USERPROFILE",
+        ]
+        .iter()
+        .filter_map(|name| std::env::var_os(name))
+        .filter_map(|value| crate::cleaner::running::normalize_win_path(&value.to_string_lossy()))
+        .any(|root| root == normalized)
+    }
+
     /// 安装目录候选：列表缓存 + 注册表 `InstallLocation` / `DisplayIcon` 目录 /
     /// `UninstallString` 可执行文件所在目录（安装位置为空时的兜底）。
+    ///
+    /// 只要有一个「真实存在的」`InstallLocation`，就绝不再用卸载程序所在目录兜底：
+    /// 否则 `msiexec.exe` / 系统目录会被当成应用目录；注册表里的位置过期时仍允许兜底。
     fn install_dirs(app_id: &str, hint: Option<&InstalledApp>) -> Vec<PathBuf> {
-        let mut dirs: Vec<PathBuf> = Vec::new();
-        let mut push = |path: PathBuf| {
-            if path.is_dir() && !dirs.contains(&path) {
-                dirs.push(path);
-            }
-        };
+        let mut locations: Vec<PathBuf> = Vec::new();
+        let mut extras: Vec<PathBuf> = Vec::new();
+        let mut fallback: Vec<PathBuf> = Vec::new();
         if let Some(app) = hint {
             let location = app.install_location.trim().trim_matches('"');
             if !location.is_empty() {
-                push(PathBuf::from(location));
+                locations.push(PathBuf::from(location));
             }
         }
         if let Ok((hive, key_path)) = parse_app_id(app_id) {
@@ -1176,23 +1253,55 @@ mod win_impl {
                 let location = read_string(&key, "InstallLocation");
                 let location = location.trim().trim_matches('"');
                 if !location.is_empty() {
-                    push(PathBuf::from(location));
+                    locations.push(PathBuf::from(location));
                 }
                 if let Some(icon) = display_icon_path(&read_string(&key, "DisplayIcon")) {
                     if let Some(parent) = icon.parent() {
-                        push(parent.to_path_buf());
+                        extras.push(parent.to_path_buf());
                     }
                 }
                 if let Some(command) =
                     parse_uninstall_command(&read_string(&key, "UninstallString"), false)
                 {
                     if let Some(parent) = Path::new(&command.program).parent() {
-                        push(parent.to_path_buf());
+                        fallback.push(parent.to_path_buf());
                     }
                 }
             }
         }
+        // 有「真实存在的」安装位置时优先用它；注册表里的位置可能过期（目录已被删），
+        // 这时仍回退到卸载程序/DisplayIcon 目录，避免程序文件组整组消失。
+        let candidates: Vec<PathBuf> = if locations.iter().any(|path| path.is_dir()) {
+            locations.into_iter().chain(extras).collect()
+        } else {
+            extras.into_iter().chain(fallback).collect()
+        };
+        let mut dirs: Vec<PathBuf> = Vec::new();
+        for path in candidates {
+            if path.is_dir() && !is_forbidden_install_dir(&path) && !dirs.contains(&path) {
+                dirs.push(path);
+            }
+        }
         dirs
+    }
+
+    #[cfg(test)]
+    mod dir_tests {
+        use super::*;
+
+        #[test]
+        fn rejects_windows_and_public_roots() {
+            let windir = std::env::var_os("WINDIR").expect("WINDIR");
+            assert!(is_forbidden_install_dir(Path::new(&windir)));
+            assert!(is_forbidden_install_dir(
+                &PathBuf::from(&windir).join("System32")
+            ));
+            assert!(is_forbidden_install_dir(Path::new(r"C:\")));
+            assert!(!is_forbidden_install_dir(Path::new(r"C:\Program Files\Foo")));
+            if let Some(program_files) = std::env::var_os("ProgramFiles") {
+                assert!(is_forbidden_install_dir(Path::new(&program_files)));
+            }
+        }
     }
 
     /// 一个存在的文件/目录 → 关联文件条目
