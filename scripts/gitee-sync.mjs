@@ -34,6 +34,9 @@
  */
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
+import { request as httpRequest } from 'node:http'
+import { request as httpsRequest } from 'node:https'
+import { randomBytes } from 'node:crypto'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -253,6 +256,57 @@ async function listAttachments(release) {
   return Array.isArray(list) ? list : []
 }
 
+/**
+ * 上传一个附件（multipart/form-data），用 Node 内置 http(s) 直连，不设超时。
+ *
+ * 为什么不用 fetch：Node 内置 fetch（undici）默认 headersTimeout 是 300s，
+ * 而 Gitee 要等 GitHub 海外 runner 把 15MB+ 的整个包传完才回响应头；一旦上传
+ * 超过 5 分钟，fetch 就报 `fetch failed`（UND_ERR_HEADERS_TIMEOUT），重试也
+ * 一样。Gitee 上 exe / tar.gz 能传上去、dmg / msi 三个全部失败就是这么来的。
+ * 这里不设超时，慢就慢，至少能传完。
+ */
+function uploadMultipart(urlString, fields, fileField) {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const url = new URL(urlString)
+    const boundary = `----wsbench${randomBytes(12).toString('hex')}`
+    const parts = []
+    for (const [name, value] of Object.entries(fields)) {
+      parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`))
+    }
+    parts.push(
+      Buffer.from(
+        `--${boundary}\r\n` +
+          `Content-Disposition: form-data; name="${fileField.name}"; filename="${fileField.filename}"\r\n` +
+          'Content-Type: application/octet-stream\r\n\r\n'
+      )
+    )
+    parts.push(fileField.bytes)
+    parts.push(Buffer.from(`\r\n--${boundary}--\r\n`))
+    const body = Buffer.concat(parts)
+
+    const request = (url.protocol === 'http:' ? httpRequest : httpsRequest)(
+      url,
+      {
+        method: 'POST',
+        headers: {
+          'User-Agent': UA,
+          'Content-Type': `multipart/form-data; boundary=${boundary}`,
+          'Content-Length': String(body.length),
+        },
+      },
+      (res) => {
+        const chunks = []
+        res.on('data', (chunk) => chunks.push(chunk))
+        res.on('end', () =>
+          resolvePromise({ status: res.statusCode, text: Buffer.concat(chunks).toString('utf8') })
+        )
+      }
+    )
+    request.on('error', rejectPromise)
+    request.end(body)
+  })
+}
+
 /** 上传一个附件；重跑同一版本时先删掉同名旧附件，保证字节是这次构建的。 */
 async function uploadAttachment(release, localPath, remoteName) {
   const bytes = readFileSync(localPath)
@@ -274,18 +328,16 @@ async function uploadAttachment(release, localPath, remoteName) {
         }).catch((err) => warn(`删除旧附件失败（继续上传）: ${err.message}`))
       }
 
-      const form = new FormData()
-      if (GITEE_TOKEN) form.append('access_token', GITEE_TOKEN)
-      form.append('file', new Blob([bytes]), remoteName)
-
-      const res = await fetch(url, { method: 'POST', body: form, headers: { 'User-Agent': UA } })
-      const text = await res.text()
-      if (!res.ok) throw new Error(`HTTP ${res.status}: ${text.slice(0, 300)}`)
+      const res = await uploadMultipart(url.toString(), {}, { name: 'file', filename: remoteName, bytes })
+      if (res.status < 200 || res.status >= 300) {
+        throw new Error(`HTTP ${res.status}: ${res.text.slice(0, 300)}`)
+      }
       log(`已上传 ${remoteName}（${(size / 1048576).toFixed(1)}MB）`)
       return
     } catch (err) {
       if (attempt === 3) throw err
-      warn(`上传 ${remoteName} 第 ${attempt} 次失败，${3 * attempt}s 后重试: ${err.message}`)
+      const code = err.cause?.code || err.code || ''
+      warn(`上传 ${remoteName} 第 ${attempt} 次失败，${3 * attempt}s 后重试: ${err.message}${code ? `（${code}）` : ''}`)
       await sleep(3000 * attempt)
     }
   }
@@ -500,17 +552,20 @@ async function main() {
 
   // 3b) 上传手工安装包（dmg / msi）：只是发行版附件，不进更新清单，
   //     失败不影响客户端更新，但会在下面的失败汇总里标出来。
-  for (const installer of installers) {
-    const size = statSync(installer.path).size
-    try {
-      await uploadAttachment(release, installer.path, installer.name)
-      await verifyRemote(`${baseUrl}/${installer.name}`, size)
-      log(`\x1b[32m${installer.label} 已镜像\x1b[0m → ${baseUrl}/${installer.name}`)
-    } catch (err) {
-      failures.push(`${installer.name}: ${err.message}`)
-      warn(`${installer.label} 镜像失败（不影响更新清单）: ${err.message}`)
-    }
-  }
+  //     三个包并行传：Gitee 对单连接限速很狠（实测 20-30KB/s），串行要半小时。
+  await Promise.all(
+    installers.map(async (installer) => {
+      const size = statSync(installer.path).size
+      try {
+        await uploadAttachment(release, installer.path, installer.name)
+        await verifyRemote(`${baseUrl}/${installer.name}`, size)
+        log(`\x1b[32m${installer.label} 已镜像\x1b[0m → ${baseUrl}/${installer.name}`)
+      } catch (err) {
+        failures.push(`${installer.name}: ${err.message}`)
+        warn(`${installer.label} 镜像失败（不影响更新清单）: ${err.message}`)
+      }
+    })
+  )
 
   // 4) 把成功平台的下载地址换成 Gitee，写回 Gitee 清单和 GitHub 清单
   const mirrored = buildMirroredManifest(base, baseUrl, uploaded)
