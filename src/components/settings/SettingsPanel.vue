@@ -337,7 +337,6 @@ function formatBytes(bytes: number): string {
     <div class="settings-head">
       <div>
         <h3>设置</h3>
-        <p>本机运行环境、更新、网络与附件位置。</p>
       </div>
       <button class="btn btn-secondary" :disabled="refreshBusy" @click="refreshAll">
         {{ refreshBusy ? '检测中…' : '重新检测' }}
@@ -457,9 +456,6 @@ function formatBytes(bytes: number): string {
     <!-- 附件上传 -->
     <section class="card">
       <h4>附件上传</h4>
-      <p class="muted">
-        所有分组/项目的附件都加密存放到这里（磁盘文件名是附件 id，原始文件名存在数据库里）；下方显示的是实际落盘位置，未单独设置时是应用私有目录。
-      </p>
       <div class="upload-dir-row">
         <div class="upload-dir-main">
           <span class="upload-dir-path mono" :title="resolvedUploadDir">
@@ -494,21 +490,13 @@ function formatBytes(bytes: number): string {
         <h4>layui 项目打包规则</h4>
         <button class="btn btn-secondary btn-xs" @click="resetIncludeRules">恢复默认</button>
       </div>
-      <p class="rule-tip">
-        只有命中下面规则的文件才会进包，没命中的一律不打包；以 <code>.</code> 或 <code>_</code>
-        开头的文件/目录始终跳过，路径里含空格的也跳过。默认已包含 layui 工程运行时用到的
-        <code>.thm</code> 模板、<code>.tjs</code> 模板脚本、WPS 控件的 <code>.dotm</code>，
-        以及 WebOffice 新建正文用的 <code>.doc</code> / <code>.docx</code> 空白模板。
-      </p>
       <RulesEditor
         v-model="localIncludeRules"
         placeholder="输入规则后回车添加，如 *.html、js/**"
         @update:modelValue="onIncludeRulesChange"
       />
       <p class="rule-tip rule-tip-dim">
-        不带 <code>/</code> 的规则按文件名匹配（任意层级都算，如 <code>*.png</code>）；带
-        <code>/</code> 的按相对源目录的路径匹配（如 <code>assets/**</code>、<code>js/app.js</code>）。
-        规则为空时视为未配置：除 <code>.</code>/<code>_</code> 开头的条目外全部打包。
+        自动过滤 点、_开始和空格的文件/目录
       </p>
     </section>
 
@@ -527,14 +515,22 @@ function formatBytes(bytes: number): string {
 }
 .settings-head {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 16px;
+  position: relative;
+}
+/* 「重新检测」不撑高标题行：标题高度与系统页标题一致，按钮再按标题中线居中 */
+.settings-head > .btn {
+  position: absolute;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
 }
 .settings-head h3 {
   font-size: 16px;
   color: var(--text-primary);
-  margin-bottom: 4px;
+  margin-bottom: 0;
 }
 .settings-head p {
   font-size: 12px;
@@ -553,7 +549,19 @@ function formatBytes(bytes: number): string {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 8px;
+  margin-bottom: 10px;
+  position: relative;
+}
+/* 标题与右侧按钮垂直居中对齐：去掉 h4 默认下外边距，避免标题偏上 */
+.card .card-head h4 {
+  margin-bottom: 0;
+}
+/* 按钮绝对定位：不撑高标题行，保证所有卡片标题的上下间距一致 */
+.card-head > .btn {
+  position: absolute;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
 }
 .rule-tip {
   font-size: 12px;

@@ -266,3 +266,12 @@ pub fn check_dir(path: String) -> DirCheck {
         is_dir: p.is_dir(),
     }
 }
+
+/// 前端首屏渲染完成：显示启动时隐藏的主窗口，并预热托盘 / 剪贴板面板。
+///
+/// 显示时机放在前端这里而不是 Rust 的 setup：Windows 冷启动 WebView2 慢，
+/// 先显示还没画完的窗口会被系统标成「未响应」。
+#[tauri::command]
+pub fn app_ready(app: AppHandle) {
+    crate::on_frontend_ready(&app);
+}

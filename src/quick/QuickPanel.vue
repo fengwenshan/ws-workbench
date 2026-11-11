@@ -107,6 +107,7 @@ async function pickMode(mode: VpnProxyMode) {
 
 /** 窗口高度跟着当前页签的内容走，两个页签都不留一大片空白 */
 const panelEl = ref<HTMLElement | null>(null)
+const footEl = ref<HTMLElement | null>(null)
 const vpnPaneEl = ref<HTMLElement | null>(null)
 const sleepPaneEl = ref<HTMLElement | null>(null)
 const activePaneEl = computed(() => (tab.value === 'vpn' ? vpnPaneEl.value : sleepPaneEl.value))
@@ -115,7 +116,7 @@ let paneObserver: ResizeObserver | null = null
 let heightScheduled = false
 let lastHeight = 0
 
-/** 头部 + 内边距 + 当前页签内容 + 上下边框，和 `.qp` 的盒模型一一对应 */
+/** 头部 + 内边距 + 当前页签内容 + 底部操作栏 + 上下边框，和 `.qp` 的盒模型一一对应 */
 function measurePanelHeight(): number {
   const panel = panelEl.value
   const head = panel?.querySelector<HTMLElement>('.qp-head')
@@ -127,7 +128,28 @@ function measurePanelHeight(): number {
   const border =
     parseFloat(panelStyle.borderTopWidth) + parseFloat(panelStyle.borderBottomWidth)
   const padding = parseFloat(bodyStyle.paddingTop) + parseFloat(bodyStyle.paddingBottom)
-  return Math.ceil(head.offsetHeight + pane.offsetHeight + padding + border)
+  const foot = footEl.value?.offsetHeight ?? 0
+  return Math.ceil(head.offsetHeight + pane.offsetHeight + padding + foot + border)
+}
+
+// ============================== 底部操作栏 ==============================
+
+/** 收起面板并唤出主窗口（和左键点托盘图标同一个入口） */
+async function openMainWindow(): Promise<void> {
+  try {
+    await invoke('quick_panel_show_main')
+  } catch {
+    // 窗口已经收起 / 命令失败时不做兜底提示：面板马上就不在了，弹错反而打扰
+  }
+}
+
+/** 退出整个应用（先停 VPN worker，再退出主进程） */
+async function quitApp(): Promise<void> {
+  try {
+    await invoke('quick_panel_quit')
+  } catch {
+    // 同上：应用正在退出，不弹任何错误
+  }
 }
 
 function syncPanelHeight(): void {
@@ -164,7 +186,17 @@ onMounted(() => {
   // 重新显示拿到焦点时再量一次，避免按旧高度弹出。
   window.addEventListener('focus', schedulePanelHeightSync)
   document.addEventListener('visibilitychange', handleVisibilityChange)
+  document.addEventListener('keydown', handleKeydown)
 })
+
+/** Esc 收起面板：除了点外面/再点托盘，给键盘留一条确定的关闭路径 */
+function handleKeydown(event: KeyboardEvent): void {
+  if (event.key !== 'Escape') return
+  event.preventDefault()
+  void invoke('quick_panel_hide').catch(() => {
+    // 已经开始退出等异常情况：收不起来也不影响别的操作
+  })
+}
 
 function handleVisibilityChange(): void {
   if (document.visibilityState === 'visible') schedulePanelHeightSync()
@@ -179,6 +211,7 @@ onUnmounted(() => {
   paneObserver?.disconnect()
   window.removeEventListener('focus', schedulePanelHeightSync)
   document.removeEventListener('visibilitychange', handleVisibilityChange)
+  document.removeEventListener('keydown', handleKeydown)
   keepAwake.stopPolling()
 })
 </script>
@@ -306,6 +339,12 @@ onUnmounted(() => {
         <p class="qp-tip">{{ sleepHint() }}</p>
       </section>
     </div>
+
+    <!-- 底部操作栏：右键托盘图标弹出面板后，主界面和退出都从这里走 -->
+    <footer ref="footEl" class="qp-foot">
+      <button type="button" class="qp-foot-btn" @click="openMainWindow">显示主界面</button>
+      <button type="button" class="qp-foot-btn qp-foot-danger" @click="quitApp">退出</button>
+    </footer>
   </div>
 </template>
 
@@ -564,4 +603,48 @@ body,
   font-size: 12px;
   font-weight: 400;
 }
+
+
+/* ============================== 底部操作栏 ============================== */
+
+/* 托盘右键弹出的面板底部固定两条入口：显示主界面 / 退出。
+   做成两条纯文本入口而不是通栏按钮：面板本身很窄，两个等宽大按钮会显得比
+   上面的内容还重；文本入口更像菜单项，也和上方页签的轻量观感一致。
+   左右各放一个（显示主界面靠左、退出靠右），比挤在中间更符合「底部工具条」。 */
+.qp-foot {
+  display: flex;
+  flex-shrink: 0;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 6px 14px 10px;
+  border-top: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+}
+
+/* 纯文本按钮：不要边框和底色，只留文字；hover 只变色，不影响布局高度 */
+.qp-foot-btn {
+  padding: 2px 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 20px;
+  cursor: pointer;
+  transition: color 0.15s ease;
+}
+
+.qp-foot-btn:hover {
+  color: var(--primary);
+}
+
+.qp-foot-btn:active {
+  opacity: 0.7;
+}
+
+/* 退出是破坏性动作：只在悬浮时用红色提示，平时和其它文本入口一样 */
+.qp-foot-danger:hover {
+  color: var(--danger);
+}
+
 </style>

@@ -7,16 +7,42 @@
 use tauri::{AppHandle, Manager};
 
 use crate::{
-    panel_origin_at, QUICK_PANEL_ANCHOR, QUICK_PANEL_LABEL, QUICK_PANEL_MAX_HEIGHT,
-    QUICK_PANEL_MIN_HEIGHT, QUICK_PANEL_WIDTH,
+    panel_origin_at, show_main_window, QUICK_PANEL_ANCHOR, QUICK_PANEL_LABEL,
+    QUICK_PANEL_MAX_HEIGHT, QUICK_PANEL_MIN_HEIGHT, QUICK_PANEL_WIDTH,
 };
+
+fn hide_quick_panel(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window(QUICK_PANEL_LABEL) {
+        let _ = window.hide();
+    }
+}
 
 /// 隐藏面板（点面板外部失焦、再点一次托盘图标时都会走到这里）
 #[tauri::command]
 pub fn quick_panel_hide(app: AppHandle) {
-    if let Some(window) = app.get_webview_window(QUICK_PANEL_LABEL) {
-        let _ = window.hide();
-    }
+    hide_quick_panel(&app);
+}
+
+/// 面板底部「显示主界面」：收起面板并唤出主窗口。
+///
+/// 和左键点托盘图标走同一个 `show_main_window`，从面板里点也不用先去
+/// 找托盘图标。
+#[tauri::command]
+pub fn quick_panel_show_main(app: AppHandle) {
+    hide_quick_panel(&app);
+    show_main_window(&app);
+}
+
+/// 面板底部「退出」：和原来的托盘菜单退出完全同一条路径。
+///
+/// 先给 worker 发停止请求（写 stop.flag），然后立刻退出主进程；worker 有
+/// 主进程消失 / 心跳过期两条兜底，会自己杀掉 openconnect、还原路由后退出，
+/// 所以这里不卡界面等它收尾。
+#[tauri::command]
+pub fn quick_panel_quit(app: AppHandle) {
+    hide_quick_panel(&app);
+    crate::vpn::commands::shutdown(&app);
+    app.exit(0);
 }
 
 /// 按当前页签的内容高度调整面板窗口。

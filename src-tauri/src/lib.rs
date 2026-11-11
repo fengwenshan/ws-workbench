@@ -29,9 +29,8 @@ mod uninstall_info;
 pub mod vpn;
 
 use tauri::{
-    menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Manager, Runtime, WindowEvent,
+    AppHandle, Manager, Runtime, WindowEvent,
 };
 
 /// 应用基础名（发布版显示名）
@@ -75,6 +74,14 @@ const QUICK_PANEL_HEIGHT: f64 = 320.0;
 const QUICK_PANEL_MIN_HEIGHT: f64 = 160.0;
 const QUICK_PANEL_MAX_HEIGHT: f64 = 480.0;
 
+/// 前端首屏是否已经调过 `app_ready`。
+///
+/// Windows 单实例的第二份进程会 FindWindow 到主窗口再 ShowWindow 叫到前台；
+/// 冷启动阶段主窗口还藏着、WebView 还没画完，这时强行显示会被系统标成
+/// 「未响应」。所以只有首屏就绪后才允许第二份进程去激活窗口。
+#[cfg(target_os = "windows")]
+static FRONTEND_READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Windows 上只允许一个 GUI 实例。
 ///
 /// 便携包很容易被重复双击：每个实例都会建自己的托盘图标和 worker，用户点
@@ -113,9 +120,11 @@ fn ensure_single_instance() -> bool {
 
     if std::io::Error::last_os_error().raw_os_error() == Some(ERROR_ALREADY_EXISTS) {
         // 已有实例：尽量把它从托盘/最小化状态叫出来，然后第二个进程退出。
+        // 首屏还没就绪时不去 ShowWindow：主窗口还藏着，强行显示只会得到
+        // 「未响应」的白窗口；第一个实例很快就自己显示了。
         let title: Vec<u16> = format!("{}\0", app_display_name()).encode_utf16().collect();
         let window = unsafe { FindWindowW(std::ptr::null(), title.as_ptr()) };
-        if !window.is_null() {
+        if !window.is_null() && FRONTEND_READY.load(std::sync::atomic::Ordering::Relaxed) {
             unsafe {
                 ShowWindow(window, SW_RESTORE);
                 SetForegroundWindow(window);
@@ -129,13 +138,29 @@ fn ensure_single_instance() -> bool {
     true
 }
 
-// 把主窗口重新显示出来（托盘菜单、Dock 图标、快捷面板里的「打开主窗口」进入）
+// 把主窗口重新显示出来（托盘左键、Dock 图标、快捷面板底部「显示主界面」共用）
 pub(crate) fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
+    // macOS：托盘面板 / 菜单栏图标触发的点击不会自动激活应用，只 show + set_focus
+    // 时窗口会显示在别的应用后面；先激活应用，再显示窗口。
+    #[cfg(target_os = "macos")]
+    clipboard::activate_app(app);
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
     }
+}
+
+/// 前端首屏挂载完成：显示主窗口，并预热两个隐藏面板。
+///
+/// 主窗口在 setup 里以隐藏状态创建（`tauri.conf.json` 的 `visible: false`），
+/// 等这里才显示：Windows 冷启动时 WebView2 初始化 + setup 的同步工作要几秒，
+/// 先亮一个还没画完的白窗口会被系统标成「未响应」，等页面就绪再显示更稳。
+pub(crate) fn on_frontend_ready(app: &AppHandle) {
+    #[cfg(target_os = "windows")]
+    FRONTEND_READY.store(true, std::sync::atomic::Ordering::Relaxed);
+    show_main_window(app);
+    warm_up_hidden_windows(app);
 }
 
 // 托盘图标：macOS 用模板图（黑 + 透明），系统会按菜单栏明暗自动反色；
@@ -283,7 +308,7 @@ fn setup_app_menu<R: Runtime>(_app: &AppHandle<R>) -> tauri::Result<()> {
 /// 不要用默认目录（`%LOCALAPPDATA%\EBWebView`）：其它 WebView2 应用会共用，
 /// 浏览器版本或锁不一致时创建环境会报「拒绝访问」。优先应用数据目录；在受限
 /// 环境（受控文件夹访问、企业策略、沙箱）下退到可执行文件旁，最后才是临时目录。
-fn webview_data_dir(app: &tauri::App) -> std::path::PathBuf {
+fn webview_data_dir<R: Runtime>(app: &AppHandle<R>) -> std::path::PathBuf {
     let mut candidates: Vec<std::path::PathBuf> = Vec::new();
     if let Ok(base) = app.path().app_local_data_dir() {
         candidates.push(base.join(format!("webview{}", build_dir_suffix())));
@@ -312,6 +337,10 @@ fn webview_data_dir(app: &tauri::App) -> std::path::PathBuf {
 /// 挂 `on_navigation`：把文件从 Finder 拖进窗口时，WebView 默认会直接导航到
 /// file:// 去显示那个文件，整个应用界面被顶替（现场坏掉就是这么来的）。
 /// 这里直接拒绝 file:// 导航，页面永远不会被拖进来的文件换掉。
+///
+/// 主窗口配置是 `visible: false`：创建完先藏着，等前端首屏渲染完调 `app_ready`
+/// 再显示（见 `app_ready`）。Windows 冷启动时 WebView2 初始化要一两秒，先亮白窗口
+/// 会被系统标成「未响应」。
 fn create_main_window(app: &mut tauri::App) -> tauri::Result<()> {
     let config = app
         .config()
@@ -328,7 +357,7 @@ fn create_main_window(app: &mut tauri::App) -> tauri::Result<()> {
     #[cfg(target_os = "windows")]
     let builder = builder.decorations(false);
     let window = builder
-        .data_directory(webview_data_dir(app))
+        .data_directory(webview_data_dir(app.handle()))
         .on_navigation(|url| {
             // 只拦本地文件导航；dev 的 http://localhost 和打包后的 tauri:// 都放行
             url.scheme() != "file"
@@ -343,17 +372,21 @@ fn create_main_window(app: &mut tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
-/// 创建托盘快捷面板：柠檬式无边框小窗，启动时建好但保持隐藏。
+/// 创建托盘快捷面板：柠檬式无边框小窗，创建后保持隐藏。
 ///
-/// 提前创建而不是每次点击现建，是为了第一次点托盘图标就能立刻出内容；
-/// 窗体的显隐/定位在 `toggle_quick_panel` 里处理。
-fn create_quick_panel(app: &mut tauri::App) -> tauri::Result<()> {
+/// 启动时不再创建，主窗口显示后由 `warm_up_hidden_windows` 预热一次；如果用户
+/// 抢在预热前点了托盘图标，`ensure_quick_panel` 会现场创建。窗体的显隐/定位在
+/// `toggle_quick_panel` 里处理。
+fn create_quick_panel<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<tauri::WebviewWindow<R>> {
     let window = tauri::WebviewWindowBuilder::new(
-        app.handle(),
+        app,
         QUICK_PANEL_LABEL,
         tauri::WebviewUrl::App("quick.html".into()),
     )
-    .title(app_display_name())
+    // 标题不能和主窗口重名：Windows 单实例靠 FindWindowW(标题) 找主窗口，
+    // 面板同名时会先被找到，结果第二份进程把快捷面板 ShowWindow 出来（而且
+    // 拿不到焦点、点外面也收不起来），用户以为窗口关不掉。
+    .title(format!("{} - 快捷面板", app_display_name()))
     // 和主窗口共用同一个可写的 WebView2 数据目录；不设时 WebView2 会退回
     // `%LOCALAPPDATA%\com.ws.workbench`，在受限环境 / 受控文件夹访问下会
     // 直接以「拒绝访问」让整个 setup hook 失败。
@@ -380,24 +413,41 @@ fn create_quick_panel(app: &mut tauri::App) -> tauri::Result<()> {
         window.outer_size(),
         window.is_visible()
     );
-    // release 下不打日志，显式消费掉绑定，避免 unused_variables
-    #[cfg(not(debug_assertions))]
-    let _ = window;
-    Ok(())
+    Ok(window)
 }
 
-/// 创建剪贴板历史面板：无边框透明浮层，启动时建好、默认隐藏。
+/// 复用已有快捷面板；第一次用（或预热还没跑到）时就地创建。
 ///
-/// macOS / Windows 都创建；Linux 不启用。
-/// 显示位置 / 焦点在 `clipboard::show_panel` 里处理。
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-fn create_clipboard_panel(app: &mut tauri::App) -> tauri::Result<()> {
+/// 创建失败只影响面板本身：托盘其它行为照常，不要 panic 打断事件循环。
+pub(crate) fn ensure_quick_panel<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Option<tauri::WebviewWindow<R>> {
+    if let Some(window) = app.get_webview_window(QUICK_PANEL_LABEL) {
+        return Some(window);
+    }
+    match create_quick_panel(app) {
+        Ok(window) => Some(window),
+        Err(err) => {
+            eprintln!("[quick-panel] 创建失败: {err}");
+            None
+        }
+    }
+}
+
+/// 创建剪贴板历史面板：无边框透明浮层，创建后保持隐藏。
+///
+/// macOS / Windows 会用到；Linux 不启用（快捷键不注册，`show_panel` 也不会被调用）。
+/// 和快捷面板一样不在启动时创建，避免冷启动一口气初始化三个 WebView2。
+fn create_clipboard_panel<R: Runtime>(
+    app: &AppHandle<R>,
+) -> tauri::Result<tauri::WebviewWindow<R>> {
     let window = tauri::WebviewWindowBuilder::new(
-        app.handle(),
+        app,
         clipboard::PANEL_LABEL,
         tauri::WebviewUrl::App("clipboard.html".into()),
     )
-    .title(app_display_name())
+    // 同快捷面板：标题必须和主窗口区分，否则 Windows 单实例会误激活这个隐藏浮层
+    .title(format!("{} - 剪贴板", app_display_name()))
     // 同上：剪贴板浮层也必须走可写的数据目录，否则第二个 WebView 创建失败
     .data_directory(webview_data_dir(app))
     .inner_size(clipboard::PANEL_WIDTH, clipboard::PANEL_HEIGHT)
@@ -420,10 +470,40 @@ fn create_clipboard_panel(app: &mut tauri::App) -> tauri::Result<()> {
         window.outer_size(),
         window.is_visible()
     );
-    // release 下不打日志，显式消费掉绑定，避免 unused_variables
-    #[cfg(not(debug_assertions))]
-    let _ = window;
-    Ok(())
+    Ok(window)
+}
+
+/// 复用已有剪贴板面板；第一次按快捷键时（或预热没跑到）就地创建。
+pub(crate) fn ensure_clipboard_panel<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Option<tauri::WebviewWindow<R>> {
+    if let Some(window) = app.get_webview_window(clipboard::PANEL_LABEL) {
+        return Some(window);
+    }
+    match create_clipboard_panel(app) {
+        Ok(window) => Some(window),
+        Err(err) => {
+            eprintln!("[clipboard-panel] 创建失败: {err}");
+            None
+        }
+    }
+}
+
+/// 主窗口显示后预热两个隐藏面板。
+///
+/// 不放在 setup 里：Windows 冷启动时三个 WebView2 一起初始化会把主窗口拖到
+/// 被系统判定「未响应」。延后 600ms 建，既不占启动路径，第一次点托盘 /
+/// 按剪贴板快捷键时窗口通常也已经在了。
+fn warm_up_hidden_windows<R: Runtime>(app: &AppHandle<R>) {
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        let inner = handle.clone();
+        let _ = handle.run_on_main_thread(move || {
+            let _ = ensure_quick_panel(&inner);
+            let _ = ensure_clipboard_panel(&inner);
+        });
+    });
 }
 
 /// 面板最近一次因失焦被收起的时间（unix 毫秒）。
@@ -442,9 +522,12 @@ fn unix_millis() -> u64 {
         .unwrap_or(0)
 }
 
-/// 左键点托盘图标：已显示就收起，否则贴着图标弹出。
+/// 右键点托盘图标：已显示就收起，否则贴着图标弹出。
+///
+/// 面板窗口是懒创建的：启动时不再创建，主窗口显示后预热；用户如果在预热前
+/// 就点了托盘图标，这里现场建一个再弹。
 fn toggle_quick_panel<R: Runtime>(app: &AppHandle<R>, rect: tauri::Rect) {
-    let Some(window) = app.get_webview_window(QUICK_PANEL_LABEL) else {
+    let Some(window) = ensure_quick_panel(app) else {
         return;
     };
     if window.is_visible().unwrap_or(false) {
@@ -804,6 +887,8 @@ pub fn run() {
             });
         })
         .invoke_handler(tauri::generate_handler![
+            // 前端首屏就绪：显示主窗口（启动时主窗口是隐藏的）
+            commands::app_ready,
             commands::get_config,
             commands::save_config,
             commands::get_config_path,
@@ -892,9 +977,11 @@ pub fn run() {
             commands::popup_clear,
             commands::popup_dismiss,
             commands::popup_ignore,
-            // 托盘快捷面板：隐藏 / 随页签内容调整高度
+            // 托盘快捷面板：隐藏 / 随页签内容调整高度 / 底部「显示主界面」「退出」
             commands::quick_panel_hide,
             commands::quick_panel_resize,
+            commands::quick_panel_show_main,
+            commands::quick_panel_quit,
             // 剪贴板历史（macOS）
             commands::clipboard_page,
             commands::clipboard_search,
@@ -919,13 +1006,11 @@ pub fn run() {
             updates::update_install_resumed,
         ])
         .setup(|app| {
-            // 先建主窗口：窗口配置在 tauri.conf.json 里，但 create: false 交给这里
+            // 启动阶段只建主窗口，而且先隐藏（tauri.conf.json 里 main 是 visible: false）：
+            // 前端首屏渲染完会调 `app_ready`，那时再显示。Windows 冷启动时 WebView2
+            // 初始化 + setup 里的同步工作要好几秒，先亮一个白窗口会被系统标成
+            // 「未响应」；等页面就绪再显示，用户看到的就是能立刻操作的界面。
             create_main_window(app)?;
-            // 托盘快捷面板：同样提前建好、默认隐藏，点托盘图标时再定位显示
-            create_quick_panel(app)?;
-            // 剪贴板面板：macOS / Windows 启用，提前建好、默认隐藏
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
-            create_clipboard_panel(app)?;
 
             // dev 模式（裸二进制）Dock 会显示系统占位图标，这里补上真实图标
             #[cfg(target_os = "macos")]
@@ -972,69 +1057,36 @@ pub fn run() {
             // 轮询会话目录里的状态文件，把 VPN 状态与日志推给前端
             vpn::commands::start_status_poller(app.handle().clone());
 
-            // 托盘：关掉窗口后应用仍在后台运行，从托盘菜单重新打开或退出。
-            // 菜单只保留必要入口：显示 / 检查更新 / 退出，页面里的动作都在主界面里。
-            // 开发版最上面再压一行禁用的构建标识，和安装版的菜单区分开。
-            let build_tag = MenuItem::with_id(
-                app,
-                "build-tag",
-                format!("{}（开发版）", app_display_name()),
-                false,
-                None::<&str>,
-            )?;
-            let show = MenuItem::with_id(app, "show", "显示主界面", true, None::<&str>)?;
-            let check_update =
-                MenuItem::with_id(app, "check-update", "检查更新", true, None::<&str>)?;
-            let separator = PredefinedMenuItem::separator(app)?;
-            let dev_separator = PredefinedMenuItem::separator(app)?;
-            let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-            let mut items: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = Vec::new();
-            if is_dev_build() {
-                items.push(&build_tag);
-                items.push(&dev_separator);
-            }
-            items.push(&show);
-            items.push(&check_update);
-            items.push(&separator);
-            items.push(&quit);
-            let menu = Menu::with_items(app, &items)?;
-
+            // 托盘：关掉窗口后应用仍在后台运行。
+            //
+            // 左键单击图标 = 直接显示主界面；右键 = 弹出快捷面板（面板底部带
+            // 「显示主界面 / 退出」两个入口）。这里不再挂原生菜单：托盘一旦有
+            // 菜单，右键会先弹系统菜单，快捷面板就出不来了。
             let mut tray = TrayIconBuilder::with_id("main")
                 // 不设 tooltip：菜单栏图标悬浮时不要弹出应用名
-                .menu(&menu)
-                // 左键单击弹快捷面板，不弹菜单；菜单只在右键时出现
-                .show_menu_on_left_click(false)
-                .on_menu_event(|app, event| match event.id.as_ref() {
-                    "show" => show_main_window(app),
-                    "check-update" => {
-                        // 检查更新要用户看得见进度，先把主界面叫出来，
-                        // 再让前端自己去 check()：事件只负责触发，不传版本信息，
-                        // 避免 Rust 侧和前端各查一次、出现两份不一致的结论。
-                        show_main_window(app);
-                        let _ = app.emit("tray-check-update", ());
-                    }
-                    "quit" => {
-                        // 退出就是整个应用和它拉起的进程都结束：先给 worker 发停止
-                        // 请求（写 stop.flag），然后立刻退出主进程。
-                        //
-                        // 不再在这里等 worker 收尾：worker 有两条独立兜底——main.pid
-                        // 里记的主进程消失、以及心跳过期——会自己杀掉 openconnect、
-                        // 还原路由后退出。等它只会让托盘和任务栏图标迟迟不消失，
-                        // 体感上就是「点了退出没反应」。
-                        vpn::commands::shutdown(app);
-                        app.exit(0);
-                    }
-                    _ => {}
-                })
                 .on_tray_icon_event(|tray, event| {
-                    if let TrayIconEvent::Click {
-                        button: MouseButton::Left,
+                    let TrayIconEvent::Click {
+                        button,
                         button_state: MouseButtonState::Up,
                         rect,
                         ..
                     } = event
-                    {
-                        toggle_quick_panel(tray.app_handle(), rect);
+                    else {
+                        return;
+                    };
+                    match button {
+                        MouseButton::Left => {
+                            // 面板开着时左键优先回主界面：先把面板收起来，
+                            // 否则 always_on_top 的面板会一直悬在主窗口上面
+                            if let Some(window) =
+                                tray.app_handle().get_webview_window(QUICK_PANEL_LABEL)
+                            {
+                                let _ = window.hide();
+                            }
+                            show_main_window(tray.app_handle());
+                        }
+                        MouseButton::Right => toggle_quick_panel(tray.app_handle(), rect),
+                        _ => {}
                     }
                 });
             if let Some(icon) = tray_icon_image() {
@@ -1043,9 +1095,30 @@ pub fn run() {
                 tray = tray.icon(icon).icon_as_template(cfg!(target_os = "macos"));
             }
             tray.build(app)?;
+
+            // 主窗口兜底：前端加载失败（或首屏逻辑异常）时不会调 app_ready，
+            // 这里等 8 秒强制显示，避免应用只剩托盘图标、没有任何窗口。
+            let handle = app.handle().clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(8));
+                let inner = handle.clone();
+                let _ = handle.run_on_main_thread(move || {
+                    if let Some(window) = inner.get_webview_window("main") {
+                        if !window.is_visible().unwrap_or(false) {
+                            crate::show_main_window(&inner);
+                        }
+                    }
+                });
+            });
+
             // 安装包卸载程序读取的路径清单：启动时先写一份，设置变化时 save_settings 会再写。
-            let settings = crate::config::load_settings(app.handle());
-            crate::uninstall_info::refresh(app.handle(), &settings);
+            // 写文件可能被杀软 / 受控文件夹访问拖慢，放到后台线程，不占启动路径。
+            let handle = app.handle().clone();
+            std::thread::spawn(move || {
+                let settings = crate::config::load_settings(&handle);
+                crate::uninstall_info::refresh(&handle, &settings);
+            });
+
             Ok(())
         })
         .on_window_event(|window, event| {

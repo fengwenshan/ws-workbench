@@ -29,7 +29,8 @@ export function useEntitySelection(
       const project = group.projects.find((item) => item.id === sel.id)
       if (project) return project
     }
-    return null
+    // 一级项目
+    return (config.value.projects ?? []).find((item) => item.id === sel.id) ?? null
   })
 
   /** 选中项失效（删除/加载完成）时回落到第一个项目 */
@@ -41,12 +42,29 @@ export function useEntitySelection(
           ? config.value.groups.some((group) => group.id === current.id)
           : config.value.groups.some((group) =>
               group.projects.some((project) => project.id === current.id),
-            )
+            ) ||
+            (config.value.projects ?? []).some((project) => project.id === current.id)
       if (alive) return
     }
-    const first = config.value.groups
-      .flatMap((group) => group.projects)
-      .find(Boolean)
+    // 回落顺序按树的一级顺序走，分组里取第一个项目
+    let first: ProjectConfig | undefined
+    for (const id of config.value.tree_order ?? []) {
+      const rootProject = (config.value.projects ?? []).find((p) => p.id === id)
+      if (rootProject) {
+        first = rootProject
+        break
+      }
+      const group = config.value.groups.find((g) => g.id === id)
+      if (group && group.projects.length > 0) {
+        first = group.projects[0]
+        break
+      }
+    }
+    if (!first) {
+      first =
+        (config.value.projects ?? [])[0] ??
+        config.value.groups.flatMap((group) => group.projects).find(Boolean)
+    }
     selection.value = first ? { kind: 'project', id: first.id } : null
   }
 

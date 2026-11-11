@@ -162,15 +162,21 @@ pub fn check(app: &AppHandle) -> Result<PathBuf, String> {
 #[derive(Debug, Clone, Default)]
 pub struct DbData {
     pub groups: Vec<ProjectGroup>,
+    /// 一级项目（不属于任何分组，入库时 `group_id` 记为空串）
+    pub projects: Vec<ProjectConfig>,
     pub vpn_profiles: Vec<VpnProfile>,
     pub vpn_rule_sets: Vec<VpnRuleSet>,
 }
 
+/// 一级项目在 projects 表里的 `group_id` 值（空串；列本身 NOT NULL）
+const ROOT_GROUP_ID: &str = "";
+
 impl DbData {
-    /// 从完整配置中抽出业务实体部分（`AppConfig.projects` 为旧字段，忽略）
+    /// 从完整配置中抽出业务实体部分
     pub fn from_config(config: &AppConfig) -> Self {
         DbData {
             groups: config.groups.clone(),
+            projects: config.projects.clone(),
             vpn_profiles: config.vpn_profiles.clone(),
             vpn_rule_sets: config.vpn_rule_sets.clone(),
         }
@@ -254,7 +260,15 @@ fn write_projects(
     prev: &DbData,
     next: &DbData,
 ) -> Result<(), String> {
+    // 先按 (group_id, sort_order) 记下上一轮的位置，内容没变、位置也没变就跳过写库。
+    // 一级项目的 group_id 用 ROOT_GROUP_ID，排序号是该项目在一级项目数组里的下标。
     let mut prev_rows: HashMap<&str, (&str, usize, serde_json::Value)> = HashMap::new();
+    for (idx, project) in prev.projects.iter().enumerate() {
+        prev_rows.insert(
+            project.id.as_str(),
+            (ROOT_GROUP_ID, idx, json_value(project)?),
+        );
+    }
     for group in &prev.groups {
         for (idx, project) in group.projects.iter().enumerate() {
             prev_rows.insert(
@@ -263,38 +277,54 @@ fn write_projects(
             );
         }
     }
+
+    let write_project = |group_id: &str, project: &ProjectConfig, idx: usize| -> Result<(), String> {
+        let value = json_value(project)?;
+        let unchanged = prev_rows
+            .get(project.id.as_str())
+            .map(|(prev_group, prev_idx, prev_value)| {
+                *prev_group == group_id && *prev_idx == idx && prev_value == &value
+            })
+            .unwrap_or(false);
+        if unchanged {
+            return Ok(());
+        }
+        let payload = seal_json(keys, &value)?;
+        tx.execute(
+            "INSERT INTO projects (id, group_id, sort_order, payload) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(id) DO UPDATE SET group_id = excluded.group_id,
+               sort_order = excluded.sort_order, payload = excluded.payload",
+            rusqlite::params![project.id, group_id, idx as i64, payload],
+        )
+        .map_err(|e| format!("写入项目失败: {}", e))?;
+        Ok(())
+    };
+
+    for (idx, project) in next.projects.iter().enumerate() {
+        write_project(ROOT_GROUP_ID, project, idx)?;
+    }
     for group in &next.groups {
         for (idx, project) in group.projects.iter().enumerate() {
-            let value = json_value(project)?;
-            let unchanged = prev_rows
-                .get(project.id.as_str())
-                .map(|(prev_group, prev_idx, prev_value)| {
-                    *prev_group == group.id.as_str() && *prev_idx == idx && prev_value == &value
-                })
-                .unwrap_or(false);
-            if unchanged {
-                continue;
-            }
-            let payload = seal_json(keys, &value)?;
-            tx.execute(
-                "INSERT INTO projects (id, group_id, sort_order, payload) VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT(id) DO UPDATE SET group_id = excluded.group_id,
-                   sort_order = excluded.sort_order, payload = excluded.payload",
-                rusqlite::params![project.id, group.id, idx as i64, payload],
-            )
-            .map_err(|e| format!("写入项目失败: {}", e))?;
+            write_project(&group.id, project, idx)?;
         }
     }
-    for group in &prev.groups {
-        for project in &group.projects {
-            let still_exists = next
+
+    // 删除下一轮里已经不存在的项目（可能在分组里，也可能是一级项目）
+    let still_exists = |project_id: &str| {
+        next.projects.iter().any(|p| p.id == project_id)
+            || next
                 .groups
                 .iter()
-                .any(|g| g.projects.iter().any(|p| p.id == project.id));
-            if !still_exists {
-                tx.execute("DELETE FROM projects WHERE id = ?1", rusqlite::params![project.id])
-                    .map_err(|e| format!("删除项目失败: {}", e))?;
-            }
+                .any(|g| g.projects.iter().any(|p| p.id == project_id))
+    };
+    for project in prev
+        .projects
+        .iter()
+        .chain(prev.groups.iter().flat_map(|g| g.projects.iter()))
+    {
+        if !still_exists(&project.id) {
+            tx.execute("DELETE FROM projects WHERE id = ?1", rusqlite::params![project.id])
+                .map_err(|e| format!("删除项目失败: {}", e))?;
         }
     }
     Ok(())
@@ -400,6 +430,7 @@ fn load_rows<T: DeserializeOwned>(
 
 pub fn load_all(conn: &Connection, keys: &VaultKeys) -> Result<DbData, String> {
     let mut groups = Vec::new();
+    let mut projects: Vec<ProjectConfig> = Vec::new();
     {
         let mut stmt = conn
             .prepare("SELECT id, payload FROM groups ORDER BY sort_order")
@@ -427,6 +458,11 @@ pub fn load_all(conn: &Connection, keys: &VaultKeys) -> Result<DbData, String> {
         for row in rows {
             let (group_id, payload) = row.map_err(|e| format!("读取项目失败: {}", e))?;
             let project: ProjectConfig = unseal(keys, &payload)?;
+            // group_id 为空串 = 一级项目：不进分组，直接挂到根上
+            if group_id.is_empty() {
+                projects.push(project);
+                continue;
+            }
             let group = groups
                 .iter_mut()
                 .find(|g| g.id == group_id)
@@ -446,6 +482,7 @@ pub fn load_all(conn: &Connection, keys: &VaultKeys) -> Result<DbData, String> {
     )?;
     Ok(DbData {
         groups,
+        projects,
         vpn_profiles,
         vpn_rule_sets,
     })
@@ -619,6 +656,8 @@ mod tests {
                 sample_group("g1", vec![sample_project("a1", "项目 A 的笔记")]),
                 sample_group("g2", vec![]),
             ],
+            // 一级项目：group_id 留空入库
+            projects: vec![sample_project("r1", "一级项目的笔记")],
             vpn_profiles: vec![profile],
             vpn_rule_sets: vec![rule_set],
         }
@@ -643,6 +682,9 @@ mod tests {
         );
         assert_eq!(loaded.groups[0].note, expected.groups[0].note);
         assert_eq!(loaded.groups[1].name, expected.groups[1].name);
+        assert_eq!(loaded.projects.len(), 1);
+        assert_eq!(loaded.projects[0].name, expected.projects[0].name);
+        assert_eq!(loaded.projects[0].note, expected.projects[0].note);
         assert_eq!(loaded.vpn_profiles[0].name, expected.vpn_profiles[0].name);
         assert_eq!(loaded.vpn_rule_sets[0].name, expected.vpn_rule_sets[0].name);
     }
@@ -705,10 +747,52 @@ mod tests {
         let loaded = load_all(&conn, &keys).unwrap();
         assert_eq!(loaded.groups.len(), 1);
         assert_eq!(loaded.groups[0].id, "g2");
+        // g1 里的 a1 跟着分组被删；一级项目 r1 不受影响
         let projects: i64 = conn
             .query_row("SELECT count(*) FROM projects", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(projects, 0);
+        assert_eq!(projects, 1);
+    }
+
+    fn project_ids_in(data: &DbData) -> Vec<String> {
+        data.groups
+            .iter()
+            .flat_map(|g| g.projects.iter())
+            .chain(data.projects.iter())
+            .map(|p| p.id.clone())
+            .collect()
+    }
+
+    #[test]
+    fn move_project_between_group_and_root() {
+        let mut conn = memory_conn();
+        init_schema(&conn).unwrap();
+        let keys = test_keys();
+        let prev = sample_data();
+        save_diff(&mut conn, &keys, &DbData::default(), &prev).unwrap();
+
+        // 一级项目 r1 → 移进 g2（group_id 从空串改成 g2）
+        let mut next = prev.clone();
+        let r1 = next.projects.remove(0);
+        next.groups[1].projects.push(r1);
+        save_diff(&mut conn, &keys, &prev, &next).unwrap();
+        let loaded = load_all(&conn, &keys).unwrap();
+        assert!(loaded.projects.is_empty());
+        assert_eq!(loaded.groups[1].projects[0].id, "r1");
+        assert_eq!(project_ids_in(&loaded).len(), 2);
+
+        // 再从 g2 拖回一级（group_id 改回空串）
+        let back = {
+            let mut data = loaded.clone();
+            let moved = data.groups[1].projects.remove(0);
+            data.projects.push(moved);
+            data
+        };
+        save_diff(&mut conn, &keys, &loaded, &back).unwrap();
+        let loaded = load_all(&conn, &keys).unwrap();
+        assert_eq!(loaded.projects.len(), 1);
+        assert_eq!(loaded.projects[0].id, "r1");
+        assert!(loaded.groups[1].projects.is_empty());
     }
 
     #[test]

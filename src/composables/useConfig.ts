@@ -8,6 +8,7 @@ export function useConfig() {
   const config = ref<AppConfig>({
     groups: [],
     projects: [],
+    tree_order: [],
     default_include: [],
     vpn_profiles: [],
     vpn_rule_sets: [],
@@ -23,6 +24,63 @@ export function useConfig() {
     if (!Array.isArray(entity.attachments)) entity.attachments = []
     // 旧版本给分组/项目单独存过上传目录，现在统一用设置里的地址，读到就丢弃
     delete (entity as ProjectConfig & { upload_dir?: string | null }).upload_dir
+  }
+
+  /** 一级项目：不属于任何分组、排在树根上的项目 */
+  function rootProjects(): ProjectConfig[] {
+    return config.value.projects ?? []
+  }
+
+  /** 一级兜底顺序：老数据没有 tree_order 时，分组在前、一级项目在后 */
+  function defaultTreeOrder(): string[] {
+    return [...config.value.groups.map(g => g.id), ...rootProjects().map(p => p.id)]
+  }
+
+  /** 清理 tree_order：去掉已删除的 id、补上遗漏的条目 */
+  function normalizeTreeOrder(): string[] {
+    const alive = new Set<string>([
+      ...config.value.groups.map(g => g.id),
+      ...rootProjects().map(p => p.id),
+    ])
+    const seen = new Set<string>()
+    const order: string[] = []
+    for (const id of config.value.tree_order ?? []) {
+      if (!alive.has(id) || seen.has(id)) continue
+      order.push(id)
+      seen.add(id)
+    }
+    for (const id of defaultTreeOrder()) {
+      if (seen.has(id)) continue
+      order.push(id)
+      seen.add(id)
+    }
+    return order
+  }
+
+  /** 按 tree_order 重排一级项目数组（数据库里的排序也用它） */
+  function syncRootProjectOrder() {
+    const order = config.value.tree_order ?? []
+    const byId = new Map(rootProjects().map(p => [p.id, p]))
+    const ordered: ProjectConfig[] = []
+    for (const id of order) {
+      const project = byId.get(id)
+      if (project) ordered.push(project)
+    }
+    for (const project of rootProjects()) {
+      if (!order.includes(project.id)) ordered.push(project)
+    }
+    config.value.projects = ordered
+  }
+
+  /** 树里第一个项目：按 tree_order 走，分组取组内第一个 */
+  function firstProjectInTree(): ProjectConfig | undefined {
+    for (const id of config.value.tree_order ?? []) {
+      const project = rootProjects().find(p => p.id === id)
+      if (project) return project
+      const group = config.value.groups.find(g => g.id === id)
+      if (group && group.projects.length > 0) return group.projects[0]
+    }
+    return rootProjects()[0] ?? config.value.groups.flatMap(g => g.projects)[0]
   }
 
   async function loadConfig() {
@@ -50,11 +108,12 @@ export function useConfig() {
       // 补齐 note / attachments，并清掉旧版本单独存的上传目录
       config.value.groups.forEach(normalizeEntity)
       config.value.groups.forEach(g => g.projects.forEach(normalizeEntity))
+      rootProjects().forEach(normalizeEntity)
+      // 老配置没有 tree_order：按「分组在前、一级项目在后」补一份
+      config.value.tree_order = normalizeTreeOrder()
       // 自动选中第一个项目
       if (!selectedProjectId.value) {
-        const first = config.value.groups
-          .flatMap(g => g.projects)
-          .find(Boolean)
+        const first = firstProjectInTree()
         if (first) selectedProjectId.value = first.id
       }
     } finally {
@@ -82,7 +141,7 @@ export function useConfig() {
       const p = g.projects.find(p => p.id === projectId)
       if (p) return p
     }
-    return undefined
+    return rootProjects().find(p => p.id === projectId)
   }
 
   // 按 kind 解析分组/项目实体
@@ -102,6 +161,7 @@ export function useConfig() {
       attachments: [],
     }
     config.value.groups.push(group)
+    config.value.tree_order = [...(config.value.tree_order ?? defaultTreeOrder()), group.id]
     await saveConfig()
     return group
   }
@@ -114,11 +174,9 @@ export function useConfig() {
     // 如果删除的分组中有选中项目，清除选中
     const hasSelected = group.projects.some(p => p.id === selectedProjectId.value)
     config.value.groups = config.value.groups.filter(g => g.id !== groupId)
+    config.value.tree_order = (config.value.tree_order ?? []).filter(id => id !== groupId)
     if (hasSelected) {
-      const first = config.value.groups
-        .flatMap(g => g.projects)
-        .find(Boolean)
-      selectedProjectId.value = first?.id ?? null
+      selectedProjectId.value = firstProjectInTree()?.id ?? null
     }
     await saveConfig()
   }
@@ -146,9 +204,35 @@ export function useConfig() {
     await saveConfig()
   }
 
-  // 分组重新排序
-  async function reorderGroups(newGroups: ProjectGroup[]) {
-    config.value.groups = newGroups
+  // 一级条目（分组 + 一级项目混排）重新排序
+  async function reorderRoot(order: string[]) {
+    const alive = new Set<string>([
+      ...config.value.groups.map(g => g.id),
+      ...rootProjects().map(p => p.id),
+    ])
+    const seen = new Set<string>()
+    const next: string[] = []
+    for (const id of order) {
+      if (!alive.has(id) || seen.has(id)) continue
+      next.push(id)
+      seen.add(id)
+    }
+    for (const id of defaultTreeOrder()) {
+      if (seen.has(id)) continue
+      next.push(id)
+      seen.add(id)
+    }
+    config.value.tree_order = next
+    // 分组数组顺序跟着一级顺序走，数据库的 sort_order 才和界面一致
+    const groupById = new Map(config.value.groups.map(g => [g.id, g]))
+    const orderedGroups = next
+      .map(id => groupById.get(id))
+      .filter((g): g is ProjectGroup => Boolean(g))
+    for (const group of config.value.groups) {
+      if (!orderedGroups.includes(group)) orderedGroups.push(group)
+    }
+    config.value.groups = orderedGroups
+    syncRootProjectOrder()
     await saveConfig()
   }
 
@@ -160,28 +244,53 @@ export function useConfig() {
     await saveConfig()
   }
 
-  // 项目跨分组移动
-  async function moveProject(projectId: string, fromGroupId: string, toGroupId: string, toIndex: number) {
-    const fromGroup = config.value.groups.find(g => g.id === fromGroupId)
-    const toGroup = config.value.groups.find(g => g.id === toGroupId)
-    if (!fromGroup || !toGroup) return
+  // 项目移动：分组 ↔ 分组、分组 ↔ 一级、一级内部排序
+  //
+  // fromGroupId / toGroupId 为 null 表示一级（树根）；toIndex 是「移除源之后」
+  // 目标数组里的插入下标（一级项目对应 tree_order 的下标）。
+  async function moveProject(
+    projectId: string,
+    fromGroupId: string | null,
+    toGroupId: string | null,
+    toIndex: number,
+  ) {
+    const project = findProject(projectId)
+    if (!project) return
 
-    const projectIndex = fromGroup.projects.findIndex(p => p.id === projectId)
-    if (projectIndex === -1) return
+    // 先从源位置移除
+    if (fromGroupId === null) {
+      config.value.projects = rootProjects().filter(p => p.id !== projectId)
+      config.value.tree_order = (config.value.tree_order ?? []).filter(id => id !== projectId)
+    } else {
+      const fromGroup = findGroup(fromGroupId)
+      if (!fromGroup) return
+      fromGroup.projects = fromGroup.projects.filter(p => p.id !== projectId)
+    }
 
-    const [project] = fromGroup.projects.splice(projectIndex, 1)
-    toGroup.projects.splice(toIndex, 0, project)
+    // 再插入目标位置
+    if (toGroupId === null) {
+      const order = config.value.tree_order ?? (config.value.tree_order = defaultTreeOrder())
+      const pos = Math.max(0, Math.min(toIndex, order.length))
+      order.splice(pos, 0, projectId)
+      config.value.projects.push(project)
+      syncRootProjectOrder()
+    } else {
+      const toGroup = findGroup(toGroupId)
+      if (!toGroup) return
+      const pos = Math.max(0, Math.min(toIndex, toGroup.projects.length))
+      toGroup.projects.splice(pos, 0, project)
+    }
     await saveConfig()
   }
 
-  // 在指定分组中添加项目
+  // 添加项目：groupId 为 null 时加到一级（树根）
   async function addProject(
-    groupId: string,
+    groupId: string | null,
     data: Omit<ProjectConfig, 'id' | 'created_at' | 'updated_at' | 'note' | 'attachments'> &
       Partial<Pick<ProjectConfig, 'note' | 'attachments'>>,
   ): Promise<ProjectConfig | undefined> {
-    const group = config.value.groups.find(g => g.id === groupId)
-    if (!group) return
+    const group = groupId === null ? null : findGroup(groupId)
+    if (groupId !== null && !group) return
     const now = nowIso()
     const project: ProjectConfig = {
       note: '',
@@ -191,7 +300,14 @@ export function useConfig() {
       created_at: now,
       updated_at: now,
     }
-    group.projects.push(project)
+    if (group) {
+      group.projects.push(project)
+    } else {
+      config.value.projects.push(project)
+      const order = config.value.tree_order ?? normalizeTreeOrder()
+      config.value.tree_order = [...order.filter(id => id !== project.id), project.id]
+      syncRootProjectOrder()
+    }
     await saveConfig()
     selectedProjectId.value = project.id
     return project
@@ -206,16 +322,17 @@ export function useConfig() {
     }
   }
 
-  // 删除项目
+  // 删除项目（分组内或一级都支持）
   async function deleteProject(id: string) {
     const group = findGroupByProject(id)
-    if (!group) return
-    group.projects = group.projects.filter(p => p.id !== id)
+    if (group) {
+      group.projects = group.projects.filter(p => p.id !== id)
+    } else {
+      config.value.projects = rootProjects().filter(p => p.id !== id)
+      config.value.tree_order = (config.value.tree_order ?? []).filter(item => item !== id)
+    }
     if (selectedProjectId.value === id) {
-      const first = config.value.groups
-        .flatMap(g => g.projects)
-        .find(Boolean)
-      selectedProjectId.value = first?.id ?? null
+      selectedProjectId.value = firstProjectInTree()?.id ?? null
     }
     await saveConfig()
   }
@@ -287,7 +404,7 @@ export function useConfig() {
     deleteGroup,
     renameGroup,
     updateGroup,
-    reorderGroups,
+    reorderRoot,
     reorderProjects,
     moveProject,
     addProject,

@@ -125,6 +125,12 @@ pub struct AppSettings {
     /// 全局默认附件上传目录（分组/项目未单独设置时使用）
     #[serde(default)]
     pub default_upload_dir: Option<String>,
+    /// 项目树一级顺序：分组 id 与一级项目 id 的混排顺序。
+    ///
+    /// 分组和「不属于任何分组」的项目都排在一级，像文件管理器里文件夹和文件
+    /// 混排；两个数组各自的顺序表达不了交错关系，所以单独存一份 id 序列。
+    #[serde(default)]
+    pub tree_order: Vec<String>,
 }
 
 impl Default for AppSettings {
@@ -135,6 +141,7 @@ impl Default for AppSettings {
             vpn_active_profile_id: String::new(),
             vpn_worker_session_dir: String::new(),
             default_upload_dir: None,
+            tree_order: vec![],
         }
     }
 }
@@ -143,6 +150,7 @@ impl Default for AppSettings {
 pub struct AppConfig {
     #[serde(default)]
     pub groups: Vec<ProjectGroup>,
+    /// 一级项目（不属于任何分组）
     #[serde(default)]
     pub projects: Vec<ProjectConfig>,
     #[serde(default)]
@@ -168,6 +176,9 @@ pub struct AppConfig {
     /// 全局默认附件上传目录（分组/项目未单独设置时使用）
     #[serde(default)]
     pub default_upload_dir: Option<String>,
+    /// 项目树一级顺序：分组 id 与一级项目 id 的混排顺序（详见 [`AppSettings::tree_order`]）
+    #[serde(default)]
+    pub tree_order: Vec<String>,
 }
 
 impl Default for AppConfig {
@@ -182,6 +193,7 @@ impl Default for AppConfig {
             vpn_active_profile_id: String::new(),
             vpn_worker_session_dir: String::new(),
             default_upload_dir: None,
+            tree_order: vec![],
         }
     }
 }

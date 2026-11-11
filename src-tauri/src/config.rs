@@ -49,6 +49,7 @@ impl AppSettings {
             vpn_active_profile_id: config.vpn_active_profile_id.clone(),
             vpn_worker_session_dir: config.vpn_worker_session_dir.clone(),
             default_upload_dir: config.default_upload_dir.clone(),
+            tree_order: config.tree_order.clone(),
         }
     }
 
@@ -56,7 +57,7 @@ impl AppSettings {
     pub fn into_config(self, data: DbData) -> AppConfig {
         AppConfig {
             groups: data.groups,
-            projects: vec![],
+            projects: data.projects,
             default_include: self.default_include,
             default_include_version: self.default_include_version,
             vpn_profiles: data.vpn_profiles,
@@ -64,6 +65,7 @@ impl AppSettings {
             vpn_active_profile_id: self.vpn_active_profile_id,
             vpn_worker_session_dir: self.vpn_worker_session_dir,
             default_upload_dir: self.default_upload_dir,
+            tree_order: self.tree_order,
         }
     }
 }
@@ -443,6 +445,7 @@ mod tests {
             vpn_active_profile_id: "p1".to_string(),
             vpn_worker_session_dir: "/tmp/session".to_string(),
             default_upload_dir: Some("/tmp/upload".to_string()),
+            tree_order: vec!["g1".to_string(), "r1".to_string()],
             ..Default::default()
         };
         let settings = AppSettings::from_config(&config);
@@ -452,7 +455,26 @@ mod tests {
         assert_eq!(merged.vpn_active_profile_id, "p1");
         assert_eq!(merged.vpn_worker_session_dir, "/tmp/session");
         assert_eq!(merged.default_upload_dir, config.default_upload_dir);
+        assert_eq!(merged.tree_order, config.tree_order);
         assert!(merged.groups.is_empty());
+    }
+
+    #[test]
+    fn into_config_keeps_root_projects() {
+        let mut data = crate::db::DbData::default();
+        data.projects.push(crate::models::ProjectConfig {
+            id: "r1".to_string(),
+            name: "一级项目".to_string(),
+            source_dir: "/tmp/root".to_string(),
+            output_dir: "/tmp/root/dist".to_string(),
+            created_at: String::new(),
+            updated_at: String::new(),
+            note: String::new(),
+            attachments: vec![],
+        });
+        let merged = AppSettings::default().into_config(data);
+        assert_eq!(merged.projects.len(), 1);
+        assert_eq!(merged.projects[0].name, "一级项目");
     }
 
     #[test]

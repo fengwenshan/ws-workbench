@@ -62,7 +62,10 @@ export interface ProjectGroup {
 
 export interface AppConfig {
   groups: ProjectGroup[]
+  /** 一级项目（不属于任何分组） */
   projects: ProjectConfig[]
+  /** 项目树一级顺序：分组 id 与一级项目 id 的混排顺序 */
+  tree_order?: string[]
   default_include: string[]
   default_include_version?: number
   /** VPN 配置列表 */

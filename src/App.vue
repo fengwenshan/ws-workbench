@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { ref, computed, nextTick, onMounted, onUnmounted, watch } from "vue";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
+import { type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { Modal, Checkbox, ConfigProvider, message, Form, FormItem, Input, Button } from "ant-design-vue";
+import { Modal, Checkbox, ConfigProvider, message, Form, FormItem, Input, Button, Segmented } from "ant-design-vue";
 import type { FormInstance } from "ant-design-vue";
 import zhCN from "ant-design-vue/es/locale/zh_CN";
 import { useConfig } from "@/composables/useConfig";
@@ -11,7 +12,7 @@ import { useUpdater } from "@/composables/useUpdater";
 import { useVpn } from "@/composables/useVpn";
 import { useWorkbenchLayout } from "@/composables/useWorkbenchLayout";
 import { useEntitySelection } from "@/composables/useEntitySelection";
-import { useProjectForm } from "@/composables/useProjectForm";
+import { useProjectForm, type CreateTab } from "@/composables/useProjectForm";
 import { useDeleteConfirm } from "@/composables/useDeleteConfirm";
 import { initPlatform, platform } from "@/platform";
 import appIcon from "@/assets/app-icon.png";
@@ -49,7 +50,7 @@ const {
   deleteGroup,
   renameGroup,
   updateGroup,
-  reorderGroups,
+  reorderRoot,
   reorderProjects,
   moveProject,
   addProject,
@@ -131,13 +132,15 @@ const {
   handleSelect,
 } = useEntitySelection(config, loading);
 
-// 新建分组 / 添加项目表单
+// 新建弹窗（分组 / 项目共用一个弹窗，顶部切类型）
 const {
-  showAddGroupForm,
+  showCreateModal,
+  createTab,
+  createTabsVisible,
+  openCreateModal,
+  switchCreateTab,
   newGroupName,
-  openAddGroupForm,
   handleAddGroup,
-  showAddForm,
   newProjectName,
   newProjectSource,
   newProjectOutput,
@@ -153,7 +156,12 @@ const {
   },
 });
 
-// 两个弹窗都交给 antd Form 校验，校验通过后再走原有的创建逻辑
+const createTabOptions = [
+  { label: "新建分组", value: "group" },
+  { label: "新建项目", value: "project" },
+];
+
+// 弹窗交给 antd Form 校验，按顶部选中的类型走对应创建逻辑
 const groupFormRef = ref<FormInstance | null>(null);
 const projectFormRef = ref<FormInstance | null>(null);
 const groupFormModel = computed(() => ({ name: newGroupName.value }));
@@ -163,16 +171,16 @@ const projectFormModel = computed(() => ({
   output: newProjectOutput.value,
 }));
 
-async function submitGroupForm() {
-  try {
-    await groupFormRef.value?.validate();
-  } catch {
+async function submitCreate() {
+  if (createTab.value === "group") {
+    try {
+      await groupFormRef.value?.validate();
+    } catch {
+      return;
+    }
+    await handleAddGroup();
     return;
   }
-  await handleAddGroup();
-}
-
-async function submitProjectForm() {
   try {
     await projectFormRef.value?.validate();
   } catch {
@@ -192,6 +200,17 @@ const quickOpenVisible = ref(false);
 /** 把所有分组/项目的附件拍平，带上所属位置，供快速搜索展示与跳转 */
 const quickItems = computed<QuickAttachmentItem[]>(() => {
   const out: QuickAttachmentItem[] = [];
+  // 一级项目（不属于分组的项目）
+  for (const project of config.value.projects ?? []) {
+    for (const attachment of project.attachments ?? []) {
+      out.push({
+        ...attachment,
+        entityKind: "project",
+        entityId: project.id,
+        entityPath: project.name,
+      });
+    }
+  }
   for (const group of config.value.groups) {
     for (const attachment of group.attachments ?? []) {
       out.push({
@@ -266,17 +285,40 @@ const groupNameInputEl = ref<{ focus: () => void; select?: () => void } | null>(
 const projectNameInputEl = ref<{ focus: () => void; select?: () => void } | null>(
   null,
 );
-watch(showAddGroupForm, async (open) => {
-  if (!open) return;
-  await nextTick();
-  groupNameInputEl.value?.focus();
-  groupNameInputEl.value?.select?.();
+watch(showCreateModal, async (open) => {
+  if (open) await focusCreateInput();
 });
-watch(showAddForm, async (open) => {
-  if (!open) return;
+watch(createTab, async () => {
+  if (showCreateModal.value) await focusCreateInput();
+});
+
+// 打开弹窗后把焦点落到当前表单的名称输入框（名称在最上面）
+async function focusCreateInput() {
   await nextTick();
-  projectNameInputEl.value?.focus();
-  projectNameInputEl.value?.select?.();
+  const target =
+    createTab.value === "group" ? groupNameInputEl : projectNameInputEl;
+  target.value?.focus();
+  target.value?.select?.();
+}
+
+// 手动校验：输入时用当前值重新校验，填上后错误提示立即消失
+watch(newGroupName, (value) => {
+  if (!showCreateModal.value || !value.trim()) return;
+  void nextTick(() =>
+    groupFormRef.value?.validate(["name"]).catch(() => {}),
+  );
+});
+watch(newProjectName, (value) => {
+  if (!showCreateModal.value || !value.trim()) return;
+  void nextTick(() =>
+    projectFormRef.value?.validate(["name"]).catch(() => {}),
+  );
+});
+watch(newProjectSource, (value) => {
+  if (!showCreateModal.value || !value.trim()) return;
+  void nextTick(() =>
+    projectFormRef.value?.validate(["source"]).catch(() => {}),
+  );
 });
 
 // 删除确认弹窗
@@ -312,6 +354,18 @@ onUnmounted(stopDailyCheck);
 onMounted(async () => {
   // 用后端的编译期平台信息覆盖 userAgent 兜底值
   await initPlatform();
+});
+
+// 启动时主窗口是隐藏的（Rust 侧 tauri.conf.json 的 visible: false），首屏渲染完
+// 再让后端显示：Windows 冷启动时 WebView2 初始化要几秒，先亮白窗口会被系统标成
+// 「未响应」。等一帧，确保首屏已经画出来再显示，避免闪一下空白。
+onMounted(async () => {
+  await nextTick();
+  try {
+    await invoke("app_ready");
+  } catch {
+    // 浏览器里调试（没有 Tauri 命令）或命令失败时不阻塞界面
+  }
 });
 
 // ========== Windows 自绘标题栏 ==========
@@ -437,44 +491,6 @@ async function handleUpdateAction() {
     await restartApp();
   }
 }
-
-// ========== 托盘右键「检查更新」 ==========
-// Rust 侧 emit "tray-check-update"：切到设置页并立刻检查一次，结果用 antd message 提示。
-// 设置页与标题栏共用 useUpdater 的同一份状态，这里查到的结果两边都会同步刷新。
-let trayCheckUnlisten: UnlistenFn | null = null;
-
-async function handleTrayCheckUpdate() {
-  selectTool("settings");
-  if (updateBusy.value) {
-    message.info("正在更新，请稍候…");
-    return;
-  }
-  const found = await checkUpdate();
-  // 失败时 updateStatus 已经是 error，错误原因放在 updateError
-  if (!found && updateStatus.value === "error") {
-    message.error(`检查更新失败：${updateError.value || "未知错误"}`);
-    return;
-  }
-  if (found) {
-    message.success(`发现新版本 v${found.version}`);
-    return;
-  }
-  message.success("已是最新版本");
-}
-
-onMounted(async () => {
-  try {
-    trayCheckUnlisten = await listen("tray-check-update", () => {
-      void handleTrayCheckUpdate();
-    });
-  } catch {
-    // 事件 API 不可用（例如浏览器里调试）时不注册，不影响其他功能
-  }
-});
-onUnmounted(() => {
-  trayCheckUnlisten?.();
-  trayCheckUnlisten = null;
-});
 
 // 重命名分组（默认分组不允许重命名）
 async function handleRenameGroup(id: string, name: string) {
@@ -720,14 +736,16 @@ async function handlePack(project: any, asZip: boolean = false) {
       >
         <ProjectList
           :groups="config.groups"
+          :projects="config.projects ?? []"
+          :tree-order="config.tree_order ?? []"
           :selected-id="selectedId"
           @select="handleSelect"
-          @add-group="openAddGroupForm"
+          @create="openCreateModal('group')"
           @delete-group="requestDeleteGroup"
           @rename-group="handleRenameGroup"
           @add-project="openAddForm"
           @delete-project="requestDeleteProject"
-          @reorder-groups="reorderGroups"
+          @reorder-root="reorderRoot"
           @reorder-projects="reorderProjects"
           @move-project="moveProject"
         />
@@ -810,18 +828,30 @@ async function handlePack(project: any, asZip: boolean = false) {
       </main>
     </div>
 
-      <!-- 新建分组弹窗：分组只需要名称 -->
+      <!-- 新建弹窗：顶部选新建分组 / 新建项目，下面切换对应表单 -->
       <Modal
-        v-model:open="showAddGroupForm"
-        title="新建分组"
-        ok-text="确定"
+        v-model:open="showCreateModal"
+        :title="createTabsVisible ? '新建' : '添加项目'"
+        :width="560"
+        ok-text="创建"
         cancel-text="取消"
         :mask-closable="false"
-        @ok="submitGroupForm"
+        @ok="submitCreate"
       >
+        <Segmented
+          v-if="createTabsVisible"
+          :value="createTab"
+          :options="createTabOptions"
+          block
+          class="create-tabs"
+          @change="(value) => switchCreateTab(value as CreateTab)"
+        />
+
         <Form
+          v-if="createTabsVisible && createTab === 'group'"
           ref="groupFormRef"
           :model="groupFormModel"
+          :validate-trigger="[]"
           layout="vertical"
           @submit.prevent
         >
@@ -829,32 +859,28 @@ async function handlePack(project: any, asZip: boolean = false) {
             label="分组名称"
             name="name"
             :rules="[
-              { required: true, whitespace: true, message: '请填写分组名称' },
+              {
+                required: true,
+                whitespace: true,
+                message: '请填写分组名称',
+                trigger: [],
+              },
             ]"
           >
             <Input
               ref="groupNameInputEl"
               v-model:value="newGroupName"
               placeholder="请输入分组名称"
-              @keydown.enter.prevent="submitGroupForm"
+              @keydown.enter.prevent="submitCreate"
             />
           </FormItem>
         </Form>
-      </Modal>
 
-      <!-- 添加项目弹窗：目录已在点击「添加项目」时选好，这里先确认名称，再补目录与输出目录 -->
-      <Modal
-        v-model:open="showAddForm"
-        title="添加项目"
-        :width="560"
-        ok-text="确定"
-        cancel-text="取消"
-        :mask-closable="false"
-        @ok="submitProjectForm"
-      >
         <Form
+          v-else
           ref="projectFormRef"
           :model="projectFormModel"
+          :validate-trigger="[]"
           layout="vertical"
           @submit.prevent
         >
@@ -862,21 +888,33 @@ async function handlePack(project: any, asZip: boolean = false) {
             label="项目名称"
             name="name"
             :rules="[
-              { required: true, whitespace: true, message: '请填写项目名称' },
+              {
+                required: true,
+                whitespace: true,
+                message: '请填写项目名称',
+                trigger: [],
+              },
             ]"
           >
             <Input
               ref="projectNameInputEl"
               v-model:value="newProjectName"
               placeholder="项目名称"
-              @keydown.enter.prevent="submitProjectForm"
+              @keydown.enter.prevent="submitCreate"
             />
           </FormItem>
-          <FormItem label="项目目录">
+          <FormItem
+            label="项目目录"
+            name="source"
+            :rules="[
+              { required: true, message: '请选择项目目录', trigger: [] },
+            ]"
+          >
             <div class="dir-row">
               <Input
                 :value="newProjectSource"
                 :title="newProjectSource"
+                placeholder="选择项目目录"
                 readonly
               />
               <Button @click="selectNewSource">选择</Button>
@@ -887,7 +925,7 @@ async function handlePack(project: any, asZip: boolean = false) {
               <Input
                 v-model:value="newProjectOutput"
                 placeholder="选择输出目录"
-                @keydown.enter.prevent="submitProjectForm"
+                @keydown.enter.prevent="submitCreate"
               />
               <Button @click="selectNewOutput">选择</Button>
             </div>
@@ -1281,6 +1319,9 @@ async function handlePack(project: any, asZip: boolean = false) {
 }
 
 /* 添加项目弹窗里的目录选择行 */
+.create-tabs {
+  margin-bottom: 16px;
+}
 .dir-row {
   display: flex;
   gap: 8px;

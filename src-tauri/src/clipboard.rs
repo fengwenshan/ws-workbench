@@ -876,7 +876,8 @@ pub fn on_hotkey(app: &AppHandle) {
 
 /// 显示并聚焦面板（不切换隐藏）
 pub fn show_panel(app: &AppHandle) {
-    let Some(window) = app.get_webview_window(PANEL_LABEL) else {
+    // 面板是懒创建的：启动时不再建，主窗口就绪后预热；预热没跑完就按了快捷键时现场建。
+    let Some(window) = crate::ensure_clipboard_panel(app) else {
         return;
     };
 
@@ -1049,8 +1050,9 @@ pub fn panel_origin_at(
 
 /// macOS：把应用带到前台。全局热键触发时应用通常不在前台，
 /// 只 `show()` + `set_focus()` 窗口可能拿不到键盘焦点。
+/// 托盘面板底部「显示主界面」也是同一场景，所以对 crate 内公开。
 #[cfg(target_os = "macos")]
-fn activate_app(app: &AppHandle) {
+pub(crate) fn activate_app<R: tauri::Runtime>(app: &AppHandle<R>) {
     // 全局热键回调本来就在主线程；不在时再转一次。不能无条件 run_on_main_thread，
     // 否则「激活」会排在 show/focus 之后，窗口还是拿不到焦点。
     fn activate_now() {
@@ -1071,7 +1073,7 @@ fn activate_app(app: &AppHandle) {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn activate_app(_app: &AppHandle) {}
+pub(crate) fn activate_app<R: tauri::Runtime>(_app: &AppHandle<R>) {}
 
 /// macOS：记住呼出面板前最前面的 App（排除自己）。
 #[cfg(target_os = "macos")]
