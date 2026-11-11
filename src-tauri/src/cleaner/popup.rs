@@ -853,7 +853,7 @@ impl Manager {
             .unwrap_or_default();
         let ignore = dir
             .as_deref()
-            .map(imp::load_ignore)
+            .map(load_ignore)
             .unwrap_or_default();
         Self {
             #[cfg(target_os = "windows")]
@@ -1417,6 +1417,13 @@ fn load_rules(dir: &std::path::Path) -> Vec<PopupRule> {
         .unwrap_or_default()
 }
 
+/// 读忽略名单。纯文件读取，和平台无关，放在外层而不是两个 `imp` 里。
+fn load_ignore(dir: &std::path::Path) -> Vec<String> {
+    read_text(&dir.join("popup-ignore.json"))
+        .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
+        .unwrap_or_default()
+}
+
 /// 读文本并去掉 UTF-8 BOM。
 ///
 /// 用户拿记事本 / PowerShell 5 的 `-Encoding UTF8` 改 `popup-*.json` 时很容易带上
@@ -1975,21 +1982,6 @@ mod imp {
                 .to_string();
             (name, path)
         }
-    }
-
-    pub fn load_ignore(dir: &std::path::Path) -> Vec<String> {
-        read_text(&dir.join("popup-ignore.json"))
-            .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
-            .unwrap_or_default()
-    }
-}
-
-#[cfg(not(target_os = "windows"))]
-mod imp {
-    pub fn load_ignore(dir: &std::path::Path) -> Vec<String> {
-        read_text(&dir.join("popup-ignore.json"))
-            .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
-            .unwrap_or_default()
     }
 }
 
