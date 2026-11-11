@@ -1990,7 +1990,7 @@ mod tests {
         );
         assert_eq!(
             worker.status.server_scope.cidrs,
-            vec!["198.51.100.0/24".to_string()],
+            vec!["198.51.100.0/22".to_string()],
             "服务端下发的网段要归一化并去重后展示"
         );
 
@@ -2009,7 +2009,7 @@ mod tests {
         );
         assert_eq!(
             worker.status.server_scope.cidrs,
-            vec!["198.51.100.0/24".to_string(), "10.10.0.0/16".to_string()]
+            vec!["198.51.100.0/22".to_string(), "10.10.0.0/16".to_string()]
         );
         let plan = worker.rule_plan();
         assert!(plan.domains.is_empty(), "服务端下发的范围永远不参与分流");
