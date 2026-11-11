@@ -1,7 +1,7 @@
 {
   "version": "1.0.22",
   "notes": "ws-workbench v1.0.22",
-  "pub_date": "2026-11-11T14:48:10Z",
+  "pub_date": "2026-11-11T14:48:33Z",
   "platforms": {
     "windows-x86_64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVE0rL3NzZVMwbkt1SHZua0JIVi9WRmxUUzhHQXIxdUhEVXFldjIzbzlzeXozeHZORUVWY1pGUXdUemVYdkZqMStGWHFWR211VkJDNlowWm1YaTNreGE1Z25uL1RDM1FnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NDA3NjI3CWZpbGU6d3Mtd29ya2JlbmNoXzEuMC4yMV94NjQtc2V0dXAuZXhlCXZlcnNpb246MS4wLjIxCmRKdUlVUkFtbDE5WVA4K3BsRzMreVEzUTc1a1NrZS9ZUmhDTEkydUpOWC9mQ2QvTHlTOFJFTU0zNTBoVGhvckowaG00QzlQTWVsWlVmeGVvY3l1a0FBPT0K",
@@ -12,8 +12,8 @@
       "url": "https://github.com/fengwenshan/ws-workbench/releases/download/v1.0.22/ws-workbench_aarch64.app.tar.gz"
     },
     "darwin-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVE0rL3NzZVMwbkxEcmdRc0xtWVdMeHY0L0FkcytMREovZ1BscnNselROc0ovSDRoV0twQUtCWmpWdEczNFJVdklKV2hOVjA1LzBpaGtyUWl3VkZnYWkwUi90aWh2dHdVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0MzIyOTE3CWZpbGU6d3Mtd29ya2JlbmNoLmFwcC50YXIuZ3oJdmVyc2lvbjoxLjAuMjAKNjBRazFVdnBrNGMxQ01lWjViVjJZOERucklibkcrVzJsNHJiZkRCaWNJV3ZNNkVkSGVzcDhybGxKdlBsOVdXVHZ4MTZrVlJOOC9iTEN0UDIvYlp3QXc9PQo=",
-      "url": "https://gitee.com/feng_wenshan/ws-workbench/releases/download/v1.0.20/ws-workbench_x86_64.app.tar.gz"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVE0rL3NzZVMwbkZ6TEk3MTBXVmZ5UjhIVlVKZTBPL1NDZDdjbzJjaUppKzRVNlVSdXE2TTdHL09wN3hUZTdURGg2d1JmdjRGVFlocmdZM0lWeWhua3I5cmJaamszMUE0PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NDA4NTA2CWZpbGU6d3Mtd29ya2JlbmNoLmFwcC50YXIuZ3oJdmVyc2lvbjoxLjAuMjIKeXpNUFhwNUEwRUFraXd6ekxGcVdwL2twQk9qdXJDWG82emprUkJqR3JRT2s1VlBLaC8wN0hvbHF4eTJYWUhtcExPNGpvV0R0SWpSemdOOXhoVHVSQVE9PQo=",
+      "url": "https://github.com/fengwenshan/ws-workbench/releases/download/v1.0.22/ws-workbench_x86_64.app.tar.gz"
     }
   }
 }
