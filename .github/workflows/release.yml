@@ -29,8 +29,8 @@ name: Release
 # 只依赖下面那句 permissions: contents: write。
 #
 # Gitee 镜像（国内下载加速）：最后一个 gitee-sync job 会把三个平台的更新载荷
-# 镜像到 Gitee 同名 tag 的发行版，并把两份清单里的下载地址改成 Gitee。
-# 客户端端点顺序是「Gitee 清单优先，GitHub 清单兜底」，见
+# 和手工安装包（dmg / msi）镜像到 Gitee 同名 tag 的发行版，并把两份清单里的
+# 下载地址改成 Gitee。客户端端点顺序是「Gitee 清单优先，GitHub 清单兜底」，见
 # src-tauri/tauri.conf.json 的 plugins.updater.endpoints。
 # 需要额外配一个仓库密钥 GITEE_TOKEN（Gitee 私人令牌，projects 权限），
 # 以及一个公开的 Gitee 仓库（默认 feng_wenshan/ws-workbench）。
@@ -248,7 +248,7 @@ jobs:
           retention-days: 14
 
   # 三个平台的包都齐了之后，串行做 Gitee 镜像（Gitee 侧只有一个写者，不并发）：
-  #   1. 建 tag vX.Y.Z + 同名发行版，把三个更新载荷传上去
+  #   1. 建 tag vX.Y.Z + 同名发行版，把三个更新载荷和手工安装包（dmg / msi）传上去
   #   2. 把 Gitee 仓库里 updates/latest.json 的下载地址改成 Gitee
   #   3. 把 GitHub main 上的清单也改写成 Gitee 地址（老客户端只认 GitHub 端点，
   #      改完它们升级时也能从 Gitee 下包）

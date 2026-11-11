@@ -359,14 +359,14 @@ macOS 两个架构都在 `macos-latest`（arm64）上跑，Intel 版用 `--targe
 
 两个构建 job 会同时改 `updates/latest.json`，脚本用「快进到远端最新 → 以远端为基线合并本平台条目 → 推送被拒就撤销重试」来避免互相覆盖。CI 自己推回 `main` 的清单提交带 `[skip ci]`，且工作流只由 tag 触发，不会自触发。
 
-三个构建 job 之后还有一个串行的 `gitee-sync` job（`needs: [macos, windows]`）：`scripts/gitee-sync.mjs` 把三份更新载荷传到 Gitee 同名 tag 的发行版，再把 Gitee 仓库里和 GitHub `main` 上的两份 `updates/latest.json` 的下载地址都改成 Gitee。它需要：
+三个构建 job 之后还有一个串行的 `gitee-sync` job（`needs: [macos, windows]`）：`scripts/gitee-sync.mjs` 把三份更新载荷**和手工安装包（两个 dmg + msi）**传到 Gitee 同名 tag 的发行版，再把 Gitee 仓库里和 GitHub `main` 上的两份 `updates/latest.json` 的下载地址都改成 Gitee。dmg / msi 不在更新清单里，只是给国内用户手动下载安装用，缺了只告警、不影响发版。它需要：
 
 - 仓库密钥 `GITEE_TOKEN`：Gitee → 设置 → 私人令牌，勾选 `projects`（仓库读写）权限
 - 一个**公开**的 Gitee 仓库：默认 `feng_wenshan/ws-workbench`，可用仓库变量 `GITEE_REPO` 覆盖；清单分支默认取仓库的默认分支（Gitee 新建仓库默认是 `master`），可用 `GITEE_BRANCH` 覆盖。**客户端端点里的分支名必须和它一致**
 
 Gitee 仓库只需要建好、勾选「使用 Readme 文件初始化」保证默认分支存在（代码不用镜像过去）；第一次发版时脚本会自动建 tag 和发行版。`GITEE_TOKEN` 没配、仓库是私有的、或附件上传失败时，这个 job 会失败并说明原因，但 GitHub 侧的发行版与清单已经发布，不影响原有流程（清单里失败的平台保留 GitHub 地址）。清单里的 `signature` 不随镜像改动（只改 `url`），Gitee 上的包和 GitHub 上的包是同一份构建产物，插件用同一把 minisign 公钥校验。
 
-还没配好 Gitee 时发布不受影响：Gitee 那一步会失败（GitHub 侧照旧）。配好之后可以在 Actions 里手动跑一次 **Gitee Backfill**（`.github/workflows/gitee-backfill.yml`，`workflow_dispatch`）：它按当前 `updates/latest.json` 的版本从 GitHub 发行版下载三个更新载荷补传 Gitee，并把清单地址改成 Gitee——已经在用旧版本的客户端下次检查更新就能直接从 Gitee 下包，不用等下一个版本。
+还没配好 Gitee 时发布不受影响：Gitee 那一步会失败（GitHub 侧照旧）。配好之后可以在 Actions 里手动跑一次 **Gitee Backfill**（`.github/workflows/gitee-backfill.yml`，`workflow_dispatch`）：它按当前 `updates/latest.json` 的版本从 GitHub 发行版下载三个更新载荷和手工安装包补传 Gitee（加 `--skip-existing`，已经传好的附件按大小跳过），并把清单地址改成 Gitee——已经在用旧版本的客户端下次检查更新就能直接从 Gitee 下包，不用等下一个版本；手工安装包也能从 Gitee 发行版里直接下。
 
 本地也可以手动补跑某次发版（需要 `GITEE_TOKEN`）：
 

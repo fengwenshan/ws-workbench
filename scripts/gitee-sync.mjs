@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
- * Gitee 镜像同步：把这次发版的三个平台更新包镜像到 Gitee，并把更新清单里的
- * 下载地址改成 Gitee。客户端检查更新时先读 Gitee 清单，读不到（超时 / 404）
- * 再读 GitHub 清单兜底。
+ * Gitee 镜像同步：把这次发版的三个平台更新包（自动更新用）和手工安装包
+ * （dmg / msi）镜像到 Gitee，并把更新清单里的下载地址改成 Gitee。客户端
+ * 检查更新时先读 Gitee 清单，读不到（超时 / 404）再读 GitHub 清单兜底。
  *
  * 为什么单开一个脚本，而不是塞进 release.mjs：
  *   三个平台的构建 job 是并行的、各自只合并自己那条清单；镜像必须等三份安装包
@@ -11,8 +11,9 @@
  *
  * Gitee 侧结构（和 GitHub 一一对应）：
  *   - 每次发版建一个 tag `vX.Y.Z` + 同 tag 的发行版，附件名与 GitHub 完全相同
- *     （ws-workbench-setup.exe / ws-workbench_<arch>.app.tar.gz），旧版本的
- *     下载地址不会失效。
+ *     （ws-workbench-setup.exe / ws-workbench_<arch>.app.tar.gz 这些更新载荷，
+ *     外加 ws-workbench_<ver>_<arch>.dmg / ws-workbench_<ver>_x64_en-US.msi
+ *     这些手工安装包），旧版本的下载地址不会失效。
  *   - 清单文件：<默认分支>/updates/latest.json，客户端从 raw 地址读取。
  *   - 全程只用 Gitee API（私人令牌），不在 Gitee 上推 git。
  *
@@ -60,6 +61,17 @@ const PLATFORMS = [
   { key: 'darwin-x86_64', asset: 'ws-workbench_x86_64.app.tar.gz' },
 ]
 
+/**
+ * 手工安装包：自动更新用不到 dmg / msi（macOS 走 .app.tar.gz，Windows 走 NSIS
+ * exe），传一份到 Gitee 只是方便国内用户手动下载安装。文件名里带版本号，所以
+ * 按清单版本拼名字去找；哪份没构建出来就跳过哪份，不影响发版和更新清单。
+ */
+const MANUAL_INSTALLERS = [
+  { label: 'macOS ARM64 dmg', asset: (version) => `ws-workbench_${version}_aarch64.dmg` },
+  { label: 'macOS Intel dmg', asset: (version) => `ws-workbench_${version}_x86_64.dmg` },
+  { label: 'Windows x64 msi', asset: (version) => `ws-workbench_${version}_x64_en-US.msi` },
+]
+
 function argValue(flag) {
   const i = process.argv.indexOf(flag)
   return i >= 0 ? process.argv[i + 1] || '' : ''
@@ -70,6 +82,11 @@ const DIR = resolve(ROOT, argValue('--dir') || 'release-assets')
 const MANIFEST_FROM = argValue('--manifest') || ''
 const DRY_RUN = process.argv.includes('--dry-run')
 const NO_GITHUB = process.argv.includes('--no-github')
+/**
+ * 补镜像时用：发行版上已有同名且大小一致的附件就跳过上传。
+ * 发版流程不用它，发版要保证 Gitee 上就是这次构建的字节。
+ */
+const SKIP_EXISTING = process.argv.includes('--skip-existing')
 
 function log(msg) {
   console.log(`\x1b[36m[gitee-sync]\x1b[0m ${msg}`)
@@ -108,8 +125,8 @@ function fetchBranch(branch) {
   git(['fetch', 'origin', `+refs/heads/${branch}:refs/remotes/origin/${branch}`])
 }
 
-/** 找到本次要镜像的更新载荷；缺哪份就跳过哪个平台（该平台清单里保留 GitHub 地址）。 */
-function locateAssets() {
+/** 找到本次要镜像的更新载荷和手工安装包；缺哪份就跳过哪份（载荷缺了清单里保留 GitHub 地址）。 */
+function locateAssets(version) {
   if (!existsSync(DIR)) fail(`产物目录不存在: ${DIR}（CI 里由 release.yml 的 download-artifact 准备）`)
   const files = walk(DIR)
   const found = {}
@@ -120,7 +137,19 @@ function locateAssets() {
     else missing.push(`${platform.asset}（${platform.key}）`)
   }
   if (missing.length) warn(`缺少构建产物，对应平台保持 GitHub 地址: ${missing.join('、')}`)
-  return found
+
+  const installers = []
+  const missingInstallers = []
+  for (const installer of MANUAL_INSTALLERS) {
+    const name = installer.asset(version)
+    const hit = files.find((path) => basename(path) === name)
+    if (hit) installers.push({ name, path: hit, label: installer.label })
+    else missingInstallers.push(name)
+  }
+  if (missingInstallers.length) {
+    warn(`缺少手工安装包（不影响更新，Gitee 上不提供这份）: ${missingInstallers.join('、')}`)
+  }
+  return { found, installers }
 }
 
 /**
@@ -235,6 +264,10 @@ async function uploadAttachment(release, localPath, remoteName) {
     try {
       const existing = (await listAttachments(release)).find((item) => item.name === remoteName)
       if (existing) {
+        if (SKIP_EXISTING && Number(existing.size) === size) {
+          log(`附件 ${remoteName} 已存在且大小一致（${size} 字节），跳过上传`)
+          return
+        }
         log(`附件 ${remoteName} 已存在（id=${existing.id}），先删除再重传`)
         await gitee(`/repos/${GITEE_REPO}/releases/${release.id}/attach_files/${existing.id}`, {
           method: 'DELETE',
@@ -397,7 +430,6 @@ function buildMirroredManifest(base, baseUrl, uploaded) {
 async function main() {
   if (!DRY_RUN && !GITEE_TOKEN) fail('缺少 GITEE_TOKEN（Gitee 私人令牌）；CI 里应配置 secrets.GITEE_TOKEN')
 
-  const assets = locateAssets()
   const base = readBaseManifest()
   // 发版时版本号来自 tag（--version）；补镜像时不传，直接用清单里的版本
   const version = (VERSION || base.version || '').trim()
@@ -410,6 +442,8 @@ async function main() {
     )
   }
   if (Object.keys(base.platforms || {}).length === 0) fail('清单里没有任何平台条目')
+
+  const { found: assets, installers } = locateAssets(version)
 
   const tag = `v${version}`
   log(`版本: ${tag}   产物目录: ${DIR}`)
@@ -424,6 +458,10 @@ async function main() {
           (local ? `上传 ${basename(local)} → releases/download/${tag}/${platform.asset}` : '缺少产物，保持 GitHub 地址')
       )
     }
+    for (const installer of installers) {
+      log(`[dry-run] ${installer.label}: 上传 ${installer.name} → releases/download/${tag}/${installer.name}`)
+    }
+    if (installers.length === 0) log('[dry-run] 没有找到手工安装包（dmg / msi），只镜像更新载荷')
     return
   }
 
@@ -460,6 +498,20 @@ async function main() {
     }
   }
 
+  // 3b) 上传手工安装包（dmg / msi）：只是发行版附件，不进更新清单，
+  //     失败不影响客户端更新，但会在下面的失败汇总里标出来。
+  for (const installer of installers) {
+    const size = statSync(installer.path).size
+    try {
+      await uploadAttachment(release, installer.path, installer.name)
+      await verifyRemote(`${baseUrl}/${installer.name}`, size)
+      log(`\x1b[32m${installer.label} 已镜像\x1b[0m → ${baseUrl}/${installer.name}`)
+    } catch (err) {
+      failures.push(`${installer.name}: ${err.message}`)
+      warn(`${installer.label} 镜像失败（不影响更新清单）: ${err.message}`)
+    }
+  }
+
   // 4) 把成功平台的下载地址换成 Gitee，写回 Gitee 清单和 GitHub 清单
   const mirrored = buildMirroredManifest(base, baseUrl, uploaded)
   await withRetry(() => writeGiteeManifest(branch, mirrored, tag), '写入 Gitee 清单')
@@ -482,12 +534,16 @@ async function main() {
 
   if (failures.length > 0) {
     console.error(
-      `\x1b[31m[gitee-sync] 以下平台没有镜像成功（清单里保留 GitHub 地址）：\n  ${failures.join('\n  ')}\x1b[0m`
+      `\x1b[31m[gitee-sync] 以下附件没有镜像成功（更新载荷失败的平台在清单里保留 GitHub 地址）：\n  ${failures.join('\n  ')}\x1b[0m`
     )
     process.exitCode = 1
     return
   }
-  log(`\x1b[32m镜像完成\x1b[0m ${tag}：${Object.keys(uploaded).join(', ')}`)
+  const extraNames = installers.map((installer) => installer.name)
+  log(
+    `\x1b[32m镜像完成\x1b[0m ${tag}：${Object.keys(uploaded).join(', ')}` +
+      (extraNames.length > 0 ? ` + ${extraNames.join(', ')}` : '')
+  )
 }
 
 main().catch((err) => fail(err.message))

@@ -1,7 +1,8 @@
 name: Gitee Backfill
 
 # 手动补镜像：把「当前 main 清单对应的那个版本」从 GitHub 发行版再走一遍 Gitee 镜像，
-# 并把两份清单的下载地址改成 Gitee。
+# 并把两份清单的下载地址改成 Gitee。除了三个更新载荷，也会把手工安装包
+# （dmg / msi）一起补传到 Gitee 发行版。
 #
 # 用途：某个版本已经发布、但当时还没接 Gitee（或者 gitee-sync 失败过）时，
 # 用它在 Actions 页面点一下补传，已经在用旧版本的老客户端下次检查更新
@@ -30,7 +31,7 @@ jobs:
         with:
           node-version: 22
 
-      - name: 从 GitHub 发行版下载当前版本的三个更新载荷
+      - name: 从 GitHub 发行版下载当前版本的更新载荷和手工安装包
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -42,6 +43,8 @@ jobs:
             --pattern "ws-workbench-setup.exe" \
             --pattern "ws-workbench_aarch64.app.tar.gz" \
             --pattern "ws-workbench_x86_64.app.tar.gz" \
+            --pattern "*.dmg" \
+            --pattern "*.msi" \
             --dir release-assets --clobber
           ls -la release-assets
 
@@ -50,4 +53,6 @@ jobs:
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
           GITEE_REPO: ${{ vars.GITEE_REPO }}
           GITEE_BRANCH: ${{ vars.GITEE_BRANCH }}
-        run: node scripts/gitee-sync.mjs --dir release-assets --manifest updates/latest.json
+        # --skip-existing：补镜像只上传还缺的附件（已有且大小一致的跳过），
+        # 避免把已经传好的更新载荷再从海外 runner 重传一遍（很慢）。
+        run: node scripts/gitee-sync.mjs --dir release-assets --manifest updates/latest.json --skip-existing
