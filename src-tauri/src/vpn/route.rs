@@ -103,6 +103,128 @@ impl RouteTarget {
     }
 }
 
+/// `netstat -rn -f inet` 里的一条路由（macOS 用；Windows 不需要它）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteEntry {
+    /// 网络地址（已按前缀抹掉主机位）
+    pub network: u32,
+    pub prefix: u8,
+    /// 原始网关列：`link#12`、`192.168.1.1` 之类；直连（on-link）时不是 IP
+    pub gateway: String,
+    /// 出口接口名（netstat 的 Netif 列）
+    pub if_name: String,
+}
+
+impl RouteEntry {
+    pub fn cidr(&self) -> String {
+        format!("{}/{}", format_ipv4(self.network), self.prefix)
+    }
+
+    /// 原路由是否经网关发出（false = on-link，直接走接口）
+    pub fn via_gateway(&self) -> bool {
+        parse_ipv4(&self.gateway).is_some()
+    }
+}
+
+/// 解析 `netstat -rn -f inet` 正文。
+///
+/// 只能 macOS 编译：它复用了 mac 专用的 [`parse_netstat_destination`]（缩写反推）。
+/// Windows 按前缀新增路由、不需要改写/还原，也就用不到这个解析。
+#[cfg(target_os = "macos")]
+pub fn parse_netstat_route_entries(text: &str) -> Vec<RouteEntry> {
+    text.lines()
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            let destination = parts.next()?;
+            let gateway = parts.next()?;
+            let _flags = parts.next()?;
+            let if_name = parts.next().unwrap_or("");
+            let (network, prefix) = parse_netstat_destination(destination)?;
+            Some(RouteEntry {
+                network,
+                prefix,
+                gateway: gateway.to_string(),
+                if_name: if_name.to_string(),
+            })
+        })
+        .collect()
+}
+
+/// 查一条已经存在的路由（按目标网段精确匹配，不管出口在哪）。
+#[cfg(target_os = "macos")]
+pub fn lookup_route(cidr: &str) -> Result<Option<RouteEntry>, String> {
+    use crate::process::run_with_timeout;
+    use std::path::Path;
+    use std::time::Duration;
+
+    let (network, prefix) = parse_cidr(cidr)?;
+    let (text, _) = run_with_timeout(
+        Path::new("/usr/sbin/netstat"),
+        &["-rn", "-f", "inet"],
+        Duration::from_secs(15),
+    );
+    Ok(parse_netstat_route_entries(&text)
+        .into_iter()
+        .find(|entry| entry.network == network && entry.prefix == prefix))
+}
+
+/// 把一条已存在的路由就地改到指定接口（显式规则覆盖本机网段时用）。
+#[cfg(target_os = "macos")]
+pub fn change_route_to_interface(cidr: &str, if_name: &str) -> Result<(), String> {
+    let cidr = normalize_cidr(cidr)?;
+    let args: Vec<String> = vec![
+        "-n".into(),
+        "change".into(),
+        "-net".into(),
+        cidr,
+        "-interface".into(),
+        if_name.to_string(),
+    ];
+    run_route_macos(&args, &["not in table", "No such process", "no such process"])
+}
+
+/// 还原一条被我们改写过的路由（macOS）。
+///
+/// 先 `route change` 改回原出口；路由已经不存在（接口消失、被别的程序删掉）就
+/// 按原出口重新加一条。
+#[cfg(target_os = "macos")]
+pub fn restore_route(entry: &RouteEntry) -> Result<(), String> {
+    let cidr = entry.cidr();
+    let mut args: Vec<String> = vec!["-n".into(), "change".into(), "-net".into(), cidr.clone()];
+    if entry.via_gateway() {
+        args.push(entry.gateway.clone());
+    } else if !entry.if_name.is_empty() {
+        args.push("-interface".into());
+        args.push(entry.if_name.clone());
+    } else {
+        return Ok(());
+    }
+    if run_route_macos(&args, &["not in table", "No such process"]).is_ok() {
+        return Ok(());
+    }
+    // on-link 路由的 gateway 列是 `link#12` 这种接口标记，不能当下一跳地址用；
+    // 传空 next_hop 让 add_route 走 `-interface` 形式。
+    let next_hop = if entry.via_gateway() {
+        entry.gateway.clone()
+    } else {
+        String::new()
+    };
+    let target = RouteTarget::new(0, &entry.if_name, &next_hop);
+    add_route(&cidr, &target, 0)
+}
+
+#[cfg(target_os = "windows")]
+pub fn restore_route(_entry: &RouteEntry) -> Result<(), String> {
+    // Windows 的覆盖是「同前缀新增一条」，断开时只删我们自己那条，
+    // 系统原路由自然恢复，不需要改写/还原。
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub fn restore_route(_entry: &RouteEntry) -> Result<(), String> {
+    Ok(())
+}
+
 // ============================== CIDR 工具 ==============================
 
 /// 校验并解析 CIDR，返回 (网络地址, 前缀长度)
@@ -1266,6 +1388,31 @@ mod tests {
         assert_eq!(parse_netstat_destination("default"), None);
         assert_eq!(parse_netstat_destination("Routing"), None);
         assert_eq!(parse_netstat_destination("Internet:"), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn parses_netstat_route_entries() {
+        let text = "Destination        Gateway            Flags        Netif Expire
+default            192.168.1.1        UGScg          en0
+127                127.0.0.1          UCS            lo0
+192.168.1          link#12            UCSIg          en0
+192.168.6.115      192.168.137.1      UGSc           utun4
+";
+        let entries = parse_netstat_route_entries(text);
+        let local = entries
+            .iter()
+            .find(|entry| entry.cidr() == "192.168.1.0/24")
+            .expect("应解析出本机网段");
+        assert_eq!(local.if_name, "en0");
+        assert!(!local.via_gateway(), "link# 不是网关地址");
+
+        let host = entries
+            .iter()
+            .find(|entry| entry.cidr() == "192.168.6.115/32")
+            .expect("应解析出 /32 主机路由");
+        assert_eq!(host.if_name, "utun4");
+        assert!(host.via_gateway());
     }
 
     #[cfg(target_os = "macos")]
