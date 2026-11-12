@@ -371,7 +371,12 @@ function collectAssets(platform) {
       const f = readdirSync(dir).find(
         (name) => name.startsWith(product) && name.endsWith('.msi')
       )
-      if (f) assets.push({ name: f, path: join(dir, f) })
+      if (f) {
+        // 顺手导出到 release/：CI 的 installers-* 产物只收 release/*，
+        // 不导出的话 gitee-sync 拿不到 msi（2026-11-11 v1.0.22 就是这么漏的）。
+        copyFileSync(join(dir, f), join(OUT_DIR, f))
+        assets.push({ name: f, path: join(dir, f) })
+      }
     }
   }
   // macOS 额外上传 dmg（人工安装包；更新载荷用的是 .app.tar.gz）

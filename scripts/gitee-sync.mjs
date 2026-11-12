@@ -533,22 +533,26 @@ async function main() {
   const release = await ensureRelease(branch, tag, base)
 
   // 3) 上传 + 校验；失败的平台保持 GitHub 地址
+  //    三个平台并行传：Gitee 海外上行实测只有 20-30KB/s 且按连接限速，
+  //    串行要一个多小时（v1.0.22 的 gitee-sync 跑了 85 分钟）。
   const uploaded = {}
   const failures = []
-  for (const platform of PLATFORMS) {
-    const local = assets[platform.key]
-    if (!local) continue
-    const size = statSync(local).size
-    try {
-      await uploadAttachment(release, local, platform.asset)
-      await verifyRemote(`${baseUrl}/${platform.asset}`, size)
-      uploaded[platform.key] = platform.asset
-      log(`\x1b[32m${platform.key} 已镜像\x1b[0m → ${baseUrl}/${platform.asset}`)
-    } catch (err) {
-      failures.push(`${platform.key}: ${err.message}`)
-      warn(`${platform.key} 镜像失败，清单里保留 GitHub 地址: ${err.message}`)
-    }
-  }
+  await Promise.all(
+    PLATFORMS.map(async (platform) => {
+      const local = assets[platform.key]
+      if (!local) return
+      const size = statSync(local).size
+      try {
+        await uploadAttachment(release, local, platform.asset)
+        await verifyRemote(`${baseUrl}/${platform.asset}`, size)
+        uploaded[platform.key] = platform.asset
+        log(`\x1b[32m${platform.key} 已镜像\x1b[0m → ${baseUrl}/${platform.asset}`)
+      } catch (err) {
+        failures.push(`${platform.key}: ${err.message}`)
+        warn(`${platform.key} 镜像失败，清单里保留 GitHub 地址: ${err.message}`)
+      }
+    })
+  )
 
   // 3b) 上传手工安装包（dmg / msi）：只是发行版附件，不进更新清单，
   //     失败不影响客户端更新，但会在下面的失败汇总里标出来。
