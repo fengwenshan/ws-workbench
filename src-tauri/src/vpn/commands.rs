@@ -300,6 +300,9 @@ pub fn validate_rule_input(kind: &str, value: &str) -> Result<(), String> {
             crate::vpn::split::normalize_domain(value)
                 .ok_or_else(|| format!("不是合法域名：{}", value))?;
         }
+        RuleKind::IpCidr => {
+            crate::vpn::split::normalize_ip_rule(value)?;
+        }
     }
     Ok(())
 }

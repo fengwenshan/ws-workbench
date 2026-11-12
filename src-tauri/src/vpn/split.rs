@@ -126,11 +126,35 @@ pub struct DomainRule {
     pub policy: Policy,
 }
 
+/// 一条 IP 规则（IPv4）的数据面语义：网络地址 + 前缀长度 + 走向。
+///
+/// `network` 已经按前缀抹掉了主机位（`192.168.6.77/24` → `192.168.6.0/24`），
+/// 判定时按「最长前缀优先、等长先出现者胜」比较即可。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IpRule {
+    pub network: u32,
+    pub prefix: u8,
+    pub policy: Policy,
+}
+
+impl IpRule {
+    /// 归一后的 CIDR 文本，例如 `192.168.6.0/24`。
+    pub fn cidr(&self) -> String {
+        format!("{}/{}", route::format_ipv4(self.network), self.prefix)
+    }
+
+    fn contains(&self, ip: u32) -> bool {
+        ip & route::prefix_to_mask(self.prefix) == self.network
+    }
+}
+
 /// 规则翻译成「路由注入模式能做的事」。
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct SplitPlan {
     /// 域名规则全集（走 VPN 的 + 直连例外），保留用户规则里的先后顺序
     pub rules: Vec<DomainRule>,
+    /// IP 规则全集（走 VPN 的 + 直连例外），已归一、按用户规则顺序保留
+    pub ip_rules: Vec<IpRule>,
     /// 需要按域名分流解析的域名（只含走 VPN 的，小写、去通配符）
     pub domains: Vec<String>,
     /// 这个模式下做不到的规则，以及需要用户知道的行为差异
@@ -146,6 +170,26 @@ impl SplitPlan {
     /// `DOMAIN-SUFFIX example.com → 走 VPN`，不需要任何域名特判。
     pub fn tunnels(&self, name: &str) -> bool {
         tunnels_domain(&self.rules, name)
+    }
+
+    /// 一个 IPv4 地址最终走不走隧道。
+    ///
+    /// 与域名规则同一套语义：最长前缀优先；前缀长度相同时先出现的规则胜出；
+    /// 没有任何 IP 规则命中时走直连（兜底策略不参与路由注入）。
+    pub fn ip_tunnels(&self, ip: std::net::Ipv4Addr) -> bool {
+        let target = u32::from(ip);
+        let mut best: Option<(u8, Policy)> = None;
+        for rule in &self.ip_rules {
+            if !rule.contains(target) {
+                continue;
+            }
+            match best {
+                // `>` 才替换：等长时先出现的已记录，保持先到先得
+                Some((best_prefix, _)) if rule.prefix <= best_prefix => {}
+                _ => best = Some((rule.prefix, rule.policy)),
+            }
+        }
+        matches!(best, Some((_, Policy::Vpn)))
     }
 }
 
@@ -194,8 +238,8 @@ fn match_score(rule: &DomainRule, name: &str) -> Option<usize> {
 /// 注入、Windows 缓存扫描）都按 [`SplitPlan::tunnels`] 的结论走，所以例外
 /// 不会出现「解析走了 VPN、路由却没装上」这种半截状态。
 ///
-/// `IP-CIDR` 规则已下线：`RuleKind::parse` 会拒绝它，并给出一条说明性提示
-/// （网段路由只能整段注入、无法按网段排除，半生效不如不做）。
+/// IP 规则（`IP-CIDR`）编译成 [`IpRule`]：命中网段由 `SplitTunnel` 装成隧道路由，
+/// 「直连」规则作为例外交给 `ip_route_plan` 决定是否需要装更具体的直连路由。
 pub fn plan(rules: &[VpnRule], default_policy: &str) -> SplitPlan {
     let mut out = SplitPlan::default();
     for rule in rules {
@@ -249,6 +293,28 @@ pub fn plan(rules: &[VpnRule], default_policy: &str) -> SplitPlan {
                     });
                 }
             }
+            RuleKind::IpCidr => match normalize_ip_rule(&rule.value) {
+                Ok(cidr) => {
+                    let (network, prefix) =
+                        route::parse_cidr(&cidr).expect("归一后的 CIDR 一定合法");
+                    let duplicate = out.ip_rules.iter().any(|item| {
+                        item.network == network
+                            && item.prefix == prefix
+                            && item.policy == policy
+                    });
+                    if !duplicate {
+                        out.ip_rules.push(IpRule {
+                            network,
+                            prefix,
+                            policy,
+                        });
+                    }
+                }
+                Err(e) => push_unique(
+                    &mut out.notes,
+                    format!("IP-CIDR {}：{}", rule.value, e),
+                ),
+            },
         }
     }
     if matches!(Policy::parse(default_policy), Ok(Policy::Vpn)) {
@@ -265,6 +331,30 @@ fn push_unique(list: &mut Vec<String>, item: String) {
     if !list.contains(&item) {
         list.push(item);
     }
+}
+
+/// IP 规则取值归一：单个地址补 `/32`，CIDR 抹掉主机位，拒绝 `/0` 与非法值。
+///
+/// 校验（`commands::validate_rule_input`）与计划编译（[`plan`]）共用它，
+/// 避免「界面校验通过、连接时被跳过」两套逻辑。
+pub fn normalize_ip_rule(value: &str) -> Result<String, String> {
+    let text = value.trim();
+    if text.is_empty() {
+        return Err("匹配值不能为空".to_string());
+    }
+    if !text.contains('/') {
+        let ip = route::parse_ipv4(text)
+            .ok_or_else(|| format!("不是合法的 IP 或网段：{}", value))?;
+        return Ok(format!("{}/32", route::format_ipv4(ip)));
+    }
+    let (network, prefix) =
+        route::parse_cidr(text).map_err(|e| format!("不是合法的 IP 或网段：{}", e))?;
+    if prefix == 0 {
+        return Err(
+            "IP 规则不支持 0.0.0.0/0，需要全部流量走 VPN 请用全局模式".to_string(),
+        );
+    }
+    Ok(format!("{}/{}", route::format_ipv4(network), prefix))
 }
 
 /// 域名规范化：小写、去掉 `*.` 前缀和首尾点，校验标签。
@@ -1978,34 +2068,16 @@ mod tests {
         );
     }
 
-    /// `IP-CIDR` 已下线：老配置里留着它时，计划里要给出「已下线」的说明，
-    /// 而不是静默丢弃。
-    #[test]
-    fn retired_ip_cidr_is_reported() {
-        let rules = vec![
-            rule("DOMAIN-SUFFIX", "example.com", "VPN"),
-            rule("IP-CIDR", "10.10.3.0/24", "VPN"),
-        ];
-        let plan = plan(&rules, "DIRECT");
-        assert_eq!(plan.domains, vec!["example.com"]);
-        assert!(
-            plan.notes.iter().any(|note| note.contains("已下线")),
-            "{:?}",
-            plan.notes
-        );
-    }
-
     #[test]
     fn plan_explains_unsupported_kinds() {
         let rules = vec![
             rule("DOMAIN-KEYWORD", "corp", "VPN"),
             rule("PROCESS-NAME", "Lark", "VPN"),
             rule("DST-PORT", "8080", "VPN"),
-            rule("IP-CIDR", "10.10.3.0/24", "VPN"),
         ];
         let plan = plan(&rules, "DIRECT");
         assert!(plan.domains.is_empty());
-        assert_eq!(plan.notes.len(), 4, "每类不支持的规则都要给出一条提示");
+        assert_eq!(plan.notes.len(), 3, "每类不支持的规则都要给出一条提示");
         assert!(plan.notes[0].contains("DOMAIN-SUFFIX"));
     }
 
@@ -2013,6 +2085,75 @@ mod tests {
     fn plan_warns_when_default_policy_is_vpn() {
         let plan = plan(&[], "VPN");
         assert!(plan.notes.iter().any(|note| note.contains("全局模式")));
+    }
+
+    #[test]
+    fn normalize_ip_rule_accepts_hosts_and_cidrs() {
+        assert_eq!(
+            normalize_ip_rule(" 192.168.6.115 ").unwrap(),
+            "192.168.6.115/32"
+        );
+        assert_eq!(normalize_ip_rule("192.168.6.77/24").unwrap(), "192.168.6.0/24");
+        assert!(normalize_ip_rule("0.0.0.0/0")
+            .unwrap_err()
+            .contains("全局模式"));
+        assert!(normalize_ip_rule("192.168.6.0/33").is_err());
+        assert!(normalize_ip_rule("not-an-ip").is_err());
+        assert!(normalize_ip_rule("").is_err());
+    }
+
+    #[test]
+    fn plan_compiles_ip_rules() {
+        let rules = vec![
+            rule("IP-CIDR", "192.168.6.115", "VPN"),
+            rule("IP-CIDR", "192.168.6.77/24", "VPN"),
+            rule("IP-CIDR", "192.168.6.9/32", "DIRECT"),
+        ];
+        let plan = plan(&rules, "DIRECT");
+        assert!(plan.domains.is_empty());
+        let cidrs: Vec<String> = plan.ip_rules.iter().map(|item| item.cidr()).collect();
+        assert_eq!(
+            cidrs,
+            vec!["192.168.6.115/32", "192.168.6.0/24", "192.168.6.9/32"]
+        );
+        assert!(plan.ip_tunnels("192.168.6.115".parse().unwrap()));
+        assert!(
+            !plan.ip_tunnels("192.168.6.9".parse().unwrap()),
+            "更具体的 DIRECT 例外要盖住 /24"
+        );
+        assert!(plan.ip_tunnels("192.168.6.10".parse().unwrap()));
+        assert!(!plan.ip_tunnels("10.0.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn invalid_ip_rules_are_reported_not_fatal() {
+        let rules = vec![
+            rule("IP-CIDR", "0.0.0.0/0", "VPN"),
+            rule("IP-CIDR", "192.168.6.0/33", "VPN"),
+            rule("IP-CIDR", "hello", "VPN"),
+        ];
+        let plan = plan(&rules, "DIRECT");
+        assert!(plan.ip_rules.is_empty());
+        assert_eq!(plan.notes.len(), 3, "{:?}", plan.notes);
+        assert!(plan.notes.iter().any(|note| note.contains("全局模式")));
+    }
+
+    #[test]
+    fn ip_rule_ties_keep_the_first_one() {
+        let rules = vec![
+            rule("IP-CIDR", "10.0.0.0/24", "VPN"),
+            rule("IP-CIDR", "10.0.0.0/24", "DIRECT"),
+            rule("IP-CIDR", "10.0.0.0/16", "VPN"),
+        ];
+        let plan = plan(&rules, "DIRECT");
+        assert!(
+            plan.ip_tunnels("10.0.0.5".parse().unwrap()),
+            "同前缀先出现的 VPN 胜出"
+        );
+        assert!(
+            plan.ip_tunnels("10.0.5.5".parse().unwrap()),
+            "/16 仍在，按最长前缀判定"
+        );
     }
 
     #[test]
