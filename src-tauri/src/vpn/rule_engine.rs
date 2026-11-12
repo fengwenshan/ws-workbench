@@ -1,13 +1,12 @@
 //! 规则类型的解析与规范化（纯逻辑，好测）。
 //!
-//! 这里只保留**真正能生效**的两类：域名精确、域名后缀。
+//! 这里保留**真正能生效**的三类：域名精确、域名后缀、IPv4 网段。
 //! 早期的 Clash 式规则（`DOMAIN-KEYWORD` / `PROCESS-NAME` / `DST-PORT` / `RULE-SET`）
 //! 需要「按连接抓包 + 按进程/端口匹配」的数据面，macOS 侧已经改成路由注入
 //! （见 `split.rs` / `fulltunnel.rs`），那套匹配器没有落点了，一并删掉。
 //!
-//! `IP-CIDR` 也已经下线：网段注入只做「整段进隧道」，做不到按网段排除，留着
-//! 只会让用户配了以为生效。老配置里如果还留着这些类型，`RuleKind::parse` 会
-//! 明确报错，界面按「不生效」标注。
+//! `IP-CIDR` 于 2026-11 重新上线：路由注入现在把命中的网段直接装成隧道路由，
+//! 直连例外用更具体的直连路由表达（见 `split::ip_route_plan`）。
 
 /// 规则的匹配类型。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,6 +15,8 @@ pub enum RuleKind {
     Domain,
     /// 域名后缀：`example.com`（DNS 上含子域；路由注入只解析字面域名本身）
     DomainSuffix,
+    /// IPv4 单个地址或网段：`192.168.6.115` / `192.168.6.0/24`
+    IpCidr,
 }
 
 impl RuleKind {
@@ -24,11 +25,7 @@ impl RuleKind {
         match text.as_str() {
             "DOMAIN" => Ok(RuleKind::Domain),
             "DOMAIN-SUFFIX" => Ok(RuleKind::DomainSuffix),
-            "IP-CIDR" => Err(
-                "网段规则（IP-CIDR）已下线：路由注入模式只支持 DOMAIN / DOMAIN-SUFFIX，\
-                 请改成域名规则"
-                    .to_string(),
-            ),
+            "IP-CIDR" => Ok(RuleKind::IpCidr),
             "" => Err("规则类型不能为空".to_string()),
             "DOMAIN-KEYWORD" => Err(
                 "DOMAIN-KEYWORD 需要按域名做数据面匹配，路由注入模式不支持；请改成 DOMAIN-SUFFIX"
@@ -45,6 +42,7 @@ impl RuleKind {
         match self {
             RuleKind::Domain => "DOMAIN",
             RuleKind::DomainSuffix => "DOMAIN-SUFFIX",
+            RuleKind::IpCidr => "IP-CIDR",
         }
     }
 }
@@ -81,12 +79,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_the_two_live_kinds() {
+    fn parses_the_live_kinds() {
         assert_eq!(RuleKind::parse("DOMAIN").unwrap(), RuleKind::Domain);
         assert_eq!(
             RuleKind::parse("domain-suffix").unwrap(),
             RuleKind::DomainSuffix
         );
+        assert_eq!(RuleKind::parse("ip-cidr").unwrap(), RuleKind::IpCidr);
+        assert_eq!(RuleKind::IpCidr.as_str(), "IP-CIDR");
     }
 
     #[test]
@@ -96,7 +96,6 @@ mod tests {
             ("PROCESS-NAME", "进程"),
             ("DST-PORT", "连接"),
             ("RULE-SET", "规则集"),
-            ("IP-CIDR", "域名"),
         ] {
             let err = RuleKind::parse(kind).unwrap_err();
             assert!(err.contains(hint), "{} 的报错要说清楚怎么办：{}", kind, err);
