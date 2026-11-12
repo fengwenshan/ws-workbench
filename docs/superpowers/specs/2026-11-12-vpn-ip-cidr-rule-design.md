@@ -16,6 +16,8 @@
 - 走向支持 `VPN` / `DIRECT`；
 - 判定与域名规则一致：**最长前缀优先，前缀相同时先出现的规则胜出**，未命中走直连；
 - IP 规则**不依赖 DNS**：连接完成后立即装好路由，不需要先访问一次域名；
+- **显式配置优先**：计划阶段不判断「是不是本机所在局域网 / 服务器网段」而跳过；
+  与系统已有路由冲突时覆盖，断开时还原（见 §6）；
 - 纯 IP 规则（没有域名规则）时**不起 DNS 转发器、不写 `/etc/resolver`、不写 NRPT、
   不改系统 DNS**，只装路由；
 - `DIRECT` 例外用「更具体的直连路由（走原默认网关）」表达，由内核最长前缀匹配裁决。
@@ -44,7 +46,8 @@
 1. `IP-CIDR` 规则在 macOS 与 Windows 的规则模式生效；
 2. 支持单 IP 与网段，支持 VPN / DIRECT；
 3. 校验、预览、状态面板、日志、热更新、断开回收、崩溃清理全链路覆盖；
-4. 纯 IP 规则不碰系统 DNS 与默认路由，保持「结构上不会一连上就断网」的边界。
+4. 显式配置优先：不做「目标是不是本机局域网」的分析，冲突路由覆盖并在断开时还原；
+5. 纯 IP 规则不碰系统 DNS 与默认路由，保持「结构上不会一连上就断网」的边界。
 
 非目标：
 
@@ -93,8 +96,8 @@
 - 否则按域名判定（现有 `SplitPlan::tunnels`）；
 - 两者都不合法 → 返回「请提供要预览的域名或 IP」。
 
-预览只按规则判定，§6 里依赖本机环境（本机网段、物理网关、服务器 IP）的跳过项
-不在预览里体现，由连接时的日志与 `notes` 给出原因——这与现有域名预览的边界一致。
+预览只按规则判定，§6 里服务器 IP / VPN DNS 的冲突跳过不在预览里体现，
+由连接时的日志与 `notes` 给出原因——这与现有域名预览的边界一致。
 
 ## 5. 编译与数据模型（`split.rs`）
 
@@ -147,29 +150,40 @@ pub fn ip_route_plan(
 
 - 同 `network` + `prefix` 的规则只取**先出现**的一条（与 §4.2 判定语义一致），
   后出现的写进 `notes`；
-- `tunnel`：所有 `policy = VPN` 的网段，去重，并按 §6 决策表剔除冲突项；
+- `tunnel`：所有 `policy = VPN` 的网段，去重；只按 §6 剔除「把隧道自己的流量送回隧道」
+  这类硬冲突，不按本机网段做跳过；
 - `direct`：只保留「比覆盖它的 VPN 网段更具体」的 `DIRECT` 网段——比 VPN 网段更宽的
-  直连规则不产生路由（写出去也只是回到默认路由），落在本机网段内的也跳过
-  （系统 on-link 路由本来就是直连），避免无意义的表项和误删别人的路由；
+  直连规则不产生路由（写出去也只是回到默认路由）；若系统已有路由的结论本来就是直连，
+  不重复安装（不改变走向、不碰别人的路由）；
 - `notes`：`/0`、冲突、跳过原因等逐条记录，由 worker 写进日志并合并进
   `SplitPlan::notes` 的展示链路。
 
-## 6. 安全边界（决策表）
+## 6. 安全边界（显式配置优先）
+
+**原则：用户显式写了「这个网段走 VPN」，就按规则注入，不判断它是不是本机所在局域网、
+不因为「看着像内网/像局域网」而跳过。** 只有两类硬冲突例外（技术原因，不是环境分析）：
 
 | 情形 | 决策 |
 | --- | --- |
-| 规则是 `0.0.0.0/0` | 校验/编译时报错，提示用全局模式 |
-| 规则网段恰为 VPN 服务器 IP 的 `/32` 或 VPN DNS 的 `/32` | 跳过该条 + `notes`（与已有主机路由同前缀，装不上也不该装） |
-| 规则网段包含 VPN 服务器 IP（如 `/16` 盖住服务器） | 正常装隧道网段；脚本已有的服务器 `/32` 主机路由更具体，服务器流量仍走物理网卡，不会打环 |
-| 规则网段包含本机所在网段（如 `192.168.0.0/16` 盖住本机 `192.168.1.0/24`） | 正常装隧道网段；系统已有的 on-link `/24` 更具体，局域网访问不受影响 |
-| 规则网段恰好等于本机所在网段 | 跳过该条 + `notes`（与 on-link 路由同前缀冲突） |
-| 规则网段落在本机所在网段内部（`/25` 在 `/24` 里） | 跳过该条 + `notes`（会部分劫持局域网） |
-| `DIRECT` 例外同时落在隧道网段内 | 装直连路由（原默认网关），由最长前缀匹配生效 |
-| `DIRECT` 例外落在本机网段内 | 跳过（系统 on-link 路由已直连），不装、也不在断开时删别人的路由 |
-| 会话快照里没有物理默认网关（`snapshot.default_gateway` 为空） | 跳过所有直连例外 + `notes`（没有可用的直连下一跳） |
+| 规则是 `0.0.0.0/0` | 校验时报错，提示用全局模式（规则模式不接管默认路由） |
+| 规则精确等于 VPN 服务器 IP 的 `/32` | 跳过该条 + `notes`：把隧道自身的 TLS/DTLS 流量送进隧道会立即打环 |
+| 规则与 VPN DNS 的 `/32` 重合 | 同目标、同前缀，视为重复，不重复装 |
+| 与系统已有同前缀路由冲突（本机局域网 on-link、其它 VPN 客户端装的路由等） | **显式配置优先，覆盖它**：macOS 先记录原接口/网关再 `route change` 到隧道；Windows 用同前缀 + Wintun + metric 1 新增，由系统按 metric 择优；断开/热更新时还原（见 §7.3） |
+| 规则网段比本机网段更宽（如 `/16` 盖住本机 `/24`） | 正常注入 `/16`；系统已有的 on-link `/24` 更具体，局域网访问仍是直连（路由表的自然结果，不是分析跳过） |
+| 规则网段落在本机网段内部（如 `/25` 在 `/24` 里） | 正常注入该 `/25`（更长前缀，显式生效）；本机网段其余地址仍直连 |
+| `DIRECT` 例外需要压过更宽的 VPN 网段 | 装直连路由（走原默认网关），由最长前缀匹配生效 |
+| `DIRECT` 例外处系统路由的结论本来已是直连 | 不重复安装（结论一致，不碰别人的路由） |
+| 会话快照里没有物理默认网关（`snapshot.default_gateway` 为空） | 直连例外无法落地，逐条 `notes` 说明 |
+
+**单条失败不致命**：某条 IP 规则注入失败只记 `notes` + 日志，不放弃其它规则、
+也不拆掉已经建好的隧道；VPN DNS 等固定路由失败仍然按致命错误回滚。
 
 **不做**的隐式行为：不因为规则覆盖某处就改 DNS、不接管默认路由、不动系统解析器；
 服务端下发的网段仍然只展示。
+
+覆盖本机局域网网段后的后果要如实告知：该网段的流量会进隧道（通常就访问不到了），
+断开连接时路由还原。日志里对此打一行
+`[分流] 覆盖系统已有路由：192.168.1.0/24（原出口 en0，断开时还原）`。
 
 ## 7. 运行期接线
 
@@ -179,12 +193,14 @@ pub fn ip_route_plan(
 - 早退条件从「`plan.domains` 为空」改成「`domains` 与 `ip_rules` 都为空」，
   文案改为：`规则里没有可用的分流动作：请加一条「域名后缀」或「IP / 网段」规则`；
 - 调 `ip_route_plan()`，`notes` 写日志：`[分流] IP 规则：192.168.6.0/24 → 隧道 utun4`；
-- 隧道网段并入现有的 `static_routes`：复用 `add_tunnel_route` / `guard()` 补装 /
-  `teardown()` 回收，不新增第二套账本；
+- 隧道网段并入现有的 `static_routes`：复用 `guard()` 补装 / `teardown()` 回收，
+  不新增第二套账本；逐条注入，遇同前缀已有路由时按 §6 覆盖（macOS `route change`，
+  Windows 同前缀 + metric 1 新增），原出口记进 `ip-routes.txt` 供还原；
+  单条失败记 `notes` + 日志后继续；
 - 直连例外装到「原默认网关」：`RouteTarget { if_index: snapshot.default_if_index,
   if_name: snapshot.default_if_alias, next_hop: snapshot.default_gateway }`，
-  用 `route::ensure_route` / `route::delete_route`；记录到新字段
-  `direct_routes: Vec<(String, RouteTarget)>`；
+  用 `route::ensure_route` / `route::delete_route`；新建的与覆盖的分别记进
+  `ip-routes.txt`（见 §7.3）；
 - **纯 IP 规则时跳过**：`install_resolver` / `start_resolver` / `spawn_self_check`，
   也不再要求 `vpn_dns` 非空（服务端没下发 DNS 也能用）；
 - `routes_for_status()` 同时列出隧道网段（`via = "vpn"`）与直连例外
@@ -202,16 +218,24 @@ pub fn ip_route_plan(
 - `guard()` 在规则模式下周期性补装丢失的路由：隧道网段沿用现有逻辑，
   直连例外同样补装（`route_exists` 判存在性）。
 
-### 7.3 崩溃与换网残留
+### 7.3 路由账本：覆盖记录与崩溃/换网清理
 
-- 隧道网段随 utun 消失，无需额外清理；
-- **直连例外**装在物理网卡上，SIGKILL 后会残留。换到别的网络后旧网关不可达，
-  残留路由会让那个网段「明明该直连却不通」。处理：
-  - 会话目录新增 `direct-routes.txt`，逐行记录 `cidr|gateway|if_index|if_name`；
-  - `cleanup_stale()` 在 worker 启动与每次 `apply` 前读取该清单，逐条删除
-    （macOS 用 `route -n delete -net <cidr> <gateway>`，Windows 用
-    `Remove-NetRoute -DestinationPrefix`），然后删除清单；
-  - `teardown()` 成功后清空清单；正常断开时清单为空，换网不会踩到残留。
+会话目录新增 `ip-routes.txt`，记录两类行：
+
+- `direct|cidr|gateway|if_index|if_name`：我们**新建**的直连例外路由，断开要删；
+- `override|cidr|orig_if_index|orig_if_name|orig_gateway`：我们**改写**的系统路由
+  （§6 覆盖本机局域网等），断开要还原。
+
+处理：
+
+- 隧道网段随 utun 消失，不需要额外清理；
+- 直连例外在物理网卡上，SIGKILL 后会残留；换到别的网络后旧网关不可达，
+  残留路由会把那个网段堵死——`cleanup_stale()` 在 worker 启动与每次 `apply` 前
+  读取清单：`direct` 行删除；`override` 行原接口还在就改回原出口，
+  原接口已消失则只删除我们改写的条目；
+- `teardown()` 按同样规则删除/还原后清空清单；
+- 覆盖与还原都要在日志里留一行，便于现场对照（例如
+  `[分流] 还原被覆盖的路由：192.168.1.0/24 → en0`）。
 
 ## 8. UI 与状态
 
@@ -241,9 +265,12 @@ pub fn ip_route_plan(
   `DOMAIN-KEYWORD` 等仍报错。
 - `split.rs::plan`：单 IP → `/32`；CIDR 归一（抹主机位）；非法值进 `notes`；
   `/0` 拒绝；同前缀先到先得；IP + 域名混合；`ip_tunnels` 判定（最长前缀、等长先到）。
-- `split.rs::ip_route_plan`：服务器 `/32` 精确冲突跳过；VPN DNS `/32` 精确冲突跳过；
-  盖住服务器 IP 的正常装；等于本机网段跳过；落在本机网段内跳过；含本机网段的正常装；
-  `DIRECT` 例外仅在更具体时产出；无物理默认网关时跳过并给 note。
+- `split.rs::ip_route_plan`：服务器 `/32` 精确冲突跳过；VPN DNS `/32` 视为重复；
+  **不做本机网段跳过**（同前缀产出覆盖意图、更宽/更窄前缀都按规则产出）；
+  `DIRECT` 例外仅在更具体时产出；无物理默认网关时直连例外给 note。
+- `split.rs` / `route.rs` 的覆盖账本：`ip-routes.txt` 行的解析、覆盖/还原意图生成
+  （纯函数）；平台层用 `cfg` 测试或字段断言覆盖 `route change` 与 `New-NetRoute` 的
+  参数拼接。
 - `commands.rs`：`validate_rule_input("IP-CIDR", ...)` 的合法/非法用例；
   `preview_verdict` 对 IP、CIDR、域名三种输入；替换现有
   `retired_ip_cidr_is_rejected_everywhere`（改为「已生效」断言）。
@@ -261,7 +288,9 @@ pub fn ip_route_plan(
 5. 纯 IP 规则时不产生 `/etc/resolver` / NRPT 规则，系统 DNS 不变；
 6. Windows 用 `Get-NetRoute -DestinationPrefix 192.168.6.0/24` 确认接口是 Wintun、
    NextHop 为 `0.0.0.0`；直连例外 NextHop 是物理网关；
-7. 拔掉/切换网络后重新连接，旧直连例外清单被 `cleanup_stale` 清掉。
+7. 拔掉/切换网络后重新连接，旧 `ip-routes.txt` 账本被 `cleanup_stale` 清掉；
+8. 显式覆盖：配 `192.168.1.0/24 → VPN`（本机所在网段）后路由指向 `utun*`、
+   日志有「覆盖系统已有路由」一行；断开后改回 `en0`，局域网恢复。
 
 前端：`pnpm build`（`vue-tsc --noEmit`）通过；规则弹窗、预览、状态面板手动过一遍。
 
@@ -277,10 +306,11 @@ pub fn ip_route_plan(
 
 | 风险 | 处理 |
 | --- | --- |
+| 覆盖本机局域网路由后，局域网访问中断 | 这是显式配置的后果：只覆盖规则里写到的网段；日志写明「覆盖了哪条、原出口是什么、断开还原」；README 提示不要这样配 |
+| 覆盖后还原失败（接口已消失或被系统重新生成） | `cleanup_stale` 只删除我们改写的条目并打日志告警，不影响隧道与其它规则 |
+| 直连例外在崩溃后残留到别的网络 | 7.3 的 `ip-routes.txt` 账本 + `cleanup_stale`（`direct` 删、`override` 还原） |
+| Windows 上同前缀覆盖靠 metric 竞争 | 验收 6 检查接口与 NextHop；断开只删我们自己那条，系统原路由还在 |
 | 与 Clash TUN / 其它 VPN 抢路由 | 隧道网段由 `guard()` 补装；不新增对抗逻辑，日志里能看到重复注入 |
-| 直连例外在崩溃后残留到别的网络 | 7.3 的 `direct-routes.txt` 清单 + `cleanup_stale` |
-| 规则写宽（`/16`）误伤本机网段 | 6 的决策表：包含本机网段正常装（on-link 更具体），等于/落在内则跳过并提示 |
-| Windows 直连例外 NextHop 用法 | 验收 6 明确检查 `NextHop`；实现时用 `Get-NetRoute` 断言，失败只跳过该条并记日志，不影响隧道 |
 | 用户以为 IP 规则也会改 DNS | README 与日志写明「IP 规则不碰解析器」 |
 
 ## 12. 涉及文件
@@ -290,9 +320,9 @@ pub fn ip_route_plan(
 | `src-tauri/src/vpn/rule_engine.rs` | 增加 `RuleKind::IpCidr` 与解析/文案/单测 |
 | `src-tauri/src/vpn/models.rs` | `VpnRule` 注释更新；沿用现有 `NetworkSnapshot` / `AppliedRoute` |
 | `src-tauri/src/vpn/split.rs` | `IpRule`、`SplitPlan.ip_rules`、`normalize_ip_rule`、`ip_tunnels`、`ip_route_plan`、`SplitTunnel` 直连路由与清理、模块文档 |
-| `src-tauri/src/vpn/route.rs` | 复用现有 `parse_cidr` / `normalize_cidr` / `add_route` / `ensure_route` / `delete_route`，不新增 API |
+| `src-tauri/src/vpn/route.rs` | 复用现有 CIDR/路由函数；新增「按网段查询现有出口」与「改写已有路由（macOS `route change`；Windows 同前缀新增）」的小函数 |
 | `src-tauri/src/vpn/commands.rs` | `validate_rule_input`、`vpn_validate_rule` 返回归一值、`preview_verdict`、`vpn_preview_rules` 参数、单测 |
-| `src-tauri/src/vpn/worker.rs` | `start_split_rules` 传 snapshot / 日志与文案、`connected_message`、纯 IP 规则路径 |
+| `src-tauri/src/vpn/worker.rs` | `start_split_rules` 传 snapshot / 日志与文案、`connected_message`、纯 IP 规则路径、`ip-routes.txt` 账本接线 |
 | `src/types/vpn.ts` | `VpnRuleKind`、`RETIRED_RULE_KINDS`、标签映射 |
 | `src/components/vpn/VpnRuleDialog.vue` | 类型下拉、占位符、提示、规范化保存、规则列表的类型标签 |
 | `src/composables/useVpn.ts` | 预览参数 `domain` → `target`；`usableRules` 的「已下线」注释更新（IP-CIDR 不再剔除） |
