@@ -15,8 +15,8 @@ export type VpnPhase =
 /** 代理模式，语义与 Clash 的 mode 一致 */
 export type VpnProxyMode = 'rule' | 'global' | 'direct'
 
-/** 规则匹配类型，取值与后端 rule_engine::RuleKind 一致（`IP-CIDR` 已下线） */
-export type VpnRuleKind = 'DOMAIN' | 'DOMAIN-SUFFIX'
+/** 规则匹配类型，取值与后端 rule_engine::RuleKind 一致 */
+export type VpnRuleKind = 'DOMAIN' | 'DOMAIN-SUFFIX' | 'IP-CIDR'
 
 /**
  * 历史上还有这几种规则类型，但需要「按连接抓包 + 按进程/端口匹配」的数据面，
@@ -27,8 +27,6 @@ export const RETIRED_RULE_KINDS = [
   'PROCESS-NAME',
   'DST-PORT',
   'RULE-SET',
-  // 网段规则只能整段注入、做不到按网段排除，已整体下线
-  'IP-CIDR',
 ] as const
 
 /** 规则走向，取值与后端 rule_engine::Policy 一致 */
@@ -222,12 +220,14 @@ export const PHASE_LABELS: Record<VpnPhase, string> = {
 export const RULE_KIND_LABELS: Record<VpnRuleKind, string> = {
   DOMAIN: 'DOMAIN',
   'DOMAIN-SUFFIX': 'DOMAIN-SUFFIX',
+  'IP-CIDR': 'IP-CIDR',
 }
 
 /** 规则类型的中文含义，只用于下拉选项，不改动规则值本身 */
 export const RULE_KIND_HINTS: Record<VpnRuleKind, string> = {
   DOMAIN: '域名',
   'DOMAIN-SUFFIX': '域名后缀',
+  'IP-CIDR': 'IP / 网段',
 }
 
 export const POLICY_LABELS: Record<VpnPolicy, string> = {

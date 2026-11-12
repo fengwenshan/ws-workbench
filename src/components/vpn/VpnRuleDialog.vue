@@ -3,7 +3,7 @@ import { computed, nextTick, ref } from 'vue'
 import { Input, Modal, Select, SelectOption, Switch } from 'ant-design-vue'
 import type { VpnApi } from '@/composables/useVpn'
 import type { VpnPolicy, VpnRule, VpnRuleKind } from '@/types/vpn'
-import { POLICY_LABELS, RETIRED_RULE_KINDS } from '@/types/vpn'
+import { POLICY_LABELS, RETIRED_RULE_KINDS, RULE_KIND_HINTS } from '@/types/vpn'
 
 const props = defineProps<{
   vpn: VpnApi
@@ -18,9 +18,9 @@ const vpn = props.vpn
 /**
  * 只保留路由注入模式（规则模式的实际实现）能生效的类型：
  * 域名类靠系统按域名解析 + 本地转发器注入隧道路由。
- * `DOMAIN-KEYWORD` / `PROCESS-NAME` / `DST-PORT` 没有数据面可用，`IP-CIDR`
- * 只能整段注入、做不到按网段排除，都已从下拉里下架；历史配置里若还留着
- * 这些规则，列表里会打「不生效」标记，删掉即可。
+ * `DOMAIN-KEYWORD` / `PROCESS-NAME` / `DST-PORT` 没有数据面可用，都已从下拉里下架；
+ * `IP-CIDR` 现在按最长前缀注入，直连例外用更具体的 DIRECT 规则表达。
+ * 历史配置里若还留着已下线的规则，列表里会打「不生效」标记，删掉即可。
  *
  * 顺序按「最常用在前」：域名后缀放第一个并设为默认 —— Windows 的 NRPT 精确匹配
  * 只覆盖裸域名，绝大多数场景要的是「这个域连同所有子域」。
@@ -28,6 +28,7 @@ const vpn = props.vpn
 const KIND_OPTIONS: { value: VpnRuleKind; label: string }[] = [
   { value: 'DOMAIN-SUFFIX', label: '域名后缀 (DOMAIN-SUFFIX)' },
   { value: 'DOMAIN', label: '完整域名 (DOMAIN)' },
+  { value: 'IP-CIDR', label: 'IP / 网段 (IP-CIDR)' },
 ]
 
 /** 历史规则里可能还存着这些类型：能显示、能删，但不会再生效 */
@@ -56,6 +57,20 @@ const saving = ref(false)
 /** 正在编辑的规则 id；为 null 表示左侧表单处于「新增」状态 */
 const editingId = ref<string | null>(null)
 const editing = computed(() => editingId.value !== null)
+
+const IPV4_OR_CIDR = /^\d{1,3}(?:\.\d{1,3}){3}(?:\/\d{1,2})?$/
+
+/** 输入框占位随类型切换：IP 规则提示单 IP 与 CIDR 两种写法 */
+const valuePlaceholder = computed(() =>
+  kind.value === 'IP-CIDR'
+    ? '192.168.6.115 或 192.168.6.0/24'
+    : 'example.com（子域用 DOMAIN-SUFFIX）',
+)
+
+/** 域名规则里填了 IP：不阻止保存，只提示改用 IP 类型（后端会把它当域名，永远不命中） */
+const ipWrittenAsDomain = computed(
+  () => kind.value !== 'IP-CIDR' && IPV4_OR_CIDR.test(value.value.trim()),
+)
 
 const rules = computed(() => draftRules.value)
 /** 列表头显示「N 条 · M 条启用」 */
@@ -235,12 +250,15 @@ async function closeDialog() {
           <Input
             ref="valueInput"
             v-model:value="value"
-            placeholder="请输入"
+            :placeholder="valuePlaceholder"
             :status="error ? 'error' : undefined"
             spellcheck="false"
             @input="onValueInput"
             @press-enter="submitRule"
           />
+          <p v-if="ipWrittenAsDomain" class="field-hint">
+            这看起来是 IP：域名规则填 IP 不会生效，请把类型改成「IP / 网段」
+          </p>
           <p v-if="error" class="field-error">{{ error }}</p>
         </div>
 
@@ -297,7 +315,7 @@ async function closeDialog() {
             <div class="row-main">
               <span class="row-value">{{ rule.value }}</span>
               <div class="row-meta">
-                <span class="row-kind">{{ rule.kind }}</span>
+                <span class="row-kind">{{ RULE_KIND_HINTS[rule.kind] ?? rule.kind }}</span>
                 <span class="row-policy" :class="rule.policy.toLowerCase()">
                   {{ POLICY_LABELS[rule.policy] }}
                 </span>
@@ -458,6 +476,11 @@ async function closeDialog() {
   font-size: 12px;
   color: var(--danger);
   line-height: 1.4;
+}
+.field-hint {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--text-muted);
 }
 .form-actions {
   display: flex;

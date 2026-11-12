@@ -24,8 +24,9 @@ import { BUSY_PHASES, RETIRED_RULE_KINDS } from '@/types/vpn'
 const RETIRED_KINDS: readonly string[] = RETIRED_RULE_KINDS
 
 /**
- * 已下线的规则类型（IP-CIDR 等）不参与数据面，留着只会让后端整体校验失败。
- * 从配置里读出来时就剔掉；界面仍能看到它们并手动删除。
+ * 已下线的规则类型不参与数据面（路由注入模式没有对应的匹配能力），
+ * 留着只会让后端整体校验失败。从配置里读出来时就剔掉；
+ * 界面仍能看到它们并手动删除。
  */
 function usableRules(rules: VpnRule[]): VpnRule[] {
   return rules.filter((rule) => !RETIRED_KINDS.includes(rule.kind))
@@ -581,17 +582,18 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
   /**
    * 预览一条输入会走哪。
    *
-   * 路由注入模式下没有按连接分流，端口/进程都不参与判定，只看域名。
+   * 输入可以是域名，也可以是 IPv4 / CIDR 网段；路由注入模式下没有按连接分流，
+   * 端口、进程都不参与判定。
    */
   async function previewRule(
     rules: VpnRule[],
     defaultPolicy: VpnPolicy,
-    domain: string,
+    target: string,
   ): Promise<VpnPolicy> {
     const verdict = await invoke<string>('vpn_preview_rules', {
       rules: usableRules(rules),
       defaultPolicy,
-      domain: domain || null,
+      target: target || null,
     })
     return verdict as VpnPolicy
   }
