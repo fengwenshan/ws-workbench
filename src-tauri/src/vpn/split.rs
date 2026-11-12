@@ -30,7 +30,8 @@
 //! 代价（必须让用户知道）：
 //! - `DOMAIN-KEYWORD` / `PROCESS-NAME` / `DST-PORT` 没有数据面可用，做不到；
 //! - 域名只覆盖「系统解析器（getaddrinfo）」这条路：自带 DoH/DoT 的应用不受控；
-//! - 网段（`IP-CIDR`）规则已下线：只能整段注入、无法按网段排除，与其半生效不如不做。
+//! - 网段（`IP-CIDR`）规则按最长前缀注入：只能整段进隧道，需要排除就用更具体的
+//!   DIRECT 规则表达（例如 `192.168.6.0/24 → VPN` + `192.168.6.9/32 → DIRECT`）；
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
@@ -331,6 +332,123 @@ fn push_unique(list: &mut Vec<String>, item: String) {
     if !list.contains(&item) {
         list.push(item);
     }
+}
+
+/// `ip_route_plan` 的产物：装到隧道上的网段、装到原网关上的直连例外、说明。
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct IpRoutePlan {
+    /// 要装到隧道接口上的网段（含 `/32`）
+    pub tunnel: Vec<String>,
+    /// 要装到原默认网关上的直连例外网段（比覆盖它的 VPN 网段更具体）
+    pub direct: Vec<String>,
+    pub notes: Vec<String>,
+}
+
+/// 把 IP 规则编译成「要装哪些路由」。
+///
+/// 纯函数：不碰系统路由表、不需要 root，边界可以直接单测。
+///
+/// - 同 `network` + `prefix` 的规则先出现者胜出（与 [`SplitPlan::ip_tunnels`] 一致），
+///   走向冲突时写一条 `notes`；
+/// - 只跳过两类硬冲突：规则精确命中 VPN 服务器 IP 的 `/32`（会把隧道自己的
+///   TLS/DTLS 流量送回隧道，立即打环）与 VPN DNS 的 `/32`（同目标重复）；
+/// - **不判断「是不是本机局域网」**：显式配置一律保留；
+/// - `DIRECT` 只有比覆盖它的 VPN 网段更具体时才需要一条直连路由，否则结论本来
+///   就是直连，不产生无意义的表项。
+pub fn ip_route_plan(
+    plan: &SplitPlan,
+    snapshot: &super::models::NetworkSnapshot,
+    server_ips: &[Ipv4Addr],
+    vpn_dns: &[Ipv4Addr],
+) -> IpRoutePlan {
+    let mut out = IpRoutePlan::default();
+
+    // 同前缀先到先得；后出现的只提示一次走向冲突
+    let mut effective: Vec<IpRule> = Vec::new();
+    let mut seen: BTreeMap<(u32, u8), Policy> = BTreeMap::new();
+    for rule in &plan.ip_rules {
+        let key = (rule.network, rule.prefix);
+        if let Some(first) = seen.get(&key) {
+            if *first != rule.policy {
+                push_unique(
+                    &mut out.notes,
+                    format!(
+                        "{} 同时配置了 VPN 与 DIRECT，先出现的 {} 生效",
+                        rule.cidr(),
+                        first.as_str()
+                    ),
+                );
+            }
+            continue;
+        }
+        seen.insert(key, rule.policy);
+        effective.push(*rule);
+    }
+
+    let mut usable: Vec<IpRule> = Vec::new();
+    for rule in effective {
+        if rule.prefix == 32 {
+            let ip = Ipv4Addr::from(rule.network);
+            if server_ips.contains(&ip) {
+                push_unique(
+                    &mut out.notes,
+                    format!(
+                        "{} 是 VPN 服务器地址，已跳过（否则隧道会自己抓自己）",
+                        rule.cidr()
+                    ),
+                );
+                continue;
+            }
+            if vpn_dns.contains(&ip) {
+                push_unique(
+                    &mut out.notes,
+                    format!("{} 已经是 VPN DNS 的固定 /32 路由，不重复安装", rule.cidr()),
+                );
+                continue;
+            }
+        }
+        usable.push(rule);
+    }
+
+    for rule in &usable {
+        if matches!(rule.policy, Policy::Vpn) {
+            push_unique(&mut out.tunnel, rule.cidr());
+        }
+    }
+
+    let vpn_rules: Vec<&IpRule> = usable
+        .iter()
+        .filter(|rule| matches!(rule.policy, Policy::Vpn))
+        .collect();
+    let mut direct: Vec<String> = Vec::new();
+    for rule in usable
+        .iter()
+        .filter(|rule| matches!(rule.policy, Policy::Direct))
+    {
+        // 只有「更具体的直连」才能压过隧道；更宽的直连写出去也只是回到默认路由
+        let needed = vpn_rules.iter().any(|vpn| {
+            vpn.prefix < rule.prefix
+                && (rule.network & route::prefix_to_mask(vpn.prefix)) == vpn.network
+        });
+        if needed {
+            push_unique(&mut direct, rule.cidr());
+        }
+    }
+
+    if direct.is_empty() {
+        return out;
+    }
+    if snapshot.default_gateway.trim().is_empty() {
+        for cidr in direct {
+            push_unique(
+                &mut out.notes,
+                format!("{} 需要直连路由，但本机没有可用的默认网关，已跳过", cidr),
+            );
+        }
+        return out;
+    }
+    out.direct = direct;
+    out
 }
 
 /// IP 规则取值归一：单个地址补 `/32`，CIDR 抹掉主机位，拒绝 `/0` 与非法值。
@@ -2153,6 +2271,84 @@ mod tests {
         assert!(
             plan.ip_tunnels("10.0.5.5".parse().unwrap()),
             "/16 仍在，按最长前缀判定"
+        );
+    }
+
+    fn snapshot_with_gateway() -> crate::vpn::models::NetworkSnapshot {
+        crate::vpn::models::NetworkSnapshot {
+            default_gateway: "192.168.1.1".into(),
+            default_if_index: 0,
+            default_if_alias: "en0".into(),
+            local_subnets: vec!["192.168.1.0/24".into()],
+        }
+    }
+
+    #[test]
+    fn ip_route_plan_splits_tunnel_and_direct() {
+        let rules = vec![
+            rule("IP-CIDR", "192.168.6.0/24", "VPN"),
+            rule("IP-CIDR", "192.168.6.9/32", "DIRECT"),
+            rule("IP-CIDR", "10.0.0.0/8", "VPN"),
+            rule("IP-CIDR", "10.1.0.0/16", "DIRECT"),
+            rule("IP-CIDR", "172.16.0.0/12", "DIRECT"),
+        ];
+        let plan = plan(&rules, "DIRECT");
+        let routes = ip_route_plan(&plan, &snapshot_with_gateway(), &[], &[]);
+        assert_eq!(routes.tunnel, vec!["192.168.6.0/24", "10.0.0.0/8"]);
+        assert_eq!(
+            routes.direct,
+            vec!["192.168.6.9/32", "10.1.0.0/16"],
+            "更宽的 DIRECT 不需要表项"
+        );
+    }
+
+    #[test]
+    fn ip_route_plan_skips_server_and_vpn_dns_hosts() {
+        let server: Ipv4Addr = "203.0.113.10".parse().unwrap();
+        let dns: Ipv4Addr = "223.5.5.5".parse().unwrap();
+        let rules = vec![
+            rule("IP-CIDR", "203.0.113.10/32", "VPN"),
+            rule("IP-CIDR", "223.5.5.5/32", "VPN"),
+            rule("IP-CIDR", "192.168.6.0/24", "VPN"),
+        ];
+        let plan = plan(&rules, "DIRECT");
+        let routes = ip_route_plan(&plan, &snapshot_with_gateway(), &[server], &[dns]);
+        assert_eq!(routes.tunnel, vec!["192.168.6.0/24"]);
+        assert_eq!(routes.notes.len(), 2, "{:?}", routes.notes);
+    }
+
+    #[test]
+    fn ip_route_plan_keeps_explicit_local_subnet_rules() {
+        let rules = vec![
+            rule("IP-CIDR", "192.168.1.0/24", "VPN"),
+            rule("IP-CIDR", "192.168.1.9/32", "DIRECT"),
+        ];
+        let plan = plan(&rules, "DIRECT");
+        let routes = ip_route_plan(&plan, &snapshot_with_gateway(), &[], &[]);
+        assert_eq!(
+            routes.tunnel,
+            vec!["192.168.1.0/24"],
+            "显式配置不因本机网段被跳过"
+        );
+        assert_eq!(routes.direct, vec!["192.168.1.9/32"]);
+    }
+
+    #[test]
+    fn ip_route_plan_reports_missing_gateway() {
+        let rules = vec![
+            rule("IP-CIDR", "192.168.6.0/24", "VPN"),
+            rule("IP-CIDR", "192.168.6.9/32", "DIRECT"),
+        ];
+        let plan = plan(&rules, "DIRECT");
+        let mut snapshot = snapshot_with_gateway();
+        snapshot.default_gateway = String::new();
+        let routes = ip_route_plan(&plan, &snapshot, &[], &[]);
+        assert_eq!(routes.tunnel, vec!["192.168.6.0/24"]);
+        assert!(routes.direct.is_empty());
+        assert!(
+            routes.notes.iter().any(|note| note.contains("默认网关")),
+            "{:?}",
+            routes.notes
         );
     }
 
