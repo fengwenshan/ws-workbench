@@ -1076,6 +1076,7 @@ Expected: PASS
                 &snapshot.default_if_alias,
                 &snapshot.default_gateway,
             );
+            // `ensure_route` 返回 `RouteOutcome::{Created,Updated}`，两种都算成功
             for cidr in ip_direct {
                 match route::ensure_route(cidr, &target, 1) {
                     Ok(_) => {
@@ -1249,7 +1250,9 @@ Expected: PASS
 - [ ] **Step 9: 更新唯一调用方（worker）**
 
 `src-tauri/src/vpn/worker.rs` 的 `start_split_rules` 里，`SplitTunnel::apply(...)` 参数
-在 `&server_ips` 之后插入 `&self.status.snapshot,`：
+在 `&server_ips` 之后插入 `&self.snapshot,`。**注意**是 worker 自己的
+`self.snapshot`（`NetworkSnapshot`）；`self.status.snapshot` 是
+`Option<NetworkSnapshot>`，别传错：
 
 ```rust
         match crate::vpn::split::SplitTunnel::apply(
