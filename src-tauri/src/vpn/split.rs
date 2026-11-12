@@ -10,8 +10,8 @@
 //!
 //! | 步骤 | macOS | Windows |
 //! | --- | --- | --- |
-//! | 命中域名的解析交给本机转发器 | 写 `/etc/resolver/<域名>` | NRPT 规则指向 `127.0.0.1:53` |
-//! | 本机转发器把查询交给 VPN DNS | `127.0.0.1:53` 转发器 | 同一个 `127.0.0.1:53` 转发器 |
+//! | 命中域名的解析交给本机转发器 | 写 `/etc/resolver/<域名>`（`nameserver 127.0.0.1` + `port <随机高位端口>`） | NRPT 规则指向 `127.0.0.1:53` |
+//! | 本机转发器把查询交给 VPN DNS | loopback 随机高位端口的转发器（不占 53，避开 Clash/dnsmasq） | `127.0.0.1:53` 转发器（NRPT 只能写 IP） |
 //! | 解析出来的内网 IP 进隧道 | 转发器在应答前注入 `/32` 路由 | 同左 |
 //! | `直连` 例外 | 转发器按查询名判 [`SplitPlan::tunnels`]，例外不注入 `/32` | 同左；回退路径的系统缓存扫描同一判定 |
 //!
@@ -44,13 +44,19 @@ use super::route;
 use super::rule_engine::{Policy, RuleKind};
 use super::session::VpnSession;
 
-/// 本机 DNS 转发器监听地址。
+/// 本机 DNS 转发器监听地址（Windows）。
 ///
-/// macOS 的 `/etc/resolver` 只能写 nameserver 地址，Windows 的 NRPT 也只能写
-/// 一个 IP；两边都用 loopback 的 53 端口最直接。worker 以管理员/root 运行，
-/// Windows 上 53 不要求特权端口，但可能被别的 DNS 服务占用，占用时回退。
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+/// Windows 的 NRPT 只能写一个 IP、不能写端口，所以转发器只能钉在 53 上；
+/// 端口被别的 DNS 服务占用时回退到「后台主动解析」。
+///
+/// macOS 不用这个常量：`/etc/resolver` 支持 `port` 关键字，转发器绑 loopback
+/// 的随机高位端口再写进 resolver 文件，彻底避开 53 被 Clash/dnsmasq 等占用
+/// （现场就撞过 `绑定 127.0.0.1:53 失败：Address already in use`）。
+#[cfg(target_os = "windows")]
 pub const FORWARDER_ADDR: &str = "127.0.0.1:53";
+/// macOS 转发器监听的 loopback 地址（端口随机分配，写进 `/etc/resolver`）。
+#[cfg(any(target_os = "macos", test))]
+const FORWARDER_HOST: &str = "127.0.0.1";
 /// NRPT 指向本机转发器时使用的地址。
 #[cfg(target_os = "windows")]
 const LOCAL_DNS_SERVER: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 1);
@@ -360,6 +366,10 @@ pub struct SplitTunnel {
     /// macOS：崩溃清理清单
     #[cfg(target_os = "macos")]
     manifest: std::path::PathBuf,
+    /// macOS：本机转发器实际监听的端口（0 = 还没绑；写进 `/etc/resolver`，
+    /// 进程活着期间不变，repair 补写 resolver 文件时要用同一个端口）
+    #[cfg(target_os = "macos")]
+    forwarder_port: u16,
     /// Windows：是否已写好 NRPT 规则
     #[cfg(target_os = "windows")]
     nrpt_installed: bool,
@@ -426,6 +436,8 @@ impl SplitTunnel {
             resolver_files: Vec::new(),
             #[cfg(target_os = "macos")]
             manifest: session.dir.join(MANIFEST_FILE),
+            #[cfg(target_os = "macos")]
+            forwarder_port: 0,
             #[cfg(target_os = "windows")]
             nrpt_installed: false,
             #[cfg(target_os = "windows")]
@@ -487,8 +499,11 @@ impl SplitTunnel {
     fn install_resolver(&mut self, session: &VpnSession) -> Result<(), String> {
         #[cfg(target_os = "macos")]
         {
+            // macOS 的 resolver 文件里要写转发器的实际端口，而端口要等
+            // start_forwarder 绑定后才确定（随机高位端口，避开被占用的 53），
+            // 所以文件在 start_forwarder 里写，这里只留空实现。
             let _ = session;
-            self.write_resolver_files()
+            Ok(())
         }
         #[cfg(target_os = "windows")]
         {
@@ -502,14 +517,16 @@ impl SplitTunnel {
     }
 
     /// 写 `/etc/resolver/<域名>`：让系统解析器把这些域名交给本机转发器（macOS）。
+    /// 端口用转发器实际监听的 `forwarder_port`，文件名与清单一致。
     #[cfg(target_os = "macos")]
     fn write_resolver_files(&mut self) -> Result<(), String> {
         use std::path::{Path, PathBuf};
         dir_create(RESOLVER_DIR)?;
+        let content = resolver_file_content(self.forwarder_port);
         let mut written: Vec<PathBuf> = Vec::new();
         for domain in &self.domains {
             let path = Path::new(RESOLVER_DIR).join(domain);
-            if let Err(e) = std::fs::write(&path, resolver_file_content()) {
+            if let Err(e) = std::fs::write(&path, &content) {
                 for p in &written {
                     let _ = std::fs::remove_file(p);
                 }
@@ -557,18 +574,46 @@ impl SplitTunnel {
         }
     }
 
-    /// 绑定 127.0.0.1:53 并起转发线程（macOS）。
+    /// 绑定本机转发器并起转发线程（macOS）。
+    ///
+    /// 优先绑 53（兼容性最好）；被占用时改绑 loopback 的随机高位端口 ——
+    /// 现场常见 Clash/dnsmasq/AdGuard 占着 53，占住就「只建隧道、不接管流量」。
+    /// `/etc/resolver` 支持 `port` 关键字，所以端口可以随便挑，绑定之后把实际
+    /// 端口写进 resolver 文件即可。
     #[cfg(target_os = "macos")]
     fn start_forwarder(&mut self, session: &VpnSession) -> Result<(), String> {
-        let socket = UdpSocket::bind(FORWARDER_ADDR).map_err(|e| {
-            format!(
-                "绑定 {} 失败：{}（端口被其它 DNS 服务占用？）",
-                FORWARDER_ADDR, e
-            )
-        })?;
+        let (socket, fallback_from_53) = match UdpSocket::bind((FORWARDER_HOST, 53)) {
+            Ok(socket) => (socket, None),
+            Err(e53) => {
+                let socket = UdpSocket::bind((FORWARDER_HOST, 0)).map_err(|e| {
+                    format!(
+                        "绑定 {}:53 失败（{}），改绑随机端口也失败：{}（本机 DNS 转发器起不来）",
+                        FORWARDER_HOST, e53, e
+                    )
+                })?;
+                (socket, Some(e53))
+            }
+        };
+        self.forwarder_port = socket
+            .local_addr()
+            .map_err(|e| format!("读取本机转发器端口失败：{}", e))?
+            .port();
         socket
             .set_read_timeout(Some(POLL_TIMEOUT))
             .map_err(|e| e.to_string())?;
+        self.write_resolver_files()?;
+        if let Some(e53) = fallback_from_53 {
+            session.append_log(&format!(
+                "[分流] {}:53 被占用（{}），本机转发器改绑 {}:{}，\
+                 /etc/resolver 用 port 字段指过去（不再和别的 DNS 服务抢 53）",
+                FORWARDER_HOST, e53, FORWARDER_HOST, self.forwarder_port
+            ));
+        } else {
+            session.append_log(&format!(
+                "[分流] 本机转发器监听 {}:{}，上游 VPN DNS {:?}",
+                FORWARDER_HOST, self.forwarder_port, self.vpn_dns
+            ));
+        }
         self.spawn_forwarder(socket, session)
     }
 
@@ -982,7 +1027,7 @@ impl SplitTunnel {
         for path in &self.resolver_files {
             let missing = std::fs::metadata(path).is_err();
             if missing {
-                let _ = std::fs::write(path, resolver_file_content());
+                let _ = std::fs::write(path, resolver_file_content(self.forwarder_port));
             }
         }
     }
@@ -1075,9 +1120,34 @@ impl SplitTunnel {
 }
 
 /// `/etc/resolver/<域名>` 的内容：把所有查询交给本机转发器（macOS）。
+///
+/// `port` 是 macOS `resolver(5)` 支持的字段，所以转发器可以绑任意高位端口，
+/// 不必和系统里别的 DNS 服务抢 53。
 #[cfg(any(target_os = "macos", test))]
-pub fn resolver_file_content() -> &'static str {
-    "nameserver 127.0.0.1\n"
+pub fn resolver_file_content(port: u16) -> String {
+    format!("nameserver {}\nport {}\n", FORWARDER_HOST, port)
+}
+
+/// 这个 resolver 文件是不是我们写的（只认「nameserver loopback」+ 可选的 `port` 行）。
+///
+/// 兼容旧版本格式：1.0.28 及更早只写 `nameserver 127.0.0.1`，没有 `port` 行；
+/// 升级后清理旧残留时也要能认出来。清理只针对清单里记过的域名，不会碰
+/// 用户自己配的 `/etc/resolver`。
+#[cfg(any(target_os = "macos", test))]
+fn is_our_resolver_content(content: &str) -> bool {
+    let mut lines = content.lines().map(str::trim).filter(|line| !line.is_empty());
+    let Some(nameserver) = lines.next() else {
+        return false;
+    };
+    if nameserver != format!("nameserver {}", FORWARDER_HOST) {
+        return false;
+    }
+    // 没有后续行（旧格式）或只有 port 行（新格式）都算我们的
+    lines.all(|line| {
+        line.strip_prefix("port ")
+            .map(|port| port.parse::<u16>().is_ok())
+            .unwrap_or(false)
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -1087,9 +1157,10 @@ fn dir_create(dir: &str) -> Result<(), String> {
 
 /// 清掉上一次崩溃留下的解析器配置。
 ///
-/// macOS 只删清单里记过、且内容还是我们写的 `nameserver 127.0.0.1` 的文件 ——
-/// 绝不能碰用户自己配的 `/etc/resolver`；Windows 只删 `DisplayName` 带我们前缀的
-/// NRPT 规则，同样不碰用户/组策略下发的规则。
+/// macOS 只删清单里记过、且内容还是我们写的 `nameserver 127.0.0.1` + `port <端口>`
+/// 的文件（端口每次连接随机，所以按格式辨认）—— 绝不能碰用户自己配的
+/// `/etc/resolver`；Windows 只删 `DisplayName` 带我们前缀的 NRPT 规则，
+/// 同样不碰用户/组策略下发的规则。
 pub fn cleanup_stale(session: &VpnSession) {
     #[cfg(target_os = "macos")]
     {
@@ -1105,9 +1176,7 @@ pub fn cleanup_stale(session: &VpnSession) {
             }
             let path = std::path::Path::new(RESOLVER_DIR).join(domain);
             if let Ok(content) = std::fs::read_to_string(&path) {
-                if content.trim() == resolver_file_content().trim()
-                    && std::fs::remove_file(&path).is_ok()
-                {
+                if is_our_resolver_content(&content) && std::fs::remove_file(&path).is_ok() {
                     removed += 1;
                 }
             }
@@ -2434,7 +2503,16 @@ mod tests {
     }
 
     #[test]
-    fn resolver_file_points_at_local_forwarder() {
-        assert!(resolver_file_content().contains("nameserver 127.0.0.1"));
+    fn resolver_file_points_at_local_forwarder_port() {
+        let content = resolver_file_content(53535);
+        assert!(content.contains("nameserver 127.0.0.1"));
+        assert!(content.contains("port 53535"));
+        // 格式对不上就不是我们写的：清理时不能误删用户自己的 resolver 文件
+        assert!(is_our_resolver_content(&content));
+        // 旧版本（1.0.28 及更早）只写一行 nameserver，也要能认出来
+        assert!(is_our_resolver_content("nameserver 127.0.0.1\n"));
+        assert!(!is_our_resolver_content("nameserver 8.8.8.8\n"));
+        assert!(!is_our_resolver_content("nameserver 127.0.0.1\nsearch corp\n"));
+        assert!(!is_our_resolver_content(""));
     }
 }

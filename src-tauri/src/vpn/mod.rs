@@ -15,7 +15,8 @@
 //! 模块分工：
 //! - `models`      数据结构
 //! - `credential`  密码加密存储（Windows DPAPI / macOS 钥匙串）
-//! - `detect`      连接器探测（内置 -> 系统 -> PATH）
+//! - `platform`    连接器平台层：macOS / Windows 各自实现检测、导入、候选来源，
+//!                 `common` 只留 probe、版本解析与模型
 //! - `route`       路由表读写与崩溃清理（Windows 走 PowerShell JSON，macOS 走 route / netstat）
 //! - `rule_engine` 规则类型解析（DOMAIN / DOMAIN-SUFFIX）
 //! - `script`      生成自定义 vpnc-script（只配网卡 + 回报服务端范围，不碰默认路由与 DNS）
@@ -43,13 +44,13 @@ pub const APP_DIR_NAME: &str = "com.ws.workbench";
 pub mod commands;
 pub mod connector;
 pub mod credential;
-pub mod detect;
 pub mod dns_client;
 pub mod elevate;
 pub mod fulltunnel;
 pub mod guide;
 pub mod models;
 pub mod notify;
+pub mod platform;
 pub mod route;
 pub mod rule_engine;
 pub mod script;

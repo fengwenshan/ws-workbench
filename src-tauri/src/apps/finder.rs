@@ -15,12 +15,35 @@ use crate::apps::models::{AppCandidate, AppContext, AppId, AppLocation};
 use crate::apps::registry;
 use crate::platform::Platform;
 
-/// 内置/托管副本在应用数据目录与资源目录下的子目录名
+/// 内置副本在资源目录下的子目录名
 pub const APPS_DIR: &str = "apps";
+
+/// 程序托管的副本（软链）在应用数据目录下的子目录名。
+///
+/// 不要复用 `apps`：内置运行时的目录也叫 `apps/openconnect`，两边重名会让界面上的
+/// 托管路径看起来像「Windows 内置副本」—— 现场已经有人把这行当成 mac 在读 Windows
+/// 的内置文件了。托管副本放在 `connectors` 下，和内置资源彻底分开。
+pub const MANAGED_DIR: &str = "connectors";
 
 /// 程序托管的副本所在目录
 pub fn managed_dir(id: AppId, data_dir: &Path) -> PathBuf {
-    data_dir.join(APPS_DIR).join(id.as_str())
+    data_dir.join(MANAGED_DIR).join(id.as_str())
+}
+
+/// 老版本把托管副本放在 `<data>/apps/<id>`；升级后一次性搬过去，
+/// 免得用户已经登记过的 openconnect 突然“丢失”。
+fn migrate_legacy_managed(id: AppId, data_dir: &Path) {
+    let legacy = data_dir.join(APPS_DIR).join(id.as_str());
+    let current = managed_dir(id, data_dir);
+    if !legacy.is_dir() || current.exists() {
+        return;
+    }
+    if let Some(parent) = current.parent() {
+        if std::fs::create_dir_all(parent).is_err() {
+            return;
+        }
+    }
+    let _ = std::fs::rename(&legacy, &current);
 }
 
 /// 是否为需要交给 cmd.exe 解释的批处理包装脚本
@@ -259,7 +282,7 @@ fn known_install_candidates(id: AppId, names: &[&str]) -> Vec<(PathBuf, String)>
 /// 或者干脆从自定义前缀换成了标准安装），就该改用系统那份、并把它当系统默认 ——
 /// 不能让旧登记一直顶在前面。现场就遇到过：先手动指定 `~/hb`，后来装到标准前缀，
 /// 点「检测」仍然显示「已指定 …/.hb/bin/openconnect」。
-fn source_priority(source: &str) -> u8 {
+pub(crate) fn source_priority(source: &str) -> u8 {
     match source {
         "custom" => 0,
         // 注册表条目和固定安装位置是同一档「系统里装好的」；同档按收集顺序排（稳定排序）
@@ -300,6 +323,7 @@ fn collect(id: AppId, ctx: &AppContext, names: &[&str]) -> Vec<(PathBuf, String)
 fn managed_candidates(id: AppId, ctx: &AppContext, names: &[&str]) -> Vec<(PathBuf, String)> {
     let mut out = Vec::new();
     if let Some(data_dir) = ctx.data_dir.as_ref() {
+        migrate_legacy_managed(id, data_dir);
         for name in names {
             out.push((managed_dir(id, data_dir).join(name), "managed".to_string()));
         }
@@ -647,16 +671,23 @@ pub fn link_binary(id: AppId, binary: &Path, data_dir: &Path) -> Result<PathBuf,
 
 /// 删除程序托管的副本
 pub fn remove_managed(id: AppId, data_dir: &Path) -> Result<(), String> {
-    let target = managed_dir(id, data_dir);
-    if !target.exists() {
-        return Ok(());
+    let current_parent = data_dir.join(MANAGED_DIR);
+    let legacy_parent = data_dir.join(APPS_DIR);
+    let mut removed = false;
+    for dir in [managed_dir(id, data_dir), legacy_parent.join(id.as_str())] {
+        if !dir.exists() {
+            continue;
+        }
+        // 只删 data_dir 的直接子目录，防止路径被拼歪时误删
+        if dir.parent() != Some(current_parent.as_path()) && dir.parent() != Some(legacy_parent.as_path())
+        {
+            return Err("目标目录不在应用数据目录下，已拒绝删除".to_string());
+        }
+        std::fs::remove_dir_all(&dir).map_err(|e| format!("删除失败: {}", e))?;
+        removed = true;
     }
-    // 只删 data_dir 的直接子目录，防止路径被拼歪时误删
-    let expected_parent = data_dir.join(APPS_DIR);
-    if target.parent() != Some(expected_parent.as_path()) {
-        return Err("目标目录不在应用数据目录下，已拒绝删除".to_string());
-    }
-    std::fs::remove_dir_all(&target).map_err(|e| format!("删除失败: {}", e))
+    let _ = removed;
+    Ok(())
 }
 
 /// 用指定的目标路径启动应用
@@ -783,13 +814,50 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// 托管副本必须放在 `connectors` 下，不能和内置资源共用 `apps`：
+    /// 重名会让界面上的托管路径看起来像内置副本（现场已误判成「mac 在读 Windows」）。
     #[test]
-    fn managed_dir_is_under_apps_folder() {
+    fn managed_dir_is_not_under_apps_folder() {
         let data = PathBuf::from("/data");
         assert_eq!(
             managed_dir(AppId::Openconnect, &data),
-            PathBuf::from("/data/apps/openconnect")
+            PathBuf::from("/data/connectors/openconnect")
         );
+        assert_ne!(
+            managed_dir(AppId::Openconnect, &data),
+            data.join(APPS_DIR).join("openconnect"),
+            "托管副本不能和内置资源目录重名"
+        );
+    }
+
+    /// 老版本的登记目录（<data>/apps/<id>）要能自动搬到新位置，用户无感。
+    #[test]
+    fn legacy_managed_dir_is_migrated() {
+        let data = temp_dir("legacy-managed");
+        let legacy = data.join(APPS_DIR).join("openconnect");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("openconnect"), b"stub").unwrap();
+
+        let ctx = AppContext {
+            data_dir: Some(data.clone()),
+            ..Default::default()
+        };
+        let candidates = managed_candidates(AppId::Openconnect, &ctx, &["openconnect"]);
+        assert!(
+            candidates
+                .first()
+                .map(|(path, _)| path.ends_with("connectors/openconnect/openconnect"))
+                .unwrap_or(false),
+            "托管候选要指向新目录，实际: {:?}",
+            candidates
+        );
+        assert!(
+            data.join(MANAGED_DIR).join("openconnect").is_dir(),
+            "旧登记目录必须被搬过来"
+        );
+        assert!(!legacy.exists(), "旧目录搬家后不应残留");
+
+        let _ = std::fs::remove_dir_all(&data);
     }
 
     #[test]
@@ -1082,7 +1150,7 @@ mod tests {
         remove_managed(AppId::Vscode, &data).unwrap();
         assert!(!dir.exists());
         // 父目录本身要保留
-        assert!(data.join(APPS_DIR).exists());
+        assert!(data.join(MANAGED_DIR).exists());
 
         let _ = std::fs::remove_dir_all(&data);
     }

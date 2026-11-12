@@ -2,8 +2,7 @@ import { ref, computed, onMounted, onUnmounted, reactive, watch, type Ref } from
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import type { AppConfig, LogEntry, LogLevel } from '@/types'
-import { pickDirectory, pickFile } from '@/utils/dialog'
-import { platform } from '@/platform'
+import { pickDirectory } from '@/utils/dialog'
 import { nowIso, timeLabel } from '@/utils/time'
 import type {
   ConnectorInfo,
@@ -226,17 +225,16 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
   }
 
   /**
-   * 指定已有的 openconnect 运行位置（macOS/Linux 上就是登记路径，不复制文件）。
+   * 指定已有的 openconnect 安装目录（macOS/Linux 上就是登记路径，不复制文件）。
    *
-   * macOS 的 openconnect 是单个可执行文件，直接选文件；Windows 版用的是安装包内置
-   * 副本，走不到这里，真要选也是选目录（要连带同目录的 DLL）。
+   * 只让用户选目录：Homebrew 的 `bin` 目录、Cellar 里带版本号的 `9.21` 版本目录、
+   * 自定义前缀的 `bin` 都行 —— 可执行文件一定在目录里（`openconnect` 或
+   * `bin/openconnect`），后端自己解析，不用用户再精确到文件。
    *
    * 返回值是后端给的提示文案（里面带登记到的绝对路径），用户取消选择时返回空串。
    */
   async function importOpenconnect(): Promise<string> {
-    const picked = platform.is_windows
-      ? await pickDirectory()
-      : await pickFile({ title: '选择 openconnect 可执行文件' })
+    const picked = await pickDirectory({ title: '选择 openconnect 所在目录' })
     if (!picked) return ''
     const message = await invoke<string>('vpn_import_openconnect', {
       sourceDir: picked,

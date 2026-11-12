@@ -207,14 +207,23 @@ function createDmg(platform, version) {
     execFileSync('cp', ['-R', join(dir, appName), join(stage, appName)], { stdio: 'inherit' })
     symlinkSync('/Applications', join(stage, 'Applications'))
 
-    // 安装包自带的卸载程序：放在 dmg 根目录，不随 app 一起被删除。
-    const uninstallerSource = join(ROOT, 'scripts/macos/uninstall-ws-workbench.command')
-    const uninstallerName = '卸载 ws-workbench.command'
-    if (!existsSync(uninstallerSource)) {
-      throw new Error(`缺少卸载脚本: ${uninstallerSource}`)
+    // 安装包自带的辅助文件：都放在 dmg 根目录，不随 app 一起被删除。
+    // - 安装说明.txt：卸载/安装两种方式 + 手动清除隔离属性的命令；
+    // - 安装 ws-workbench.command：一键安装（复制 + 清除隔离属性 + 启动）；
+    // - 卸载 ws-workbench.command：先退出进程，再按用户选择删应用/数据。
+    const dmgExtras = [
+      { source: '安装说明.txt', name: '安装说明.txt', mode: 0o644 },
+      { source: 'install-ws-workbench.command', name: '安装 ws-workbench.command', mode: 0o755 },
+      { source: 'uninstall-ws-workbench.command', name: '卸载 ws-workbench.command', mode: 0o755 },
+    ]
+    for (const extra of dmgExtras) {
+      const sourcePath = join(ROOT, 'scripts/macos', extra.source)
+      if (!existsSync(sourcePath)) {
+        throw new Error(`缺少 dmg 辅助文件: ${sourcePath}`)
+      }
+      copyFileSync(sourcePath, join(stage, extra.name))
+      chmodSync(join(stage, extra.name), extra.mode)
     }
-    copyFileSync(uninstallerSource, join(stage, uninstallerName))
-    chmodSync(join(stage, uninstallerName), 0o755)
 
     log('生成 dmg（makehybrid + UDZO 压缩）…')
     // convert 不会覆盖已存在的输出，重复构建时要先删掉

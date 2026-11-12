@@ -1302,6 +1302,12 @@ fn elapsed_since(timestamp: &str) -> Duration {
 
 /// worker 入口
 pub fn run(session_dir: &Path) -> i32 {
+    // worker 是独立进程（macOS 走 osascript 提权、Windows 走计划任务），入口环境里
+    // 没有 LANG/LC_ALL；openconnect 会按系统语言翻译输出，而这里要靠
+    // "Login failed" / "CSTP connected" / "Set up tun device failed" 这类英文行
+    // 判断认证与隧道状态。整棵进程树钉死 C locale（worker 不拉起用户可见的 GUI 程序）。
+    crate::process::pin_child_locale();
+
     let session = VpnSession::new(session_dir.to_path_buf());
     if let Err(e) = session.ensure() {
         eprintln!("[worker] {}", e);

@@ -1,0 +1,102 @@
+name: CI
+
+# 日常护栏：push 到 main、pull request 与手动 workflow_dispatch 都会跑。
+# 发版仍只由 tag 触发 release.yml，这里只做编译与单测。
+#
+# 两个 job 各自在原生平台编译并跑本平台用例（macOS → macos-latest，
+# Windows → windows-latest）：VPN 实现按 cfg 整文件选择，单平台跑不到对面
+# 那份代码，所以必须在两边各跑一次，防止改坏对面平台。
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+# 同一分支连续推送时只保留最新一次运行，旧运行自动取消
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-macos:
+    name: test (macos)
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 安装 pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 缓存 Rust 构建产物
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: macos-arm64
+
+      - name: 安装前端依赖
+        run: pnpm install --frozen-lockfile
+
+      # 必须先 pnpm build：tauri 的 generate_context! 在编译期要求
+      # frontendDist(../dist) 存在，缺 dist 时 cargo test 直接编译失败。
+      - name: 构建前端
+        run: pnpm build
+
+      - name: Rust 单测（本平台）
+        working-directory: src-tauri
+        run: cargo test --lib
+
+  test-windows:
+    name: test (windows)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 安装 pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 缓存 Rust 构建产物
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: windows-x64
+
+      - name: 安装前端依赖
+        run: pnpm install --frozen-lockfile
+
+      # 同 macOS：cargo test 之前必须有 dist，generate_context! 才能编译过。
+      - name: 构建前端
+        run: pnpm build
+
+      - name: Rust 单测（本平台）
+        working-directory: src-tauri
+        run: cargo test --lib

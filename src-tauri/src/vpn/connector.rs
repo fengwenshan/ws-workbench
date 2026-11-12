@@ -21,6 +21,9 @@ fn base_command(program: &Path) -> Command {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // openconnect 的输出要按英文关键字解析（登录失败 / CSTP connected / 建网卡失败），
+    // 中文 locale 下它会翻译输出，worker 的状态判定就会失灵
+    crate::process::apply_c_locale(&mut command);
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;

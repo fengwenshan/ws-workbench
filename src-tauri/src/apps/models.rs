@@ -1,7 +1,7 @@
 //! 需要定位的外部应用，以及「怎么找它」的全部元数据
 //!
 //! 之前这份知识散落在两处：`commands.rs` 里的 win_launcher 负责 VS Code / IDEA / Trae，
-//! `vpn/detect.rs` 负责 openconnect，两边各写一份 PATH 查找和目录扫描。
+//! `vpn/platform` 负责 openconnect，两边各写一份 PATH 查找和目录扫描。
 //! 现在统一到这张表里，新增一个应用只需要在这里加一项。
 
 use serde::{Deserialize, Serialize};

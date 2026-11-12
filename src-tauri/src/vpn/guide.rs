@@ -78,7 +78,7 @@ fn macos_guide(openconnect_available: bool) -> InstallGuide {
         "确认安装位置",
         "brew --prefix 应输出 /opt/homebrew（Intel 机器是 /usr/local），\
          which openconnect 应指向 <前缀>/bin/openconnect。\
-         已经装在其它前缀里的，用下面「指定位置」选中那个 openconnect 即可，不需要重装。",
+         已经装在其它前缀里的，用下面「选择安装目录」选中 openconnect 所在的目录（里面有 bin/openconnect），不需要重装。",
         "brew --prefix && which openconnect",
     ));
 
@@ -120,7 +120,7 @@ fn linux_guide(openconnect_available: bool) -> InstallGuide {
             step(
                 "确认安装位置",
                 "如果装在了非标准前缀（例如 /usr/local 或自定义目录），\
-                 用下面「指定位置」选中那个 openconnect 即可，不需要重装。",
+                 用下面「选择安装目录」选中 openconnect 所在的目录（里面有 bin/openconnect），不需要重装。",
                 "which openconnect",
             ),
         ],
@@ -238,7 +238,7 @@ mod tests {
     }
 
     /// brew 装在自定义前缀（例如 ~/hb）时程序探测不到，引导必须先说清「必须装到标准前缀」，
-    /// 并把兜底指向真实存在的「指定位置」，不能再提已经删掉的「设置页手动指定」。
+    /// 并把兜底指向真实存在的「选择安装目录」，不能再提已经删掉的「设置页手动指定」。
     #[test]
     fn macos_guide_requires_standard_prefix_and_real_fallback() {
         let guide = build(Os::Macos, false);
@@ -249,7 +249,7 @@ mod tests {
 
         assert!(text.contains("/opt/homebrew"), "缺少标准前缀地址: {}", text);
         assert!(text.contains("自定义前缀"), "要点明自定义前缀不被识别: {}", text);
-        assert!(text.contains("指定位置"), "兜底入口名称要和界面按钮一致: {}", text);
+        assert!(text.contains("选择安装目录"), "兜底入口名称要和界面按钮一致: {}", text);
         assert!(!text.contains("设置"), "设置页里没有这个入口，不能再引导过去: {}", text);
     }
 
@@ -261,7 +261,7 @@ mod tests {
         for step in &guide.steps {
             text.push_str(&format!("\n{}\n{}", step.title, step.detail));
         }
-        assert!(text.contains("指定位置"), "兜底入口名称要和界面按钮一致: {}", text);
+        assert!(text.contains("选择安装目录"), "兜底入口名称要和界面按钮一致: {}", text);
         assert!(!text.contains("设置"), "设置页里没有这个入口: {}", text);
     }
 }

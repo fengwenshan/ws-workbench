@@ -1,6 +1,6 @@
 //! 子进程调用工具
 //!
-//! 从 `vpn::detect` 里提取出来的通用能力：带超时地跑一个外部命令并把
+//! 从 `vpn::platform::common` 里提取出来的通用能力：带超时地跑一个外部命令并把
 //! stdout + stderr 一起收回来。Windows 上同时抑制控制台黑框。
 
 use std::path::Path;
@@ -11,6 +11,45 @@ use std::time::{Duration, Instant};
 #[cfg(target_os = "windows")]
 pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+/// 给子进程钉死 C locale。
+///
+/// openconnect 9.x 会根据系统语言翻译自己的输出：中文系统上 `openconnect --version`
+/// 打的是「OpenConnect 版本 v9.21」。而探测靠英文前缀 `OpenConnect version ` 解析
+/// 版本号，worker 还靠 `Login failed` / `CSTP connected` / `Set up tun device failed`
+/// 这些英文行判断认证失败和隧道状态——输出一翻译就全失效。
+///
+/// 现场就是这么炸的：终端里跑（`LANG=C.UTF-8`）一切正常，打包成 .app 从 Finder
+/// 启动时环境里没有 `LANG` / `LC_ALL`，gettext 退回系统语言，界面报
+/// 「未找到 openconnect，请先安装」，可 `which openconnect` 明明指向
+/// `/opt/homebrew/bin/openconnect`。GUI 进程拿不到稳定的 `LANG`，不能靠环境碰运气，
+/// 凡是输出要被解析的子进程都统一钉死。
+///
+/// 注意只给「输出要被解析」的命令用；拉起用户的编辑器 / 终端这类可见程序
+/// 不要带，否则会把它们也变成英文界面。
+pub fn apply_c_locale(command: &mut Command) {
+    command
+        .env("LC_ALL", "C")
+        .env("LANG", "C")
+        // GNU gettext 里 LANGUAGE 的优先级高于 LC_ALL，不删掉等于没设；
+        // LC_MESSAGES 也可能被程序单独优先读取
+        .env_remove("LANGUAGE")
+        .env_remove("LC_MESSAGES");
+}
+
+/// 把当前进程（连同它拉起的全部子进程）钉到 C locale。
+///
+/// 只给 VPN worker 用：它是独立进程，只跑隧道和系统命令，不会拉起用户可见的
+/// GUI 程序，整棵进程树钉死没有副作用（openconnect 本身和它执行的 vpnc-script
+/// 都会继承）。主界面进程不要调用——它会拉起 VS Code / 终端这类应用，
+/// 那些得保留用户自己的语言设置。
+pub fn pin_child_locale() {
+    // edition 2021 下 std::env::set_var 仍是安全函数
+    std::env::set_var("LC_ALL", "C");
+    std::env::set_var("LANG", "C");
+    std::env::remove_var("LANGUAGE");
+    std::env::remove_var("LC_MESSAGES");
+}
+
 /// 起一个**后台**控制台程序（curl / taskkill / cscript 这类）时用它。
 ///
 /// 直接 `Command::new` 从 GUI 进程里拉控制台程序，Windows 会为它新建一个
@@ -20,6 +59,7 @@ pub fn hidden(program: &str) -> Command {
     #[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
     let mut command = Command::new(program);
     command.stdin(Stdio::null());
+    apply_c_locale(&mut command);
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
@@ -36,6 +76,7 @@ pub fn run_with_timeout(program: &Path, args: &[&str], timeout: Duration) -> (St
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    apply_c_locale(&mut command);
 
     #[cfg(target_os = "windows")]
     {
@@ -283,6 +324,57 @@ mod tests {
 
         assert!(!ok);
         assert_eq!(text, "执行超时");
+    }
+
+    /// 解析类子进程必须看到 C locale：openconnect 的版本行会跟着系统语言翻译，
+    /// 从 Finder 启动的 .app 没有 LANG，不钉死就会把中文行当成「没有版本号」。
+    #[cfg(unix)]
+    fn locale_echo_script(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("ws-locale-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("echo-locale.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nprintf 'LC_ALL=%s LANGUAGE=%s\\n' \"${LC_ALL:-unset}\" \"${LANGUAGE:-unset}\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (dir, script)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_with_timeout_pins_c_locale_for_child() {
+        let (dir, script) = locale_echo_script("rt");
+        let (text, ok) = run_with_timeout(&script, &[], Duration::from_secs(5));
+        assert!(ok, "{}", text);
+        assert!(
+            text.contains("LC_ALL=C"),
+            "子进程必须看到 LC_ALL=C: {}",
+            text
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 父进程环境里已有的 zh_CN / LANGUAGE 要被显式覆盖/删掉，
+    /// 不能指望「子进程碰巧没继承」。
+    #[cfg(unix)]
+    #[test]
+    fn apply_c_locale_overrides_inherited_values() {
+        let (dir, script) = locale_echo_script("apply");
+        let mut command = Command::new(&script);
+        command
+            .env("LC_ALL", "zh_CN.UTF-8")
+            .env("LANGUAGE", "zh_CN");
+        apply_c_locale(&mut command);
+        let output = command.output().unwrap();
+        let text = String::from_utf8_lossy(&output.stdout).to_string();
+        assert!(output.status.success(), "{}", text);
+        assert!(text.contains("LC_ALL=C"), "实际输出: {}", text);
+        assert!(text.contains("LANGUAGE=unset"), "实际输出: {}", text);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// ShellExecuteW 的参数里，带空格的路径必须自己加引号，否则会被拆成多个参数

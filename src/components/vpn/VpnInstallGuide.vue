@@ -8,6 +8,7 @@ defineProps<{
 }>()
 
 const emit = defineEmits<{
+  /** 指定 openconnect 安装目录（版本目录 / bin 目录都行，后端自己找可执行文件） */
   import: []
   'copy-command': [command: string]
 }>()
@@ -46,9 +47,9 @@ async function copyCommand(command: string) {
     <div v-if="canImport" class="guide-import">
       <div class="import-text">
         <strong>已经有 openconnect 了？</strong>
-        <span>选中那个 openconnect 可执行文件即可（Homebrew 的在 Cellar/openconnect/9.21/bin/ 下）。程序只记住这个路径，不复制文件，brew 升级后会自动跟着走。</span>
+        <span>选择它所在的目录即可：Homebrew 的 <code>bin</code> 目录、Cellar 里带版本号的 <code>9.21</code> 版本目录（里面有 <code>bin/openconnect</code>）、或自定义前缀里的 <code>bin</code> 都行。程序只记住这个路径，不复制文件，brew 升级后会自动跟着走。</span>
       </div>
-      <button class="btn btn-primary" @click="emit('import')">指定位置</button>
+      <button class="btn btn-primary" @click="emit('import')">选择安装目录</button>
     </div>
 
     <div v-if="guide.links.length > 0" class="guide-links">
@@ -150,6 +151,12 @@ async function copyCommand(command: string) {
   margin-top: 16px;
   padding-top: 14px;
   border-top: 1px dashed rgba(245, 158, 11, 0.35);
+}
+.import-text code {
+  background: var(--bg-tag);
+  border-radius: 3px;
+  padding: 0 3px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 .import-text {
   display: flex;

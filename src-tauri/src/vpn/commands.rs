@@ -11,7 +11,7 @@ use crate::vpn::guide;
 use crate::vpn::models::*;
 use crate::vpn::session::{LogCursor, VpnSession};
 use crate::vpn::models::ProxyMode;
-use crate::vpn::{detect, elevate, notify};
+use crate::vpn::{elevate, notify, platform};
 
 /// 状态轮询间隔：既能让界面反应够快，也不会把磁盘打满
 const POLL_INTERVAL: Duration = Duration::from_millis(600);
@@ -242,7 +242,7 @@ pub fn vpn_detect_connectors(
     app: AppHandle,
     custom_openconnect: Option<String>,
 ) -> Vec<ConnectorInfo> {
-    detect::detect_all(
+    platform::detect_all(
         &detect_context(&app),
         custom_openconnect.as_deref().unwrap_or(""),
     )
@@ -251,15 +251,16 @@ pub fn vpn_detect_connectors(
 /// 记住用户指定的 openconnect 运行位置。
 ///
 /// 传进来的可能是可执行文件本身、它所在的目录，或 Homebrew 的 Cellar 版本目录，
-/// 由 `detect::import_openconnect` 统一解析。macOS/Linux 上不复制二进制，
-/// 只在程序数据目录里登记一个软链；Windows 版用安装包内置副本，直接报不支持。
+/// 由 `platform::import_openconnect` 统一解析。macOS 上不复制二进制、也不建软链，
+/// 只在 `<data>/vpn/openconnect-path.txt` 里记一行路径；Windows 版用安装包内置副本，
+/// 直接报不支持。
 #[tauri::command]
 pub fn vpn_import_openconnect(app: AppHandle, source_dir: String) -> Result<String, String> {
     let data_dir = app
         .path()
         .app_data_dir()
         .map_err(|e| format!("无法获取应用数据目录: {}", e))?;
-    let imported = detect::import_openconnect(&data_dir, std::path::Path::new(&source_dir))?;
+    let imported = platform::import_openconnect(&data_dir, std::path::Path::new(&source_dir))?;
     // 位置一定要回显：自定义前缀叫什么名字都行，用户只能靠这行确认程序认的是哪个文件
     Ok(format!(
         "已记住 OpenConnect {} 的位置：{}",
@@ -273,7 +274,7 @@ pub fn vpn_remove_managed_openconnect(app: AppHandle) -> Result<String, String> 
         .path()
         .app_data_dir()
         .map_err(|e| format!("无法获取应用数据目录: {}", e))?;
-    detect::remove_managed_openconnect(&data_dir)?;
+    platform::remove_managed_openconnect(&data_dir)?;
     Ok("已移除登记的 OpenConnect 位置".to_string())
 }
 
@@ -648,7 +649,7 @@ pub async fn vpn_connect(
     let (rules, default_policy) = (plan.rules.clone(), plan.default_policy.clone());
     // 1. 选连接器
     let candidates = vpn_detect_connectors(app.clone(), custom_openconnect.clone());
-    let picked = detect::pick_connector(&candidates, profile.connector).ok_or_else(|| {
+    let picked = platform::pick_connector(&candidates, profile.connector).ok_or_else(|| {
         "没有可用的连接器：没找到 openconnect。请到 VPN 页查看安装引导。".to_string()
     })?;
     let connector = picked.clone();

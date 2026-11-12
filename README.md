@@ -90,10 +90,12 @@ const canPack = computed(() => projectType.value === 'layui')
 连接器来源按平台区分：
 
 - **Windows 只认安装包内置的 openconnect**（`src-tauri/resources/apps/openconnect/openconnect.exe` + 同目录 `wintun.dll`）。不扫描注册表、常见安装目录或 PATH，也不提供「指定外部 openconnect」入口，避免把来源不明的二进制拉进提权进程。内置副本缺失时直接报错并提示重装。
-- **macOS** 按「专用路径 > 标准前缀 > 已登记的 openconnect > 内置资源 > PATH」查找。自动识别只覆盖标准前缀（Apple Silicon `/opt/homebrew/bin`、Intel `/usr/local/bin`，外加 `/opt/local/bin`）；`brew` 装在自定义前缀（例如 `~/hb`）时不会被自动识别，要用引导里的「指定位置」登记。反过来，**标准前缀里一旦出现能跑的 openconnect，就按系统默认处理，并直接删掉之前登记的旧路径** —— 界面上那行「已指定 openconnect + 路径」随之消失。留着旧登记只会在系统那份被卸载后悄悄顶上来，所以干脆不存：用户把 openconnect 从自定义前缀换到标准安装后点一次「检测」即可；将来系统那份没了，就回到安装引导让用户重新指定。
-- **「指定位置」在 macOS/Linux 上不复制二进制**，只在程序数据目录里建一个软链指向原来的可执行文件：Homebrew 的 openconnect 用绝对路径加载自己前缀里的动态库，拷出来的副本 `brew upgrade` 之后就会失配；而且复制要先读用户目录里的文件，自定义前缀经常被权限/隐私策略挡住（现场报过 `复制 openconnect 失败: Permission denied (os error 13)`）。软链只写不读，brew 升级后自动跟着走。选可执行文件、选 `bin` 目录、选 Cellar 的 `9.21` 版本目录三种都认，Cellar 路径会改指到稳定的 `prefix/bin`。登记成功后在引导卡片下方回显记住的**绝对路径**和版本号（自定义前缀名字五花八门，只能靠这行确认认的是哪个文件），提示停留 6 秒；失败提示一律常驻，不自动消失，免得用户还没看清原因就没了。之后这个位置会长期显示在详情区顶部（`已指定 openconnect` + 路径 + 版本）；**系统默认路径不显示** —— 装好就有的东西摆出来只是噪音，只有手动指定的那份才需要在界面上认领。
+- **macOS 只向外找**，按「专用路径 > 标准前缀 > 记住的路径 > PATH」查找（不探测内置副本 —— 包里的内置 openconnect 只有 Windows 版，macOS 上跑不起来）。自动识别只覆盖标准前缀（Apple Silicon `/opt/homebrew/bin`、Intel `/usr/local/bin`，外加 `/opt/local/bin`）；`brew` 装在自定义前缀（例如 `~/hb`）时不会被自动识别，要用引导里的「选择安装目录」记住路径。反过来，**标准前缀里一旦出现能跑的 openconnect，就按系统默认处理，并直接清掉之前记住的路径** —— 界面上那行「已指定 openconnect + 路径」随之消失。留着旧记录只会在系统那份被卸载后悄悄顶上来，所以干脆不存：用户把 openconnect 从自定义前缀换到标准安装后点一次「检测」即可；将来系统那份没了，就回到安装引导让用户重新指定。
+- **「选择安装目录」在 macOS/Linux 上不复制二进制、也不建软链**，只在 `<data>/vpn/openconnect-path.txt` 里记一行路径，执行时直接用原来的可执行文件：复制件会在 `brew upgrade` 后失配；复制还会先读用户目录里的文件，自定义前缀经常被权限/隐私策略挡住（现场报过 `复制 openconnect 失败: Permission denied (os error 13)`）；而数据目录里出现可执行文件/软链，又会被当成「程序自带的副本」（现场已经有人把它误认成 Windows 内置文件）。旧版本遗留的 `<data>/apps/openconnect/`（或 1.0.25 的 `connectors/openconnect/`）会在下次检测时自动清理：软链的真实目标转成路径记录，旧复制件直接删除（只靠复制件的机器会回到安装引导，重新选一次目录即可）。界面只让选目录、不让选文件：`bin` 目录、Cellar 里带版本号的 `9.21` 版本目录（里面有 `bin/openconnect`）、自定义前缀的 `bin` 都认，后端在目录里自己找可执行文件；Cellar 路径会改指到稳定的 `prefix/bin`。登记成功后在引导卡片下方回显记住的**绝对路径**和版本号（自定义前缀名字五花八门，只能靠这行确认认的是哪个文件），提示停留 6 秒；失败提示一律常驻，不自动消失，免得用户还没看清原因就没了。之后这个位置会长期显示在详情区顶部（`已指定 openconnect` + 路径 + 版本），旁边带「更改」（重新选目录登记）和「移除」（清掉登记、回到安装引导）两个文字按钮——指定错了不用重装或手动清数据目录；**系统默认路径不显示** —— 装好就有的东西摆出来只是噪音，只有手动指定的那份才需要在界面上认领。
 
 判定可用性的方式是真正执行一次 `openconnect --version` 并解析版本号，而不是看文件存在与否 —— 解压后缺依赖 DLL 是很常见的情况，光看路径会把跑不起来的二进制当成可用。
+
+**子进程统一钉死 C locale**（`process::apply_c_locale` / worker 入口的 `pin_child_locale`）：openconnect 9.x 会按系统语言翻译输出，中文机器上 `--version` 打的是「OpenConnect 版本 v9.21」，worker 靠的 `Login failed` / `CSTP connected` / `Set up tun device failed` 也会跟着变中文。终端里跑（`LANG=C.UTF-8`）一切正常，打包成 .app 从 Finder 启动时环境里没有 `LANG` / `LC_ALL`，gettext 退回系统语言，版本行解析不到英文前缀，界面就误报「未找到 openconnect，请先安装」——`which openconnect` 却指向 `/opt/homebrew/bin/openconnect`。所以凡是输出要被解析的子进程都显式带 `LC_ALL=C`（并删掉优先级更高的 `LANGUAGE`），版本号解析也不再依赖英文 `version` 单词；拉起用户的编辑器 / 终端这类可见程序不带这个环境，保留用户自己的语言设置。
 
 支持的协议：`anyconnect`、`nc`、`gp`、`pulse`、`f5`、`fortinet`、`array`。
 
@@ -113,7 +115,7 @@ const canPack = computed(() => projectType.value === 'layui')
 三种代理模式，已连接时也能运行期切换（都是本地布线，点了就生效）：
 
 - **规则模式（默认）**：不抓包、不抢默认路由、不改系统 DNS。命中「走 VPN」的域名交给 VPN DNS 解析，解析出来的内网 IP 装 `/32` 路由指向隧道。默认路由和系统 DNS 都不动，结构上不可能「一连上就全网断」。服务端下发的内网范围只做展示（见上方「严格规则模式」），不参与布线。
-  - **macOS**：写 `/etc/resolver/<域名>` + 本机 DNS 转发器（`127.0.0.1:53`），转发器把应答回给应用**之前**就装好 `/32`，没有时间差。
+  - **macOS**：写 `/etc/resolver/<域名>` + 本机 DNS 转发器，转发器把应答回给应用**之前**就装好 `/32`，没有时间差。转发器优先绑 `127.0.0.1:53`；53 被 Clash/dnsmasq 之类的 DNS 服务占用时，改绑 loopback 随机高位端口，并在 resolver 文件里用 `port` 字段指过去（现场撞过 `Address already in use`，直接失败会变成「只建隧道、不接管流量」）。
   - **Windows**：用 NRPT（`Add-DnsClientNrptRule`）把这些域名的解析交给本机 `127.0.0.1:53` 转发器（转发器在回包前装好 `/32`）；NRPT 指向 loopback 不生效时退回「NRPT 直连 VPN DNS + 后台解析」，再不行才退回「只给隧道网卡配 DNS」，每一步都会在日志里写明原因。回退路径下子域的首个请求可能失败一次，`/32` 补齐（约 3 秒）后重试即通。回退路径的缓存扫描同样会把看到的答案记进「DNS 答案账本」：热更新时 teardown 要清空 DNS Client 缓存，没有这份记账，删掉直连例外就又要等应用重新解析。
 - **全局模式**：`0.0.0.0/1` + `128.0.0.0/1` 两条半默认路由指向隧道，系统 DNS 改成 VPN DNS。装完立刻验证系统解析器还能解析，不通就整段回滚（路由与 DNS 一起还原）。本地直连网段比 `/1` 更具体，自动保持直连。
 - **直连模式**：只建隧道，不接管任何流量。
@@ -187,14 +189,14 @@ Windows 上的虚拟网卡由 Wintun 驱动提供（`src-tauri/resources/apps/op
 
 #### 安装引导
 
-openconnect 探测失败时，代理页给出按平台区分的安装引导：macOS 明确要求 `brew` 装在标准前缀（`/opt/homebrew`，Intel 是 `/usr/local`）并给出可复制的安装命令与官方文档；Linux 给发行版安装命令；Windows 只说明内置副本缺失并提示覆盖安装，不引导下载外部二进制。已经装在自定义前缀里的用户走引导下方的「指定位置」，登记现有二进制即可，不需要重装。
+openconnect 探测失败时，代理页给出按平台区分的安装引导：macOS 明确要求 `brew` 装在标准前缀（`/opt/homebrew`，Intel 是 `/usr/local`）并给出可复制的安装命令与官方文档；Linux 给发行版安装命令；Windows 只说明内置副本缺失并提示覆盖安装，不引导下载外部二进制。已经装在自定义前缀里的用户走引导下方的「选择安装目录」，选中 openconnect 所在的目录（里面有 `bin/openconnect`）即可，不需要重装。
 
 ### 系统
 
 左侧图标栏第四个工具（`⌘/Ctrl+4`），四个页签（弹窗拦截仅 Windows 可见）：
 
 - **软件卸载**：Windows 读注册表 `Uninstall` 键（HKLM 64/32 位、HKCU），macOS 扫 `/Applications` 与 `~/Applications`；支持按名称/发布者/位置搜索，按名称、大小、安装日期排序（顺序记在本地）。行内「卸载」打开独立卸载窗口（820×560，macOS 隐藏标题、红绿灯浮在内容上；Windows 自绘标题栏，与主界面一致）：按「程序文件 / 支持文件 / 缓存文件」列出关联文件——程序文件 = 主 `.app` + Spotlight/兜底目录找到的同 id 副本，支持/缓存复用残留规则；带大小、版本、置信度，high/medium 默认勾选，low 只列出不勾选，底部「全选」可全选，应用本体始终必选。点「确认删除」先只读检测是否在运行：不在运行直接执行；在运行弹二次确认（进程数与进程名），点「强制退出」先按平台正常退出（macOS `NSRunningApplication.terminate()`、Windows `CloseMainWindow()`），3 秒内退不干净就逐进程强杀（macOS `SIGKILL`、Windows `taskkill /PID … /T /F`），每 250ms 重新检测并补杀重启出来的新进程，全部进程消失后才继续（总上限约 20 秒，退不干净即中止并提示）。随后先跑应用自带卸载程序（macOS 主 `.app` 移入废纸篓；MSI 的 `/I` 自动换 `/X`，需要时一次 UAC），卸载完成后自动再扫一次残留——仍有残留就回到勾选页（提示「卸载已完成。重新扫描到 N 项残留」，主按钮变「清理残留」），没有残留直接进结果页——再按本次扫描白名单删除勾选的关联文件：卸载程序已删掉的路径记「跳过」不算失败，需 root 的条目走一次合并授权；结果页给出删除/跳过/失败明细，失败项可在结果页「重试清理」，卸载/删除后主列表自动刷新。运行中的应用本体不出现在列表里，命令层也会再拦一次——不能卸载自己。
-- **卸载 ws-workbench 自己**：macOS 安装包（DMG）里带一个「卸载 ws-workbench.command」。双击后先正常退出应用，退不掉会询问是否强制退出；**所有相关进程归零后才继续**，否则直接报「卸载失败」且不删除任何文件。继续后会列出应用本体、数据目录、附件上传目录、剪贴板图片和 WebView 缓存，默认**保留用户数据**，也可以选择「删除全部数据」（二次确认，附件/数据库删除后不可恢复）。自定义到应用数据目录之外的附件目录只提醒、不自动删；真实路径由应用启动/保存设置时写入 `uninstall-info.txt`（纯路径，不含密钥）。Windows 继续使用安装器自带的标准卸载器（设置 → 应用 → 卸载），安装包里的 NSIS 钩子会在删文件前检查 `ws-workbench.exe`（在运行就问是否强制退出，退不掉直接中止）、读取同一份 `uninstall-info.txt` 展示真实路径，默认保留用户数据，只有明确选择才删 App 自有目录，自定义附件目录只提示不删；静默卸载按保留数据处理。
+- **卸载 ws-workbench 自己**：macOS 安装包（DMG）里带「卸载 ws-workbench.command」。DMG 根目录另外还有「安装说明.txt」和「安装 ws-workbench.command」：双击后者会自动把 app 复制到 `/Applications`、执行 `sudo xattr -cr /Applications/ws-workbench.app` 清除隔离属性（未公证的包直接双击会被 Gatekeeper 拦成「已损坏」/「无法验证开发者」）并启动。卸载双击后先正常退出应用，退不掉会询问是否强制退出；**所有相关进程归零后才继续**，否则直接报「卸载失败」且不删除任何文件。继续后会列出应用本体、数据目录、附件上传目录、剪贴板图片和 WebView 缓存，默认**保留用户数据**，也可以选择「删除全部数据」（二次确认，附件/数据库删除后不可恢复）。自定义到应用数据目录之外的附件目录只提醒、不自动删；真实路径由应用启动/保存设置时写入 `uninstall-info.txt`（纯路径，不含密钥）。Windows 继续使用安装器自带的标准卸载器（设置 → 应用 → 卸载），安装包里的 NSIS 钩子会在删文件前检查 `ws-workbench.exe`（在运行就问是否强制退出，退不掉直接中止）、读取同一份 `uninstall-info.txt` 展示真实路径，默认保留用户数据，只有明确选择才删 App 自有目录，自定义附件目录只提示不删；静默卸载按保留数据处理。
 - **弹窗拦截**（仅 Windows）：火绒式的规则拦截。默认关闭，总开关持久化，开启后下次启动自动恢复；后台线程每 500ms `EnumWindows` 扫可见顶层窗口——**先匹配拦截规则**（进程必须一致，窗口类 / 标题子串可选，命中直接 `WM_CLOSE` / `SW_HIDE` 并记一条拦截记录），没有规则才走启发式打分（工具窗口 / 不抢焦点 / 始终置顶 / 无标题 / 尺寸异常 / 类名与标题广告线索 / 进程不在前台），可疑窗口进「可疑记录」等用户处理。对可疑弹窗点「拦截此类」会生成一条持久化规则（默认按「进程 + 窗口类」，同一个广告位换标题/素材也能拦；也可选「仅此弹窗」或「该程序全部」），之后同类弹窗出现即自动关闭；「从窗口添加」直接列出当前可见窗口挑选一个加规则，规则可停用 / 删除 / 立即执行，命中次数与最近命中时间落 `<data_dir>/popup-rules.json`。可选「智能拦截」（默认关）：没有命中规则时，按分数阈值 + 至少两条命中原因 + 系统保护表 + 忽略名单 + 每分钟上限自动处理，设置存 `popup-settings.json`；忽略名单（白名单）存 `popup-ignore.json`。界面用 exe 的版本信息取应用名和图标（取不到退回进程名 + 首字母色块）。不注入、不装驱动、不杀进程。
 - **屏幕休眠**：阻止系统空闲睡眠（参考 Amphetamine 的公开电源断言方案），并支持「自动保持规则」（Triggers）：指定 App 运行时 / 接通电源时 / 连接外接显示器时自动保持，条件失效自动释放；手动开启优先，规则只释放自己开的会话。规则存 `<data_dir>/sleep-triggers.json`，后台 5 秒探测一次（`sysinfo` 进程列表、`pmset -g batt` / `GetSystemPowerStatus`、CoreGraphics 活动屏幕数 / `GetSystemMetrics(SM_CMONITORS)`），全部只读、不需要管理员权限。macOS 用 IOKit `IOPMAssertionCreateWithName`（`PreventUserIdleSystemSleep`，不勾「允许屏幕关闭」时再加 `PreventUserIdleDisplaySleep`，断言名 `ws-workbench Keep Awake`）；Windows 用专用线程持有 `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED [| ES_DISPLAY_REQUIRED])`。时长按会话式菜单选（参考 Amphetamine 的「开启新会话」）：不限时 / 5·10·15·20·25·30·45 分钟 / 1·2·3·4·6·8·12 小时，或自定义小时+分钟，点时长立即开始一个会话，到点自动释放（状态查询还有一道惰性回收）；不需要 root / 管理员，也不做登录级保活。
 - **Hosts**：把系统 hosts 的完整内容直接读进等宽编辑器，想加什么行就加什么行，`⌘/Ctrl+S` 保存整份文件（保存前自动备份 + 一次系统授权，取消不会改动文件）。路径固定：macOS `/etc/hosts`，Windows `%SystemRoot%\System32\drivers\etc\hosts`；「备份 N」可展开最近 30 份备份并还原（路径见「打开目录」按钮的提示）。编辑器是 Monaco（VS Code 内核，本地打包、首次打开 Hosts 页签时懒加载）：行号对齐、注释 / IPv4 / IPv6 / 主机名高亮、非法地址标红，支持撤销重做、查找替换（`⌘/Ctrl+F`）、多光标与右键菜单。非 UTF-8 的 hosts 会拒绝编辑，避免写坏原有内容；CRLF 文件会保持原来的换行风格。
@@ -232,7 +234,7 @@ openconnect 探测失败时，代理页给出按平台区分的安装引导：ma
 
 顶部「检查更新」卡片显示当前版本，只有查到更高版本时才多显示一行高亮的「最新版本」并出现「立即更新」（右上角「重新检测」会顺带检查一次更新）；下载/安装进度就地显示，下载中断后点「重试」会从断点续传（见「自动更新」）；下面显示运行环境（操作系统、架构、可执行文件后缀、是否需要提权、配置文件位置、各网卡的 MAC 与全部 IP —— 多 IP 逐条列出），以及附件实际落盘位置（可直接打开目录）。
 
-「用编辑器打开项目」与非 Windows 的 VPN 连接器探测共用同一套应用查找逻辑，优先级为专用路径 > 标准安装位置 > 已登记的副本 > 内置资源 > PATH（Windows 上还有注册表，位置在标准安装位置之前）；其中「指定位置」入口只对 openconnect 开放（Windows 版用内置副本，不提供该入口）。Windows 的 VPN 探测是例外：只认安装包内置副本，不查注册表、安装目录或 PATH。macOS 与 Linux 下分别检查 `/Applications`、Homebrew 前缀以及 PATH 里的 `/usr/bin`、`/usr/local/bin`。
+「用编辑器打开项目」使用的应用查找优先级为专用路径 > 标准安装位置 > 记住的路径 > 内置资源 > PATH（Windows 上还有注册表，位置在标准安装位置之前）；VPN 连接器探测不走这条：Windows 只认内置副本，macOS 只向外找（专用路径 > 标准前缀 > 记住的路径 > PATH，内置副本里只有 Windows 版可执行文件，不参与探测）。其中「选择安装目录」入口只对 openconnect 开放（Windows 版用内置副本，不提供该入口）。macOS 与 Linux 下分别检查 `/Applications`、Homebrew 前缀以及 PATH 里的 `/usr/bin`、`/usr/local/bin`。
 
 ### 托盘
 
@@ -266,7 +268,7 @@ macOS 的应用菜单做了汉化，点 Dock 图标会把窗口重新显示出�
 
 - Node 22 与 pnpm（CI 固定 pnpm 10；`pnpm-lock.yaml` 为 9.0 格式）
 - Rust stable 工具链
-- 仅在需要 VPN 时：可用的 openconnect。Windows 必须使用 `src-tauri/resources/apps/openconnect/` 里的内置副本（安装包会一起打进去），macOS 用 `brew install openconnect` 装到标准前缀（`/opt/homebrew`，Intel 是 `/usr/local`）；装在自定义前缀里的用引导里的「指定位置」登记一次
+- 仅在需要 VPN 时：可用的 openconnect。Windows 必须使用 `src-tauri/resources/apps/openconnect/` 里的内置副本（安装包会一起打进去），macOS 用 `brew install openconnect` 装到标准前缀（`/opt/homebrew`，Intel 是 `/usr/local`）；装在自定义前缀里的用引导里的「选择安装目录」记住路径（只记路径，不复制文件）。mac 包里**不带**内置 openconnect（`resources/apps` 只在 Windows 包里，见「构建与发布」）
 - VPN 连接需要管理员授权，见「权限与进程拆分」；两个平台都用路由注入做规则分流，不抓包，macOS 用系统 utun，Windows 用内置 `wintun.dll`
 
 ## 开发
@@ -275,6 +277,12 @@ macOS 的应用菜单做了汉化，点 Dock 图标会把窗口重新显示出�
 pnpm install          # 安装前端依赖
 pnpm dev              # 只起前端，http://localhost:8790
 pnpm exec tauri dev   # 起完整桌面应用
+```
+
+改完通用层（`src-tauri/src/util`、`process` 等）或 VPN 逻辑后，本地跑一遍 Rust 单测（`dist/` 不存在时先 `pnpm build`，`generate_context!` 编译期要读 `frontendDist`）：
+
+```bash
+cd src-tauri && cargo test --lib
 ```
 
 Vite 固定在 8790 端口并开启 `strictPort`，端口被占用会直接失败而不是换端口；`@` 别名指向 `./src`，监听忽略 `src-tauri/`。
@@ -331,6 +339,8 @@ node scripts/release.mjs                    # Windows 版直接在 Windows 主�
 
 Windows 安装包（NSIS 的 `exe` 与 WiX 的 `msi`）必须在 Windows 主机上构建：Tauri 打 MSI 依赖 WiX Toolset，而 WiX 只有 Windows 可执行文件，交叉编译拿不到。
 
+**安装包内容按平台裁剪**：`src-tauri/` 下两份平台配置都是 JSON Merge Patch（RFC 7396，`null` 即删除），Tauri 2 构建时自动和 `tauri.conf.json` 合并：`tauri.macos.conf.json` 把 `bundle.resources` 里的 `resources/apps` 去掉，所以 mac 包不含内置的 Windows openconnect 运行时（约 9 MB）；`tauri.windows.conf.json` 把 `resources/zh-Hans.lproj` 去掉，所以 Windows 包不带 macOS 的本地化资源（`resources/apps` 继续由 `tauri.conf.json` 打进 Windows 包）。VPN 探测逻辑也按平台拆文件：Windows 只探内置副本、不向外找；macOS 只向外找、不探内置（见上文「连接器来源」）。改一边不会把另一边的行为带偏。
+
 Windows 安装器启动时，NSIS 会先把自解压内容写到 `%TEMP%`。如果 `%TEMP%` 不可写（受限环境、安全软件拦截、沙箱），会弹出 `NSIS Error: Error writing temporary file. Make sure your temp folder is valid.`——这是运行环境问题，不是安装包损坏。把 `TEMP` / `TMP` 指到一个可写目录再从资源管理器运行安装包即可；构建产物旁的 `安装（临时目录重定向）.cmd` 就是做这件事（把 `TEMP` 设到同目录 `install-tmp` 后启动安装器）。
 
 还有一种更隐蔽、更容易被误判成「安装包坏了」的情况：安装包和程序放在**被运行沙箱/受限策略圈住的目录**里（例如把项目工作区限制成「只能写本目录」的环境）。表现是安装器能启动，但静默或秒退、什么提示都没有——因为它在解压到 `%TEMP%`、写 `%LOCALAPPDATA%` 时被拒绝；程序本身跑起来后，写 `%APPDATA%`、`~/.dsh` 也会报 `os error 5（拒绝访问）`。判断方法：把同一个 exe 复制到 `%TEMP%`、桌面、下载目录各跑一次，只有工作区里失败就是目录限制，跟代码签名、杀毒软件都无关。处理：**把安装包复制到工作区外的普通目录再运行**。
@@ -357,6 +367,8 @@ git push origin v1.0.16   # 只有推 tag 才会触发 GitHub 构建
 ```
 
 ### CI
+
+`.github/workflows/ci.yml` 是常驻护栏：push 到 `main`、pull request 与手动 `workflow_dispatch` 都会跑，`test-macos` 和 `test-windows` 两个 job 分别在 `macos-latest`、`windows-latest` 上原生编译，各自 `pnpm build` + 在 `src-tauri` 下 `cargo test --lib`，防止改坏对面平台的代码合进来。两个 job 都先构建前端：tauri 的 `generate_context!` 在编译期要求 `frontendDist`（`../dist`）存在。发版仍只由 tag 触发 `release.yml`。
 
 `.github/workflows/release.yml` 只在推送 `v*` tag 时触发（直接 push `main` 不会构建），三个 job 并行，产出：
 
@@ -462,7 +474,7 @@ VPN 会话目录同时被主进程和提权 worker 使用，因此不做路径�
 | VPN 提权 | 计划任务免 UAC，失败回退 UAC 弹窗 | 系统授权框 |
 | 虚拟网卡 | Wintun 驱动 | 系统 utun |
 | 分流实现 | 路由注入：NRPT 按域名解析 + 隧道路由（不抓包） | 路由注入：`/etc/resolver` + 本机转发器 + 隧道路由（不抓包） |
-| 按域名解析 | NRPT（`Add-DnsClientNrptRule`） | `/etc/resolver` + `127.0.0.1:53` 转发器 |
+| 按域名解析 | NRPT（`Add-DnsClientNrptRule`） | `/etc/resolver` + 本机转发器（53 优先，被占用则随机高位端口 + `port` 字段） |
 | 路由查询 | PowerShell JSON（`Get-NetRoute` 等） | `route` / `ifconfig` / `netstat` |
 
 其余已知限制：
@@ -533,7 +545,10 @@ src-tauri/src/
     route.rs       路由表读写与崩溃清理
     script.rs      生成 vpnc-script
     credential.rs  密码加密存储
-    detect.rs      连接器可用性探测
+    platform/      连接器探测，按平台拆文件（mod.rs 只做 cfg 分派）
+      common.rs    共享：执行 `--version` 探测、版本解析、探测结果模型
+      macos.rs     macOS：向外查找、导入（记住路径）、清理旧副本
+      windows.rs   Windows：只认安装包内置副本、拒绝导入
     elevate.rs     提权启动
     guide.rs       openconnect 安装引导（Windows 只提示重装内置副本）
     session.rs     会话目录 IPC

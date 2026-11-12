@@ -1,0 +1,26 @@
+ws-workbench 安装说明（macOS / Apple Silicon）
+================================================
+
+方式一（推荐）：双击本窗口里的「安装 ws-workbench.command」
+  1. 自动把 ws-workbench.app 复制到「应用程序」(/Applications) 并替换旧版本；
+  2. 清除隔离属性（会要求输入管理员密码）；
+  3. 启动 ws-workbench。
+
+方式二（手动拖动）：
+  1. 把 ws-workbench.app 拖到「应用程序」(Applications) 文件夹；
+  2. 打开「终端」，执行下面这行，回车后输入管理员密码：
+
+       sudo xattr -cr /Applications/ws-workbench.app
+
+     这一步用于绕过 macOS 对未公证应用的「已损坏」/「无法验证开发者」提示；
+     不清除隔离属性的话，双击 .app 可能直接被系统拒绝打开。
+  3. 从「应用程序」里打开 ws-workbench。
+
+卸载：
+  双击本窗口里的「卸载 ws-workbench.command」，按提示操作。
+  默认保留用户数据（数据库、附件、剪贴板等），也可以选择同时删除。
+
+说明：
+  • 安装包是 Apple Silicon（arm64）版本，不适用于 Intel 机器。
+  • 应用未使用 Apple 开发者证书公证，安装时被 Gatekeeper 拦下属于预期行为，
+    按上面的步骤清除隔离属性即可。

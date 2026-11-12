@@ -38,6 +38,8 @@ const savingProfile = ref(false)
 const importHint = ref('')
 /** 提示语义：成功停留几秒自动收起；失败常驻，等下一次尝试再替换 */
 const importHintKind = ref<'success' | 'error'>('success')
+/** 正在选目录/登记：按钮置灰，避免连点弹出两个选择框 */
+const importing = ref(false)
 let importHintTimer: ReturnType<typeof setTimeout> | undefined
 
 function clearImportHintTimer() {
@@ -280,9 +282,11 @@ async function confirmReconnect() {
 const IMPORT_HINT_MS = 6000
 
 async function handleImport() {
+  if (importing.value) return
+  importing.value = true
   try {
     const message = await vpn.importOpenconnect()
-    // 用户取消了文件选择：保持上一条提示（连同它的倒计时）不动
+    // 用户取消了目录选择：保持上一条提示（连同它的倒计时）不动
     if (!message) return
     clearImportHintTimer()
     importHintKind.value = 'success'
@@ -293,6 +297,23 @@ async function handleImport() {
     // 失败常驻：下一次指定成功或再次失败时才会被替换
     importHintKind.value = 'error'
     importHint.value = `指定失败: ${err}`
+  } finally {
+    importing.value = false
+  }
+}
+
+/** 移除「选择安装目录」记住的位置：移除后回到安装引导，可以重新指定 */
+async function handleRemoveManaged() {
+  try {
+    await vpn.removeManagedOpenconnect()
+    clearImportHintTimer()
+    importHintKind.value = 'success'
+    importHint.value = '已移除指定的 openconnect，可重新选择目录'
+    importHintTimer = setTimeout(() => (importHint.value = ''), IMPORT_HINT_MS)
+  } catch (err: any) {
+    clearImportHintTimer()
+    importHintKind.value = 'error'
+    importHint.value = `移除失败: ${err}`
   }
 }
 
@@ -484,12 +505,34 @@ watch(
             </div>
           </div>
 
-          <!-- 只有手动指定的 openconnect 才显示位置：系统默认路径是装好就有的，显示出来只是噪音 -->
+          <!-- 只有手动指定的 openconnect 才显示位置：系统默认路径是装好就有的，显示出来只是噪音。
+               这个路径就是用户真实选中的可执行文件（程序数据目录里只有一行记录，不存副本）。
+               指定后要能改：跟着给出「更改 / 移除」，不用重装或清数据目录。 -->
           <div v-if="vpn.manualConnector" class="connector-location">
             <span class="connector-location-label">已指定 openconnect</span>
             <code class="connector-location-path">{{ vpn.manualConnector.path }}</code>
             <span v-if="vpn.manualConnector.version" class="connector-location-version">
               {{ vpn.manualConnector.version }}
+            </span>
+            <span
+              v-if="!platform.is_windows && vpn.manualConnector.source === 'managed'"
+              class="connector-location-actions"
+            >
+              <button
+                type="button"
+                class="connector-location-action"
+                :disabled="importing"
+                @click="handleImport"
+              >
+                {{ importing ? '选择中…' : '更改' }}
+              </button>
+              <button
+                type="button"
+                class="connector-location-action"
+                @click="handleRemoveManaged"
+              >
+                移除
+              </button>
             </span>
           </div>
 
@@ -935,6 +978,29 @@ watch(
 }
 .connector-location-version {
   white-space: nowrap;
+}
+/* 指定之后还能改：做成文字链接，别抢路径的视线 */
+.connector-location-actions {
+  display: inline-flex;
+  gap: 10px;
+  margin-left: 2px;
+}
+.connector-location-action {
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  font-size: 12px;
+  color: var(--primary);
+  cursor: pointer;
+}
+.connector-location-action:hover {
+  text-decoration: underline;
+}
+.connector-location-action:disabled {
+  color: var(--text-muted);
+  cursor: default;
+  text-decoration: none;
 }
 .card {
   border: 1px solid var(--border-color);
