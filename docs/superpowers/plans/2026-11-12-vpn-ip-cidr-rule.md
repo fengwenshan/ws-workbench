@@ -574,6 +574,13 @@ pub fn ip_route_plan(
 }
 ```
 
+顺手修掉 `split.rs` 模块文档里已经过时的「代价」条目（第 31 行）：
+
+```rust
+//! - 网段（`IP-CIDR`）规则按最长前缀注入：只能整段进隧道，需要排除就用更具体的
+//!   DIRECT 规则表达（例如 `192.168.6.0/24 → VPN` + `192.168.6.9/32 → DIRECT`）；
+```
+
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `cargo test --manifest-path src-tauri/Cargo.toml vpn::split::tests`
