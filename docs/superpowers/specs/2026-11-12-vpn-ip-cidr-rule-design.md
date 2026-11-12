@@ -248,10 +248,10 @@ pub fn ip_route_plan(
   - **非阻断提示**：类型是 `DOMAIN` / `DOMAIN-SUFFIX` 但值能解析成 IPv4 时，
     提示「这看起来是 IP，建议改用「IP / 网段」，域名规则填 IP 不会生效」——不阻止保存，
     兼容历史配置。
-- 预览输入（`useVpn.previewRule` 的调用方）：标签从「域名」改为「域名或 IP」，
-  参数名 `domain` → `target`。
-- 状态面板（`VpnRoutePreview.vue`）：路由表的出口列把 `vpn` 显示为「VPN」、
-  `local` 显示为「直连」；不新增区块。
+- 预览 API（`useVpn.previewRule`，目前没有界面调用方，只保留能力）：参数名
+  `domain` → `target`，注释改为「域名或 IP」；`vpn_preview_rules` 同步改名。
+- 状态面板（`VpnRoutePreview.vue`）：路由表的出口列已经按 `vpn` / `local`
+  显示「走 VPN」/「走本地」，直连例外复用现成渲染，不改。
 - `README.md` 的 VPN 规则章节：规则类型表补 `IP-CIDR`，写明「IP 规则不走 DNS、
   连接后立即生效」「DIRECT 例外用更具体的直连路由表达」。
 - 历史规则：之前显示「不生效」的 `IP-CIDR` 规则从本版本起生效；
