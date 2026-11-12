@@ -665,8 +665,14 @@ Get-Service -Name Dnscache | Format-List Status,StartType
             .filter_map(|item| item.trim().parse().ok())
             .collect();
         self.log(&format!(
-            "[分流] 路由注入模式：域名 {:?}，VPN DNS {:?}，隧道 {}",
-            plan.domains, vpn_dns, tun_dev
+            "[分流] 路由注入模式：域名 {:?}，IP 规则 {:?}，VPN DNS {:?}，隧道 {}",
+            plan.domains,
+            plan.ip_rules
+                .iter()
+                .map(|rule| rule.cidr())
+                .collect::<Vec<_>>(),
+            vpn_dns,
+            tun_dev
         ));
         // VPN 服务器自己的公网 IP 绝不能进隧道：否则 openconnect 的 TLS/DTLS
         // 会被自己的路由抓回隧道打环（现场日志出现过「内网 IP 203.0.113.10
@@ -688,9 +694,10 @@ Get-Service -Name Dnscache | Format-List Status,StartType
         ) {
             Ok(split) => {
                 self.log(&format!(
-                    "[分流] 路由注入分流已生效：{} 个域名走隧道 {}，{} 条固定隧道路由；\
-                     默认路由与系统 DNS 均未改动（系统解析器不受影响）",
+                    "[分流] 路由注入分流已生效：{} 个域名 + {} 条 IP 路由走隧道 {}，\
+                     {} 条固定隧道路由；默认路由与系统 DNS 均未改动（系统解析器不受影响）",
                     split.domain_count(),
+                    split.ip_route_count(),
                     tun_dev,
                     split.static_route_count()
                 ));
@@ -772,10 +779,12 @@ Get-Service -Name Dnscache | Format-List Status,StartType
     /// 不需要断开重连（界面上点了就生效）。
     fn switch_mode(&mut self, target: ProxyMode) {
         if let Some(mut split) = self.split.take() {
+            let domains = split.domain_count();
+            let ip_routes = split.ip_route_count();
             split.teardown();
             self.log(&format!(
-                "[模式] 已撤掉规则分流的布线（{} 个域名、动态注入的内网 IP 一并回收）",
-                split.domain_count()
+                "[模式] 已撤掉规则分流的布线（{} 个域名、{} 条 IP 路由与动态注入的内网 IP 一并回收）",
+                domains, ip_routes
             ));
         }
         if let Some(mut full) = self.full.take() {
@@ -830,8 +839,9 @@ Get-Service -Name Dnscache | Format-List Status,StartType
         }
         if let Some(split) = self.split.as_ref() {
             return format!(
-                "隧道已建立，路由注入分流已生效（{} 个域名 → {}）",
+                "隧道已建立，路由注入分流已生效（{} 个域名 / {} 条 IP 路由 → {}）",
                 split.domain_count(),
+                split.ip_route_count(),
                 split.tun_dev()
             );
         }
