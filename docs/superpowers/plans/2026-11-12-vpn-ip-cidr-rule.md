@@ -606,6 +606,7 @@ git commit -m "feat(vpn): ip_route_plan 编译 IP 规则为隧道路由与直连
 在 `route.rs` 的 `mod tests` 里加（纯解析，任何平台都能跑）：
 
 ```rust
+    #[cfg(target_os = "macos")]
     #[test]
     fn parses_netstat_route_entries() {
         let text = "Destination        Gateway            Flags        Netif Expire
@@ -664,8 +665,11 @@ impl RouteEntry {
     }
 }
 
-/// 解析 `netstat -rn -f inet` 正文（纯函数，任何平台都能测）。
-#[cfg(any(target_os = "macos", test))]
+/// 解析 `netstat -rn -f inet` 正文。
+///
+/// 只能 macOS 编译：它复用了 mac 专用的 [`parse_netstat_destination`]（缩写反推）。
+/// Windows 按前缀新增路由、不需要改写/还原，也就用不到这个解析。
+#[cfg(target_os = "macos")]
 pub fn parse_netstat_route_entries(text: &str) -> Vec<RouteEntry> {
     text.lines()
         .filter_map(|line| {
@@ -737,7 +741,14 @@ pub fn restore_route(entry: &RouteEntry) -> Result<(), String> {
     if run_route_macos(&args, &["not in table", "No such process"]).is_ok() {
         return Ok(());
     }
-    let target = RouteTarget::new(0, &entry.if_name, &entry.gateway);
+    // on-link 路由的 gateway 列是 `link#12` 这种接口标记，不能当下一跳地址用；
+    // 传空 next_hop 让 add_route 走 `-interface` 形式。
+    let next_hop = if entry.via_gateway() {
+        entry.gateway.clone()
+    } else {
+        String::new()
+    };
+    let target = RouteTarget::new(0, &entry.if_name, &next_hop);
     add_route(&cidr, &target, 0)
 }
 
