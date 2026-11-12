@@ -1410,7 +1410,14 @@ impl SplitTunnel {
         #[cfg(target_os = "macos")]
         {
             let target = route::RouteTarget::new(0, &self.tun_dev, "");
+            // 被我们覆盖过的网段交给下面的 overrides 循环专门处理：那条路由的「正确
+            // 修法」是就地 `route change`，走 add_tunnel_route 会因为 `File exists`
+            // 去删一条其实还在原出口上的路由，删不掉就静默放弃。
+            let overridden: Vec<String> = self.overrides.iter().map(|entry| entry.cidr()).collect();
             for cidr in &self.static_routes {
+                if overridden.contains(cidr) {
+                    continue;
+                }
                 // 路由还在就不动它：删了重装会让匹配这条路由的流量有一瞬间掉回默认路由
                 if route::route_exists(cidr, &target).unwrap_or(true) {
                     continue;
@@ -1424,10 +1431,17 @@ impl SplitTunnel {
                 }
             }
             for orig in &self.overrides {
-                match route::lookup_route(&orig.cidr()) {
+                let cidr = orig.cidr();
+                match route::lookup_route(&cidr) {
+                    // 还在隧道上：正常
                     Ok(Some(current)) if current.if_name == self.tun_dev => {}
+                    // 被系统/别的客户端改回原出口：就地改回隧道
+                    Ok(Some(_)) => {
+                        let _ = route::change_route_to_interface(&cidr, &self.tun_dev);
+                    }
+                    // 路由被删了：重新装一条
                     _ => {
-                        let _ = add_tunnel_route(&orig.cidr(), &self.tun_dev, self.tun_index());
+                        let _ = add_tunnel_route(&cidr, &self.tun_dev, self.tun_index());
                     }
                 }
             }
