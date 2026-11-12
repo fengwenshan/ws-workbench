@@ -682,6 +682,7 @@ Get-Service -Name Dnscache | Format-List Status,StartType
             self.status.tun_index,
             &vpn_dns,
             &server_ips,
+            &self.snapshot,
             self.memo.clone(),
             plan,
         ) {

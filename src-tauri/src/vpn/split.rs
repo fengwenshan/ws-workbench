@@ -451,6 +451,107 @@ pub fn ip_route_plan(
     out
 }
 
+/// 本次会话动过的路由账本（会话目录下的文件名）。
+pub const IP_ROUTES_LEDGER: &str = "ip-routes.txt";
+
+/// 路由账本条目：断开时按它删除或还原。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RouteLedgerEntry {
+    /// 我们新建的直连例外（走原默认网关），断开删掉即可
+    Direct {
+        cidr: String,
+        gateway: String,
+        if_index: u32,
+        if_name: String,
+    },
+    /// 我们改写过的系统路由（macOS），断开要还原原出口
+    Override { cidr: String, orig: route::RouteEntry },
+}
+
+impl RouteLedgerEntry {
+    fn encode(&self) -> String {
+        match self {
+            RouteLedgerEntry::Direct {
+                cidr,
+                gateway,
+                if_index,
+                if_name,
+            } => format!("direct|{}|{}|{}|{}", cidr, gateway, if_index, if_name),
+            RouteLedgerEntry::Override { cidr, orig } => format!(
+                "override|{}|{}|{}|{}|{}",
+                cidr,
+                route::format_ipv4(orig.network),
+                orig.prefix,
+                orig.gateway,
+                orig.if_name
+            ),
+        }
+    }
+}
+
+pub fn encode_ledger(entries: &[RouteLedgerEntry]) -> String {
+    let mut text = String::new();
+    for entry in entries {
+        text.push_str(&entry.encode());
+        text.push('\n');
+    }
+    text
+}
+
+/// 解析账本；不认识的行直接跳过（旧版本写的账本、手改坏的账本都不能让连接失败）。
+pub fn parse_ledger(text: &str) -> Vec<RouteLedgerEntry> {
+    text.lines()
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.trim().split('|').collect();
+            match parts.as_slice() {
+                ["direct", cidr, gateway, if_index, if_name] => Some(RouteLedgerEntry::Direct {
+                    cidr: (*cidr).to_string(),
+                    gateway: (*gateway).to_string(),
+                    if_index: if_index.parse().unwrap_or(0),
+                    if_name: (*if_name).to_string(),
+                }),
+                ["override", cidr, network, prefix, gateway, if_name] => {
+                    Some(RouteLedgerEntry::Override {
+                        cidr: (*cidr).to_string(),
+                        orig: route::RouteEntry {
+                            network: route::parse_ipv4(network)?,
+                            prefix: prefix.parse().ok()?,
+                            gateway: (*gateway).to_string(),
+                            if_name: (*if_name).to_string(),
+                        },
+                    })
+                }
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+/// 按账本清理上一次会话留下的路由：直连例外删掉，覆盖的系统路由还原。
+fn cleanup_ledger(_session: &VpnSession) {
+    let path = _session.dir.join(IP_ROUTES_LEDGER);
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    for entry in parse_ledger(&text) {
+        match entry {
+            RouteLedgerEntry::Direct {
+                cidr,
+                gateway,
+                if_index,
+                if_name,
+            } => {
+                let target = route::RouteTarget::new(if_index, &if_name, &gateway);
+                let _ = route::delete_route(&cidr, &target);
+            }
+            RouteLedgerEntry::Override { orig, .. } => {
+                let _ = route::restore_route(&orig);
+            }
+        }
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
 /// IP 规则取值归一：单个地址补 `/32`，CIDR 抹掉主机位，拒绝 `/0` 与非法值。
 ///
 /// 校验（`commands::validate_rule_input`）与计划编译（[`plan`]）共用它，
@@ -566,6 +667,14 @@ pub struct SplitTunnel {
     vpn_dns: Vec<Ipv4Addr>,
     /// 固定要维护的路由（VPN DNS 的 `/32`）
     static_routes: Vec<String>,
+    /// 来自 IP 规则的隧道路由（与 VPN DNS 的 /32 一起放在 `static_routes` 里维护）
+    ip_routes: Vec<String>,
+    /// 我们新建的直连例外：(cidr, 出口)
+    direct_routes: Vec<(String, route::RouteTarget)>,
+    /// 我们改写过的系统路由（macOS）
+    overrides: Vec<route::RouteEntry>,
+    /// 会话目录里的路由账本
+    ledger: std::path::PathBuf,
     /// 从 DNS 应答里学到的内网 IP（动态注入，断开时按它回收）
     dynamic: Arc<Mutex<BTreeSet<Ipv4Addr>>>,
     /// macOS：我们写过的 `/etc/resolver/<域名>`
@@ -602,11 +711,14 @@ impl SplitTunnel {
         tun_index: u32,
         vpn_dns: &[Ipv4Addr],
         server_ips: &[Ipv4Addr],
+        snapshot: &super::models::NetworkSnapshot,
         memo: DnsMemo,
         plan: SplitPlan,
     ) -> Result<Self, String> {
-        if plan.domains.is_empty() {
-            return Err("规则里没有可用的分流动作：请加一条「域名后缀 → 走 VPN」".to_string());
+        if plan.domains.is_empty() && plan.ip_rules.is_empty() {
+            return Err(
+                "规则里没有可用的分流动作：请加一条「域名后缀」或「IP / 网段」规则".to_string(),
+            );
         }
         // 上一轮被 SIGKILL 时留下的解析器配置先清掉，否则清不干净的域名
         // 会一直指向一个已经断掉的 DNS（macOS）或一条过期规则（Windows）。
@@ -627,8 +739,13 @@ impl SplitTunnel {
             ));
         }
 
-        if vpn_dns.is_empty() {
+        let needs_dns = !plan.domains.is_empty();
+        if needs_dns && vpn_dns.is_empty() {
             return Err("服务端没有下发 DNS 地址，内网域名无法解析".to_string());
+        }
+        let ip_plan = ip_route_plan(&plan, snapshot, server_ips, vpn_dns);
+        for note in &ip_plan.notes {
+            session.append_log(&format!("[分流] {}", note));
         }
         let mut me = SplitTunnel {
             domains: plan.domains.clone(),
@@ -639,6 +756,10 @@ impl SplitTunnel {
             tun_index,
             vpn_dns: vpn_dns.to_vec(),
             static_routes: Vec::new(),
+            ip_routes: Vec::new(),
+            direct_routes: Vec::new(),
+            overrides: Vec::new(),
+            ledger: session.dir.join(IP_ROUTES_LEDGER),
             dynamic: Arc::new(Mutex::new(BTreeSet::new())),
             #[cfg(target_os = "macos")]
             resolver_files: Vec::new(),
@@ -657,7 +778,7 @@ impl SplitTunnel {
             thread: None,
         };
 
-        if let Err(e) = me.install_routes() {
+        if let Err(e) = me.install_routes(&ip_plan.tunnel, &ip_plan.direct, session, snapshot) {
             me.teardown();
             return Err(e);
         }
@@ -672,13 +793,15 @@ impl SplitTunnel {
             ));
             inject_ips(&restored, &me.tun_dev, me.tun_index, &me.dynamic, session);
         }
-        if let Err(e) = me.install_resolver(session) {
-            me.teardown();
-            return Err(e);
-        }
-        if let Err(e) = me.start_resolver(session) {
-            me.teardown();
-            return Err(e);
+        if needs_dns {
+            if let Err(e) = me.install_resolver(session) {
+                me.teardown();
+                return Err(e);
+            }
+            if let Err(e) = me.start_resolver(session) {
+                me.teardown();
+                return Err(e);
+            }
         }
         flush_dns_cache();
         Ok(me)
@@ -688,19 +811,116 @@ impl SplitTunnel {
         self.tun_index
     }
 
-    /// VPN DNS：装成指向隧道的固定 `/32` 路由（否则 DNS 查询出不去）。
-    fn install_routes(&mut self) -> Result<(), String> {
-        let mut wanted: Vec<String> = Vec::new();
+    /// 装固定路由：VPN DNS 的 `/32`（失败致命）+ IP 规则的隧道网段（单条失败继续）。
+    fn install_routes(
+        &mut self,
+        ip_tunnel: &[String],
+        ip_direct: &[String],
+        session: &VpnSession,
+        snapshot: &super::models::NetworkSnapshot,
+    ) -> Result<(), String> {
         for ip in &self.vpn_dns {
-            wanted.push(format!("{}/32", ip));
-        }
-        for cidr in &wanted {
-            add_tunnel_route(cidr, &self.tun_dev, self.tun_index())?;
-            if !self.static_routes.contains(cidr) {
-                self.static_routes.push(cidr.clone());
+            let cidr = format!("{}/32", ip);
+            add_tunnel_route(&cidr, &self.tun_dev, self.tun_index())?;
+            if !self.static_routes.contains(&cidr) {
+                self.static_routes.push(cidr);
             }
         }
+
+        for cidr in ip_tunnel {
+            match self.install_ip_tunnel_route(cidr, session) {
+                Ok(()) => {
+                    if !self.static_routes.contains(cidr) {
+                        self.static_routes.push(cidr.clone());
+                    }
+                    if !self.ip_routes.contains(cidr) {
+                        self.ip_routes.push(cidr.clone());
+                    }
+                    session.append_log(&format!(
+                        "[分流] IP 规则 {} → 隧道 {}",
+                        cidr, self.tun_dev
+                    ));
+                }
+                Err(e) => session.append_log(&format!(
+                    "[分流] IP 规则 {} 未注入：{}（其它规则不受影响）",
+                    cidr, e
+                )),
+            }
+        }
+
+        if !ip_direct.is_empty() {
+            let target = route::RouteTarget::new(
+                snapshot.default_if_index,
+                &snapshot.default_if_alias,
+                &snapshot.default_gateway,
+            );
+            // `ensure_route` 返回 `RouteOutcome::{Created,Updated}`，两种都算成功
+            for cidr in ip_direct {
+                match route::ensure_route(cidr, &target, 1) {
+                    Ok(_) => {
+                        session.append_log(&format!(
+                            "[分流] 直连例外 {} → {}（{}）",
+                            cidr, snapshot.default_gateway, snapshot.default_if_alias
+                        ));
+                        if !self.direct_routes.iter().any(|(item, _)| item == cidr) {
+                            self.direct_routes.push((cidr.clone(), target.clone()));
+                        }
+                    }
+                    Err(e) => session.append_log(&format!(
+                        "[分流] 直连例外 {} 未安装：{}（其它规则不受影响）",
+                        cidr, e
+                    )),
+                }
+            }
+        }
+
+        self.write_ledger();
         Ok(())
+    }
+
+    /// 装一条 IP 规则的隧道路由。
+    ///
+    /// macOS 上如果同前缀已经有一条系统路由（本机局域网 on-link、别的 VPN 客户端
+    /// 装的路由），显式配置优先：记下原出口后 `route change` 到隧道，断开时还原。
+    /// Windows 直接同前缀 + metric 1 新增，系统按 metric 择优，断开只删自己那条。
+    fn install_ip_tunnel_route(&mut self, cidr: &str, session: &VpnSession) -> Result<(), String> {
+        #[cfg(target_os = "macos")]
+        {
+            if let Ok(Some(existing)) = route::lookup_route(cidr) {
+                if existing.if_name != self.tun_dev {
+                    route::change_route_to_interface(cidr, &self.tun_dev)?;
+                    session.append_log(&format!(
+                        "[分流] 覆盖系统已有路由：{}（原出口 {}，断开时还原）",
+                        cidr, existing.if_name
+                    ));
+                    self.overrides.push(existing);
+                    return Ok(());
+                }
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = session;
+        add_tunnel_route(cidr, &self.tun_dev, self.tun_index())
+    }
+
+    /// 把「新建的直连例外 + 改写的系统路由」落盘，崩溃后下次连接前能清理/还原。
+    fn write_ledger(&self) {
+        let mut entries: Vec<RouteLedgerEntry> = Vec::new();
+        for (cidr, target) in &self.direct_routes {
+            entries.push(RouteLedgerEntry::Direct {
+                cidr: cidr.clone(),
+                gateway: target.next_hop.clone(),
+                if_index: target.if_index,
+                if_name: target.if_name.clone(),
+            });
+        }
+        for orig in &self.overrides {
+            entries.push(RouteLedgerEntry::Override {
+                cidr: orig.cidr(),
+                orig: orig.clone(),
+            });
+        }
+        let _ = std::fs::write(&self.ledger, encode_ledger(&entries));
     }
 
     /// 把「这些域名交给 VPN DNS」这条本地布线装好。
@@ -1198,12 +1418,28 @@ impl SplitTunnel {
                 // 不在就补回来；单条失败不吵，下一次守护再试
                 let _ = add_tunnel_route(cidr, &self.tun_dev, self.tun_index());
             }
+            for (cidr, target) in &self.direct_routes {
+                if !route::route_exists(cidr, target).unwrap_or(true) {
+                    let _ = route::ensure_route(cidr, target, 1);
+                }
+            }
+            for orig in &self.overrides {
+                match route::lookup_route(&orig.cidr()) {
+                    Ok(Some(current)) if current.if_name == self.tun_dev => {}
+                    _ => {
+                        let _ = add_tunnel_route(&orig.cidr(), &self.tun_dev, self.tun_index());
+                    }
+                }
+            }
         }
         #[cfg(target_os = "windows")]
         {
             // 一条 PowerShell 把「缺哪条补哪条」全办了：逐条查要起 N 次进程，
             // 每 15 秒一轮会把 worker 主循环拖慢。
             let _ = route::ensure_onlink_routes(&self.static_routes, self.tun_index(), 1);
+            for (cidr, target) in &self.direct_routes {
+                let _ = route::ensure_route(cidr, target, 1);
+            }
             // NRPT 规则被组策略/其它客户端盖掉时补回来。
             //
             // 注意必须重下**全部**域名：`apply_namespace_rules` 的脚本会先清掉所有
@@ -1257,6 +1493,16 @@ impl SplitTunnel {
         for cidr in &self.static_routes {
             let _ = del_tunnel_route(cidr, &self.tun_dev, self.tun_index());
         }
+        for (cidr, target) in &self.direct_routes {
+            let _ = route::delete_route(cidr, target);
+        }
+        for entry in &self.overrides {
+            let _ = route::restore_route(entry);
+        }
+        self.direct_routes.clear();
+        self.overrides.clear();
+        self.ip_routes.clear();
+        let _ = std::fs::remove_file(&self.ledger);
         #[cfg(target_os = "macos")]
         {
             for path in &self.resolver_files {
@@ -1303,6 +1549,11 @@ impl SplitTunnel {
         self.static_routes.len()
     }
 
+    /// 本次由 IP 规则装进隧道的网段数（状态/日志用，不含 VPN DNS 的 /32）。
+    pub fn ip_route_count(&self) -> usize {
+        self.ip_routes.len()
+    }
+
     pub fn routed_ip_count(&self) -> usize {
         self.dynamic.lock().map(|set| set.len()).unwrap_or(0)
     }
@@ -1314,7 +1565,8 @@ impl SplitTunnel {
     /// 给界面看的「当前生效路由」列表（只列固定注入的隧道路由；
     /// 按解析结果动态注入的 /32 会很多，不往状态里塞）。
     pub fn routes_for_status(&self) -> Vec<super::models::AppliedRoute> {
-        self.static_routes
+        let mut out: Vec<super::models::AppliedRoute> = self
+            .static_routes
             .iter()
             .map(|cidr| super::models::AppliedRoute {
                 cidr: cidr.clone(),
@@ -1323,7 +1575,21 @@ impl SplitTunnel {
                 iface: self.tun_dev.clone(),
                 owned: true,
             })
-            .collect()
+            .collect();
+        out.extend(self.direct_routes.iter().map(|(cidr, target)| {
+            super::models::AppliedRoute {
+                cidr: cidr.clone(),
+                via: "local".to_string(),
+                next_hop: target.next_hop.clone(),
+                iface: if target.if_name.is_empty() {
+                    format!("if#{}", target.if_index)
+                } else {
+                    target.if_name.clone()
+                },
+                owned: true,
+            }
+        }));
+        out
     }
 }
 
@@ -1373,25 +1639,24 @@ pub fn cleanup_stale(session: &VpnSession) {
     #[cfg(target_os = "macos")]
     {
         let manifest = session.dir.join(MANIFEST_FILE);
-        let Ok(text) = std::fs::read_to_string(&manifest) else {
-            return;
-        };
-        let mut removed = 0usize;
-        for domain in text.lines() {
-            let domain = domain.trim();
-            if domain.is_empty() {
-                continue;
-            }
-            let path = std::path::Path::new(RESOLVER_DIR).join(domain);
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                if is_our_resolver_content(&content) && std::fs::remove_file(&path).is_ok() {
-                    removed += 1;
+        if let Ok(text) = std::fs::read_to_string(&manifest) {
+            let mut removed = 0usize;
+            for domain in text.lines() {
+                let domain = domain.trim();
+                if domain.is_empty() {
+                    continue;
+                }
+                let path = std::path::Path::new(RESOLVER_DIR).join(domain);
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    if is_our_resolver_content(&content) && std::fs::remove_file(&path).is_ok() {
+                        removed += 1;
+                    }
                 }
             }
-        }
-        let _ = std::fs::remove_file(&manifest);
-        if removed > 0 {
-            flush_dns_cache();
+            let _ = std::fs::remove_file(&manifest);
+            if removed > 0 {
+                flush_dns_cache();
+            }
         }
     }
     #[cfg(target_os = "windows")]
@@ -1411,6 +1676,7 @@ pub fn cleanup_stale(session: &VpnSession) {
             )),
         }
     }
+    cleanup_ledger(session);
 }
 
 /// 转发线程的运行参数。
@@ -2851,5 +3117,29 @@ mod tests {
         assert!(!is_our_resolver_content("nameserver 8.8.8.8\n"));
         assert!(!is_our_resolver_content("nameserver 127.0.0.1\nsearch corp\n"));
         assert!(!is_our_resolver_content(""));
+    }
+
+    #[test]
+    fn route_ledger_round_trips() {
+        let entries = vec![
+            RouteLedgerEntry::Direct {
+                cidr: "192.168.6.9/32".into(),
+                gateway: "192.168.1.1".into(),
+                if_index: 0,
+                if_name: "en0".into(),
+            },
+            RouteLedgerEntry::Override {
+                cidr: "192.168.1.0/24".into(),
+                orig: route::RouteEntry {
+                    network: route::parse_ipv4("192.168.1.0").unwrap(),
+                    prefix: 24,
+                    gateway: "link#12".into(),
+                    if_name: "en0".into(),
+                },
+            },
+        ];
+        let text = encode_ledger(&entries);
+        assert_eq!(parse_ledger(&text), entries);
+        assert!(parse_ledger("garbage\n\n").is_empty());
     }
 }
