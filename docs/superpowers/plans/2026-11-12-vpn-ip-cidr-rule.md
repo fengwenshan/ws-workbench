@@ -105,10 +105,12 @@ pub enum RuleKind {
             RuleKind::IpCidr => "IP-CIDR",
 ```
 
-- [ ] **Step 4: 跑测试确认通过**
+- [ ] **Step 4: 确认 RED 证据（本任务单独无法变绿）**
 
 Run: `cargo test --manifest-path src-tauri/Cargo.toml vpn::rule_engine`
-Expected: `test result: ok`
+Expected: 编译失败 `error[E0004]: non-exhaustive patterns: RuleKind::IpCidr not covered`
+（`split.rs:plan` 与 `commands.rs:validate_rule_input` 各一处）。这是预期的：
+Task 2 会同时补上这两个 match 分支，代码在 Task 2 结束时恢复绿色。
 
 - [ ] **Step 5: 提交**
 
@@ -123,6 +125,8 @@ git commit -m "feat(vpn): 恢复 IP-CIDR 规则类型解析"
 
 **Files:**
 - Modify: `src-tauri/src/vpn/split.rs`（`DomainRule` 之后、`plan()` 与 `SplitPlan`）
+- Modify: `src-tauri/src/vpn/commands.rs:289-303`（`validate_rule_input` 补 `IpCidr` 分支，
+  否则 Task 1 引入的 `E0004` 无法消除）
 - Test: `src-tauri/src/vpn/split.rs` 的 `mod tests`
 
 - [ ] **Step 1: 写失败测试**
@@ -331,6 +335,15 @@ pub fn normalize_ip_rule(value: &str) -> Result<String, String> {
 /// 「直连」规则作为例外交给 [`ip_route_plan`] 决定是否需要装更具体的直连路由。
 ```
 
+同时在 `src-tauri/src/vpn/commands.rs` 的 `validate_rule_input` 里补上分支
+（消除 Task 1 引入的 `E0004`；Task 6 只在此基础上改预览与归一返回）：
+
+```rust
+        RuleKind::IpCidr => {
+            crate::vpn::split::normalize_ip_rule(value)?;
+        }
+```
+
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `cargo test --manifest-path src-tauri/Cargo.toml vpn::split::tests`
@@ -339,7 +352,7 @@ Expected: `test result: ok`
 - [ ] **Step 5: 提交**
 
 ```bash
-git add src-tauri/src/vpn/split.rs
+git add src-tauri/src/vpn/split.rs src-tauri/src/vpn/commands.rs
 git commit -m "feat(vpn): IP 规则编译成 SplitPlan.ip_rules"
 ```
 
@@ -1333,13 +1346,9 @@ Expected: 失败（`IP-CIDR` 被拒、`preview_verdict` 参数名不匹配等）
 
 - [ ] **Step 3: 实现**
 
-`validate_rule_input` 的 `match kind` 加：
-
-```rust
-        RuleKind::IpCidr => {
-            crate::vpn::split::normalize_ip_rule(value)?;
-        }
-```
+`validate_rule_input` 的 `IpCidr` 分支已在 Task 2 加好（调用
+`split::normalize_ip_rule`），本任务**不要**重复添加；只改下面的 `vpn_validate_rule`
+与预览。
 
 `vpn_validate_rule` 整段换成：
 
