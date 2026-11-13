@@ -2103,6 +2103,32 @@ mod tests {
         );
     }
 
+    /// 非规则模式连接时也要把规则装进 worker：用户运行期切回规则模式时
+    /// 直接可用，不必断开重连。
+    ///
+    /// 现场：直连模式连接后切规则模式，日志「域名 []，IP 规则 []」，
+    /// 原因是前端连接时只给规则模式发规则，worker 的规则表是空的。
+    #[test]
+    fn rules_are_loaded_even_when_connecting_in_direct_mode() {
+        let dir = crate::test_support::TempDir::new("worker-direct-keeps-rules");
+        let session = VpnSession::new(dir.path().to_path_buf());
+        session.ensure().unwrap();
+        let rule = VpnRule {
+            id: "r1".into(),
+            kind: "DOMAIN-SUFFIX".into(),
+            value: "example.com".into(),
+            policy: "VPN".into(),
+            remark: String::new(),
+            enabled: true,
+        };
+        let mut request = request_with_rules(vec![rule]);
+        request.proxy_mode = "direct".into();
+        let worker = Worker::new(session, request);
+
+        assert_eq!(worker.current_rules.len(), 1, "直连模式也要保留规则");
+        assert_eq!(worker.rule_plan().domains, vec!["example.com".to_string()]);
+    }
+
     /// 连接流程还没走完（phase 不是 Connected）时改规则不能抢先布线：
     /// 否则会和 apply_mode 重复创建一份 SplitTunnel。
     #[test]

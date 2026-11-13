@@ -306,10 +306,12 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
     connecting.value = true
     try {
       const mode = target.proxy_mode ?? 'rule'
-      // 规则来自配置自身；全局/直连模式不把规则交给后端参与判定
-      const rules = mode === 'rule' ? usableRules(target.rules ?? []) : []
-      // 规则模式没命中就走直连；全局模式全部走隧道，直连模式全部直连
-      const defaultPolicy = mode === 'global' ? 'VPN' : 'DIRECT'
+      // 规则始终全量下发：worker 在全局/直连模式下不参与判定，但用户运行期切回
+      // 规则模式时要能立刻用上。曾经只发规则模式的规则，切模式后 worker 的规则表
+      // 是空的，于是「切到规则模式」反而什么都不分流（现场踩过）。
+      const rules = usableRules(target.rules ?? [])
+      // 规则模式没命中一律直连；全局/直连模式不使用兜底走向
+      const defaultPolicy = 'DIRECT'
       if (mode === 'rule' && !rules.some((rule) => rule.enabled)) {
         pushLog('warn', '这个配置还没有启用的规则，所有流量都会直连')
       }
