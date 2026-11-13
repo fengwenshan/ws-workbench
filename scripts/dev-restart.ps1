@@ -1,4 +1,4 @@
-# 重启开发环境：结束旧的 ws-workbench*（发布版 ws-workbench / 开发版 ws-workbench-dev）、
+﻿# 重启开发环境：结束旧的 ws-workbench*（发布版 ws-workbench / 开发版 ws-workbench-dev）、
 # vite、tauri dev 进程，再重新拉起一份。
 #
 # 用法：

@@ -31,7 +31,10 @@ pub(super) fn change_count() -> Option<i64> {
 /// `WM_ACTIVATE(WA_INACTIVE)`；失焦处理器如果无脑 `hide()`，拖拽会被当场掐断，
 /// 用户看到的就是「点一下标题栏面板就没了」。鼠标还在面板里就当作「在拖自己」，
 /// 真正点外面时鼠标已经不在面板矩形内。
-pub(super) fn cursor_inside_hwnd(raw: isize) -> bool {
+// `clipboard/mod.rs` 把它按 `pub(crate)` 再导出给 `lib.rs` 的失焦处理器，
+// 所以这里必须也是 `pub(crate)`：只写 `pub(super)` 会在 Windows 上编译不过
+// （E0364：private item cannot be re-exported）。
+pub(crate) fn cursor_inside_hwnd(raw: isize) -> bool {
     use windows::Win32::Foundation::{HWND, POINT, RECT};
     use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, GetWindowRect};
 

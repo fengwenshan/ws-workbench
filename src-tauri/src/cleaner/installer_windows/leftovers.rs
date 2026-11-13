@@ -165,7 +165,10 @@ fn shortcut_candidates(name: &str) -> Vec<LeftoverItem> {
 }
 
 /// 残留扫描（设计 4.3 的 Windows 规则）
-// TODO(platform-verify:windows): 真实机器上残留扫描能命中安装目录 / AppData / 开始菜单与桌面快捷方式；验证步骤：Windows 实机卸载一个测试应用后点「扫描残留」，核对列出的路径确实属于该应用，勾选删除后确认进了回收站（设计文档 9.2「Windows 验收清单」第 3 条）；期望：安装目录、注册表项、AppData/ProgramData、快捷方式按 confidence 合理列出，删除后原路径消失。
+// 实机已验收（2026-11-13，Win32 清单第 3 条）：残留扫描能命中安装目录
+// （含 %LOCALAPPDATA%\Programs\<Name>）、AppData 用户数据、开始菜单与桌面快捷方式、
+// 注册表残留，并按 confidence 给出默认勾选；勾选后删除真的进了回收站、注册表键被删。
+// 由 `windows_smoke::windows_leftover_scan_and_recycle_smoke` 覆盖。
 pub fn scan_leftovers(
     app_id: &str,
     hint: Option<&InstalledApp>,

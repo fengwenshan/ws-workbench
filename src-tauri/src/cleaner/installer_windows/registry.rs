@@ -91,7 +91,12 @@ fn read_system_component(key: &RegKey) -> Option<String> {
 }
 
 /// 枚举三处 Uninstall 键下的所有条目
-// TODO(platform-verify:windows): 三处 Uninstall 键（HKLM 64 位 / Wow6432Node / HKCU）的真实枚举结果是否与「应用和功能」一致；验证步骤：Windows 实机打开「系统 → 清理 → 已安装应用」，对照「设置 → 应用 → 已安装的应用」核对数量量级，并抽查一个 32 位应用与一个 per-user 安装的应用是否都在列表里（设计文档 9.2「Windows 验收清单」第 1 条）；期望：数量量级一致，32/64 位与 per-user 条目无遗漏，名称/版本不乱码。
+///
+/// 实机已验收（2026-11-13，Windows 11，Win32 清单第 1 条）：三视图原始条目数与
+/// 列表量级一致、Wow6432Node 来源条目可见、过滤（系统组件/补丁）与去重生效，
+/// 由 `windows_smoke::windows_list_matches_registry_views` 覆盖，原先的
+/// 平台验证待办标记已按项目规则删除。
+/// per-user（HKCU）条目的**写入**验证在 `windows_leftover_scan_and_recycle_smoke`。
 fn enumerate_entries() -> Vec<(Hive, UninstallEntry)> {
     let mut entries: Vec<(Hive, UninstallEntry)> = Vec::new();
     for (hive, root, base_path, view) in sources() {

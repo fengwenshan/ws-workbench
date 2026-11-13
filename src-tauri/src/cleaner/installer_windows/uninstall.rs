@@ -71,7 +71,7 @@ mod script_tests {
 ///
 /// 没有 `UninstallString` 的条目走「强制移除」：删掉注册表条目后由前端继续
 /// 残留清理。HKLM 条目需要一次 UAC，HKCU 条目普通权限即可。
-// TODO(platform-verify:windows): 真实执行 MSI（msiexec /I→/X）与 exe 卸载器、以及 UAC 取消时的结果映射；验证步骤：Windows 实机各卸载一个 MSI 应用与一个 exe 卸载器应用，再对一个 HKLM 条目在 UAC 弹窗点「否」（设计文档 9.2「Windows 验收清单」第 2 条）；期望：MSI/exe 都真正卸载完成且 exit_code=0，取消授权返回 ok=false、message 为「已取消授权，未执行卸载」，绝不误报成功。
+// TODO(platform-verify:windows): 真实 MSI 应用卸载（msiexec /I→/X）与 UAC 取消的结果映射未验；验证步骤：装一个 MSI 应用从卸载窗口执行一次，再对一个 HKLM 条目在 UAC 弹窗点「否」；期望：MSI 真正卸载完成且 exit_code=0，取消授权返回 ok=false、message 为「已取消授权，未执行卸载」，绝不误报成功；exe 卸载器的 0/非 0 退出码映射与「无卸载命令→强制移除」已由 windows_smoke::windows_uninstall_outcomes_smoke 覆盖。
 pub fn uninstall(
     app_id: &str,
     hint: Option<&InstalledApp>,

@@ -12,7 +12,10 @@ use super::super::registry_id::{
 use super::scripts::powershell_quote;
 
 /// 硬拒绝目录（Windows）。
-// TODO(platform-verify:windows): 注册表/提权删除的硬拒名单需在 Windows 实机复核；验证步骤：按 README「平台与限制」Windows 验收清单，尝试删除白名单外路径与系统目录；期望：均被拒绝且不产生删除动作。
+///
+/// 实机已验收（2026-11-13）：系统目录、公共父目录、用户主目录、盘符根都被
+/// `is_allowed` 拒绝，白名单内的 AppData 目录可以通过；由
+/// `windows_smoke::windows_trash_guard_deny_list_and_key_delete` 覆盖。
 pub(super) fn is_denied(path: &Path) -> bool {
     const DENIED: &[&str] = &[
         r"C:\Windows",
@@ -50,8 +53,11 @@ pub(super) fn allowed_roots() -> Vec<PathBuf> {
     roots
 }
 
-// TODO(platform-verify:windows): 提权批量删除（UAC 一次授权）需在 Windows 实机验收；验证步骤：卸载一个需要管理员权限的应用并勾选提权项，分别在「同意」与「取消」UAC 时执行；期望：同意时目标被删除且只弹一次授权框，取消时逐条回传「已取消授权」且不误删。
-fn delete_files_elevated(paths: &[PathBuf], registry_keys: &[(String, String)]) -> DeleteOutcome {
+// TODO(platform-verify:windows): 提权批量删除的 UAC 一次授权路径未验（自动化不能替人点「是」）；验证步骤：装一个需要管理员权限的应用，卸载时勾选提权项，先点「取消」再点「同意」各跑一次；期望：同意时目标被删除且只弹一次授权框，取消时逐条回传「已取消授权」、不误删、不误报成功；白名单在生成脚本前就拒绝这一点已由 windows_smoke::windows_uninstall_outcomes_smoke 覆盖（那一步不弹 UAC），不可在无人值守环境验证。
+pub(super) fn delete_files_elevated(
+    paths: &[PathBuf],
+    registry_keys: &[(String, String)],
+) -> DeleteOutcome {
     let mut outcome = DeleteOutcome::default();
 
     let result_path = std::env::temp_dir().join(format!(
@@ -165,7 +171,7 @@ fn delete_files_elevated(paths: &[PathBuf], registry_keys: &[(String, String)]) 
     outcome
 }
 
-// TODO(platform-verify:windows): 注册表键删除需在 Windows 实机验收；验证步骤：在 HKCU/HKLM\SOFTWARE 下各建一个测试键，分别走「普通删除」与「提权删除」；期望：键被删除，WOW6432Node 视图不误删另一视图的同名键。
+// TODO(platform-verify:windows): HKLM 的注册表键「提权删除」与 WOW6432Node 视图隔离未验；验证步骤：管理员身份在 HKLM\SOFTWARE 与 HKLM\SOFTWARE\Wow6432Node 下各建一个同名测试键，走「提权删除」只删 64 位视图那个，再用 reg query 两个视图确认另一个还在；期望：只删目标视图的键，另一视图同名键保留；HKCU 普通删除、兄弟键隔离与越界拒绝已由 windows_smoke::windows_trash_guard_deny_list_and_key_delete 覆盖。
 /// hive 令牌 + 键路径 → PowerShell `Registry::` 提供程序路径（提权删除用）
 fn registry_ps_path(hive: &str, key_path: &str) -> Option<String> {
     let normalized = validate_registry_key_path(key_path).ok()?;

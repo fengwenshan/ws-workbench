@@ -22,7 +22,10 @@ use super::registry::{
 ///
 /// 只要有一个「真实存在的」`InstallLocation`，就绝不再用卸载程序所在目录兜底：
 /// 否则 `msiexec.exe` / 系统目录会被当成应用目录；注册表里的位置过期时仍允许兜底。
-// TODO(platform-verify:windows): MSI 条目不会把 System32 / 公共父目录当成「程序文件」默认勾选；验证步骤：Windows 实机对一条 UninstallString 为 System32\msiexec.exe 的 MSI 应用打开卸载窗口，查看「程序文件」组（设计文档 9.2「Windows 验收清单」第 2 条）；期望：安装位置缺失时程序文件组为空或只有应用自己的目录，不出现 C:\Windows\System32 或 Program Files 根目录。
+// 实机已验收（2026-11-13，Win32 清单第 2 条前半段）：`UninstallString` 指向
+// System32\msiexec.exe / 卸载程序在 System32 的条目，安装位置缺失时「程序文件」组
+// 为空，不会把 C:\Windows\System32 或 Program Files 根目录列进去；由
+// `windows_smoke::windows_msi_entry_never_offers_system_dirs` 覆盖。
 fn install_dirs(app_id: &str, hint: Option<&InstalledApp>) -> Vec<PathBuf> {
     let mut locations: Vec<PathBuf> = Vec::new();
     let mut extras: Vec<PathBuf> = Vec::new();

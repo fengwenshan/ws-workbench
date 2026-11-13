@@ -33,6 +33,9 @@ pub mod installer_macos;
 // 实机冒烟：默认 #[ignore]，只在人工联调时跑（会真实写 ~/Applications 与废纸篓）
 #[cfg(all(test, target_os = "macos"))]
 mod macos_smoke;
+// 实机冒烟（Windows）：写 HKCU 临时卸载项 / LOCALAPPDATA 目录 / 回收站，跑完清理
+#[cfg(all(test, target_os = "windows"))]
+mod windows_smoke;
 
 pub mod models;
 pub use models::*;

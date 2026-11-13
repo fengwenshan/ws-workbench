@@ -318,6 +318,27 @@ Windows 与 macOS 的实现必须拆开写，禁止在共享文件里用 `cfg` �
 
 门面分派（`cleaner/installer.rs`、`cleaner/related.rs`、`commands/cleaner*.rs`、`uninstall_info.rs` 里只影响门面/窗口装饰/脚本落盘的零散 `cfg`）属于允许写法。还没拆的共享文件（下一批按本规范处理）：`vpn/split.rs`、`vpn/route.rs`、`vpn/fulltunnel.rs`、`vpn/elevate.rs`、`vpn/worker.rs`、`vpn/credential.rs`、`vpn/script.rs`（`vpn/platform/` 只覆盖连接器探测那一块）、`commands/openwith.rs`、`crypto.rs`（钥匙串 / DPAPI）、`apps/finder.rs`、`process.rs` / `winps.rs`、`lib.rs` 的窗口/托盘/菜单、`cleaner/popup.rs`；`platform.rs` 本身是平台判定入口，不算。Windows 实机验收项已用 `TODO(platform-verify:windows)` 标注，发版前用 `grep -rn "TODO(platform-verify" src-tauri/src src-tauri/nsis src-tauri/resources` 清点（NSIS 钩子和 PowerShell 资源里的 TODO 不在 Rust 目录，别漏）。
 
+### 实机冒烟
+
+单测只覆盖纯逻辑（过滤 / 去重 / `UninstallString` 解析），「列表 → 残留扫描 → 删进回收站 → 卸载 → 注册表键删除」这条链路要真机。每个平台各有一份 `#[ignore]` 的冒烟用例，只在手动执行时跑，且写入都用唯一名字、结束（含断言失败）自动清理：
+
+```bash
+# macOS：真实写 ~/Applications、~/Library 与废纸篓
+CLEANER_SMOKE=1 cargo test --manifest-path src-tauri/Cargo.toml --lib \
+  -- --ignored cleaner::macos_smoke
+
+# Windows：真实写 HKCU 卸载项、%LOCALAPPDATA%/%APPDATA%/桌面快捷方式与回收站
+CLEANER_SMOKE=1 cargo test --manifest-path src-tauri/Cargo.toml --lib \
+  -- --ignored --test-threads=1 cleaner::windows_smoke
+```
+
+Windows 上有两个坑：
+
+- 需要 UAC 的路径（提权批量删除、HKLM 键删除、真实 MSI 卸载）**不在**冒烟里，自动化不能替人点「是」，仍按 `TODO(platform-verify:windows)` 人工验收。
+- 有些安全软件（火绒等）对「桌面 / 下载 / 临时目录里跑出来的新二进制」限制写用户目录，此时用例会直接失败并提示。绕过办法：把编译好的测试二进制复制到 `%LOCALAPPDATA%\Programs\` 下再跑，例如
+  `copy src-tauri\target\debug\deps\ws_workbench_lib-*.exe "%LOCALAPPDATA%\Programs\wswb-probe\smoke.exe"`，
+  然后在那个目录执行 `smoke.exe --ignored --test-threads=1 cleaner::windows_smoke`（记得同样带上 `CLEANER_SMOKE=1`）。临时目录（`%TEMP%`）被这类软件拦住时，`cargo test` 会大量报 `拒绝访问`，把 `TEMP`/`TMP` 指到仓库内的 `.tmp\test-temp` 即可。
+
 ### 重启
 
 改完代码要重启时用 `scripts/dev-restart.ps1`，它会先结束残留进程再拉起一份：
@@ -515,7 +536,7 @@ VPN 会话目录同时被主进程和提权 worker 使用，因此不做路径�
 - 域名分流只覆盖系统解析器（getaddrinfo）：自带 DoH/DoT 的应用不受控
 - Windows 上按域名解析出来的 `/32` 由本机转发器在回包前注入；NRPT 退回旧路径时最多晚约 3~15 秒生效。服务端下发的内网范围（默认域名 / split-include）只展示、不参与分流，所以不会再有「服务端一推就接管」的隐式路由
 - 规则与代理模式的改动都会热生效（worker 轮询 `rules.json` / `mode` 后重新布线），不需要断开重连
-- 系统清理的 Windows 运行时行为（注册表枚举、UAC 卸载、工作集/待机列表）只做了交叉编译检查，需按设计文档第 9 节的 Windows 清单实机验收；安装包的 NSIS 卸载钩子已实现并通过 `makensis` 编译检查（含新的 PowerShell 三类勾选界面），进程未退出则中止、勾选删除/保留数据、自定义附件目录提示仍需在 Windows 实机走一遍（计划见 `docs/superpowers/plans/2026-11-10-installer-uninstall.md` 的 Phase W）
+- 系统清理的 Windows 运行时行为已补实机冒烟：注册表三视图枚举、MSI/exe 卸载退出码映射、残留扫描与回收站删除、硬拒名单与 HKCU 键删除都有对应用例（`src-tauri/src/cleaner/windows_smoke.rs`，与 `macos_smoke.rs` 对称），2026-11-13 在 Windows 11 全绿；用法见下面「实机冒烟」。仍需人工验收的只剩需要点 UAC 的路径（提权批量删除、HKLM 键删除）与真实 MSI 应用卸载，按项目规则保留 `TODO(platform-verify:windows)` 并写明了验证步骤；安装包的 NSIS 卸载钩子已实现并通过 `makensis` 编译检查（含新的 PowerShell 三类勾选界面），进程未退出则中止、勾选删除/保留数据、自定义附件目录提示仍需在 Windows 实机走一遍（计划见 `docs/superpowers/plans/2026-11-10-installer-uninstall.md` 的 Phase W）
 - `~/.Trash` 内容受 TCC 保护，删除结果以「原路径消失 + trash API 成功」为准
 - 卸载残留只做精确匹配（bundle id / 注册表键 / 精确应用名），存在非标准目录的数据需要手动清理
 - 托盘快捷面板的原生弹出（真实点菜单栏图标）受 macOS 辅助功能/屏幕录制权限限制，自动化测试只覆盖了页面渲染、位置计算与 `cargo check`，首次使用请手动点一下确认弹窗位置与失焦收起

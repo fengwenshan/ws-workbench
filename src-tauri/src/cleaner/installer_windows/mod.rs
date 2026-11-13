@@ -16,9 +16,11 @@
 //! `display_icon_path` / `is_forbidden_install_dir`）只有 `registry.rs` 一份，
 //! 以 `pub(super)` 暴露给同目录的其它实现文件，不复制第二份。
 //!
-//! 对外符号沿用拆分前的路径（`crate::cleaner::installer_windows::…`）：纯逻辑在这里
-//! 按原可见性再导出，Windows 实现同样按原可见性再导出，调用方（`installer` /
-//! `running`）无需改动。
+//! 对外符号沿用拆分前的路径（`crate::cleaner::installer_windows::…`）：`list_apps` /
+//! `uninstall` / `scan_leftovers` / `related_files` / `install_root_candidates` 与
+//! `is_self_install` 在这里按原可见性再导出，调用方（`installer` / `running` /
+//! `related`）无需改动；`parse` 的纯逻辑由同目录文件用 `super::parse::…` 直接引用，
+//! 不经本模块转手（转出去只会是多一层没人用的 re-export）。
 
 mod parse;
 
@@ -31,13 +33,6 @@ mod related;
 #[cfg(target_os = "windows")]
 mod uninstall;
 
-// 这些符号只有 Windows 实现和真实调用方在用；macOS 的测试构建里仅编译
-// `parse` 本身，没人再导出它们，放行未使用导入。
-#[cfg_attr(not(target_os = "windows"), allow(unused_imports))]
-pub use parse::{
-    dedupe, format_install_date, parse_estimated_size, parse_uninstall_command, should_show,
-    split_windows_args, uninstall_kind, Hive, UninstallCommand, UninstallEntry,
-};
 // `is_self_install` 原本就是 `pub(crate)`（`installer.rs` 的 Windows 分支在用）：
 // macOS 的测试构建里没有调用方，单独放行未使用导入，理由与 `cleaner/mod.rs` 给
 // 本模块的 `allow(dead_code)` 相同。
