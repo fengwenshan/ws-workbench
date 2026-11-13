@@ -31,6 +31,9 @@ mod related;
 #[cfg(target_os = "windows")]
 mod uninstall;
 
+// 这些符号只有 Windows 实现和真实调用方在用；macOS 的测试构建里仅编译
+// `parse` 本身，没人再导出它们，放行未使用导入。
+#[cfg_attr(not(target_os = "windows"), allow(unused_imports))]
 pub use parse::{
     dedupe, format_install_date, parse_estimated_size, parse_uninstall_command, should_show,
     split_windows_args, uninstall_kind, Hive, UninstallCommand, UninstallEntry,

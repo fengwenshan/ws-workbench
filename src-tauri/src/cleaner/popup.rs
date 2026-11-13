@@ -25,8 +25,10 @@ use std::sync::{Arc, LazyLock, Mutex};
 use serde::{Deserialize, Serialize};
 
 /// 记录缓冲上限：拦截记录 + 当前可疑窗口
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 const HIT_LIMIT: usize = 300;
 /// 同一个窗口句柄两次动作之间的最小间隔
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 const RETRY_AFTER_MS: u64 = 5_000;
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -206,17 +208,20 @@ pub struct WindowFeatures {
     /// 每个进程里挑出来的主窗口，任何规则 / 智能拦截都不能碰
     pub is_main: bool,
     /// 相对屏幕的位置分类（右下窗口 / 中间窗口 / 任意位置）
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub position: String,
     pub width: i32,
     pub height: i32,
     pub class_name: String,
     pub title: String,
     pub process: String,
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub path: String,
 }
 
 #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
 impl WindowFeatures {
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub fn display_title(&self) -> String {
         clean_text(&self.title, 120)
     }
@@ -240,6 +245,7 @@ impl WindowFeatures {
 ///
 /// 这是「只拦应用弹出的广告窗、不拦应用本身」的兜底：即便用户对某进程加了
 /// `scope=app` 的规则，主窗口也会被跳过。
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
 pub fn mark_main_windows(items: &mut [(WindowFeatures, isize)]) {
     use std::collections::HashMap;
 
@@ -262,6 +268,7 @@ pub fn mark_main_windows(items: &mut [(WindowFeatures, isize)]) {
 }
 
 /// 窗口相对屏幕的位置。用于规则列表里的「弹窗位置」列，不参与匹配。
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
 pub fn position_of(
     left: i32,
     top: i32,
@@ -826,8 +833,10 @@ fn rule_summary(rule: &PopupRule) -> String {
 
 // ============================== 全局状态 ==============================
 
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 static NEXT_HIT_ID: AtomicU64 = AtomicU64::new(1);
 
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn next_hit_id() -> u64 {
     NEXT_HIT_ID.fetch_add(1, Ordering::Relaxed)
 }
