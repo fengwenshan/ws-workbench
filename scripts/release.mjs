@@ -5,6 +5,8 @@
  * 用法：
  *   node scripts/release.mjs                 # 构建当前平台 + 发布
  *   node scripts/release.mjs --no-publish    # 只构建，产物落在 release/
+ *   node scripts/release.mjs --no-publish --no-sign   # 没有签名私钥时：只出一个能装的包，
+ *                                            # 不生成 .sig、不写 updates/latest.json（仅本机试装）
  *   node scripts/release.mjs --dmg           # macOS 额外生成 dmg（Intel / Apple Silicon 各一份）
  *   node scripts/release.mjs --target x86_64-apple-darwin     # 在 Apple Silicon 上交叉编 Intel 版
  *   node scripts/release.mjs --target aarch64-apple-darwin    # Apple Silicon 版
@@ -45,8 +47,8 @@ import {
   statSync,
   symlinkSync,
 } from 'node:fs'
-import { join, dirname } from 'node:path'
-import { tmpdir } from 'node:os'
+import { join, dirname, resolve } from 'node:path'
+import { tmpdir, homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
 import { request as httpsRequest } from 'node:https'
@@ -60,7 +62,11 @@ const UPDATES_DIR = 'updates'
 const REPO = process.env.REPO || 'fengwenshan/ws-workbench'
 const BRANCH = process.env.GITHUB_BRANCH || 'main'
 const SKIP_PUBLISH = process.argv.includes('--no-publish')
-
+/**
+ * 跳过更新签名：只产出一个能装的安装包（本机试装用），不生成 `.sig`、不写
+ * `updates/latest.json`。没有签名私钥时用这条路径，别把它放进更新通道。
+ */
+const NO_SIGN = process.argv.includes('--no-sign')
 /** 更新清单的公开地址（公开仓库，无需凭据） */
 const RAW_BASE = `https://raw.githubusercontent.com/${REPO}/${BRANCH}/${UPDATES_DIR}`
 /** 发行版附件的下载地址前缀；URL 带 tag，长期稳定 */
@@ -80,8 +86,12 @@ const require = createRequire(import.meta.url)
  */
 const TAURI_CLI = require.resolve('@tauri-apps/cli/tauri.js')
 
-const KEY_PATH =
-  process.env.TAURI_SIGNING_PRIVATE_KEY_PATH || join(process.env.HOME || '', '.tauri/ws-workbench.key')
+// 私钥位置：默认 `~/.tauri/ws-workbench.key`，可用 TAURI_SIGNING_PRIVATE_KEY_PATH 覆盖。
+// 必须用 os.homedir()：Windows 上没有 HOME 环境变量，原来写 `join(process.env.HOME || '', …)`
+// 会退化成相对路径 `.tauri/ws-workbench.key`，于是「按提示生成到 ~/.tauri」也永远找不到。
+const KEY_PATH = process.env.TAURI_SIGNING_PRIVATE_KEY_PATH
+  ? resolve(process.env.TAURI_SIGNING_PRIVATE_KEY_PATH)
+  : join(homedir(), '.tauri', 'ws-workbench.key')
 
 /** 更新清单的固定文件名 */
 const ASSET_MANIFEST = 'latest.json'
@@ -106,6 +116,24 @@ function log(msg) {
 function fail(msg) {
   console.error(`\x1b[31m[release] 失败: ${msg}\x1b[0m`)
   process.exit(1)
+}
+
+/** 从 minisign 公钥文本里取 key id（`untrusted comment: minisign public key: XXXX`） */
+function minisignKeyId(text) {
+  const m = text.match(/minisign public key:\s*([0-9A-Fa-f]+)/)
+  return m ? m[1].toUpperCase() : ''
+}
+
+/** tauri.conf.json 里 updater.pubkey 的 key id；读不到就返回空串（不阻断构建） */
+function configuredUpdaterKeyId() {
+  try {
+    const conf = JSON.parse(readFileSync(join(TAURI_DIR, 'tauri.conf.json'), 'utf8'))
+    const encoded = conf?.plugins?.updater?.pubkey || ''
+    if (!encoded) return ''
+    return minisignKeyId(Buffer.from(encoded, 'base64').toString('utf8'))
+  } catch {
+    return ''
+  }
 }
 
 /** 当前构建目标的平台信息；product 用于精确匹配产物，避免选中改名前的旧文件 */
@@ -257,17 +285,39 @@ function build() {
   // 注意打包器只识别 TAURI_SIGNING_PRIVATE_KEY（内容或路径），
   // TAURI_SIGNING_PRIVATE_KEY_PATH 不生效，实测会报 "no private key"。
   let privateKey = process.env.TAURI_SIGNING_PRIVATE_KEY || ''
-  if (privateKey) {
+  if (NO_SIGN) {
+    log('--no-sign：跳过更新签名，产物只能本机试装（不生成 .sig，也不写 updates/latest.json）')
+    if (privateKey) log('提示：环境变量里其实有签名私钥，去掉 --no-sign 就能正常签名')
+  } else if (privateKey) {
     log('使用环境变量中的签名私钥')
   } else {
     if (!existsSync(KEY_PATH)) {
       fail(
         `找不到签名私钥: ${KEY_PATH}\n` +
-          '先执行: npx tauri signer generate -w ~/.tauri/ws-workbench.key'
+          `生成一对新密钥: npx tauri signer generate -w "${KEY_PATH}"\n` +
+          '（密钥设了密码时，再设环境变量 TAURI_SIGNING_PRIVATE_KEY_PASSWORD）\n' +
+          '优先找回原来那把私钥：换新密钥就得同步改 src-tauri/tauri.conf.json 的 ' +
+          'updater.pubkey，已装旧版本的机器会验签失败、再也收不到自动更新。'
       )
     }
     privateKey = readFileSync(KEY_PATH, 'utf8')
     log(`使用签名私钥: ${KEY_PATH}`)
+    // 私钥和配置里的 pubkey 必须是同一对。换了新密钥却忘了改配置时，包能装、
+    // 能发，但老客户端验签失败，症状要等用户点「检查更新」才暴露，这里提前拦住。
+    const pubPath = `${KEY_PATH}.pub`
+    if (existsSync(pubPath)) {
+      const configuredId = configuredUpdaterKeyId()
+      const keyId = minisignKeyId(readFileSync(pubPath, 'utf8'))
+      if (configuredId && keyId && configuredId !== keyId) {
+        fail(
+          '签名密钥与 tauri.conf.json 的 updater.pubkey 不是同一对\n' +
+            `  私钥: ${keyId}（${pubPath}）\n` +
+            `  配置: ${configuredId}（src-tauri/tauri.conf.json）\n` +
+            '用回原来那把私钥；确实要换密钥，就把 .pub 内容 Base64 后写进 updater.pubkey，' +
+            '并接受「已装旧版本的机器只能手动重装」。'
+        )
+      }
+    }
   }
 
   // 必须带 exec：package.json 里有个同名的 "tauri" 脚本（值为 "tauri dev"），
@@ -275,8 +325,11 @@ function build() {
   // 起来后永不退出，CI 会一直挂在构建步骤上、出不了安装包。
   const args = ['build']
   if (TARGET) args.push('--target', TARGET)
-  // 版本覆盖（合并到默认配置里，不改动源文件）
-  if (VERSION_OVERRIDE) args.push('--config', JSON.stringify({ version: VERSION_OVERRIDE }))
+  // 配置覆盖（合并到默认配置里，不改动源文件）：版本号 + 是否产出更新签名产物
+  const overrides = {}
+  if (VERSION_OVERRIDE) overrides.version = VERSION_OVERRIDE
+  if (NO_SIGN) overrides.bundle = { createUpdaterArtifacts: false }
+  if (Object.keys(overrides).length) args.push('--config', JSON.stringify(overrides))
   // 可用 TAURI_BUNDLES=app 跳过 dmg（例如受限环境无法创建 dmg 时）；
   // 更新通道只需要 .app.tar.gz，不依赖 dmg。
   if (process.env.TAURI_BUNDLES) args.push('--bundles', process.env.TAURI_BUNDLES)
@@ -287,7 +340,9 @@ function build() {
 
   log(`开始构建: tauri ${args.join(' ')}`)
 
-  const env = { ...process.env, TAURI_SIGNING_PRIVATE_KEY: privateKey }
+  const env = privateKey
+    ? { ...process.env, TAURI_SIGNING_PRIVATE_KEY: privateKey }
+    : { ...process.env }
 
   // 交叉编译 Windows 需要 llvm-rc（Tauri 用它编译资源文件）和 makensis。
   // Homebrew 的 llvm 是 keg-only，不在默认 PATH 里，这里自动补上，避免每次手动 export。
@@ -313,14 +368,14 @@ function findArtifacts(platform) {
   const files = readdirSync(dir)
   const bundle = files.find(platform.matchBundle)
   const sig = files.find(platform.matchSig)
-  if (!bundle || !sig) {
+  if (!bundle || (!sig && !NO_SIGN)) {
     fail(
       `在 ${dir} 里找不到安装包或签名文件\n` +
         `实际文件: ${files.join(', ')}\n` +
         '请确认 tauri.conf.json 的 bundle.createUpdaterArtifacts 为 true'
     )
   }
-  return { bundlePath: join(dir, bundle), sigPath: join(dir, sig) }
+  return { bundlePath: join(dir, bundle), sigPath: sig ? join(dir, sig) : '' }
 }
 
 /** 读取已提交的 latest.json，用于把另一个平台的条目合并进来 */
@@ -668,6 +723,18 @@ async function main() {
   build()
 
   const { bundlePath, sigPath } = findArtifacts(platform)
+
+  if (NO_SIGN) {
+    // 未签名产物不能进更新通道：客户端拿到没有 signature 的条目会直接拒绝更新。
+    if (!SKIP_PUBLISH) {
+      fail('--no-sign 只能配合 --no-publish 使用：更新通道只接受签名产物')
+    }
+    mkdirSync(OUT_DIR, { recursive: true })
+    copyFileSync(bundlePath, join(OUT_DIR, platform.assetFile))
+    log(`已导出 release/${platform.assetFile}（未签名，只能本机试装）`)
+    return
+  }
+
   const signature = readFileSync(sigPath, 'utf8').trim()
   if (!signature) fail('签名文件为空，构建可能没有正确签名')
 
