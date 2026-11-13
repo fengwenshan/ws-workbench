@@ -457,11 +457,6 @@ watch(
               </div>
             </div>
           </div>
-
-          <p class="muted">
-            文件默认直接保存到系统下载目录（macOS 为 ~/Downloads），重名自动加序号，不会覆盖已有文件。
-            <template v-if="snapshot.download_dir_custom">当前使用自定义目录。</template>
-          </p>
         </section>
 
         <!-- 待接收：别人发来的分享请求 -->
