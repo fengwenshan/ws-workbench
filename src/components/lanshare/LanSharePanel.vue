@@ -329,22 +329,6 @@ watch(
     <div class="lan-head">
       <div class="lan-title">
         <h3>局域网分享</h3>
-        <p>同一局域网里都打开本应用的设备会互相发现，选中设备就能把本机文件发过去。</p>
-      </div>
-      <div class="lan-head-actions">
-        <span class="lan-status" :class="statusClass">
-          <span class="lan-status-dot"></span>
-          {{ statusText }}
-          <template v-if="running && snapshot?.port">（端口 {{ snapshot.port }}）</template>
-        </span>
-        <button
-          class="btn"
-          :class="enabled ? 'btn-danger-ghost' : 'btn-primary'"
-          :disabled="!snapshot || toggling"
-          @click="toggleEnabled"
-        >
-          {{ toggling ? '处理中…' : enabled ? '关闭功能' : '开启功能' }}
-        </button>
       </div>
     </div>
 
@@ -415,6 +399,24 @@ watch(
                   </svg>
                 </button>
               </div>
+
+              <!-- 开关与状态放在卡片右上角 -->
+              <div class="local-actions">
+                <span class="lan-status" :class="statusClass">
+                  <span class="lan-status-dot"></span>
+                  {{ statusText }}
+                  <template v-if="running && snapshot?.port">（端口 {{ snapshot.port }}）</template>
+                </span>
+                <button
+                  class="btn btn-xs"
+                  :class="enabled ? 'btn-danger-ghost' : 'btn-primary'"
+                  type="button"
+                  :disabled="!snapshot || toggling"
+                  @click="toggleEnabled"
+                >
+                  {{ toggling ? '处理中…' : enabled ? '关闭功能' : '开启功能' }}
+                </button>
+              </div>
             </div>
 
             <div class="field">
@@ -437,19 +439,17 @@ watch(
               </span>
               <div class="dir-actions">
                 <button
-                  class="btn btn-secondary btn-xs"
+                  class="text-btn"
                   type="button"
                   :disabled="savingDir"
                   @click="chooseDownloadDir"
                 >
                   选择目录
                 </button>
-                <button class="btn btn-secondary btn-xs" type="button" @click="openDownloadDir">
-                  打开目录
-                </button>
+                <button class="text-btn" type="button" @click="openDownloadDir">打开目录</button>
                 <button
                   v-if="snapshot.download_dir_custom"
-                  class="btn btn-secondary btn-xs"
+                  class="text-btn"
                   type="button"
                   :disabled="savingDir"
                   @click="resetDownloadDir"
@@ -463,9 +463,6 @@ watch(
           <p class="muted">
             文件默认直接保存到系统下载目录（macOS 为 ~/Downloads），重名自动加序号，不会覆盖已有文件。
             <template v-if="snapshot.download_dir_custom">当前使用自定义目录。</template>
-          </p>
-          <p v-if="!enabled" class="muted">
-            功能已关闭：本机不会广播，也不会接受别人发来的文件。
           </p>
         </section>
 
@@ -625,31 +622,15 @@ watch(
   overflow: hidden;
 }
 
-/* 页头：标题 + 开关，和「系统」「设置」页同一套排版 */
+/* 页头：只留标题，开关与状态放进顶部状态卡 */
 .lan-head {
   flex-shrink: 0;
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
   padding: 16px 20px 12px;
   border-bottom: 1px solid var(--border-color);
 }
 .lan-title h3 {
   font-size: 16px;
   color: var(--text-primary);
-  margin-bottom: 4px;
-}
-.lan-title p {
-  font-size: 12px;
-  color: var(--text-muted);
-  line-height: 1.6;
-}
-.lan-head-actions {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-shrink: 0;
 }
 .lan-status {
   display: inline-flex;
@@ -772,6 +753,15 @@ watch(
 .field-alias {
   grid-column: 1 / -1;
 }
+/* 开关与状态：卡片右上角 */
+.local-actions {
+  margin-left: auto;
+  padding-left: 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
 .field .label {
   color: var(--text-muted);
   width: 64px;
@@ -857,12 +847,12 @@ watch(
   height: 15px;
 }
 
-/* 接收目录：路径省略 + 右侧操作按钮 */
+/* 接收目录：路径后面紧跟文字按钮，路径太长时优先省略路径 */
 .dir-field {
   grid-column: 1 / -1;
 }
 .dir-path {
-  flex: 1;
+  flex: 0 1 auto;
   min-width: 0;
   font-size: 12px;
   color: var(--text-secondary);
@@ -873,8 +863,27 @@ watch(
 .dir-actions {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 2px;
   flex-shrink: 0;
+}
+.text-btn {
+  padding: 2px 6px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--primary);
+  font-size: 12px;
+  line-height: 1.5;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s, color 0.15s;
+}
+.text-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+.text-btn:disabled {
+  color: var(--text-muted);
+  cursor: not-allowed;
 }
 
 .muted {
