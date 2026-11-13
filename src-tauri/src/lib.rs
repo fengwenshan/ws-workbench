@@ -329,23 +329,31 @@ pub(crate) fn on_frontend_ready(app: &AppHandle) {
 // （系统按菜单栏明暗染色，开发版的颜色和发布版完全一样），只在箱体正中镂空一个
 // 透明小圆点——镂空处透出菜单栏背景，不引入新颜色，18pt 见方、不比发布版宽。
 // Windows / Linux 托盘用右下角带 dev 角标的彩色应用图标（浅色任务栏上也认得出）。
+#[cfg(target_os = "macos")]
 fn tray_icon_image() -> Option<tauri::image::Image<'static>> {
-    let dev = is_dev_build();
-    let bytes: &'static [u8] = if cfg!(target_os = "macos") {
-        if dev {
-            // 开发版：模板图 + 正中镂空点，仍交给系统着色
-            include_bytes!("../icons/tray/tray-dev-template-36.png")
-        } else {
-            include_bytes!("../icons/tray/tray-template-36.png")
-        }
-    } else if cfg!(target_os = "windows") {
-        if dev {
-            include_bytes!("../icons/dev/32x32-dev.png")
-        } else {
-            include_bytes!("../icons/32x32.png")
-        }
-    } else if dev {
-        // Linux 托盘：带 dev 角标的彩色应用图标
+    // 模板图（黑 + 透明），系统按菜单栏明暗自动反色；开发版正中镂空一个点。
+    let bytes: &'static [u8] = if is_dev_build() {
+        include_bytes!("../icons/tray/tray-dev-template-36.png")
+    } else {
+        include_bytes!("../icons/tray/tray-template-36.png")
+    };
+    tauri::image::Image::from_bytes(bytes).ok()
+}
+
+#[cfg(target_os = "windows")]
+fn tray_icon_image() -> Option<tauri::image::Image<'static>> {
+    // Windows 用彩色应用图标（白色线条图在浅色任务栏上看不清）。
+    let bytes: &'static [u8] = if is_dev_build() {
+        include_bytes!("../icons/dev/32x32-dev.png")
+    } else {
+        include_bytes!("../icons/32x32.png")
+    };
+    tauri::image::Image::from_bytes(bytes).ok()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn tray_icon_image() -> Option<tauri::image::Image<'static>> {
+    let bytes: &'static [u8] = if is_dev_build() {
         include_bytes!("../icons/dev/32x32-dev.png")
     } else {
         include_bytes!("../icons/tray/tray-white-48.png")
@@ -367,11 +375,10 @@ fn set_dock_icon() {
     let Some(mtm) = MainThreadMarker::new() else {
         return;
     };
-    let bytes: &'static [u8] = if is_dev_build() {
-        include_bytes!("../icons/dev/icon-dev.png")
-    } else {
-        include_bytes!("../icons/icon-source.png")
-    };
+    #[cfg(debug_assertions)]
+    let bytes: &'static [u8] = include_bytes!("../icons/dev/icon-dev.png");
+    #[cfg(not(debug_assertions))]
+    let bytes: &'static [u8] = include_bytes!("../icons/icon-source.png");
     let data = NSData::with_bytes(bytes);
     let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) else {
         return;
@@ -385,17 +392,20 @@ fn set_dock_icon() {
 // 窗口图标，不会跟着托盘图标走；macOS 上 set_icon 是 no-op，Dock 由
 // set_dock_icon 负责，所以这里不用按平台分支。
 fn set_dev_window_icon<R: Runtime>(app: &AppHandle<R>) {
-    if !is_dev_build() {
-        return;
-    }
-    let Some(window) = app.get_webview_window("main") else {
-        return;
-    };
-    if let Ok(icon) =
-        tauri::image::Image::from_bytes(include_bytes!("../icons/dev/128x128@2x-dev.png"))
+    // 发布包不编入 dev 图标字节；开发版才需要。
+    #[cfg(debug_assertions)]
     {
-        let _ = window.set_icon(icon);
+        let Some(window) = app.get_webview_window("main") else {
+            return;
+        };
+        if let Ok(icon) =
+            tauri::image::Image::from_bytes(include_bytes!("../icons/dev/128x128@2x-dev.png"))
+        {
+            let _ = window.set_icon(icon);
+        }
     }
+    #[cfg(not(debug_assertions))]
+    let _ = app;
 }
 
 // macOS 顶部菜单栏汉化（Tauri 默认菜单是英文的）

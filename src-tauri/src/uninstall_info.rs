@@ -17,7 +17,10 @@ const VERSION: &str = "1";
 /// Windows 卸载器的数据勾选脚本（内容见 `resources/windows/`）。
 /// 卸载器按固定文件名调用，脚本输出用户勾选结果；macOS 用 .command 里的
 /// `choose from list`，不需要这个文件。
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+///
+/// 只在 Windows 下 include：这个常量会把 PowerShell 脚本文本编进二进制，
+/// 不能让它出现在 macOS 产物里（测试用 `include_str!` 单独校验内容）。
+#[cfg(target_os = "windows")]
 const CHOOSE_DATA_SCRIPT: &str = include_str!("../resources/windows/uninstall-choose-data.ps1");
 #[cfg(target_os = "windows")]
 const CHOOSE_DATA_SCRIPT_FILE: &str = "uninstall-choose-data.ps1";
@@ -384,12 +387,14 @@ mod tests {
 
     #[test]
     fn windows_choose_script_matches_uninstaller_protocol() {
+        // 测试直接读资源文件，保证 macOS 测试也能校验；常量本身只在 Windows 编译。
+        let script = include_str!("../resources/windows/uninstall-choose-data.ps1");
         // NSIS 按这个输出格式解析用户勾选：data/upload/cache 三个开关。
         for key in ["data=$data", "upload=$uploadDel", "cache=$cache"] {
-            assert!(CHOOSE_DATA_SCRIPT.contains(key), "missing {key}");
+            assert!(script.contains(key), "missing {key}");
         }
         // 输出文件固定；取消时写 cancel=1 表示全部保留。
-        assert!(CHOOSE_DATA_SCRIPT.contains("ws-wb-uninstall-selection.txt"));
-        assert!(CHOOSE_DATA_SCRIPT.contains("cancel=1"));
+        assert!(script.contains("ws-wb-uninstall-selection.txt"));
+        assert!(script.contains("cancel=1"));
     }
 }
