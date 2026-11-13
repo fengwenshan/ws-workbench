@@ -1,6 +1,7 @@
 #!/bin/bash
 # ws-workbench 卸载程序（macOS）
-# 由 DMG 提供；先确认所有进程退出，再展示数据/附件路径，默认保留数据。
+# 由 DMG 提供；先确认所有进程退出，再展示数据/附件路径，并多选勾选要清除
+# 的数据类别（默认全部保留）。
 set -u
 set -o pipefail
 
@@ -208,34 +209,93 @@ fi
 upload_note=""
 [ "$upload_custom" = "1" ] && upload_note="（自定义）"
 
-# 3. 确认数据策略
-choice="$(dialog "卸载 ws-workbench" \
-"应用：$APP_PATH
+# 3. 选择要删除的数据类别（多选勾选；默认全不选 = 保留）
+data_label="设置、数据库与剪贴板历史"
+upload_label="附件目录"
+cache_label="缓存、日志与偏好设置"
 
-以下为 App 自有数据，默认保留：
+delete_data=0
+delete_upload=0
+delete_cache=0
+if [ "$DRY_RUN" = "1" ]; then
+    # 测试/自动化：keep 保留；all 删全部；其余按逗号分隔的类别（data,upload,cache）
+    case "$DRY_RUN_DATA" in
+        ""|keep) ;;
+        all) delete_data=1; delete_upload=1; delete_cache=1 ;;
+        *)
+            case ",$DRY_RUN_DATA," in
+                *,data,*) delete_data=1 ;;
+            esac
+            case ",$DRY_RUN_DATA," in
+                *,upload,*) delete_upload=1 ;;
+            esac
+            case ",$DRY_RUN_DATA," in
+                *,cache,*) delete_cache=1 ;;
+            esac
+            ;;
+    esac
+else
+    WS_TITLE="卸载 ws-workbench"
+    WS_MSG="应用：$APP_PATH
+
+以下为 App 自有数据，默认全部保留：
 $owned_data$owned_cache
 附件目录${upload_note}：$upload_dir
 
-是否同时删除这些用户数据？删除后附件/数据库不可恢复。" \
-"取消" "保留数据并卸载" "删除全部数据" "保留数据并卸载")"
-if [ "$DRY_RUN" = "1" ] && [ "$DRY_RUN_DATA" = "all" ]; then
-    choice="删除全部数据"
+勾选需要删除的类别（可多选；不勾选 = 保留全部数据）："
+    WS_ITEMS="$data_label|$upload_label|$cache_label"
+    chosen="$(WS_TITLE="$WS_TITLE" WS_MSG="$WS_MSG" WS_ITEMS="$WS_ITEMS" \
+        osascript 2>/dev/null <<'APPLESCRIPT'
+set textItems to text items of (system attribute "WS_ITEMS")
+set itemList to {}
+repeat with i in textItems
+    set end of itemList to contents of i
+end repeat
+set chosen to choose from list itemList with title (system attribute "WS_TITLE") with prompt (system attribute "WS_MSG") default items {} multiple selections allowed true OK button name "下一步" cancel button name "取消"
+if chosen is false then
+    return "CANCEL"
+end if
+set text item delimiters of AppleScript to "|"
+return (chosen as text)
+APPLESCRIPT
+)"
+    case "$chosen" in
+        CANCEL) cancel_no_delete "未卸载，未删除任何文件。" ;;
+    esac
+    case "$chosen" in
+        *"$data_label"*) delete_data=1 ;;
+    esac
+    case "$chosen" in
+        *"$upload_label"*) delete_upload=1 ;;
+    esac
+    case "$chosen" in
+        *"$cache_label"*) delete_cache=1 ;;
+    esac
 fi
-case "$choice" in
-    "删除全部数据")
-        if [ "$DRY_RUN" = "1" ]; then
-            confirm="确认删除"
-        else
-            confirm="$(dialog "确认删除全部数据" \
-                "附件、数据库、剪贴板图片和缓存将被永久删除，无法恢复。确认继续？" \
-                "取消" "确认删除" "" "取消")"
-        fi
-        [ "$confirm" = "确认删除" ] || cancel_no_delete "未删除数据，也未卸载应用。"
-        delete_data=1
-        ;;
-    "保留数据并卸载") delete_data=0 ;;
-    *) cancel_no_delete "未卸载，未删除任何文件。" ;;
-esac
+
+if [ "$delete_data" = "1" ] || [ "$delete_upload" = "1" ] || [ "$delete_cache" = "1" ]; then
+    summary=""
+    if [ "$delete_data" = "1" ]; then
+        printf -v line '\n  • 设置、数据库与剪贴板历史'
+        summary="$summary$line"
+    fi
+    if [ "$delete_upload" = "1" ]; then
+        printf -v line '\n  • 附件目录：%s' "$upload_dir"
+        summary="$summary$line"
+    fi
+    if [ "$delete_cache" = "1" ]; then
+        printf -v line '\n  • 缓存、日志与偏好设置'
+        summary="$summary$line"
+    fi
+    if [ "$DRY_RUN" = "1" ]; then
+        confirm="确认删除"
+    else
+        confirm="$(dialog "确认删除数据" \
+            "以下数据将被永久删除，无法恢复：$summary" \
+            "取消" "确认删除" "" "取消")"
+    fi
+    [ "$confirm" = "确认删除" ] || cancel_no_delete "未删除数据，也未卸载应用。"
+fi
 
 # 4. 删除前最后确认进程归零
 [ -z "$(app_pids)" ] || fail_no_delete "确认期间应用被重新启动，未删除任何文件。"
@@ -252,34 +312,41 @@ else
     log "已移到废纸篓：$DEST"
 fi
 
-# 6. 可选删除 App 自有数据
+# 6. 按勾选删除 App 自有数据
 custom_kept=""
 data_failures=0
-if [ "$delete_data" = "1" ]; then
-    delete_one() {
-        local path="$1"
-        [ -z "$path" ] && return 0
-        case "$path" in
-            "$HOME"/*) ;;
-            *) log "跳过不在用户目录的路径：$path"; return 0 ;;
-        esac
-        [ -e "$path" ] || return 0
-        if [ "$DRY_RUN" = "1" ]; then
-            log "[dry-run] 删除 $path"
-        elif rm -rf -- "$path" 2>>"$LOG_FILE"; then
-            log "已删除 $path"
-        else
-            log "删除失败：$path"
-            data_failures=$((data_failures + 1))
-        fi
-    }
+deleted_any=0
 
-    for path in "${data_dirs[@]}"; do delete_one "$path"; done
-    if [ "${#cache_dirs[@]}" -gt 0 ]; then
-        for path in "${cache_dirs[@]}"; do delete_one "$path"; done
+delete_one() {
+    local path="$1"
+    [ -z "$path" ] && return 0
+    case "$path" in
+        "$HOME"/*) ;;
+        *) log "跳过不在用户目录的路径：$path"; return 0 ;;
+    esac
+    [ -e "$path" ] || return 0
+    if [ "$DRY_RUN" = "1" ]; then
+        log "[dry-run] 删除 $path"
+    elif rm -rf -- "$path" 2>>"$LOG_FILE"; then
+        log "已删除 $path"
+    else
+        log "删除失败：$path"
+        data_failures=$((data_failures + 1))
     fi
-    delete_one "$clipboard_dir"
+}
 
+if [ "$delete_data" = "1" ]; then
+    deleted_any=1
+    for path in "${data_dirs[@]}"; do delete_one "$path"; done
+    delete_one "$db_path"
+    delete_one "$clipboard_dir"
+fi
+if [ "$delete_cache" = "1" ]; then
+    deleted_any=1
+    for path in "${cache_dirs[@]}"; do delete_one "$path"; done
+fi
+if [ "$delete_upload" = "1" ]; then
+    deleted_any=1
     if [ "$upload_custom" = "1" ]; then
         owned=0
         for path in "${data_dirs[@]}"; do
@@ -289,6 +356,8 @@ if [ "$delete_data" = "1" ]; then
             custom_kept="$upload_dir"
             log "自定义附件目录不在 App 数据目录内，未自动删除：$upload_dir"
         fi
+    else
+        delete_one "$upload_dir"
     fi
 fi
 
@@ -298,11 +367,11 @@ if [ "$DRY_RUN" = "1" ]; then
     exit 0
 fi
 tips="卸载完成。应用已移到废纸篓。"
-if [ "$delete_data" = "1" ]; then
+if [ "$deleted_any" = "1" ]; then
     if [ "$data_failures" -gt 0 ]; then
         tips="$tips\n有 $data_failures 个数据目录删除失败，请查看日志：$LOG_FILE"
     else
-        tips="$tips\nApp 自有数据已删除。"
+        tips="$tips\n已删除勾选的数据。"
     fi
 else
     tips="$tips\n用户数据已保留。"

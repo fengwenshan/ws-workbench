@@ -2,17 +2,13 @@
 //!
 //! 设计见 docs/superpowers/specs/2026-11-07-system-tools-design.md 4.1。
 //!
-//! - macOS：IOKit `IOPMAssertionCreateWithName` 电源断言。系统断言
-//!   `PreventUserIdleSystemSleep` 常建；「允许屏幕关闭」关闭时再加
-//!   `PreventUserIdleDisplaySleep`。断言随进程退出自动回收，不需要 root/TCC。
-//! - Windows：`SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED
-//!   [| ES_DISPLAY_REQUIRED])` 由专用线程持有，停止时复位线程状态。
-//!   不需要管理员；不拦屏保/合盖/主动睡眠。
-//!
 //! 状态只在本进程内有效：应用退出（含崩溃）即释放，不做登录级保活。
 //!
 //! 自动规则（Triggers）在 `sleep::triggers` 里：指定 App 运行 / 接通电源 /
 //! 连接外接显示器时自动开启保持唤醒，条件不满足自动释放；手动开启优先。
+//!
+//! 本文件只放共享会话状态机与门面：平台实现在 `macos.rs` / `windows.rs` /
+//! `unsupported.rs`，两个平台文件互不引用。
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -21,6 +17,20 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 
 pub mod triggers;
+
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+mod unsupported;
+#[cfg(target_os = "windows")]
+mod windows;
+
+#[cfg(target_os = "macos")]
+use macos as platform;
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+use unsupported as platform;
+#[cfg(target_os = "windows")]
+use windows as platform;
 
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct KeepAwakeStatus {
@@ -52,7 +62,7 @@ struct Session {
     /// 每次 start/stop 自增；定时任务只释放自己那一代
     generation: u64,
     /// 平台资源，Drop 时释放
-    _guard: imp::Guard,
+    _guard: platform::Guard,
     origin: Origin,
 }
 
@@ -172,7 +182,7 @@ fn start_inner(
     };
 
     // 先建新断言：失败时保持原会话不变，避免「点了没反应还把旧的停了」
-    let guard = imp::acquire(allow_display_sleep)?;
+    let guard = platform::acquire(allow_display_sleep)?;
     let generation = GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     let started_at_ms = now_ms();
     let expires_at = duration.map(|secs| Instant::now() + std::time::Duration::from_secs(secs));
@@ -222,178 +232,23 @@ pub fn stop() -> Result<KeepAwakeStatus, String> {
     Ok(inactive_status())
 }
 
-// ============================== 平台实现 ==============================
+// ============================== 测试辅助 ==============================
 
-#[cfg(target_os = "macos")]
-mod imp {
-    use std::ffi::{c_void, CString};
-    use std::os::raw::c_char;
+/// 会话状态是进程级全局量，测试必须串行跑，否则互相把对方的会话停掉。
+/// 放在 `sleep` 模块层是因为平台文件里的测试也要用同一把锁。
+#[cfg(test)]
+static TEST_LOCK: Mutex<()> = Mutex::new(());
 
-    type CFStringRef = *const c_void;
-    type CFAllocatorRef = *const c_void;
-    type IOReturn = i32;
-
-    /// IOPMAssertionLevel = 255（kIOPMAssertionLevelOn）
-    const LEVEL_ON: u32 = 255;
-    const CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
-    /// 断言名：`pmset -g assertions` 里能看到，便于人工核对
-    const ASSERTION_NAME: &str = "ws-workbench Keep Awake";
-
-    #[link(name = "CoreFoundation", kind = "framework")]
-    extern "C" {
-        fn CFStringCreateWithCString(
-            allocator: CFAllocatorRef,
-            c_str: *const c_char,
-            encoding: u32,
-        ) -> CFStringRef;
-        fn CFRelease(cf: *const c_void);
-    }
-
-    #[link(name = "IOKit", kind = "framework")]
-    extern "C" {
-        fn IOPMAssertionCreateWithName(
-            assertion_type: CFStringRef,
-            level: u32,
-            assertion_name: CFStringRef,
-            assertion_id: *mut u32,
-        ) -> IOReturn;
-        fn IOPMAssertionRelease(assertion_id: u32) -> IOReturn;
-    }
-
-    fn cfstring(value: &str) -> Option<CFStringRef> {
-        let c_str = CString::new(value).ok()?;
-        let handle =
-            unsafe { CFStringCreateWithCString(std::ptr::null(), c_str.as_ptr(), CF_STRING_ENCODING_UTF8) };
-        (!handle.is_null()).then_some(handle)
-    }
-
-    fn create_assertion(assertion_type: &str) -> Option<u32> {
-        let type_ref = cfstring(assertion_type)?;
-        let name_ref = cfstring(ASSERTION_NAME)?;
-        let mut id: u32 = 0;
-        let result = unsafe { IOPMAssertionCreateWithName(type_ref, LEVEL_ON, name_ref, &mut id) };
-        unsafe {
-            CFRelease(type_ref);
-            CFRelease(name_ref);
-        }
-        (result == 0).then_some(id)
-    }
-
-    pub struct Guard {
-        system: u32,
-        display: Option<u32>,
-    }
-
-    pub fn acquire(allow_display_sleep: bool) -> Result<Guard, String> {
-        let system = create_assertion("PreventUserIdleSystemSleep")
-            .ok_or_else(|| "创建系统电源断言失败（IOPMAssertionCreateWithName）".to_string())?;
-        if allow_display_sleep {
-            return Ok(Guard {
-                system,
-                display: None,
-            });
-        }
-        match create_assertion("PreventUserIdleDisplaySleep") {
-            Some(display) => Ok(Guard {
-                system,
-                display: Some(display),
-            }),
-            None => {
-                unsafe { IOPMAssertionRelease(system) };
-                Err("创建屏幕电源断言失败（IOPMAssertionCreateWithName）".to_string())
-            }
-        }
-    }
-
-    impl Drop for Guard {
-        fn drop(&mut self) {
-            unsafe {
-                if let Some(display) = self.display.take() {
-                    IOPMAssertionRelease(display);
-                }
-                IOPMAssertionRelease(self.system);
-            }
-        }
-    }
+#[cfg(test)]
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    TEST_LOCK.lock().unwrap_or_else(|poison| poison.into_inner())
 }
 
-#[cfg(target_os = "windows")]
-mod imp {
-    use std::sync::mpsc::{channel, RecvTimeoutError, Sender};
-
-    use windows::Win32::System::Power::{
-        SetThreadExecutionState, ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED,
-        EXECUTION_STATE,
-    };
-
-    /// 持有 `ES_*` 状态的线程：`ES_CONTINUOUS` 要求线程活着并周期性重置
-    pub struct Guard {
-        tx: Option<Sender<()>>,
-        join: Option<std::thread::JoinHandle<()>>,
-    }
-
-    pub fn acquire(allow_display_sleep: bool) -> Result<Guard, String> {
-        let (tx, rx) = channel::<()>();
-        let flags = if allow_display_sleep {
-            ES_CONTINUOUS | ES_SYSTEM_REQUIRED
-        } else {
-            ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED
-        };
-        let join = std::thread::Builder::new()
-            .name("keepawake".into())
-            .spawn(move || {
-                let apply = |state: EXECUTION_STATE| unsafe {
-                    SetThreadExecutionState(state);
-                };
-                apply(flags);
-                loop {
-                    match rx.recv_timeout(std::time::Duration::from_secs(25)) {
-                        // 停止信号或调用方已释放：复位后退出
-                        Ok(()) | Err(RecvTimeoutError::Disconnected) => break,
-                        Err(RecvTimeoutError::Timeout) => apply(flags),
-                    }
-                }
-                apply(ES_CONTINUOUS);
-            })
-            .map_err(|err| format!("启动保持唤醒线程失败：{err}"))?;
-        Ok(Guard {
-            tx: Some(tx),
-            join: Some(join),
-        })
-    }
-
-    impl Drop for Guard {
-        fn drop(&mut self) {
-            if let Some(tx) = self.tx.take() {
-                let _ = tx.send(());
-            }
-            if let Some(join) = self.join.take() {
-                let _ = join.join();
-            }
-        }
-    }
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-mod imp {
-    /// 其它平台：没有实现，直接拒绝
-    pub struct Guard;
-
-    pub fn acquire(_allow_display_sleep: bool) -> Result<Guard, String> {
-        Err("当前平台不支持保持唤醒".into())
-    }
-}
+// ============================== 测试 ==============================
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// 会话状态是进程级全局量，测试必须串行跑，否则互相把对方的会话停掉
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
-
-    fn serial() -> std::sync::MutexGuard<'static, ()> {
-        TEST_LOCK.lock().unwrap_or_else(|poison| poison.into_inner())
-    }
 
     #[test]
     fn trigger_session_is_released_by_same_trigger() {
@@ -484,32 +339,6 @@ mod tests {
         assert!(second.active);
         assert!(second.allow_display_sleep);
         assert!(second.remaining_secs.is_some());
-        stop().expect("stop");
-    }
-
-    /// 手动验证：真实电源断言必须出现在 `pmset -g assertions` 里。
-    /// 跑法：`cargo test --lib cleaner::sleep::tests::manual_assertion_shows_in_pmset -- --ignored --nocapture`
-    #[test]
-    #[ignore = "需要真实系统电源断言，默认不跑"]
-    fn manual_assertion_shows_in_pmset() {
-        let _serial = serial();
-        let started = start(None, false).expect("start");
-        assert!(started.active);
-
-        let output = std::process::Command::new("pmset")
-            .args(["-g", "assertions"])
-            .output()
-            .expect("跑 pmset 失败");
-        let text = String::from_utf8_lossy(&output.stdout).to_string();
-        println!("{text}");
-
-        assert!(
-            text.contains("ws-workbench Keep Awake"),
-            "pmset 里应能看到断言名，实际输出：\n{text}"
-        );
-        assert!(text.contains("PreventUserIdleSystemSleep"));
-        assert!(text.contains("PreventUserIdleDisplaySleep"));
-        assert!(text.contains("PreventUserIdle"), "断言类型名应完整展示");
         stop().expect("stop");
     }
 

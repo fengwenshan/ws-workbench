@@ -3,11 +3,17 @@
 ; 目标与 macOS 的「卸载 ws-workbench.command」对齐：
 ;   1. 卸载前先确认 ws-workbench 进程全部退出；用户同意才强杀，杀不掉就中止，
 ;      绝不出现「程序删了、进程还在」的半完成状态。
-;   2. 展示 App 写下的真实数据/附件路径（uninstall-info.txt），默认保留数据；
-;      用户明确选择后才删除 App 自有目录。
+;   2. 读 App 写下的真实数据/附件路径（uninstall-info.txt），弹出三类多选框：
+;      设置/数据库/剪贴板历史、附件目录、缓存/日志/偏好设置；默认全不勾（保留），
+;      只删除用户勾选的类别。
 ;   3. 自定义附件目录只提示、不删除，避免误删共享目录。
 ;
 ; 静默卸载（/S）不做任何交互，按「保留数据」处理。
+;
+; TODO(platform-verify:windows): 勾选界面与删除结果需在真实 Windows 上验收；
+; 验证步骤：安装后运行 uninstaller，分别测试「全不勾」「只勾数据」「只勾缓存」
+; 「勾自定义附件」「取消勾选弹窗」「/S 静默卸载」；期望：全不勾保留所有数据，
+; 只删除勾选类别，自定义附件目录不被删除，静默卸载不删数据。
 ;
 ; 这个文件由 tauri.conf.json 的 bundle.windows.nsis.installerHooks 引入，
 ; 必须是带 BOM 的 UTF-8（NSIS 3 才会按 Unicode 解析中文）。
@@ -20,6 +26,9 @@ Var /GLOBAL wsWbInfo
 Var /GLOBAL wsWbInfoFile
 Var /GLOBAL wsWbCustom
 Var /GLOBAL wsWbTries
+Var /GLOBAL wsWbDelData
+Var /GLOBAL wsWbDelUpload
+Var /GLOBAL wsWbDelCache
 
 ; 检查 ws-workbench.exe（含提权 worker，同一个 exe）是否还在运行。
 ; 用 find 的退出码判断，避开 tasklist 本地化后的 "INFO: No tasks..." 文案。
@@ -97,6 +106,86 @@ Function un.wsWbLog
   Pop $1
 FunctionEnd
 
+; 数据勾选界面：Windows 用 PowerShell WinForms 实现多选，对齐 macOS 的 choose from list。
+; 脚本由 App 写在数据目录里（uninstall-choose-data.ps1），会读取 uninstall-info.txt
+; 展示真实路径；用户勾选结果写到 %APPDATA%\ws-wb-uninstall-selection.txt。
+; 静默卸载 / 脚本缺失 / 调用失败 / 用户取消：一律按「保留全部数据」处理。
+Function un.wsWbChooseData
+  StrCpy $wsWbDelData "0"
+  StrCpy $wsWbDelUpload "0"
+  StrCpy $wsWbDelCache "0"
+  ${If} ${Silent}
+    Return
+  ${EndIf}
+
+  StrCpy $0 "$APPDATA\com.ws.workbench\uninstall-choose-data.ps1"
+  ${IfNot} ${FileExists} "$0"
+    StrCpy $0 "$APPDATA\ws-workbench\uninstall-choose-data.ps1"
+  ${EndIf}
+  ${IfNot} ${FileExists} "$0"
+    Push "未找到数据勾选脚本，按保留数据处理"
+    Call un.wsWbLog
+    Return
+  ${EndIf}
+
+  Delete "$APPDATA\ws-wb-uninstall-selection.txt"
+  nsExec::ExecToStack 'powershell -NoProfile -STA -ExecutionPolicy Bypass -WindowStyle Hidden -File "$0"'
+  Pop $1
+  Pop $2
+
+  ${IfNot} ${FileExists} "$APPDATA\ws-wb-uninstall-selection.txt"
+    Push "未获得数据勾选结果，按保留数据处理"
+    Call un.wsWbLog
+    Return
+  ${EndIf}
+
+  ClearErrors
+  FileOpen $3 "$APPDATA\ws-wb-uninstall-selection.txt" r
+  IfErrors ws_wb_choose_done
+
+  ${Do}
+    FileRead $3 $4
+    ${If} $4 == ""
+      ${ExitDo}
+    ${EndIf}
+    ; 去掉行尾 CR/LF（FileRead 会把换行一起读进来）
+    ${Do}
+      StrCpy $5 $4 1 -1
+      ${If} $5 == "$\r"
+      ${OrIf} $5 == "$\n"
+        StrCpy $4 $4 -1
+      ${Else}
+        ${ExitDo}
+      ${EndIf}
+    ${Loop}
+    StrCpy $5 $4 5
+    ${If} $5 == "data="
+      StrCpy $6 $4 1 5
+      ${If} $6 == "1"
+        StrCpy $wsWbDelData "1"
+      ${EndIf}
+    ${EndIf}
+    StrCpy $5 $4 7
+    ${If} $5 == "upload="
+      StrCpy $6 $4 1 7
+      ${If} $6 == "1"
+        StrCpy $wsWbDelUpload "1"
+      ${EndIf}
+    ${EndIf}
+    StrCpy $5 $4 6
+    ${If} $5 == "cache="
+      StrCpy $6 $4 1 6
+      ${If} $6 == "1"
+        StrCpy $wsWbDelCache "1"
+      ${EndIf}
+    ${EndIf}
+  ${Loop}
+  FileClose $3
+  Delete "$APPDATA\ws-wb-uninstall-selection.txt"
+
+  ws_wb_choose_done:
+FunctionEnd
+
 !macro NSIS_HOOK_PREUNINSTALL
   ; 数据目录按当前用户定位；安装器固定 currentUser，这里再兜一次。
   SetShellVarContext current
@@ -144,34 +233,34 @@ FunctionEnd
 
   ws_wb_continue:
 
-  ; 2) 展示真实路径，问是否删除数据（默认保留）
+  ; 2) 勾选要清除的数据类别（默认全部保留）；静默卸载/脚本缺失都按保留处理。
   Call un.wsWbReadInfo
-  ${If} $wsWbInfo == ""
-    StrCpy $wsWbInfo "未找到路径清单（uninstall-info.txt），将只删除程序文件，保留用户数据。"
-  ${Else}
-    StrCpy $wsWbInfo "以下为 ws-workbench 的关联路径：$\r$\n$wsWbInfo"
-  ${EndIf}
-  ${If} $wsWbCustom == "1"
-    StrCpy $wsWbInfo "$wsWbInfo$\r$\n$\r$\n注意：检测到自定义附件目录。卸载程序不会删除它，请按上面的 upload_dir 自行处理。"
-  ${EndIf}
+  Call un.wsWbChooseData
 
-  MessageBox MB_YESNO|MB_DEFBUTTON2|MB_ICONQUESTION "$wsWbInfo$\r$\n$\r$\n是否同时删除 ws-workbench 的用户数据？$\r$\n删除后附件、数据库、剪贴板图片不可恢复。选择「否」将保留数据，只卸载程序。" IDYES ws_wb_delete IDNO ws_wb_keep
-
-  ws_wb_delete:
-    Push "用户选择删除用户数据"
+  ${If} $wsWbDelData == "1"
+    Push "用户选择删除数据目录（设置、数据库与剪贴板历史）"
     Call un.wsWbLog
     RMDir /r "$APPDATA\com.ws.workbench"
     RMDir /r "$APPDATA\ws-workbench"
+    RMDir /r "$PROFILE\.ws-workbench"
+  ${EndIf}
+  ${If} $wsWbDelCache == "1"
+    Push "用户选择删除缓存、日志与偏好设置"
+    Call un.wsWbLog
     RMDir /r "$LOCALAPPDATA\com.ws.workbench"
     RMDir /r "$LOCALAPPDATA\ws-workbench"
-    RMDir /r "$PROFILE\.ws-workbench"
-    Goto ws_wb_done
-
-  ws_wb_keep:
-    Push "用户选择保留用户数据"
+  ${EndIf}
+  ${If} $wsWbDelUpload == "1"
+  ${AndIf} $wsWbCustom == "1"
+    Push "自定义附件目录不自动删除，需用户按提示自行处理"
     Call un.wsWbLog
-
-  ws_wb_done:
+  ${EndIf}
+  ${If} $wsWbDelData != "1"
+  ${AndIf} $wsWbDelCache != "1"
+  ${AndIf} $wsWbDelUpload != "1"
+    Push "用户选择保留全部用户数据"
+    Call un.wsWbLog
+  ${EndIf}
 
   ws_wb_silent:
 !macroend

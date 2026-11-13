@@ -18,6 +18,24 @@ pub const GROUP_CACHE: &str = "cache";
 /// 分组固定顺序：程序文件 → 支持文件 → 缓存文件（设计 2）
 pub const GROUP_ORDER: [&str; 3] = [GROUP_PROGRAM, GROUP_SUPPORT, GROUP_CACHE];
 
+/// 默认勾选的 kind：只包含「删掉不影响设置/账号/文件」的清理项，以及卸载本体。
+///
+/// 用户数据（`app_data` / `preference` / `container` / `launch_agent` / `registry` /
+/// `shortcut` 等）默认**不勾选**：卸载默认保留设置、登录状态、插件配置，只有用户
+/// 显式切到「彻底删除」或手动勾选才清理。缓存/日志/崩溃报告删了可以重建，保持默认勾选。
+pub const DEFAULT_SELECTED_KINDS: &[&str] = &[
+    "app_bundle",
+    "install_dir",
+    "cache",
+    "log",
+    "crash_report",
+];
+
+/// 单个条目是否默认勾选：低置信度一律不勾，且只勾 [`DEFAULT_SELECTED_KINDS`]。
+pub fn default_selected(kind: &str, confidence: &str) -> bool {
+    confidence != "low" && DEFAULT_SELECTED_KINDS.contains(&kind)
+}
+
 /// 分组中文标签
 pub fn label_for_group(id: &str) -> &'static str {
     match id {
@@ -53,7 +71,8 @@ fn confidence_rank(confidence: &str) -> u8 {
 ///
 /// 规则（设计 3 / 4.2）：
 /// - 按路径去重（保留先出现的那条，平台侧已按高置信度优先生成）；
-/// - `selected = confidence != "low"`；
+/// - `selected = default_selected(kind, confidence)`：只默认勾选缓存/日志/崩溃报告
+///   与卸载本体，用户数据默认保留；
 /// - 分组顺序固定，空组剔除；
 /// - 组内按置信度再按路径排序；
 /// - 合计大小取所有条目（含默认不勾选的 low）。
@@ -68,11 +87,10 @@ pub(crate) fn build_related_files(
         .filter(|item| seen.insert(item.path.clone()))
         .collect();
     for item in items.iter_mut() {
-        // 默认勾选规则（设计 4.2/4.4）：high / medium 默认勾选；low 条目
-        // （深扫命中的厂商目录等）照常列出但不勾选，避免误删用户数据。
-        // 前端「全选」是用户显式动作，会把这些 low 条目的 path 一起传给
-        // `cleaner_delete_related`，届时按用户选择删除（仍受白名单限制）。
-        item.selected = item.confidence != "low";
+        // 默认勾选规则（设计 4.2/4.4）：只勾缓存/日志/崩溃报告与卸载本体；
+        // 设置、账号、插件配置等用户数据默认保留，必须由用户显式选择（前端
+        // 「彻底删除」或手动勾选）。低置信度条目同样不勾。
+        item.selected = default_selected(&item.kind, &item.confidence);
     }
 
     let total_bytes = items
@@ -225,11 +243,11 @@ mod tests {
         let program = &files.groups[0];
         assert_eq!(program.label, "程序文件");
         assert_eq!(program.items.len(), 1);
-        assert!(program.items[0].selected, "high 默认勾选");
+        assert!(program.items[0].selected, "程序文件（卸载本体）默认勾选");
 
         let support = &files.groups[1];
         assert_eq!(support.items.len(), 1);
-        assert!(support.items[0].selected, "medium 默认勾选");
+        assert!(!support.items[0].selected, "用户数据（设置/账号等）默认不勾选");
 
         let cache = &files.groups[2];
         assert_eq!(cache.items.len(), 2);
@@ -238,6 +256,35 @@ mod tests {
         assert!(cache.items[0].selected);
         assert_eq!(cache.items[1].confidence, "low");
         assert!(!cache.items[1].selected, "low 默认不勾选");
+    }
+
+    #[test]
+    fn default_selection_keeps_user_data() {
+        // 卸载本体与可重建的清理项默认勾选
+        for (kind, confidence) in [
+            ("app_bundle", "high"),
+            ("install_dir", "medium"),
+            ("cache", "high"),
+            ("log", "medium"),
+            ("crash_report", "high"),
+        ] {
+            assert!(default_selected(kind, confidence), "{kind} 应默认勾选");
+        }
+        // 用户数据默认保留：设置、账号、插件配置、启动项、注册表、快捷方式
+        for kind in [
+            "app_data",
+            "preference",
+            "container",
+            "launch_agent",
+            "registry",
+            "shortcut",
+        ] {
+            assert!(!default_selected(kind, "high"), "{kind} 不应默认勾选");
+        }
+        // 低置信度一律不勾
+        for kind in DEFAULT_SELECTED_KINDS {
+            assert!(!default_selected(kind, "low"), "{kind} low 不应默认勾选");
+        }
     }
 
     #[test]

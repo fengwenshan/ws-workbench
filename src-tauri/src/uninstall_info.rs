@@ -14,6 +14,14 @@ use crate::models::AppSettings;
 pub(crate) const FILE_NAME: &str = "uninstall-info.txt";
 const VERSION: &str = "1";
 
+/// Windows 卸载器的数据勾选脚本（内容见 `resources/windows/`）。
+/// 卸载器按固定文件名调用，脚本输出用户勾选结果；macOS 用 .command 里的
+/// `choose from list`，不需要这个文件。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+const CHOOSE_DATA_SCRIPT: &str = include_str!("../resources/windows/uninstall-choose-data.ps1");
+#[cfg(target_os = "windows")]
+const CHOOSE_DATA_SCRIPT_FILE: &str = "uninstall-choose-data.ps1";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct UninstallInfo {
     pub app_bundle: String,
@@ -237,6 +245,20 @@ pub(crate) fn refresh(app: &AppHandle, settings: &AppSettings) {
         if let Err(err) = write_private(&path, &text) {
             eprintln!("[uninstall-info] 写入 {} 失败: {}", path.display(), err);
         }
+        // Windows 卸载器的勾选界面：和清单放在同一目录，保证卸载时能找到。
+        // PowerShell 5.1 读无 BOM 的 .ps1 会按 ANSI 解析，中文标签必须带 BOM。
+        #[cfg(target_os = "windows")]
+        {
+            let script_path = dir.join(CHOOSE_DATA_SCRIPT_FILE);
+            let script = format!("\u{feff}{}", CHOOSE_DATA_SCRIPT);
+            if let Err(err) = write_private(&script_path, &script) {
+                eprintln!(
+                    "[uninstall-info] 写入 {} 失败: {}",
+                    script_path.display(),
+                    err
+                );
+            }
+        }
     }
 }
 
@@ -358,5 +380,16 @@ mod tests {
             assert!(text.contains(key), "missing {key}");
         }
         assert!(text.contains("upload_custom=0\n"));
+    }
+
+    #[test]
+    fn windows_choose_script_matches_uninstaller_protocol() {
+        // NSIS 按这个输出格式解析用户勾选：data/upload/cache 三个开关。
+        for key in ["data=$data", "upload=$uploadDel", "cache=$cache"] {
+            assert!(CHOOSE_DATA_SCRIPT.contains(key), "missing {key}");
+        }
+        // 输出文件固定；取消时写 cancel=1 表示全部保留。
+        assert!(CHOOSE_DATA_SCRIPT.contains("ws-wb-uninstall-selection.txt"));
+        assert!(CHOOSE_DATA_SCRIPT.contains("cancel=1"));
     }
 }

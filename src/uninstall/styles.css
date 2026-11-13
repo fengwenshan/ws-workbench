@@ -295,6 +295,19 @@ button {
   transition: color 0.15s ease;
 }
 
+.related-group-hint {
+  flex: 0 1 auto;
+  min-width: 0;
+  margin-left: 8px;
+  color: var(--un-text-muted);
+  font-size: 11.5px;
+  line-height: 16px;
+  opacity: 0.8;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .related-group-head:hover .related-group-label {
   color: var(--un-text-secondary);
 }

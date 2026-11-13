@@ -3,7 +3,6 @@ import type {
   DeleteOutcome,
   ForceQuitOutcome,
   InstalledApp,
-  LeftoverItem,
   RelatedFiles,
   RunningState,
   UninstallOutcome,
@@ -42,19 +41,6 @@ export function uninstallApp(
   quitRunning = false,
 ): Promise<UninstallOutcome> {
   return invoke<UninstallOutcome>('cleaner_uninstall_app', { appId, quitRunning })
-}
-
-/** 扫描卸载残留；也允许对未卸载的应用做预览 */
-export function scanLeftovers(appId: string): Promise<LeftoverItem[]> {
-  return invoke<LeftoverItem[]>('cleaner_scan_leftovers', { appId })
-}
-
-/** 删除残留：后端白名单校验后逐条进废纸篓，需提权的合并成一次系统授权 */
-export function deleteLeftovers(
-  appId: string,
-  paths: string[],
-): Promise<DeleteOutcome> {
-  return invoke<DeleteOutcome>('cleaner_delete_leftovers', { appId, paths })
 }
 
 // ============================ 独立卸载窗口 ============================

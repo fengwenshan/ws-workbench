@@ -5,6 +5,8 @@ use tauri::{AppHandle, Emitter};
 use ignore::WalkBuilder;
 use crate::models::*;
 
+mod svn_platform;
+
 /// 检查路径中是否有任何组件含空格
 fn path_has_space(path: &Path) -> bool {
     path.components().any(|c| {
@@ -838,67 +840,15 @@ fn extract_repo_url(bytes: &[u8]) -> Option<String> {
         .map(|(url, _, _)| url)
 }
 
-/// svn 命令行可能不在 PATH 里：Windows 上 TortoiseSVN / SlikSVN 默认都不写 PATH，
-/// macOS 上 Homebrew / MacPorts 也可能只装了链接。这里按平台列一遍常见位置。
+/// svn 命令行候选路径（平台实现在 `svn_platform/`，macOS / Windows 各一份）。
 fn svn_command_candidates() -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = Vec::new();
-
-    #[cfg(target_os = "windows")]
-    {
-        let roots: Vec<PathBuf> = ["ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "LOCALAPPDATA"]
-            .iter()
-            .filter_map(|name| std::env::var_os(name).map(PathBuf::from))
-            .collect();
-        for root in roots {
-            for relative in [
-                r"TortoiseSVN\bin\svn.exe",
-                r"SlikSvn\bin\svn.exe",
-                r"VisualSVN Server\bin\svn.exe",
-                r"VisualSVN\bin\svn.exe",
-            ] {
-                let path = root.join(relative);
-                if path.is_file() {
-                    out.push(path);
-                }
-            }
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    for raw in ["/opt/homebrew/bin/svn", "/usr/local/bin/svn", "/usr/bin/svn"] {
-        let path = PathBuf::from(raw);
-        if path.is_file() {
-            out.push(path);
-        }
-    }
-
-    #[cfg(all(unix, not(target_os = "macos")))]
-    for raw in ["/usr/bin/svn", "/usr/local/bin/svn", "/snap/bin/svn"] {
-        let path = PathBuf::from(raw);
-        if path.is_file() {
-            out.push(path);
-        }
-    }
-
-    out
+    svn_platform::command_candidates()
 }
 
-/// 传给 svn 的路径文本。
-///
-/// Windows 的 `canonicalize` 会带 `\\?\` 前缀，svn.exe 不认这种写法，
-/// 会把目录当成不存在的路径直接失败。
+/// 传给 svn 的路径文本（平台实现在 `svn_platform/`：
+/// Windows 去掉 `canonicalize` 带出来的 `\\?\` 前缀，其它平台原样返回）。
 fn svn_path_argument(path: &Path) -> String {
-    let text = path.to_string_lossy().to_string();
-    #[cfg(target_os = "windows")]
-    {
-        if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
-            return format!(r"\\{}", rest);
-        }
-        if let Some(rest) = text.strip_prefix(r"\\?\") {
-            return rest.to_string();
-        }
-    }
-    text
+    svn_platform::path_argument(path)
 }
 
 /// 通过 svn 命令行读取工作副本地址（传入源目录本身，URL 才带仓库内路径）
@@ -1361,6 +1311,8 @@ mod tests {
         write_file(src.path(), "xmodules/pcip/module/lib/wps/Normal.dotm", "docm");
         write_file(src.path(), "xmodules/pcip/module/lib/weboffice/newDocument.docx", "docx");
         write_file(src.path(), "xmodules/pcip/module/lib/weboffice/legacyTemplate.doc", "doc");
+        write_file(src.path(), "xmodules/pcip/module/lib/ntko/ntkoControl.cab", "cab");
+        write_file(src.path(), "xmodules/pcip/module/lib/ntko/ntko_lib.ftl", "[#-- object --]");
         write_file(src.path(), "src/main.ts", "export {}");
         write_file(src.path(), "src/App.vue", "<template/>");
         write_file(src.path(), "styles/main.scss", "$a: 1;");
@@ -1393,6 +1345,8 @@ mod tests {
             "dist/xmodules/pcip/module/lib/wps/Normal.dotm",
             "dist/xmodules/pcip/module/lib/weboffice/newDocument.docx",
             "dist/xmodules/pcip/module/lib/weboffice/legacyTemplate.doc",
+            "dist/xmodules/pcip/module/lib/ntko/ntkoControl.cab",
+            "dist/xmodules/pcip/module/lib/ntko/ntko_lib.ftl",
         ] {
             assert!(entries.contains(&expect.to_string()), "缺少 {}: {:?}", expect, entries);
         }

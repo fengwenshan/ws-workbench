@@ -98,6 +98,14 @@ function toggleItem(item: RelatedFileItem, checked: boolean): void {
   emit('update:selected', next)
 }
 
+/** 分组说明：让「默认保留用户数据」在 UI 上有明确解释 */
+function groupHint(group: RelatedFileGroup): string {
+  if (group.id === 'program') return '应用本体与安装目录'
+  if (group.id === 'support') return '设置、账号、插件配置，默认保留'
+  if (group.id === 'cache') return '缓存、日志、崩溃报告，可安全清理'
+  return ''
+}
+
 /** 程序文件里的 .app 用应用图标，其余用文件夹/文档/注册表小图标 */
 function iconKind(item: RelatedFileItem): 'app' | 'registry' | 'doc' | 'folder' {
   if (item.kind === 'app_bundle') return 'app'
@@ -179,6 +187,7 @@ function iconKind(item: RelatedFileItem): 'app' | 'registry' | 'doc' | 'folder' 
           <span v-else-if="groupIndeterminate(group)" class="u-check-dash"></span>
         </button>
         <span class="related-group-label">{{ group.label }}</span>
+        <span class="related-group-hint">{{ groupHint(group) }}</span>
         <svg
           class="related-chevron"
           :class="{ 'is-collapsed': isCollapsed(group) }"

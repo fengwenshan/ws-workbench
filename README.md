@@ -17,6 +17,8 @@
 
 笔记用 `Vditor` 的即时渲染模式（IR）编辑，单栏所见即所得、边写边排版，交互参考 Typora：标题 / 列表 / 引用 / 表格 / 代码块即时呈现；工具栏末尾的铅笔按钮可在即时渲染与纯源码之间切换。光标落在表格里时，表格右侧会出现一个小工具条，点「↑ 行 / ↓ 行 / ← 列 / → 列」直接加行加列，不用切源码；代码块右上角的语言标签点开就是可搜索的语言选择列表（鼠标悬停在代码块上也会露出入口），选完立即换成对应语法高亮，不用进源码改围栏。内容 500 毫秒防抖后回写配置；切换实体或组件卸载前会把未落盘的修改补交一次。
 
+复制 / 剪切给的是**屏幕上看到的内容**（`text/plain` + `text/html`），不是 Markdown 源码：Vditor 自己的 copy 会把选区序列化成 Markdown，隐藏标记以 `\_`、`**`、反引号的形式进剪贴板，粘到公众号 / 密码管理器里就多出反斜杠（现场反馈：`Risen_typt@2022` 复制出来变成 `Risen\_typt@2022`）。现在复制走 IR DOM 的渲染层：去掉语法标记、还原代码块与链接（代码语言一并带上），应用内复制再粘贴能保住格式与围栏语言；源码模式下仍是原生的源码复制。另外从浏览器 / Word / 微信这类带 HTML 的来源粘贴时，Lute 的 `HTML2VditorIRDOM` 会把文本里的 `_` 转成转义节点存进正文；下划线夹在单词中间（`Risen_typt@2022`）这种多余转义会在粘贴和打开笔记时还原成普通字符，词边界上的下划线（`_init and foo_`，去掉反斜杠会被当成强调）保持转义不动。
+
 Vditor 的运行时资源（lute / highlight.js / i18n / 图标 / 内容主题）不走 CDN：`vite.config.ts` 里的 `vditorOfflineAssets` 插件在 dev 时从 `node_modules/vditor/dist` 直出 `/vditor/dist/*`，构建时拷进 `dist/vditor/dist/*` 随安装包一起发布。
 
 笔记页右侧是「大纲 / 附件」栏（默认显示大纲）：
@@ -30,7 +32,7 @@ Vditor 的运行时资源（lute / highlight.js / i18n / 图标 / 内容主题�
 
 - 选文件，或把文件拖到「上传」页任意位置（整个内容区都是投放区）；上传时加密成 `<upload_dir>/<uuid>.wst`，先写 `.tmp` 再原子改名，磁盘上不会出现明文副本
 - 容器格式 `WST1`：明文头（magic / 版本 / 原始大小）+ 若干 `SM4-CBC(PKCS7)` 帧 + HMAC-SM3 尾。分帧读写，内存占用近似常数，大文件不会整份读进内存
-- 上传目录：设置页全局默认目录 → App 私有 `<app_data_dir>/attachments`（未设置时按需创建）
+- 上传目录：设置页全局默认目录 → 数据目录下的 `attachments/`（未设置时按需创建；默认目录跟数据库同一个「数据仓库」，不可写时一起回退，见「数据与配置」）
 - 预览 = 应用内按需解密渲染（图像走 `wst-img` 协议，不生成明文临时文件）；下载 = 解密到指定路径；重命名只改元信息；删除会连同密文 blob 一起删
 - `⌘/Ctrl+P` 快速搜索命中附件时也走应用内预览，同样不在系统临时目录留明文副本
 - 上传与解密进度通过 `attachment-progress` 事件推给界面
@@ -67,17 +69,20 @@ const canPack = computed(() => projectType.value === 'layui')
 *.txt *.xml
 *.thm *.tjs *.dotm     # layui 模板 / 模板脚本 / WPS 控件模板
 *.doc *.docx           # WebOffice 新建正文的空白模板（旧版 / 新版 Word）
+*.cab                  # NTKO 正文控件的 ActiveX 安装包（IE）
+*.ftl                  # NTKO 控件模板（服务端 FreeMarker 片段）
 ```
 
 - 只列运行时真的会被请求的类型；`scss`/`ts`/`vue`/`map`/`md`、构建配置（`package.json`、`vite.config.*`）、设计源文件、压缩包这些开发期产物都不在里面
 - layui 特有：`.thm`（表单/列表模板，`rsViewRender.js` 按 `APP_ROOT + '/xmodules/.../**.thm'` 拉取）、`.tjs`（模板脚本）、`.dotm`（WPS 控件的 `Normal.dotm`）都是运行时资源，默认收
 - `.doc`/`.docx` 只收运行时真会 GET 的那类模板（`rsWebOffice.js` 用 `$.ajax` 拉 `weboffice/newDocument.doc(x)` 当新建正文模板，旧版 Word 模板是 `.doc`）；上传控件 accept 里出现的 `.pdf`/`.wps` 等字符串不算引用，工程里没有对应资源的仍不收
+- NTKO 正文控件相关：`.cab`（`rsOfficeRender.js` 的 `codebase` 指向 `xmodules/pcip/module/lib/ntko/ntkoControl.cab`，IE 下由浏览器请求安装）、`.ftl`（控件模板 `ntko_lib.ftl`，前端不直接请求，但这类工程常与静态资源同目录部署、由后端 include，漏了正文控件起不来）
 - **`.` 或 `_` 开头的路径段一律跳过**（任意层级，文件或目录都算）：`.svn`/`.git`/`.idea`/`.vscode`、`.DS_Store`、`_draft.html`、`partials/_header.html` 都由这一条硬规则兜住，不占规则名额
 - 匹配语义：不带 `/` 的规则按**文件名**匹配、任意层级都算（`*.png`）；带 `/` 的按**相对源目录的路径**匹配（`assets/**`、`js/app.js`）
 - 规则清空 = 视为未配置：除 `.`/`_` 开头的条目外全部打包（避免误删规则后打出空包）
 - 路径里含空格的文件始终跳过
 
-默认规则定义在 `src-tauri/src/models.rs` 的 `DEFAULT_INCLUDE`，带版本号（当前 `DEFAULT_INCLUDE_VERSION = 4`）：老配置（没有 include 字段）加载时自动补上默认集，之后用户自己删掉的规则不会被重新塞回去。「恢复默认」按钮调用 `get_default_include_rules` 取同一份清单。
+默认规则定义在 `src-tauri/src/models.rs` 的 `DEFAULT_INCLUDE`，带版本号（当前 `DEFAULT_INCLUDE_VERSION = 5`）：老配置（没有 include 字段）加载时自动补上默认集，之后用户自己删掉的规则不会被重新塞回去。「恢复默认」按钮调用 `get_default_include_rules` 取同一份清单。
 
 遍历由 `ignore::WalkBuilder` 完成，标准过滤全部关闭、不跟随符号链接；`.`/`_` 开头的条目在 `filter_entry` 里直接剪掉，包含规则用 `globset` 在遍历结果上过滤（文件名匹配 + 路径匹配两个集合）。相对路径中任一段含空格的文件会被跳过。输出目录与 zip 自身通过 `extra_excludes` 整棵子树剪掉，避免上一次的产物被再打一遍。
 
@@ -197,8 +202,8 @@ openconnect 探测失败时，代理页给出按平台区分的安装引导：ma
 
 左侧图标栏第四个工具（`⌘/Ctrl+4`），四个页签（弹窗拦截仅 Windows 可见）：
 
-- **软件卸载**：Windows 读注册表 `Uninstall` 键（HKLM 64/32 位、HKCU），macOS 扫 `/Applications` 与 `~/Applications`；支持按名称/发布者/位置搜索，按名称、大小、安装日期排序（顺序记在本地）。行内「卸载」打开独立卸载窗口（820×560，macOS 隐藏标题、红绿灯浮在内容上；Windows 自绘标题栏，与主界面一致）：按「程序文件 / 支持文件 / 缓存文件」列出关联文件——程序文件 = 主 `.app` + Spotlight/兜底目录找到的同 id 副本，支持/缓存复用残留规则；带大小、版本、置信度，high/medium 默认勾选，low 只列出不勾选，底部「全选」可全选，应用本体始终必选。点「确认删除」先只读检测是否在运行：不在运行直接执行；在运行弹二次确认（进程数与进程名），点「强制退出」先按平台正常退出（macOS `NSRunningApplication.terminate()`、Windows `CloseMainWindow()`），3 秒内退不干净就逐进程强杀（macOS `SIGKILL`、Windows `taskkill /PID … /T /F`），每 250ms 重新检测并补杀重启出来的新进程，全部进程消失后才继续（总上限约 20 秒，退不干净即中止并提示）。随后先跑应用自带卸载程序（macOS 主 `.app` 移入废纸篓；MSI 的 `/I` 自动换 `/X`，需要时一次 UAC），卸载完成后自动再扫一次残留——仍有残留就回到勾选页（提示「卸载已完成。重新扫描到 N 项残留」，主按钮变「清理残留」），没有残留直接进结果页——再按本次扫描白名单删除勾选的关联文件：卸载程序已删掉的路径记「跳过」不算失败，需 root 的条目走一次合并授权；结果页给出删除/跳过/失败明细，失败项可在结果页「重试清理」，卸载/删除后主列表自动刷新。运行中的应用本体不出现在列表里，命令层也会再拦一次——不能卸载自己。
-- **卸载 ws-workbench 自己**：macOS 安装包（DMG）里带「卸载 ws-workbench.command」。DMG 根目录另外还有「安装说明.txt」和「安装 ws-workbench.command」：双击后者会自动把 app 复制到 `/Applications`、执行 `sudo xattr -cr /Applications/ws-workbench.app` 清除隔离属性（未公证的包直接双击会被 Gatekeeper 拦成「已损坏」/「无法验证开发者」）并启动。卸载双击后先正常退出应用，退不掉会询问是否强制退出；**所有相关进程归零后才继续**，否则直接报「卸载失败」且不删除任何文件。继续后会列出应用本体、数据目录、附件上传目录、剪贴板图片和 WebView 缓存，默认**保留用户数据**，也可以选择「删除全部数据」（二次确认，附件/数据库删除后不可恢复）。自定义到应用数据目录之外的附件目录只提醒、不自动删；真实路径由应用启动/保存设置时写入 `uninstall-info.txt`（纯路径，不含密钥）。Windows 继续使用安装器自带的标准卸载器（设置 → 应用 → 卸载），安装包里的 NSIS 钩子会在删文件前检查 `ws-workbench.exe`（在运行就问是否强制退出，退不掉直接中止）、读取同一份 `uninstall-info.txt` 展示真实路径，默认保留用户数据，只有明确选择才删 App 自有目录，自定义附件目录只提示不删；静默卸载按保留数据处理。
+- **软件卸载**：Windows 读注册表 `Uninstall` 键（HKLM 64/32 位、HKCU），macOS 扫 `/Applications` 与 `~/Applications`；支持按名称/发布者/位置搜索，按名称、大小、安装日期排序（顺序记在本地）。行内「卸载」打开独立卸载窗口（820×560，macOS 隐藏标题、红绿灯浮在内容上；Windows 自绘标题栏，与主界面一致）：按「程序文件 / 支持文件 / 缓存文件」列出关联文件——程序文件 = 主 `.app` + Spotlight/兜底目录找到的同 id 副本，支持/缓存复用残留规则；带大小、版本、置信度：默认只勾缓存/日志/崩溃报告（可重建）和必须卸载的应用本体；设置、账号、插件配置等用户数据默认保留，点「彻底删除（含用户数据）」或手动勾选才会清理，low 只列出不勾选，底部「全选」可全选，应用本体始终必选。点「确认删除」先只读检测是否在运行：不在运行直接执行；在运行弹二次确认（进程数与进程名），点「强制退出」先按平台正常退出（macOS `NSRunningApplication.terminate()`、Windows `CloseMainWindow()`），3 秒内退不干净就逐进程强杀（macOS `SIGKILL`、Windows `taskkill /PID … /T /F`），每 250ms 重新检测并补杀重启出来的新进程，全部进程消失后才继续（总上限约 20 秒，退不干净即中止并提示）。随后先跑应用自带卸载程序（macOS 主 `.app` 移入废纸篓；MSI 的 `/I` 自动换 `/X`，需要时一次 UAC），卸载完成后自动再扫一次残留——仍有残留就回到勾选页（提示「卸载已完成。重新扫描到 N 项残留」，主按钮变「清理残留」），没有残留直接进结果页——再按本次扫描白名单删除勾选的关联文件：卸载程序已删掉的路径记「跳过」不算失败，需 root 的条目走一次合并授权；结果页给出删除/跳过/失败明细，失败项可在结果页「重试清理」，卸载/删除后主列表自动刷新。运行中的应用本体不出现在列表里，命令层也会再拦一次——不能卸载自己。
+- **卸载 ws-workbench 自己**：macOS 安装包（DMG）里带「卸载 ws-workbench.command」。DMG 根目录另外还有「安装说明.txt」和「安装 ws-workbench.command」：双击后者会自动把 app 复制到 `/Applications`、执行 `sudo xattr -cr /Applications/ws-workbench.app` 清除隔离属性（未公证的包直接双击会被 Gatekeeper 拦成「已损坏」/「无法验证开发者」）并启动。卸载双击后先正常退出应用，退不掉会询问是否强制退出；**所有相关进程归零后才继续**，否则直接报「卸载失败」且不删除任何文件。继续后列出应用本体、数据目录、附件上传目录、剪贴板图片和 WebView 缓存，并弹出多选勾选：设置/数据库/剪贴板历史、附件目录、缓存/日志/偏好设置三类，默认**全部不勾（保留）**，勾选的类别二次确认后删除（附件/数据库删除后不可恢复）。自定义到应用数据目录之外的附件目录只提醒、不自动删；真实路径由应用启动/保存设置时写入 `uninstall-info.txt`（纯路径，不含密钥）。Windows 继续使用安装器自带的标准卸载器（设置 → 应用 → 卸载），安装包里的 NSIS 钩子会在删文件前检查 `ws-workbench.exe`（在运行就问是否强制退出，退不掉直接中止）、读取同一份 `uninstall-info.txt`，并调用 App 写在数据目录里的 `uninstall-choose-data.ps1` 显示同样的三类多选框；勾选结果写在 `%APPDATA%\ws-wb-uninstall-selection.txt`，NSIS 按结果删除、未勾选一律保留，自定义附件目录只提示不删；静默卸载/勾选脚本缺失/调用失败都按保留数据处理。
 - **弹窗拦截**（仅 Windows）：火绒式的规则拦截。默认关闭，总开关持久化，开启后下次启动自动恢复；后台线程每 500ms `EnumWindows` 扫可见顶层窗口——**先匹配拦截规则**（进程必须一致，窗口类 / 标题子串可选，命中直接 `WM_CLOSE` / `SW_HIDE` 并记一条拦截记录），没有规则才走启发式打分（工具窗口 / 不抢焦点 / 始终置顶 / 无标题 / 尺寸异常 / 类名与标题广告线索 / 进程不在前台），可疑窗口进「可疑记录」等用户处理。对可疑弹窗点「拦截此类」会生成一条持久化规则（默认按「进程 + 窗口类」，同一个广告位换标题/素材也能拦；也可选「仅此弹窗」或「该程序全部」），之后同类弹窗出现即自动关闭；「从窗口添加」直接列出当前可见窗口挑选一个加规则，规则可停用 / 删除 / 立即执行，命中次数与最近命中时间落 `<data_dir>/popup-rules.json`。可选「智能拦截」（默认关）：没有命中规则时，按分数阈值 + 至少两条命中原因 + 系统保护表 + 忽略名单 + 每分钟上限自动处理，设置存 `popup-settings.json`；忽略名单（白名单）存 `popup-ignore.json`。界面用 exe 的版本信息取应用名和图标（取不到退回进程名 + 首字母色块）。不注入、不装驱动、不杀进程。
 - **屏幕休眠**：阻止系统空闲睡眠（参考 Amphetamine 的公开电源断言方案），并支持「自动保持规则」（Triggers）：指定 App 运行时 / 接通电源时 / 连接外接显示器时自动保持，条件失效自动释放；手动开启优先，规则只释放自己开的会话。规则存 `<data_dir>/sleep-triggers.json`，后台 5 秒探测一次（`sysinfo` 进程列表、`pmset -g batt` / `GetSystemPowerStatus`、CoreGraphics 活动屏幕数 / `GetSystemMetrics(SM_CMONITORS)`），全部只读、不需要管理员权限。macOS 用 IOKit `IOPMAssertionCreateWithName`（`PreventUserIdleSystemSleep`，不勾「允许屏幕关闭」时再加 `PreventUserIdleDisplaySleep`，断言名 `ws-workbench Keep Awake`）；Windows 用专用线程持有 `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED [| ES_DISPLAY_REQUIRED])`。时长按会话式菜单选（参考 Amphetamine 的「开启新会话」）：不限时 / 5·10·15·20·25·30·45 分钟 / 1·2·3·4·6·8·12 小时，或自定义小时+分钟，点时长立即开始一个会话，到点自动释放（状态查询还有一道惰性回收）；不需要 root / 管理员，也不做登录级保活。
 - **Hosts**：把系统 hosts 的完整内容直接读进等宽编辑器，想加什么行就加什么行，`⌘/Ctrl+S` 保存整份文件（保存前自动备份 + 一次系统授权，取消不会改动文件）。路径固定：macOS `/etc/hosts`，Windows `%SystemRoot%\System32\drivers\etc\hosts`；「备份 N」可展开最近 30 份备份并还原（路径见「打开目录」按钮的提示）。编辑器是 Monaco（VS Code 内核，本地打包、首次打开 Hosts 页签时懒加载）：行号对齐、注释 / IPv4 / IPv6 / 主机名高亮、非法地址标红，支持撤销重做、查找替换（`⌘/Ctrl+F`）、多光标与右键菜单。非 UTF-8 的 hosts 会拒绝编辑，避免写坏原有内容；CRLF 文件会保持原来的换行风格。
@@ -292,6 +297,26 @@ Vite 固定在 8790 端口并开启 `strictPort`，端口被占用会直接失�
 **样式里的 px 一律用偶数**（`11px` 写 `12px`，`13px` 写 `14px`）：缩放不是 100% 时，奇数尺寸会被摆到半个像素上，边框、图标、文字都会发虚。`1px` 的描边和分隔线是刻意留的发丝线，不受这条约束。
 
 注意别用 `pnpm tauri dev`。`package.json` 里有一个名为 `tauri` 的脚本（内容是 `tauri dev`），`pnpm tauri dev` 会被解析成 `pnpm run tauri dev`，最终执行 `tauri dev dev` —— 多出来的 `dev` 会被当成传给 runner 的附加参数，和预期行为不一致。
+
+### 平台代码分离
+
+Windows 与 macOS 的实现必须拆开写，禁止在共享文件里用 `cfg` 堆两个平台的业务分支——目的是修一个平台时别把另一个改坏：
+
+- 结构照 `src-tauri/src/vpn/platform/`：`mod.rs` 只做平台分派，`common.rs` 放平台无关逻辑，`macos.rs` / `windows.rs` 各自完整实现；两个平台文件之间不互相引用。
+- 共享层只留「拿掉系统调用、权限、注册表/plist、安装卸载机制后仍成立」的纯逻辑；系统 API 一律放对应平台文件。
+- 改动必须过 CI 的 `test-macos` / `test-windows` 两个 job。
+- 本机验证不了的代码用 `// TODO(platform-verify:windows): <待验证行为>；验证步骤：<命令/手动步骤>；期望：<结果>` 标记，换到该平台验证通过后再删；提权/删除/卸载等高风险路径不得带未验证 TODO 发版。
+
+软件卸载、屏幕休眠、hosts、剪贴板、项目打包的平台代码都已按此规范拆完（`mod.rs` 只做分派，平台文件内不再出现 `cfg(target_os)`，两个平台文件互不引用）：
+
+- 卸载：`cleaner/installer_macos/`、`cleaner/installer_windows/`（`mod.rs` 门面 + 纯解析 / 注册表或 bundle / 卸载 / 残留 / 关联文件子模块）、`cleaner/running/`、`cleaner/trash_guard/`；
+- 屏幕休眠：`cleaner/sleep/`（共享会话状态机；`macos.rs` 是 IOKit 电源断言、`windows.rs` 是 `SetThreadExecutionState`，`triggers/` 下 pmset + CoreGraphics 与 `GetSystemPowerStatus` + `GetSystemMetrics` 各一份）；
+- hosts：`hosts/file/`（共享读取与提权编排、`scripts.rs` 纯脚本文本生成；`macos.rs` osascript 提权、`windows.rs` UAC PowerShell 提权）；
+- 剪贴板：`clipboard/`（共享采集编排 / 快捷键 / 面板门面；`macos.rs` NSPasteboard + NSWorkspace，`windows.rs` Win32 剪贴板与焦点）；
+- 数据目录：`storage/`（共享迁移逻辑，`macos.rs` / `windows.rs` 只列旧目录候选）；
+- 项目打包：`packer/svn_platform/`（svn 候选路径与 Windows `\\?\` 前缀处理各一份）。
+
+门面分派（`cleaner/installer.rs`、`cleaner/related.rs`、`commands/cleaner*.rs`、`uninstall_info.rs` 里只影响门面/窗口装饰/脚本落盘的零散 `cfg`）属于允许写法。还没拆的共享文件（下一批按本规范处理）：`vpn/split.rs`、`vpn/route.rs`、`vpn/fulltunnel.rs`、`vpn/elevate.rs`、`vpn/worker.rs`、`vpn/credential.rs`、`vpn/script.rs`（`vpn/platform/` 只覆盖连接器探测那一块）、`commands/openwith.rs`、`crypto.rs`（钥匙串 / DPAPI）、`apps/finder.rs`、`process.rs` / `winps.rs`、`lib.rs` 的窗口/托盘/菜单、`cleaner/popup.rs`；`platform.rs` 本身是平台判定入口，不算。Windows 实机验收项已用 `TODO(platform-verify:windows)` 标注，发版前用 `grep -rn "TODO(platform-verify" src-tauri/src src-tauri/nsis src-tauri/resources` 清点（NSIS 钩子和 PowerShell 资源里的 TODO 不在 Rust 目录，别漏）。
 
 ### 重启
 
@@ -446,7 +471,9 @@ Gitee 仓库的默认分支可能是 `master`（Gitee 新建仓库默认）或 `
 
 前端写 localStorage 也一律走 `safeStorage`：值经 `vault_encrypt` 变成密文再落盘。
 
-数据库与设置文件都按以下顺序找可写目录，逐个做真实写入探测：`app_data_dir` → `app_config_dir` → `~/.ws-workbench` → `$HOME/.ws-workbench` → `cwd/.config`（开发兜底）；全部失败则退回进程内存，此时重启会丢数据。
+数据库与设置文件统一放在「标准数据仓库」：优先 `app_data_dir`（macOS `~/Library/Application Support/com.ws.workbench`，Windows `%APPDATA%\com.ws.workbench`），不可写时按 `app_config_dir` → 主目录点目录 → `cwd/.config`（开发兜底）逐级回退，全部失败则退回进程内存，此时重启会丢数据。
+
+旧版本的数据目录（产品名目录 `ws-workbench`、`~/.ws-workbench`、`%LOCALAPPDATA%\ws-workbench`）由 `storage` 模块在启动时自动识别并迁移：只搬 `config.json`、`ws-workbench.db`、`attachments/`、`clipboard-attachments/`、`vpn/` 这些业务数据，目标已有同名数据时不覆盖，搬空后删除旧目录；平台差异只在旧目录候选（`storage/macos.rs` / `storage/windows.rs`），搬运逻辑共享。
 
 附件元信息随所属分组/项目一起加密保存；密文 blob 就在上传目录里，文件名为 `<uuid>.wst`。备份时复制 `ws-workbench.db`、`config.json` 与上传目录即可。
 
@@ -487,7 +514,7 @@ VPN 会话目录同时被主进程和提权 worker 使用，因此不做路径�
 - 域名分流只覆盖系统解析器（getaddrinfo）：自带 DoH/DoT 的应用不受控
 - Windows 上按域名解析出来的 `/32` 由本机转发器在回包前注入；NRPT 退回旧路径时最多晚约 3~15 秒生效。服务端下发的内网范围（默认域名 / split-include）只展示、不参与分流，所以不会再有「服务端一推就接管」的隐式路由
 - 规则与代理模式的改动都会热生效（worker 轮询 `rules.json` / `mode` 后重新布线），不需要断开重连
-- 系统清理的 Windows 运行时行为（注册表枚举、UAC 卸载、工作集/待机列表）只做了交叉编译检查，需按设计文档第 9 节的 Windows 清单实机验收；安装包的 NSIS 卸载钩子已实现并通过编译，进程未退出则中止、保留/删除数据、自定义附件目录提示仍需在 Windows 实机走一遍（计划见 `docs/superpowers/plans/2026-11-10-installer-uninstall.md` 的 Phase W）
+- 系统清理的 Windows 运行时行为（注册表枚举、UAC 卸载、工作集/待机列表）只做了交叉编译检查，需按设计文档第 9 节的 Windows 清单实机验收；安装包的 NSIS 卸载钩子已实现并通过 `makensis` 编译检查（含新的 PowerShell 三类勾选界面），进程未退出则中止、勾选删除/保留数据、自定义附件目录提示仍需在 Windows 实机走一遍（计划见 `docs/superpowers/plans/2026-11-10-installer-uninstall.md` 的 Phase W）
 - `~/.Trash` 内容受 TCC 保护，删除结果以「原路径消失 + trash API 成功」为准
 - 卸载残留只做精确匹配（bundle id / 注册表键 / 精确应用名），存在非标准目录的数据需要手动清理
 - 托盘快捷面板的原生弹出（真实点菜单栏图标）受 macOS 辅助功能/屏幕录制权限限制，自动化测试只覆盖了页面渲染、位置计算与 `cargo check`，首次使用请手动点一下确认弹窗位置与失焦收起
@@ -509,7 +536,7 @@ src-tauri/src/
     cleaner_sleep.rs / cleaner_popup.rs
                    屏幕休眠 / 弹窗拦截（仅 Windows）的命令入口
     quick.rs       托盘快捷面板：隐藏、按页签内容调整高度、底部「显示主界面 / 退出」
-    clipboard.rs   剪贴板历史：changeCount 采集 / 运行时状态 / 面板显隐（macOS）
+    clipboard.rs   剪贴板历史命令层：changeCount 采集 / 运行时状态 / 面板显隐
     hosts.rs       Hosts 在线编辑：读取 / 保存 / 备份列表 / 还原（整文件写入）
   util/            通用能力层
     fs.rs          目录创建、文本读写、可写性探测
@@ -517,22 +544,25 @@ src-tauri/src/
   config.rs        配置读写：整份加密、写入目录多级回退、历史字段迁移
   crypto.rs        字符串密文信封（SM4-CBC + HMAC-SM3）与主密钥托管
   filecrypto.rs    附件流式加密容器 WST1
-  packer.rs        打包：遍历、包含规则过滤、复制、流式 ZIP
+  packer/          打包：遍历、包含规则过滤、复制、流式 ZIP；svn_platform/ 按平台定位 svn
   updates.rs       更新包断点续传下载 + minisign 校验（安装交给 updater 插件）
   models.rs        AppConfig / 分组 / 项目 / 附件元信息 / 默认包含规则
   platform.rs      操作系统判定
   netinfo.rs       本机网卡 MAC / IP（Windows 走 PowerShell，macOS/Linux 走 getifaddrs）
   process.rs/winps.rs  进程管理与 PowerShell 调用
   apps/            外部应用定位（finder / registry）
-  clipboard.rs     剪贴板历史核心：changeCount 采集、内容分类、面板定位（纯逻辑带单测）
-  clipboard/       rich.rs（HTML 图文抽取 / 还原 / 哈希 / 缩略图）、store.rs（SQLite 读写与附件路径）
-  hosts/           Hosts 在线编辑：内容校验（mod.rs）、备份（store.rs）、提权写入（file.rs）
+  clipboard/       剪贴板历史：mod.rs 共享采集/分类/快捷键/面板门面，
+                   macos.rs / windows.rs / unsupported.rs 平台实现；
+                   rich.rs（HTML 图文抽取 / 还原 / 哈希 / 缩略图）、store.rs（SQLite 读写与附件路径）
+  hosts/           Hosts 在线编辑：内容校验（mod.rs）、备份（store.rs）、
+                   提权写入在 file/ 下按平台拆（scripts.rs 放纯脚本文本生成）
   cleaner/         系统工具：安装列表/卸载/关联文件/残留扫描 + 屏幕休眠、弹窗拦截的后端
     related.rs     卸载窗口关联文件清单组装（分组 / 默认勾选 / 使用情况文案）
-    running.rs     运行检测、优雅退出与强制退出（sysinfo + NSRunningApplication / PowerShell CloseMainWindow，force_quit 先终止、退不掉再 SIGKILL / taskkill）
-    sleep.rs       防休眠（macOS IOKit 断言 / Windows SetThreadExecutionState）
+    installer_macos/ / installer_windows/  卸载实现，按平台拆
+    running/       运行检测、优雅退出与强制退出（macos.rs / windows.rs 各一份）
+    sleep/         防休眠（macos.rs IOKit 断言 / windows.rs SetThreadExecutionState；triggers/ 同结构）
+    trash_guard/   删除安全层（白名单 + 废纸篓 + 提权删除），平台实现已拆
     popup.rs       弹窗拦截（仅 Windows：规则匹配 + EnumWindows 轮询 + 启发式打分）
-    *_macos.rs / *_windows.rs  平台实现，按 cfg 拆文件
   vpn/
     models.rs      规则、规则集、VPN 配置、状态
     mod.rs         模块导出与数据目录名
@@ -571,7 +601,8 @@ src/
   api/             后端命令的类型化封装（config / project / system / attachments / apps / cleaner /
                    sleep / startup / popup / defaultapps / clipboard / hosts）
   editor/          Monaco 集成（hosts 语言 / 主题 / worker，首次打开 Hosts 页签才加载）
-  utils/           通用小工具（time / dialog / path / error / hostsTokens）
+  utils/           通用小工具（time / dialog / path / error / hostsTokens / note-text /
+                   note-assets / note-clipboard）
   types/           前后端共享的数据结构（含 cleaner / sleep / startup / popup / defaultapps / hosts / clipboard）
   quick/           托盘快捷面板（独立入口：quick.html + main.ts + QuickPanel.vue）
   clipboard/       剪贴板历史面板（独立入口：clipboard.html + main.ts + ClipboardPanel.vue）

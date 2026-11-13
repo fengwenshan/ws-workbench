@@ -296,8 +296,11 @@ fn push_project_candidates(candidates: &mut Vec<(String, std::path::PathBuf)>) {
     }
 }
 
-/// 写入候选目录：优先可持久化的用户位置（应用数据/配置目录、用户主目录），
-/// 最后才退到项目内目录（开发专用）。
+/// 写入候选目录：优先标准数据仓库（`app_data_dir`），写不了才逐级回退
+/// （`app_config_dir` → 主目录点目录），最后才退到项目内目录（开发专用）。
+///
+/// 旧版本可能把数据留在产品名目录 / `~/.ws-workbench`，启动时由
+/// `storage::migrate_on_startup` 自动搬到实际选中的标准目录。
 ///
 /// 这里刻意不含 TMPDIR / tmp：临时目录重启即失，一旦静默落盘，
 /// 用户就会看到"每次重启数据都没了"。

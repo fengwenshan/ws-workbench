@@ -3,12 +3,18 @@
 //! 文件划分（设计 7）：
 //! - `models`：对前端的数据契约；
 //! - `installer`：列表、卸载、残留的统一入口与缓存；
-//! - `installer_windows` / `installer_macos`：平台实现（`cfg` 拆文件）；
-//! - `trash_guard`：删除白名单与废纸篓/提权删除。
+//! - `installer_windows/` / `installer_macos/`：平台实现目录，`mod.rs` 只做门面，
+//!   子文件按职责拆（纯解析 / 注册表或 bundle / 卸载 / 残留 / 关联文件）；
+//! - `running/` / `trash_guard/`：运行状态与删除安全层，`mod.rs` 只放共享逻辑
+//!   与 `cfg` 分派，平台实现分别在 `macos.rs` / `windows.rs`，两平台文件互不引用；
+//! - `registry_id` / `paths`：平台无关的字符串与路径判定。
 //!
-//! 这里只放平台无关的公共小工具与 `CleanerState`，避免平台文件互相引用。
+//! 这里只放平台无关的公共小工具与 `CleanerState`，避免平台文件互相引用；
+//! 平台代码分离规范见 README「平台代码分离」。
 
 pub mod installer;
+pub(crate) mod paths;
+pub(crate) mod registry_id;
 pub mod related;
 pub mod running;
 pub mod trash_guard;

@@ -4,7 +4,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
-use tauri::{http, AppHandle, Emitter, Manager};
+use tauri::{http, AppHandle, Emitter};
 use uuid::Uuid;
 
 use crate::filecrypto;
@@ -22,6 +22,10 @@ fn emit_attachment_progress(app: &AppHandle, id: &str, done: u64, total: u64) {
 ///
 /// 分组/项目不再单独配置上传目录，由前端在展示「上传位置」行时调用，
 /// 保证展示路径与实际落盘位置一致。
+///
+/// 默认目录跟数据库走（`db::storage_dir`）：数据仓库不可写时会回退到候选
+/// 目录，附件必须和数据库在同一个目录，否则数据库写成功、附件写失败，
+/// 图文条目会被整条跳过。
 #[tauri::command]
 pub fn resolve_upload_dir(app: AppHandle, default_dir: Option<String>) -> Result<String, String> {
     if let Some(dir) = default_dir.as_deref() {
@@ -29,10 +33,7 @@ pub fn resolve_upload_dir(app: AppHandle, default_dir: Option<String>) -> Result
             return Ok(dir.to_string());
         }
     }
-    let base = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("获取应用数据目录失败: {}", e))?;
+    let base = crate::db::storage_dir(&app)?;
     Ok(base.join("attachments").to_string_lossy().to_string())
 }
 

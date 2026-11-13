@@ -6,6 +6,7 @@ import type { LogLevel } from '@/types'
 import { encryptUploadBytes, resolveUploadDir } from '@/api/attachments'
 import { noteImageUrl } from '@/utils/note-assets'
 import { parseNoteHeadings, countNoteWords } from '@/utils/note-text'
+import { buildNoteClipboard, unescapeIntrawordUnderscores } from '@/utils/note-clipboard'
 import { errorText } from '@/utils/error'
 
 const props = defineProps<{
@@ -44,6 +45,8 @@ let lastKnown = props.note ?? ''
 let ready = false
 let destroyed = false
 let emitTimer: number | undefined
+/** 粘贴后修正「词内下划线」转义的延时任务 */
+let escapeCleanupTimer: number | undefined
 /** 编辑器就绪前收到的插入请求 */
 let pendingInsert: string | null = null
 
@@ -170,6 +173,8 @@ function onReady() {
     pendingInsert = null
     insertMarkdown(md)
   }
+  // 老正文里可能已经存着 HTML 粘贴产生的 `\_`，打开时就地修正
+  scheduleEscapeCleanup()
 }
 
 onBeforeUnmount(() => {
@@ -193,6 +198,10 @@ onBeforeUnmount(() => {
   if (emitTimer) {
     window.clearTimeout(emitTimer)
     emitTimer = undefined
+  }
+  if (escapeCleanupTimer) {
+    window.clearTimeout(escapeCleanupTimer)
+    escapeCleanupTimer = undefined
   }
   // 卸载前把未落盘的内容补交，避免快速切换实体丢内容。
   // Vditor 的 input 回调要等 undoDelay，这里直接取编辑器当前值兜底。
@@ -260,6 +269,8 @@ function onEditorDomInput(event: Event) {
   const target = event.target
   if (!root || !(target instanceof Node) || !root.contains(target)) return
   applyLocalValue(editor.getValue())
+  // 粘贴带格式的 HTML 会产生 `\_` 转义节点，input 事件是插入完成的可靠时机
+  if (root.querySelector('[data-type="backslash"]')) cleanupEscapedUnderscores()
 }
 
 // 外部（切换实体 / 侧栏改正文）传入新笔记时同步到编辑器
@@ -278,6 +289,7 @@ watch(
     const editor = vditor.value
     if (ready && editor && editor.getValue() !== next) editor.setValue(next, true)
     refreshCodeLanguageHints()
+    scheduleEscapeCleanup()
   },
 )
 
@@ -309,6 +321,7 @@ function setMarkdown(md: string) {
   if (editor && editor.getValue() !== next) editor.setValue(next, true)
   syncTableOps()
   refreshCodeLanguageHints()
+  scheduleEscapeCleanup()
 }
 
 function focus() {
@@ -1022,10 +1035,85 @@ async function handleUpload(files: File[]): Promise<null> {
   return null
 }
 
+// ========== 复制 / 剪切：给出「看到的内容」而不是 Markdown 源码 ==========
+/**
+ * Vditor 的 IR 复制会把选区序列化成 Markdown（`\_`、`**`、反引号这些标记都会进剪贴板），
+ * 粘到别的应用里就多出反斜杠。这里接管 copy / cut，按渲染结果写 text/plain + text/html；
+ * 出任何意外都不拦截事件，退回 Vditor 自己的处理。
+ */
+function onCopyCut(event: ClipboardEvent) {
+  const host = hostRef.value
+  const editor = vditor.value
+  if (!host || !editor || !ready || destroyed) return
+  if (editor.getCurrentMode() !== 'ir') return
+  const selection = window.getSelection()
+  if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return
+  const range = selection.getRangeAt(0)
+  const root = host.querySelector<HTMLElement>('.vditor-ir pre.vditor-reset')
+  if (!root || !root.contains(range.commonAncestorContainer)) return
+  const data = event.clipboardData
+  if (!data) return
+
+  let payload: { text: string; html: string } | null = null
+  try {
+    payload = buildNoteClipboard(range)
+  } catch (e) {
+    emit('log', 'warn', `生成复制内容失败: ${errorText(e)}`)
+    return
+  }
+  if (!payload || (!payload.text && !payload.html)) return
+
+  event.preventDefault()
+  event.stopPropagation()
+  data.setData('text/plain', payload.text)
+  data.setData('text/html', payload.html)
+  // Vditor 的 cut 是「copy + execCommand('delete')」，拦截后要自己删掉选区
+  if (event.type === 'cut') document.execCommand('delete')
+}
+
+// ========== 粘贴后修正「词内下划线」的多余转义 ==========
+function irResetElement(): HTMLElement | null {
+  return hostRef.value?.querySelector<HTMLElement>('.vditor-ir pre.vditor-reset') ?? null
+}
+
+/** 去掉 HTML 粘贴写进 IR DOM 的 `\_`，正文落盘的内容和用户输入的才一致 */
+function cleanupEscapedUnderscores() {
+  const editor = vditor.value
+  if (!editor || !ready || destroyed) return
+  if (editor.getCurrentMode() !== 'ir') return
+  const root = irResetElement()
+  if (!root) return
+  if (unescapeIntrawordUnderscores(root) === 0) return
+  // 这是「把编辑器里的表示纠正回输入原文」，不是用户正在输入：直接同步并落盘，
+  // 不走防抖，也不把保存状态切成「编辑中…」
+  const value = editor.getValue()
+  if (value === lastKnown) return
+  if (emitTimer) {
+    window.clearTimeout(emitTimer)
+    emitTimer = undefined
+  }
+  content.value = value
+  lastKnown = value
+  editing.value = false
+  emit('change', value)
+  emit('update', value)
+}
+
+/** 粘贴 / 切换正文后延迟执行：等 Vditor 自己把 DOM 写完再改 */
+function scheduleEscapeCleanup(delay = 50) {
+  if (escapeCleanupTimer) window.clearTimeout(escapeCleanupTimer)
+  escapeCleanupTimer = window.setTimeout(() => {
+    escapeCleanupTimer = undefined
+    cleanupEscapedUnderscores()
+  }, delay)
+}
+
 // ========== 粘贴兜底 ==========
 // Vditor 自带的粘贴只认 clipboardData.files，个别 WebView 里图片只出现在
 // clipboardData.items 中，这里补一条兜底；有 files 时仍交给 Vditor 原生流程。
 function onPasteCapture(event: ClipboardEvent) {
+  // 不管粘贴进来的是文字还是图片，Vditor 处理完都检查一遍下划线转义
+  scheduleEscapeCleanup()
   const data = event.clipboardData
   if (!data) return
   if (Array.from(data.files ?? []).some(isImageFile)) return
@@ -1045,7 +1133,13 @@ function onPasteCapture(event: ClipboardEvent) {
 </script>
 
 <template>
-  <div class="note-editor" @paste.capture="onPasteCapture" @input="onEditorDomInput">
+  <div
+    class="note-editor"
+    @paste.capture="onPasteCapture"
+    @copy.capture="onCopyCut"
+    @cut.capture="onCopyCut"
+    @input="onEditorDomInput"
+  >
     <div ref="hostRef" class="note-editor-vditor"></div>
     <div
       v-if="tableOps"

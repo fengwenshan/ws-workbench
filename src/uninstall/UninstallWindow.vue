@@ -21,6 +21,7 @@ import type {
   CleanerProgress,
   DeleteOutcome,
   InstalledApp,
+  RelatedFileItem,
   RelatedFiles,
 } from '@/types/cleaner'
 import ForceQuitDialog from './ForceQuitDialog.vue'
@@ -41,6 +42,9 @@ import RelatedList from './RelatedList.vue'
  * 6. 卸载成功后自动再扫一次残留：有残留回到 ready（提示「卸载已完成」，
  *    按钮变为「清理残留」）让用户确认；没有残留直接进 done；
  * 7. `cleaner_delete_related` 删除勾选的关联文件，结果留在窗口内展示。
+ *
+ * 默认只勾缓存/日志/崩溃报告（后端 `DEFAULT_SELECTED_KINDS`），设置、账号、
+ * 插件配置等用户数据默认保留；用户可显式切到「彻底删除（含用户数据）」。
  */
 type Phase =
   | 'loading'
@@ -135,6 +139,45 @@ const allSelected = computed(
 const partlySelected = computed(
   () => selectedCount.value > 0 && !allSelected.value,
 )
+
+/**
+ * 默认/安全清理的 kind：缓存、日志、崩溃报告，以及卸载本体。
+ * 与后端 `related::DEFAULT_SELECTED_KINDS` 保持一致。
+ */
+const SAFE_CLEAN_KINDS = new Set(['app_bundle', 'install_dir', 'cache', 'log', 'crash_report'])
+
+function isSafeItem(item: RelatedFileItem): boolean {
+  return item.confidence !== 'low' && SAFE_CLEAN_KINDS.has(item.kind)
+}
+
+/**
+ * 当前勾选是否只包含安全清理项（即「保留用户数据」状态）。
+ * 用户手动勾选设置/账号类条目后会自动变为 false，提示条随之为「彻底删除」。
+ */
+const preserveData = computed(() =>
+  allItems.value.every((item) => !selected.value[item.path] || isSafeItem(item)),
+)
+
+/** 保留用户数据：只勾缓存/日志/崩溃报告 + 卸载本体 */
+function selectSafeOnly(): void {
+  const next: Record<string, boolean> = {}
+  for (const item of allItems.value) {
+    if (isSafeItem(item)) next[item.path] = true
+  }
+  selected.value = withPrimary(next)
+}
+
+/** 彻底删除：连同设置、账号、插件配置等用户数据一起勾选 */
+function selectEverything(): void {
+  const next: Record<string, boolean> = {}
+  for (const item of allItems.value) next[item.path] = true
+  selected.value = withPrimary(next)
+}
+
+function togglePreserveData(): void {
+  if (preserveData.value) selectEverything()
+  else selectSafeOnly()
+}
 
 const busyText = computed(() => {
   if (phase.value === 'quitting') return '正在强制退出…'
@@ -566,6 +609,24 @@ onUnmounted(() => {
           </span>
         </div>
 
+        <div
+          v-if="related && allItems.length > 0"
+          class="unwin-preserve"
+          :class="{ 'is-all': !preserveData }"
+        >
+          <span class="unwin-preserve-text">
+            <template v-if="preserveData">
+              默认保留设置、账号与插件配置，只清理缓存/日志等可重建文件。
+            </template>
+            <template v-else>
+              将连同设置、账号与插件配置一起删除，删除后不可恢复。
+            </template>
+          </span>
+          <button type="button" class="banner-btn" @click="togglePreserveData">
+            {{ preserveData ? '彻底删除（含用户数据）' : '改回保留用户数据' }}
+          </button>
+        </div>
+
         <div v-if="!related || allItems.length === 0" class="unwin-empty">
           <p>没有扫描到可以清理的关联文件。</p>
           <button type="button" class="btn btn-ghost" @click="load">重新扫描</button>
@@ -668,6 +729,31 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+/* 默认保留用户数据 / 彻底删除 的切换提示 */
+.unwin-preserve {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+  margin: 10px 40px 0;
+  padding: 8px 12px;
+  border: 1px solid rgba(0, 122, 255, 0.22);
+  border-radius: 8px;
+  background: rgba(0, 122, 255, 0.06);
+  color: var(--un-text-secondary);
+  font-size: 12.5px;
+}
+
+.unwin-preserve.is-all {
+  border-color: rgba(255, 149, 0, 0.38);
+  background: rgba(255, 149, 0, 0.1);
+}
+
+.unwin-preserve-text {
+  flex: 1;
+  min-width: 0;
+}
+
 /* 卸载后二次扫描的提示条 */
 .unwin-rescan-note {
   flex-shrink: 0;

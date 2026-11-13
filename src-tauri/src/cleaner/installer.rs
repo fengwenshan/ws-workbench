@@ -9,7 +9,9 @@
 use std::path::PathBuf;
 
 use super::models::*;
-use super::trash_guard::{self, split_registry_id};
+use super::paths::is_trash_path;
+use super::registry_id::split_registry_id;
+use super::trash_guard;
 
 /// 进度事件名（前端 `listen('cleaner-progress')`）
 pub const EVENT_PROGRESS: &str = "cleaner-progress";
@@ -314,25 +316,8 @@ pub fn delete_leftovers(
     delete_selected(&scanned, paths, MissingPolicy::Fail, "scan_leftovers", emit)
 }
 
-/// 是否位于废纸篓（`~/.Trash` 前缀，或任一路径组件为 `.Trash`）。
-///
-/// 关联文件删除永远不碰废纸篓：`trash_guard::trash_path` 对废纸篓内的路径走
-/// `remove_permanently`（永久删除），卸载窗口的「全选」若带上这些条目，等于
-/// 顺手清空用户废纸篓。扫描侧（`installer_macos::related_files`）已过滤，
-/// 这里再兜一层，保证即使白名单被污染也不会永久删除。
-fn in_trash(path: &str) -> bool {
-    let path = std::path::Path::new(path);
-    let under_home_trash = super::home_dir()
-        .map(|home| path.starts_with(home.join(".Trash")))
-        .unwrap_or(false);
-    under_home_trash
-        || path
-            .components()
-            .any(|component| component.as_os_str() == ".Trash")
-}
-
 /// 白名单过滤：只放行最近一次关联扫描里的路径，其余记失败。
-/// 废纸篓中的条目即使出现在白名单里也拒绝（见 [`in_trash`]）。
+/// 废纸篓中的条目即使出现在白名单里也拒绝（见 `paths::is_trash_path`）。
 fn filter_whitelisted(
     allowed: &std::collections::HashSet<&str>,
     paths: &[String],
@@ -349,7 +334,7 @@ fn filter_whitelisted(
                 path: path.clone(),
                 error: "不在本次扫描结果中".to_string(),
             });
-        } else if in_trash(path) {
+        } else if is_trash_path(std::path::Path::new(path)) {
             outcome.failed.push(DeleteFailure {
                 path: path.clone(),
                 error: "废纸篓中的条目不在关联文件删除范围内".to_string(),

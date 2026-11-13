@@ -146,7 +146,8 @@ pub struct RelatedFileItem {
     pub confidence: String,
     pub requires_elevation: bool,
     pub exists: bool,
-    /// 默认勾选：confidence != "low"（由 `related::build_related_files` 统一赋值）
+    /// 默认勾选：只勾缓存/日志/崩溃报告与卸载本体，用户数据默认保留
+    /// （由 `related::build_related_files` 统一赋值，见 `DEFAULT_SELECTED_KINDS`）
     pub selected: bool,
 }
 

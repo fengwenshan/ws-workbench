@@ -55,6 +55,17 @@ assert_contains "$log" "[dry-run] 移动"
 assert_not_contains "$log" "[dry-run] 删除"
 [ -f "$TMP/custom-attachments/user.wst" ]
 
+read -r code log <<<"$(run_case data_only "" data)"
+[ "$code" = "0" ] || { cat "$log"; exit 1; }
+assert_contains "$log" "[dry-run] 删除 $TMP/home/Library/Application Support/com.ws.workbench"
+assert_not_contains "$log" "WebKit"
+[ -f "$TMP/home/Library/WebKit/com.ws.workbench/cache" ]
+
+read -r code log <<<"$(run_case cache_only "" cache)"
+[ "$code" = "0" ] || { cat "$log"; exit 1; }
+assert_contains "$log" "WebKit"
+assert_not_contains "$log" "$TMP/home/Library/Application Support/com.ws.workbench/ws-workbench.db"
+
 read -r code log <<<"$(run_case all "" all)"
 [ "$code" = "0" ] || { cat "$log"; exit 1; }
 assert_contains "$log" "[dry-run] 删除"

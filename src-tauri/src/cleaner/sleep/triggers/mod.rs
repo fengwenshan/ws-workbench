@@ -12,9 +12,10 @@
 //! - 条件不再满足时，只会释放「规则自己开」的会话，不会误停手动会话；
 //! - 监控线程 5 秒一轮，命中/失效时通过事件 `sleep-triggers-changed` 通知界面。
 //!
-//! 平台探测：进程列表用 `sysinfo`（跨平台）；电源用 `pmset -g batt`（macOS）/
-//! `GetSystemPowerStatus`（Windows）；外接显示器用 CoreGraphics 活动屏幕数（macOS）/
-//! `GetSystemMetrics(SM_CMONITORS)`（Windows）。都是只读查询，不需要管理员权限。
+//! 平台探测：进程列表用 `sysinfo`（跨平台）；电源与外接显示器在 `macos.rs` /
+//! `windows.rs` / `unsupported.rs`：macOS 用 `pmset -g batt` / CoreGraphics 活动
+//! 屏幕数，Windows 用 `GetSystemPowerStatus` / `GetSystemMetrics(SM_CMONITORS)`。
+//! 两个平台文件互不引用；都是只读查询，不需要管理员权限。
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -23,6 +24,20 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use super::{release_trigger, start_from_trigger};
+
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+mod unsupported;
+#[cfg(target_os = "windows")]
+mod windows;
+
+#[cfg(target_os = "macos")]
+use macos as platform;
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+use unsupported as platform;
+#[cfg(target_os = "windows")]
+use windows as platform;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 const FILE_NAME: &str = "sleep-triggers.json";
@@ -195,8 +210,8 @@ pub struct ProbeResult {
 
 fn probe_conditions() -> ProbeResult {
     ProbeResult {
-        on_ac_power: probe_on_ac_power(),
-        external_display: probe_external_display(),
+        on_ac_power: platform::probe_on_ac_power(),
+        external_display: platform::probe_external_display(),
         processes: running_processes(),
     }
 }
@@ -230,51 +245,6 @@ fn running_processes() -> Vec<String> {
         .map(|process| process.name().to_string_lossy().to_string())
         .filter(|name| !name.is_empty())
         .collect()
-}
-
-#[cfg(target_os = "macos")]
-fn probe_on_ac_power() -> bool {
-    std::process::Command::new("pmset")
-        .args(["-g", "batt"])
-        .output()
-        .ok()
-        .map(|output| String::from_utf8_lossy(&output.stdout).contains("AC Power"))
-        .unwrap_or(false)
-}
-
-#[cfg(target_os = "macos")]
-fn probe_external_display() -> bool {
-    #[link(name = "CoreGraphics", kind = "framework")]
-    extern "C" {
-        fn CGGetActiveDisplayList(max_displays: u32, displays: *mut u32, count: *mut u32) -> i32;
-    }
-    let mut count: u32 = 0;
-    // 只问数量：不传数组，避免多一次分配
-    let status = unsafe { CGGetActiveDisplayList(0, std::ptr::null_mut(), &mut count) };
-    status == 0 && count > 1
-}
-
-#[cfg(target_os = "windows")]
-fn probe_on_ac_power() -> bool {
-    use windows::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
-    let mut status = SYSTEM_POWER_STATUS::default();
-    unsafe { GetSystemPowerStatus(&mut status) }.is_ok() && status.ACLineStatus == 1
-}
-
-#[cfg(target_os = "windows")]
-fn probe_external_display() -> bool {
-    use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CMONITORS};
-    unsafe { GetSystemMetrics(SM_CMONITORS) > 1 }
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn probe_on_ac_power() -> bool {
-    false
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn probe_external_display() -> bool {
-    false
 }
 
 // ============================== 持久化 + 全局状态 ==============================
@@ -616,7 +586,10 @@ mod tests {
             let _ = tx.send(());
         });
         assert!(
-            rx.recv_timeout(Duration::from_secs(2)).is_ok(),
+            // 这里验证的是「不等待锁」而不是速度：try_lock 失败后走真实探测，
+            // 并行跑测试时系统探测可能超过 2 秒，过短的超时会造成偶发失败。
+            // 真死锁会一直阻塞，10 秒足够区分。
+            rx.recv_timeout(Duration::from_secs(10)).is_ok(),
             "detected_snapshot 不应等待 MONITOR 锁"
         );
         drop(guard);

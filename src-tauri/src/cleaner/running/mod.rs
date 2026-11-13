@@ -1,16 +1,32 @@
-﻿//! 卸载前的运行状态检测与优雅退出。
+//! 卸载前的运行状态检测与优雅退出。
 //!
 //! 检测只读、不需要提权；退出先走平台原生「正常退出」通道，
 //! 5 秒内退不干净就失败，由卸载流程中止，不强制杀进程。
 //!
-//! 平台差异与 `installer_*` 保持同一套约定：公共逻辑（进程去重、路径匹配、
-//! 安装根校验、轮询）在 test cfg 下也会编进 macOS 测试，便于在 macOS 上验证
-//! Windows 专用纯逻辑。
+//! 本文件只放平台无关的纯逻辑与门面：平台实现在 `macos.rs` / `windows.rs`，
+//! 两个平台文件互不引用。进程去重、路径匹配、安装根校验、轮询在 test cfg 下
+//! 也会编进 macOS 测试，便于在 macOS 上验证 Windows 专用纯逻辑。
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::models::{CleanerProgress, ForceQuitOutcome, InstalledApp, RunningState};
+
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+mod unsupported;
+#[cfg(target_os = "windows")]
+mod windows;
+
+#[cfg(target_os = "macos")]
+use macos::{detect as platform_detect, kill as platform_kill, terminate as platform_terminate};
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+use unsupported::{
+    detect as platform_detect, kill as platform_kill, terminate as platform_terminate,
+};
+#[cfg(target_os = "windows")]
+use windows::{detect as platform_detect, kill as platform_kill, terminate as platform_terminate};
 
 pub(crate) const QUIT_TIMEOUT: Duration = Duration::from_secs(5);
 pub(crate) const QUIT_POLL: Duration = Duration::from_millis(250);
@@ -41,7 +57,11 @@ pub(crate) fn running_state_from(mut processes: Vec<RunningProcess>) -> RunningS
             names.push(name.to_string());
         }
     }
-    RunningState { running: !processes.is_empty(), processes: processes.len(), names }
+    RunningState {
+        running: !processes.is_empty(),
+        processes: processes.len(),
+        names,
+    }
 }
 
 /// 路径是否严格位于 root 之下（组件级比较，root 自身不算）。
@@ -97,7 +117,11 @@ pub(crate) fn is_usable_install_root(normalized: &str, public_roots: &[String]) 
     if public_roots.iter().any(|root| root == normalized) {
         return false;
     }
-    normalized.split('\\').filter(|segment| !segment.is_empty()).count() >= 2
+    normalized
+        .split('\\')
+        .filter(|segment| !segment.is_empty())
+        .count()
+        >= 2
 }
 
 /// 轮询直到进程清零；返回 true = 已全部退出。
@@ -250,7 +274,11 @@ pub fn force_quit(
     // 归零后再确认一次：极端情况下最后 250ms 内应用又被拉起来
     let state = running_state_from(platform_detect(app));
     let ok = remaining == 0 && !state.running;
-    let processes = if ok { 0 } else { state.processes.max(remaining) };
+    let processes = if ok {
+        0
+    } else {
+        state.processes.max(remaining)
+    };
     let message = if ok {
         format!("「{}」已全部退出", app.name)
     } else if timeout_message.is_empty() {
@@ -296,203 +324,16 @@ fn sysinfo_processes() -> Vec<RunningProcess> {
         .collect()
 }
 
-// ============================== macOS 平台 ==============================
-
-#[cfg(target_os = "macos")]
-fn mac_bundle_path(app: &InstalledApp) -> Option<PathBuf> {
-    app.id.strip_prefix("mac:").map(PathBuf::from)
-}
-
-/// macOS 检测：sysinfo 里 exe 在 `.app` 内的进程（覆盖 helper / XPC / 扩展）
-/// + `NSRunningApplication` 按 bundle id 找到的主应用，按 pid 去重。
-#[cfg(target_os = "macos")]
-fn platform_detect(app: &InstalledApp) -> Vec<RunningProcess> {
-    use objc2_app_kit::NSRunningApplication;
-    use objc2_foundation::NSString;
-
-    use std::collections::HashMap;
-
-    let Some(bundle) = mac_bundle_path(app) else {
-        return Vec::new();
-    };
-    let mut found: HashMap<u32, RunningProcess> = HashMap::new();
-    for process in sysinfo_processes() {
-        if let Some(exe) = &process.exe {
-            if path_within(exe, &bundle) {
-                found.insert(process.pid, process);
-            }
-        }
-    }
-    if let Some(info) = super::installer_macos::read_bundle_info(&bundle) {
-        if let Some(bundle_id) = info.bundle_id {
-            let ns_id = NSString::from_str(&bundle_id);
-            let running = NSRunningApplication::runningApplicationsWithBundleIdentifier(&ns_id);
-            for application in running.iter() {
-                let pid = application.processIdentifier() as u32;
-                let name = application
-                    .localizedName()
-                    .map(|name| name.to_string())
-                    .unwrap_or_else(|| app.name.clone());
-                found.entry(pid).or_insert(RunningProcess { pid, name, exe: None });
-            }
-        }
-    }
-    found.into_values().collect()
-}
-
-/// macOS 退出：优先按 bundle id 拿 `NSRunningApplication`，再按 pid 补 helper 实例，
-/// 逐个 `terminate()`（等价于点 Dock 菜单里的「退出」，应用可以弹保存确认框）。
-#[cfg(target_os = "macos")]
-fn platform_terminate(app: &InstalledApp, processes: &[RunningProcess]) {
-    use objc2::rc::Retained;
-    use objc2_app_kit::NSRunningApplication;
-    use objc2_foundation::NSString;
-
-    use std::collections::HashMap;
-
-    let mut handles: HashMap<libc::pid_t, Retained<NSRunningApplication>> = HashMap::new();
-    if let Some(bundle) = mac_bundle_path(app) {
-        if let Some(info) = super::installer_macos::read_bundle_info(&bundle) {
-            if let Some(bundle_id) = info.bundle_id {
-                let ns_id = NSString::from_str(&bundle_id);
-                let running = NSRunningApplication::runningApplicationsWithBundleIdentifier(&ns_id);
-                for application in running.iter() {
-                    handles.insert(application.processIdentifier(), application);
-                }
-            }
-        }
-    }
-    for process in processes {
-        let pid = process.pid as libc::pid_t;
-        if let Some(application) = NSRunningApplication::runningApplicationWithProcessIdentifier(pid) {
-            handles.insert(pid, application);
-        }
-    }
-    for application in handles.values() {
-        let _ = application.terminate();
-    }
-}
-
-/// macOS 强杀：逐 pid `SIGKILL`（`kill -9` 的等价调用）。
-///
-/// `kill` 失败（进程已退出 / 无权限）不影响后续轮询：下一轮 `detect` 会给出
-/// 真实状态，退不掉的进程最终由超时判定报出。
-#[cfg(target_os = "macos")]
-fn platform_kill(processes: &[RunningProcess]) {
-    for process in processes {
-        unsafe {
-            libc::kill(process.pid as libc::pid_t, libc::SIGKILL);
-        }
-    }
-}
-
-// ============================== Windows 平台 ==============================
-
-/// Windows 公共父目录：安装位置写成这些目录时不能用来判定进程归属。
-#[cfg(target_os = "windows")]
-fn public_roots() -> Vec<String> {
-    [
-        "PROGRAMFILES",
-        "ProgramW6432",
-        "ProgramFiles(x86)",
-        "PROGRAMDATA",
-        "APPDATA",
-        "LOCALAPPDATA",
-        "USERPROFILE",
-        "SystemDrive",
-    ]
-    .iter()
-    .filter_map(|name| std::env::var(name).ok())
-    .filter_map(|value| normalize_win_path(&value))
-    .collect()
-}
-
-/// 安装根候选：缓存里的 InstallLocation + 注册表里的 InstallLocation / DisplayIcon 目录。
-#[cfg(target_os = "windows")]
-fn install_roots(app: &InstalledApp) -> Vec<String> {
-    let public = public_roots();
-    let mut roots: Vec<String> = Vec::new();
-    let mut push = |raw: &str| {
-        let Some(root) = normalize_win_path(raw) else {
-            return;
-        };
-        if is_usable_install_root(&root, &public) && !roots.contains(&root) {
-            roots.push(root);
-        }
-    };
-    push(&app.install_location);
-    for candidate in super::installer_windows::install_root_candidates(&app.id) {
-        push(&candidate.to_string_lossy());
-    }
-    roots
-}
-
-/// Windows 检测：exe 在安装根内的进程都算该应用（主程序 + 辅助进程）。
-#[cfg(target_os = "windows")]
-fn platform_detect(app: &InstalledApp) -> Vec<RunningProcess> {
-    let roots = install_roots(app);
-    if roots.is_empty() {
-        return Vec::new();
-    }
-    sysinfo_processes()
-        .into_iter()
-        .filter(|process| {
-            let Some(exe) = process.exe.as_ref() else {
-                return false;
-            };
-            let Some(exe) = normalize_win_path(&exe.to_string_lossy()) else {
-                return false;
-            };
-            roots.iter().any(|root| win_path_within(&exe, root))
-        })
-        .collect()
-}
-
-/// Windows 退出：对主窗口发 `CloseMainWindow()`（等价于点窗口的关闭按钮），
-/// 不强制 `Stop-Process`；没有主窗口的进程会留给超时判定，由卸载流程中止。
-#[cfg(target_os = "windows")]
-fn platform_terminate(_app: &InstalledApp, processes: &[RunningProcess]) {
-    let pids = processes
-        .iter()
-        .map(|process| process.pid.to_string())
-        .collect::<Vec<_>>()
-        .join(",");
-    let script = format!(
-        "$pids = @({pids}); foreach ($p in $pids) {{ \
-         $proc = Get-Process -Id $p -ErrorAction SilentlyContinue; \
-         if ($proc) {{ $null = $proc.CloseMainWindow() }} }}"
-    );
-    let _ = crate::winps::run_with_timeout_ms(&script, std::time::Duration::from_secs(15));
-}
-
-/// Windows 强杀：`taskkill /PID <pid> /T /F`（含子进程树）。
-#[cfg(target_os = "windows")]
-fn platform_kill(processes: &[RunningProcess]) {
-    for process in processes {
-        let pid = process.pid.to_string();
-        let _ = crate::process::hidden("taskkill")
-            .args(["/PID", &pid, "/T", "/F"])
-            .output();
-    }
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn platform_detect(_app: &InstalledApp) -> Vec<RunningProcess> {
-    Vec::new()
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn platform_terminate(_app: &InstalledApp, _processes: &[RunningProcess]) {}
-
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn platform_kill(_processes: &[RunningProcess]) {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn proc(pid: u32, name: &str, exe: Option<&str>) -> RunningProcess {
-        RunningProcess { pid, name: name.into(), exe: exe.map(PathBuf::from) }
+        RunningProcess {
+            pid,
+            name: name.into(),
+            exe: exe.map(PathBuf::from),
+        }
     }
 
     #[test]
@@ -504,7 +345,10 @@ mod tests {
         ]);
         assert!(state.running);
         assert_eq!(state.processes, 2);
-        assert_eq!(state.names, vec!["Foo Helper".to_string(), "Foo".to_string()]);
+        assert_eq!(
+            state.names,
+            vec!["Foo Helper".to_string(), "Foo".to_string()]
+        );
     }
 
     #[test]

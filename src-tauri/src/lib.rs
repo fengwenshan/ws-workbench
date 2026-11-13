@@ -10,7 +10,7 @@ mod filecrypto;
 mod util;
 mod commands;
 mod cleaner;
-/// 剪贴板历史（macOS）
+/// 剪贴板历史（macOS / Windows）
 mod clipboard;
 /// Hosts 在线编辑（macOS + Windows）
 mod hosts;
@@ -19,6 +19,8 @@ pub mod apps;
 mod platform;
 mod netinfo;
 mod process;
+/// 标准数据目录约定与旧版本数据迁移
+mod storage;
 mod winps;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -1206,7 +1208,7 @@ pub fn run() {
             commands::quick_panel_resize,
             commands::quick_panel_show_main,
             commands::quick_panel_quit,
-            // 剪贴板历史（macOS）
+            // 剪贴板历史（macOS / Windows；其它平台不启用）
             commands::clipboard_page,
             commands::clipboard_search,
             commands::clipboard_stats,
@@ -1230,6 +1232,13 @@ pub fn run() {
             updates::update_install_resumed,
         ])
         .setup(|app| {
+            // 数据目录迁移必须早于任何 config/db 读取：旧版本的数据目录
+            // （产品名目录 / ~/.ws-workbench）统一搬到标准 app_data_dir。
+            // 迁移失败只打日志，不阻断启动。
+            if let Err(err) = crate::storage::migrate_on_startup(app.handle()) {
+                eprintln!("[storage] 旧数据目录迁移失败（不影响启动）: {err}");
+            }
+
             // 启动阶段只建主窗口，而且先隐藏（tauri.conf.json 里 main 是 visible: false）：
             // 前端首屏渲染完会调 `app_ready`，那时再显示。Windows 冷启动时 WebView2
             // 初始化 + setup 里的同步工作要好几秒，先亮一个白窗口会被系统标成

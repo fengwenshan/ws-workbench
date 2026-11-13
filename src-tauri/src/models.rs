@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 /// 面向 layui 工程的打包白名单：只放浏览器/控件运行时真的会请求的类型。
 /// `scss`/`ts`/`map`/`md`/设计源文件、构建配置这些开发期产物不在列表里；
 /// `.thm`/`.tjs`/`.dotm` 是 layui 模板与 WPS 控件，`.doc`/`.docx` 是 WebOffice
-/// 新建正文的空白模板（旧版 Word 用 `.doc`），都按运行时资源处理。
+/// 新建正文的空白模板（旧版 Word 用 `.doc`），`.cab` 是 NTKO 正文控件的
+/// ActiveX 安装包，都按运行时资源处理；`.ftl` 是 NTKO 控件模板的服务端片段，
+/// 前端不直接请求，但这类工程常与后端模板同目录部署，漏了正文控件起不来。
 /// 路径里以 `.` 或 `_` 开头的段一律跳过，由 `packer::scan_files` 硬编码处理。
 pub const DEFAULT_INCLUDE: &[&str] = &[
     "*.html",
@@ -47,11 +49,17 @@ pub const DEFAULT_INCLUDE: &[&str] = &[
     // - .doc: 旧版 Word 模板，部分 layui 工程只放了这一份
     "*.docx",
     "*.doc",
+    // NTKO 正文控件的 ActiveX 安装包：rsOfficeRender.js 的 codebase 指向
+    // `APP_ROOT + '/xmodules/pcip/module/lib/ntko/ntkoControl.cab'`，IE 下由浏览器请求安装
+    "*.cab",
+    // NTKO 控件模板的服务端片段（ntko_lib.ftl）：前端不直接请求，但 layui 工程常把
+    // 模板与静态资源放在同一份目录里部署，由后端 include，漏了正文控件渲染不出来
+    "*.ftl",
 ];
 
 /// 当前包含规则版本号。以后新增默认规则时递增，老配置由
 /// [`migrate_default_include`] 补齐（只追加缺的，不动用户已有规则）。
-pub const DEFAULT_INCLUDE_VERSION: u32 = 4;
+pub const DEFAULT_INCLUDE_VERSION: u32 = 5;
 
 /// 默认包含规则列表
 pub fn default_include_rules() -> Vec<String> {
@@ -291,6 +299,8 @@ mod default_include_tests {
             "*.woff2", "*.ttf", "*.mp4", "*.txt",
             // layui 工程特有
             "*.thm", "*.tjs", "*.dotm", "*.docx", "*.doc",
+            // NTKO 正文控件：ActiveX 安装包 + 服务端模板片段
+            "*.cab", "*.ftl",
         ] {
             assert!(has(rule), "默认包含规则缺少 {}", rule);
         }
