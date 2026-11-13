@@ -4,11 +4,11 @@
  * Vditor 的即时渲染（IR）模式自带 copy / cut 处理：它把选区按 Markdown 序列化写进
  * 剪贴板，隐藏的语法标记会变成 `\_`、`**`、反引号这些源码。笔记是所见即所得编辑器，
  * 复制出去的应该是屏幕上看到的内容，否则粘到别的应用里就会多出反斜杠
- * （例如公众号 / 密码管理器里粘出来的 `Risen\_typt@2022`）。所以这里接管 copy / cut：
+ * （例如公众号 / 密码管理器里粘出来的 `demo\_user@2022`）。所以这里接管 copy / cut：
  * 复用 Vditor 的 IR DOM，去掉标记层、还原代码块与链接，产出 text/plain 和 text/html。
  *
  * 另外，从带格式的来源（浏览器、Word、微信）粘贴时，Lute 的 HTML2VditorIRDOM 会把
- * 文本里的 `_` 转成反斜杠转义节点，正文里就会存下 `Risen\_typt@2022`。下划线夹在
+ * 文本里的 `_` 转成反斜杠转义节点，正文里就会存下 `demo\_user@2022`。下划线夹在
  * 单词中间时这个转义是多余的（CommonMark 里词内 `_` 不能开 / 闭强调），
  * unescapeIntrawordUnderscores 把这类转义还原成普通字符；其它地方的转义保持不动。
  */
@@ -162,7 +162,7 @@ function adjacentVisibleChar(
 }
 
 /**
- * 还原「词内下划线」的多余转义：`Risen\_typt@2022` → `Risen_typt@2022`。
+ * 还原「词内下划线」的多余转义：`demo\_user@2022` → `demo_user@2022`。
  * 返回实际处理的节点数（0 表示正文没有变化）。
  */
 export function unescapeIntrawordUnderscores(root: HTMLElement): number {

@@ -57,3 +57,7 @@ src/components.d.ts
 
 # 本地临时文件（依赖探针、cargo home 等，勿提交）
 .tmp/
+
+# github-hosts-pick.sh 的本机测速结果：含当前网络的实测线路与公网 IP，
+# 只在本机使用，不要提交（生成脚本 github-hosts-pick.sh 本身可以留着）
+github-hosts.txt
