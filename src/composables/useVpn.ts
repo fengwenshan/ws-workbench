@@ -32,6 +32,15 @@ function usableRules(rules: VpnRule[]): VpnRule[] {
   return rules.filter((rule) => !RETIRED_KINDS.includes(rule.kind))
 }
 
+/**
+ * 规则模式的兜底走向：没命中任何规则就走直连（规则弹窗里也不再提供选项）。
+ *
+ * 连接、同通道切换、规则热推送三处下发规则表时都必须用它。若跟着 `proxy_mode`
+ * 或历史字段 `rules_default_policy` 走，运行期从全局切回规则模式时兜底会一起
+ * 变成 VPN，和界面上「未命中的一律直连」的说明相反。
+ */
+const RULE_FALLBACK: VpnPolicy = 'DIRECT'
+
 /** 后端事件名，与 Rust 侧 vpn/commands.rs 保持一致 */
 const EVENT_STATUS = 'vpn-status'
 const EVENT_LOG = 'vpn-log'
@@ -311,7 +320,7 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
       // 是空的，于是「切到规则模式」反而什么都不分流（现场踩过）。
       const rules = usableRules(target.rules ?? [])
       // 规则模式没命中一律直连；全局/直连模式不使用兜底走向
-      const defaultPolicy = 'DIRECT'
+      const defaultPolicy = RULE_FALLBACK
       if (mode === 'rule' && !rules.some((rule) => rule.enabled)) {
         pushLog('warn', '这个配置还没有启用的规则，所有流量都会直连')
       }
@@ -384,8 +393,9 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
     if (!isConnected.value) return 'none'
     const shared = await invoke<boolean>('vpn_switch_profile', {
       profile,
+      // 同样全量下发：切换后可能马上再切模式，worker 只认这一份规则表
       rules: usableRules(profile.rules ?? []),
-      defaultPolicy: profile.rules_default_policy ?? 'DIRECT',
+      defaultPolicy: RULE_FALLBACK,
     })
     if (!shared) return 'reconnect'
     policyProfileId.value = profile.id
@@ -539,7 +549,7 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
     if (!isConnected.value || policyProfileId.value !== profile.id) return
     await invoke('vpn_push_rules', {
       rules: usableRules(profile.rules ?? []),
-      defaultPolicy: profile.rules_default_policy ?? 'DIRECT',
+      defaultPolicy: RULE_FALLBACK,
     })
     // 后端写完后 worker 约 200ms 轮询到；给界面一个能看见的落点，
     // 再刷新一次状态，避免弹窗关掉后日志还没出现。

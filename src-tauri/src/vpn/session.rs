@@ -146,6 +146,9 @@ impl VpnSession {
         );
         for path in [
             self.status_path(),
+            // 连接请求里有明文密码（整块配置的加密信封不覆盖会话文件）。
+            // 上一轮若在失败/强杀路径上没收干净，新会话开始前必须清掉。
+            self.request_path(),
             self.log_path(),
             self.script_log_path(),
             self.mode_path(),
@@ -577,9 +580,15 @@ mod tests {
         let session = temp_session("prepare");
         session.write_status(&VpnStatus::default()).unwrap();
         session.append_log("上一轮日志");
+        std::fs::write(session.request_path(), r#"{"password":"secret"}"#).unwrap();
         session.request_stop();
         session.prepare().unwrap();
         assert!(session.read_status().is_none());
+        // 连接请求里有明文密码：上一轮没擦干净时，新会话开始前必须清掉
+        assert!(
+            !session.request_path().exists(),
+            "prepare 应当清掉 request.json"
+        );
         assert!(!session.is_stop_requested());
         assert!(session.script_dir().exists());
     }

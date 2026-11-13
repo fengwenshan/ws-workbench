@@ -1232,6 +1232,49 @@ Exception calling "CreateToastNotifier" with "1" argument(s):
 `cargo test --lib vpn::` → **175 passed, 0 failed**（新增
 `disconnect_notifies_once_and_only_after_being_connected`）。
 
+### 14.23 14:12 Windows 分流/提权链路复查：7 处缺陷 + 修复
+
+按「规则始终全量下发」的契约把 Windows 侧又过了一遍（分流、DNS、worker、提权、会话），
+确认并修掉这几处，全部带触发路径：
+
+1. **直连例外会删掉系统自己的 on-link 路由（最严重）**：`ensure_route` 命中已有路由时
+   只改 metric 并返回 `Updated`，但 `split.rs` 把两种结果都记成「我们建的」，
+   断开时按「前缀 + ifIndex」删除 —— 正好删掉网卡那条公司网段/局域网路由，之后整个
+   内网不通。现在 `Created` 才删，`Updated` 记进 `metric_restores`，断开只
+   `reset_route_metric` 还原原跃点数；账本新增 `metric|...` 条目，崩溃清理也不会误删。
+2. **`request.json` 里的明文密码在失败路径上残留**：只有「正常断开」会擦，
+   认证失败/超时/脚本失败/拒绝 UAC/worker 被强杀都会留在 `%APPDATA%`。现在
+   `Worker::fail()`、`run()` 收尾、`vpn_connect` 两个启动失败分支都擦，
+   `prepare()` 也把 `request.json` 列进清理清单。
+3. **主进程存活判定把「打不开句柄」当成「已退出」**：`OpenProcess` 失败（EDR 拦截、
+   权限瞬时不足）直接返回 false，worker 200ms 内自己拆隧道。现在只有
+   `ERROR_INVALID_PARAMETER`（PID 确实不存在）才判死，其它错误交给心跳兜底。
+4. **启动瞬间点断开是空操作**：`prepare()` 清过 `status.json`，`vpn_disconnect` 读到
+   默认 `Disconnected` 就直接返回「当前未连接」，`stop.flag` 没写，worker 照样把隧道
+   建起来。现在再看 `request.json` 是否还在；确实没 worker 时 5s 后按「未连接」返回，
+   不让人白等 20s。
+5. **连接过程中切模式会提前写出「已连接」**：`switch_mode` 不看 `tunnel_ready()`，
+   布线失败也照样 `set_phase(Connected)`，界面显示连上、实际零路由。现在连接中只记住
+   目标模式，隧道就绪后由 `start_engine` 布线。
+6. **`script.log` 半行会吃掉 `done=connect`**：读到正在写的半行时 `lines()` 把它当完整行
+   并推进游标，关键回报永久丢失 → 界面停在「连接中」直到 120s 超时。现在只消费以换行
+   结尾的完整前缀。
+7. **回退路径子域 `/32` 被删后不自愈**：`scan_system_dns_cache` 把「已在 `dynamic` 里」
+   的地址整条过滤掉，而 `sync_dynamic_routes` 的「每轮幂等 ensure」依赖它返回全集。
+   现在照样返回（只是不重复写日志），别的软件删掉子域路由能在下一轮补回来。
+
+已确认但本轮不动的（需要真机/更大改动，先记录）：残留 `status.json` + 只看 PID 的存活
+判定（崩溃后界面可能显示「已连接」）；提权 15s 无日志即回退 UAC 并无条件再起一个 worker；
+会话目录 `OnceLock` 永久缓存导致「连接时重探」是死代码；提权执行用户可写目录里的 `.cmd`
+（TOCTOU）；全局模式的服务器防环只有脚本里一条依赖 `ORIGINAL_GW` 的主机路由；
+`teardown` join 转发线程可能被 40s 超时的 PowerShell 拖住；服务端只下发 IPv6 DNS 时整条
+分流失败（连 IP 规则也不装）；转发器路径下动态 `/32` 注入失败不重试（要等 DNS TTL）。
+
+`cargo test --lib vpn::` → **214 passed, 2 failed**（失败的两条是本机低完整性 shell 下
+`Get-NetAdapter` 拒绝访问，环境问题）。新增 `ingest_script_log_waits_for_a_complete_line`、
+`mode_change_during_connect_waits_for_tunnel`，`prepare_clears_previous_run` 补了
+`request.json` 断言，账本往返测试补了 `MetricOnly` 条目。
+
 ---
 
 ## 15. 参考资料

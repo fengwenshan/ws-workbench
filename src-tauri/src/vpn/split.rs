@@ -466,6 +466,14 @@ pub enum RouteLedgerEntry {
     },
     /// 我们改写过的系统路由（macOS），断开要还原原出口
     Override { cidr: String, orig: route::RouteEntry },
+    /// 命中了系统已有路由、只改了跃点数的直连例外：**不能删**，只还原跃点数
+    MetricOnly {
+        cidr: String,
+        gateway: String,
+        if_index: u32,
+        if_name: String,
+        metric: u32,
+    },
 }
 
 impl RouteLedgerEntry {
@@ -484,6 +492,16 @@ impl RouteLedgerEntry {
                 orig.prefix,
                 orig.gateway,
                 orig.if_name
+            ),
+            RouteLedgerEntry::MetricOnly {
+                cidr,
+                gateway,
+                if_index,
+                if_name,
+                metric,
+            } => format!(
+                "metric|{}|{}|{}|{}|{}",
+                cidr, gateway, if_index, if_name, metric
             ),
         }
     }
@@ -521,6 +539,15 @@ pub fn parse_ledger(text: &str) -> Vec<RouteLedgerEntry> {
                         },
                     })
                 }
+                ["metric", cidr, gateway, if_index, if_name, metric] => {
+                    Some(RouteLedgerEntry::MetricOnly {
+                        cidr: (*cidr).to_string(),
+                        gateway: (*gateway).to_string(),
+                        if_index: if_index.parse().unwrap_or(0),
+                        if_name: (*if_name).to_string(),
+                        metric: metric.parse().unwrap_or(1),
+                    })
+                }
                 _ => None,
             }
         })
@@ -546,6 +573,17 @@ fn cleanup_ledger(_session: &VpnSession) {
             }
             RouteLedgerEntry::Override { orig, .. } => {
                 let _ = route::restore_route(&orig);
+            }
+            RouteLedgerEntry::MetricOnly {
+                cidr,
+                gateway,
+                if_index,
+                if_name,
+                metric,
+            } => {
+                // 系统自己的路由：只把跃点数写回去，绝不删除
+                let target = route::RouteTarget::new(if_index, &if_name, &gateway);
+                let _ = route::reset_route_metric(&cidr, &target, metric);
             }
         }
     }
@@ -671,6 +709,11 @@ pub struct SplitTunnel {
     ip_routes: Vec<String>,
     /// 我们新建的直连例外：(cidr, 出口)
     direct_routes: Vec<(String, route::RouteTarget)>,
+    /// 命中了系统已有路由、只被改了跃点数的直连例外：(cidr, 出口, 原跃点数)。
+    ///
+    /// 这类路由**不能删**——它是网卡自己的 on-link 路由（公司网段、局域网、
+    /// NAS）；断开时只把跃点数还原。
+    metric_restores: Vec<(String, route::RouteTarget, u32)>,
     /// 我们改写过的系统路由（macOS）
     overrides: Vec<route::RouteEntry>,
     /// 会话目录里的路由账本
@@ -758,6 +801,7 @@ impl SplitTunnel {
             static_routes: Vec::new(),
             ip_routes: Vec::new(),
             direct_routes: Vec::new(),
+            metric_restores: Vec::new(),
             overrides: Vec::new(),
             ledger: session.dir.join(IP_ROUTES_LEDGER),
             dynamic: Arc::new(Mutex::new(BTreeSet::new())),
@@ -854,16 +898,33 @@ impl SplitTunnel {
                 &snapshot.default_if_alias,
                 &snapshot.default_gateway,
             );
-            // `ensure_route` 返回 `RouteOutcome::{Created,Updated}`，两种都算成功
+            // `ensure_route` 有两种结果：新建的（断开要删）与命中原有路由、
+            // 只改了跃点数的（断开只还原跃点数）。以前一律按「我们建的」删，
+            // 结果把系统那条 on-link 路由删了 —— 断开后整个局域网都不通。
             for cidr in ip_direct {
+                let before = route::route_metric(cidr, &target);
                 match route::ensure_route(cidr, &target, 1) {
-                    Ok(_) => {
+                    Ok(route::RouteOutcome::Created) => {
                         session.append_log(&format!(
                             "[分流] 直连例外 {} → {}（{}）",
                             cidr, snapshot.default_gateway, snapshot.default_if_alias
                         ));
                         if !self.direct_routes.iter().any(|(item, _)| item == cidr) {
                             self.direct_routes.push((cidr.clone(), target.clone()));
+                        }
+                    }
+                    Ok(route::RouteOutcome::Updated) => {
+                        // 系统本来就有这条路由（本机局域网、on-link 网段）：只把
+                        // 跃点数压到 1 抢优先级，断开时写回原值，绝不删除。
+                        // 读不到原值时按 1 记（还原成 1 无害），但同样不能删。
+                        let metric = before.unwrap_or(1);
+                        session.append_log(&format!(
+                            "[分流] 直连例外 {} 沿用系统已有路由（跃点数 {}→1，断开还原，不删除）",
+                            cidr, metric
+                        ));
+                        if !self.metric_restores.iter().any(|(item, _, _)| item == cidr) {
+                            self.metric_restores
+                                .push((cidr.clone(), target.clone(), metric));
                         }
                     }
                     Err(e) => session.append_log(&format!(
@@ -912,6 +973,15 @@ impl SplitTunnel {
                 gateway: target.next_hop.clone(),
                 if_index: target.if_index,
                 if_name: target.if_name.clone(),
+            });
+        }
+        for (cidr, target, metric) in &self.metric_restores {
+            entries.push(RouteLedgerEntry::MetricOnly {
+                cidr: cidr.clone(),
+                gateway: target.next_hop.clone(),
+                if_index: target.if_index,
+                if_name: target.if_name.clone(),
+                metric: *metric,
             });
         }
         for orig in &self.overrides {
@@ -1454,6 +1524,10 @@ impl SplitTunnel {
             for (cidr, target) in &self.direct_routes {
                 let _ = route::ensure_route(cidr, target, 1);
             }
+            // 沿用系统已有路由的直连例外：被别的软件改回原跃点数时，这里再压回 1
+            for (cidr, target, _) in &self.metric_restores {
+                let _ = route::ensure_route(cidr, target, 1);
+            }
             // NRPT 规则被组策略/其它客户端盖掉时补回来。
             //
             // 注意必须重下**全部**域名：`apply_namespace_rules` 的脚本会先清掉所有
@@ -1510,10 +1584,14 @@ impl SplitTunnel {
         for (cidr, target) in &self.direct_routes {
             let _ = route::delete_route(cidr, target);
         }
+        for (cidr, target, metric) in &self.metric_restores {
+            let _ = route::reset_route_metric(cidr, target, *metric);
+        }
         for entry in &self.overrides {
             let _ = route::restore_route(entry);
         }
         self.direct_routes.clear();
+        self.metric_restores.clear();
         self.overrides.clear();
         self.ip_routes.clear();
         let _ = std::fs::remove_file(&self.ledger);
@@ -2029,7 +2107,8 @@ fn resolve_loop(
 ///
 /// 回退路径（NRPT 直连 VPN DNS）下应用解析过的名字会留在缓存里，这是唯一能在
 /// 「应用拿到地址之后」补装 `/32` 的时机；最多晚一个 [`CACHE_POLL_INTERVAL`]。
-/// 只返回还没注入过的地址，并顺手记一行「哪个子域带来的」，现场一眼能对上。
+/// 只返回「当前仍该走隧道」的地址（含已经注入过的，交给调用方幂等补装），
+/// 首次发现时顺手记一行「哪个子域带来的」，现场一眼能对上。
 /// 直连例外在这里同样生效：规则判定为直连的名字不会补路由。
 ///
 /// 缓存里的每一条（含直连例外的）都先进 [`DnsMemo`]：回退路径没有转发器，
@@ -2054,13 +2133,18 @@ fn scan_system_dns_cache(
         if !tunnels_domain(rules, &name) || !injectable(ip, server_ips) {
             continue;
         }
-        if known.contains(&ip) || out.contains(&ip) {
+        // 已经在 dynamic 里的地址也要返回：sync_dynamic_routes 每轮对「本轮所有
+        // 地址」重跑一次幂等的 ensure，别的软件删掉某条子域 /32 时才能补回来。
+        // 只把「首次发现」的映射写日志，避免每轮刷同一行。
+        if out.contains(&ip) {
             continue;
         }
-        session.append_log(&format!(
-            "[分流] 系统 DNS 缓存发现子域 {} -> {}，补注入隧道",
-            name, ip
-        ));
+        if !known.contains(&ip) {
+            session.append_log(&format!(
+                "[分流] 系统 DNS 缓存发现子域 {} -> {}，补注入隧道",
+                name, ip
+            ));
+        }
         out.push(ip);
     }
     Ok(out)
@@ -3150,6 +3234,14 @@ mod tests {
                     gateway: "link#12".into(),
                     if_name: "en0".into(),
                 },
+            },
+            // 系统自己的路由：账本里必须能分辨出来，崩溃清理时才不会删掉它
+            RouteLedgerEntry::MetricOnly {
+                cidr: "10.1.0.0/16".into(),
+                gateway: "192.168.1.1".into(),
+                if_index: 12,
+                if_name: "以太网".into(),
+                metric: 25,
             },
         ];
         let text = encode_ledger(&entries);

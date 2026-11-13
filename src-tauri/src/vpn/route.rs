@@ -936,6 +936,30 @@ pub fn ensure_route(
     }
 }
 
+/// 读某条已存在路由的跃点数，供断开时精确还原。
+///
+/// 只有 Windows 需要：`ensure_route` 命中系统已有的路由时只改 metric，
+/// 回收时必须把原值写回去，不能把系统那条路由整条删掉。macOS 的
+/// `ensure_route` 不改 metric，返回 `None`。
+pub fn route_metric(cidr: &str, target: &RouteTarget) -> Option<u32> {
+    #[cfg(target_os = "windows")]
+    {
+        let cidr = normalize_cidr(cidr).ok()?;
+        let script = format!(
+            "$r = @(Get-NetRoute -DestinationPrefix '{}' -InterfaceIndex {} -PolicyStore ActiveStore \
+             -ErrorAction SilentlyContinue | Select-Object -First 1); \
+             if ($r.Count -gt 0) {{ $r[0].RouteMetric }}",
+            cidr, target.if_index
+        );
+        powershell(&script).ok()?.trim().parse().ok()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (cidr, target);
+        None
+    }
+}
+
 /// 把跃点数还原成一个中性值（用于回收 `RouteOutcome::Updated` 的路由）
 pub fn reset_route_metric(cidr: &str, target: &RouteTarget, metric: u32) -> Result<(), String> {
     let cidr = normalize_cidr(cidr)?;

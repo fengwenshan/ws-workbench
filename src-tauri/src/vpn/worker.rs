@@ -38,20 +38,27 @@ pub const EXIT_FAILED: i32 = 3;
 /// 这条判断比心跳文件更及时，也不受磁盘写失败影响。
 #[cfg(target_os = "windows")]
 fn process_running(pid: u32) -> bool {
-    use windows::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
+    use windows::Win32::Foundation::{CloseHandle, E_INVALIDARG, WAIT_OBJECT_0};
     use windows::Win32::System::Threading::{
         OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
     };
 
     // SAFETY: 句柄只在本函数内使用，用完立刻关闭。
     unsafe {
-        let Ok(handle) = OpenProcess(PROCESS_SYNCHRONIZE, false, pid) else {
-            // 打不开一般就是进程已经没了；万一只是权限不足，心跳还会兜底
-            return false;
-        };
-        let state = WaitForSingleObject(handle, 0);
-        let _ = CloseHandle(handle);
-        state == WAIT_TIMEOUT
+        match OpenProcess(PROCESS_SYNCHRONIZE, false, pid) {
+            Ok(handle) => {
+                let state = WaitForSingleObject(handle, 0);
+                let _ = CloseHandle(handle);
+                // WAIT_OBJECT_0 = 已退出；WAIT_TIMEOUT = 还在跑；
+                // WAIT_FAILED（句柄状态异常）按「不确定」处理成还活着。
+                state != WAIT_OBJECT_0
+            }
+            // 只有「PID 不存在」（OpenProcess 报 ERROR_INVALID_PARAMETER，
+            // 即 HRESULT_FROM_WIN32(87) = E_INVALIDARG）才判定已退出。
+            // 权限不足 / 被杀软挡了句柄时进程其实还在，若当成已退出，worker
+            // 会立刻自己拆隧道（界面明明活着）。这种情况交给心跳判据兜底。
+            Err(err) => err.code() != E_INVALIDARG,
+        }
     }
 }
 
@@ -169,6 +176,9 @@ impl Worker {
         self.dump_network_state("失败时");
         self.cleanup_routes();
         let _ = self.session.write_status(&self.status);
+        // 认证失败、超时、脚本失败这些路径以前直接把 request.json 留在盘上，
+        // 而里面有明文密码。失败一次就擦掉，不能等下一次「正常断开」。
+        self.session.scrub_request();
         EXIT_FAILED
     }
 
@@ -330,7 +340,15 @@ Get-Service -Name Dnscache | Format-List Status,StartType
             self.script_log_error_logged = false;
             self.log("[脚本] script.log 已可读取");
         }
-        let lines: Vec<&str> = text.lines().collect();
+        // 只消费「以换行结尾」的完整行。脚本用 FSO WriteLine 逐行追加，但读的
+        // 那一瞬间仍可能拿到写了一半的行（尤其 UTF-16 下半个字符）；把半行当完整
+        // 行处理会推进游标，`done=connect` / `tunidx=` 这类关键行就永远丢了，
+        // 表现为「隧道建好了但界面一直停在连接中，120s 后超时」。
+        let complete = match text.rfind('\n') {
+            Some(index) => &text[..=index],
+            None => "",
+        };
+        let lines: Vec<&str> = complete.lines().collect();
         // 新脚本在 connect 时会把上一份日志改名成 script.prev.log，文件行数
         // 可能比旧会话少；不重置游标就会永远读不到新文件里的 marker。
         if lines.len() < self.script_log_lines {
@@ -344,7 +362,7 @@ Get-Service -Name Dnscache | Format-List Status,StartType
         if lines.len() <= self.script_log_lines {
             return;
         }
-        // 只取新增的行：脚本每写一行就关一次文件，不会留下半行
+        // 只取新增的完整行
         let fresh: Vec<String> = lines[self.script_log_lines..]
             .iter()
             .map(|line| line.to_string())
@@ -548,6 +566,19 @@ Get-Service -Name Dnscache | Format-List Status,StartType
             self.applied_mode.as_str(),
             target.as_str()
         ));
+        // 隧道还没就绪时不能真的布线：start_split_rules 会因为没有 tun_dev 直接失败，
+        // 而 switch_mode 结尾会把阶段写成「已连接」——界面显示连上了，实际一条路由都没有。
+        // 连接过程中只记住目标模式，由 start_engine 在隧道就绪后按新模式布线。
+        if self.status.phase != VpnPhase::Connected || !self.tunnel_ready() {
+            self.applied_mode = target;
+            self.status.applied_mode = target.as_str().to_string();
+            let _ = self.session.write_status(&self.status);
+            self.log(&format!(
+                "[模式] 连接还在进行，先记为 {} 模式，隧道就绪后按它布线",
+                target.as_str()
+            ));
+            return;
+        }
         self.switch_mode(target);
     }
 
@@ -1422,6 +1453,8 @@ pub fn run(session_dir: &Path) -> i32 {
         worker.cleanup_routes();
     }
     let _ = worker.session.write_status(&worker.status);
+    // 同上：连接请求里有明文密码，无论从哪条分支退出都不要留盘。
+    worker.session.scrub_request();
     code
 }
 
@@ -1621,6 +1654,37 @@ mod tests {
         std::fs::write(worker.session.script_log_path(), &bytes).unwrap();
         worker.ingest_script_log();
         assert_eq!(worker.status.vpn_ip, "10.9.0.3");
+    }
+
+    /// 读到「写了一半的行」时不能消费它：那会把游标推过去，`done=connect`
+    /// 这类关键回报永远丢失（现场表现为隧道已建好但界面一直停在连接中）。
+    #[test]
+    fn ingest_script_log_waits_for_a_complete_line() {
+        let dir = crate::test_support::TempDir::new("worker-script-log-partial");
+        let session = VpnSession::new(dir.path().to_path_buf());
+        session.ensure().unwrap();
+        let mut worker = Worker::new(session, request_with_rules(vec![]));
+
+        // 半行：没有换行结尾
+        let partial = "WS-WORKBENCH ip4=10.10.0.2";
+        let mut bytes = vec![0xFF, 0xFE];
+        for unit in partial.encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        std::fs::write(worker.session.script_log_path(), &bytes).unwrap();
+        worker.ingest_script_log();
+        assert_eq!(worker.status.vpn_ip, "", "半行不能被当成完整行处理");
+
+        // 补齐换行并追加后续行，两行都必须读到
+        let complete = "WS-WORKBENCH ip4=10.10.0.2\nWS-WORKBENCH done=connect\n";
+        let mut bytes = vec![0xFF, 0xFE];
+        for unit in complete.encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        std::fs::write(worker.session.script_log_path(), &bytes).unwrap();
+        worker.ingest_script_log();
+        assert_eq!(worker.status.vpn_ip, "10.10.0.2");
+        assert!(worker.script_done);
     }
 
     #[test]
@@ -2163,5 +2227,40 @@ mod tests {
             "连接中改规则应等连接流程收尾；日志：\n{log}"
         );
         assert!(worker.split.is_none(), "连接中不应抢先创建分流");
+    }
+
+    /// 连接中切模式同理：不能立刻布线（tun 还没就绪，布线必失败），更不能
+    /// 顺手把阶段写成「已连接」——那样界面显示连上了，实际一条路由都没有。
+    #[test]
+    fn mode_change_during_connect_waits_for_tunnel() {
+        let dir = crate::test_support::TempDir::new("worker-hot-mode-connecting");
+        let session = VpnSession::new(dir.path().to_path_buf());
+        session.ensure().unwrap();
+        let mut request = request_with_rules(vec![]);
+        request.server = "127.0.0.1".into();
+        request.proxy_mode = "rule".into();
+        let mut worker = Worker::new(session.clone(), request);
+        worker.status.phase = VpnPhase::Connecting;
+        assert!(!worker.tunnel_ready());
+
+        session.write_mode("global").unwrap();
+        worker.last_mode_check = Instant::now() - Duration::from_secs(1);
+        worker.poll_mode_change();
+
+        assert_eq!(
+            worker.applied_mode,
+            ProxyMode::Global,
+            "目标模式要记住，隧道就绪后按它布线"
+        );
+        assert_eq!(
+            worker.status.applied_mode, "global",
+            "状态里的生效模式要跟着目标走"
+        );
+        assert_eq!(
+            worker.status.phase,
+            VpnPhase::Connecting,
+            "隧道还没就绪，不能把阶段写成已连接"
+        );
+        assert!(worker.full.is_none(), "还没就绪时不应安装全局路由");
     }
 }

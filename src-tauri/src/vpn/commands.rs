@@ -657,8 +657,9 @@ pub async fn vpn_connect(
     let default_policy = default_policy
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| "DIRECT".to_string());
-    // 代理模式是连接行为的唯一来源：全局/直连模式会忽略前端传来的规则，
-    // 避免界面已经切模式、实际仍按旧规则分流。
+    // 代理模式决定 worker 怎么布线；规则表始终随请求全量下发：全局/直连模式下
+    // worker 不拿它们参与判定，但运行期切回规则模式时只能靠这份快照（切模式只写
+    // `mode` 文件，不会重新下发规则）。兜底走向由前端固定为直连。
     let plan = resolve_proxy_plan(&profile.proxy_mode, rules, default_policy)?;
     let (rules, default_policy) = (plan.rules.clone(), plan.default_policy.clone());
     // 1. 选连接器
@@ -747,6 +748,8 @@ pub async fn vpn_connect(
             Ok(()) => "直接启动（当前已是管理员）".to_string(),
             Err(e) => {
                 session.append_log(&format!("[启动] 直接启动 worker 失败: {}", e));
+                // 请求里有明文密码：启动没成功就不能把它留在盘上
+                session.scrub_request();
                 return Err(e);
             }
         }
@@ -782,6 +785,8 @@ pub async fn vpn_connect(
             }
             Err(e) => {
                 session.append_log(&format!("[启动] worker 启动失败: {}", e));
+                // 用户拒绝 UAC / 计划任务拉不起来时，worker 不会来擦这份请求
+                session.scrub_request();
                 return Err(e);
             }
         }
@@ -900,7 +905,12 @@ pub async fn vpn_disconnect(app: AppHandle, state: State<'_, VpnState>) -> Resul
     };
 
     let status = session.read_status().unwrap_or_default();
-    if status.phase == VpnPhase::Disconnected {
+    // 不能只看 status：连接刚起步时 `prepare()` 刚清过 status.json，worker 还没写
+    // 第一份，此时显示的是默认 Disconnected。若据此当成「未连接」直接返回，这次
+    // 断开请求就丢了，worker 会继续把隧道建起来（界面随后又跳回「已连接」）。
+    // request.json 还在（且没被 scrub）就说明这次会话正在起步/进行中。
+    let pending_request = session.request_path().exists();
+    if status.phase == VpnPhase::Disconnected && !pending_request {
         return Ok("当前未连接".to_string());
     }
 
@@ -921,13 +931,19 @@ pub async fn vpn_disconnect(app: AppHandle, state: State<'_, VpnState>) -> Resul
     .ok();
 
     // 等 worker 自己收尾，超时就标记为已断开，避免界面卡在「断开中」
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let started = Instant::now();
+    // 进到这个分支时到底有没有 worker，只有 status 知道；它还是默认的 Disconnected
+    // 且 pid 为 0 就说明「不确定」。stop.flag 已经写了（晚到的 worker 会立刻收尾），
+    // 这种不确定状态只等 5s，别让「其实没连」也卡满 20s 再报超时。
+    let mut saw_worker = status.pid != 0 || status.phase != VpnPhase::Disconnected;
+    let deadline = started + Duration::from_secs(20);
     while Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(300));
         if let Some(latest) = session.read_status() {
             if latest.phase == VpnPhase::Disconnected || latest.phase == VpnPhase::Failed {
                 return Ok(latest.message);
             }
+            saw_worker = true;
             // worker 进程已经没了却还没写终态，说明是被强杀
             if latest.pid != 0 && !is_process_alive(latest.pid) {
                 let mut final_status = latest;
@@ -937,6 +953,9 @@ pub async fn vpn_disconnect(app: AppHandle, state: State<'_, VpnState>) -> Resul
                 let _ = session.write_status(&final_status);
                 return Ok(final_status.message);
             }
+        }
+        if !saw_worker && started.elapsed() > Duration::from_secs(5) {
+            return Ok("当前未连接".to_string());
         }
     }
 

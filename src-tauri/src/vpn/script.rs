@@ -696,8 +696,11 @@ mod tests {
             "默认域名没有回报给 worker：{}",
             stdout
         );
+        // 服务端下发的是 198.51.100.0/22（上面的 MASKLEN=22），脚本按原样回报；
+        // 归一化到网络地址是 worker 的活（见 `worker::tests::*server_scope*`），
+        // 这里断言 /24 会是复制粘贴留下的旧期望值。
         assert!(
-            stdout.contains("WS-WORKBENCH split=198.51.100.0/24"),
+            stdout.contains("WS-WORKBENCH split=198.51.100.0/22"),
             "split-include 网段没有回报给 worker：{}",
             stdout
         );
@@ -709,8 +712,12 @@ mod tests {
         // 回报同时要落到 script.log（openconnect 的 stdout 接不到 worker 的管道）。
         // 新脚本用 UTF-16LE 写，必须走 read_log 而不是 read_to_string。
         let log = read_log(&dir.join("script.log")).unwrap_or_default();
-        assert!(log.contains("split=198.51.100.0/24"));
-        assert!(log.contains("DONE reason=connect"));
+        assert!(
+            log.contains("split=198.51.100.0/22"),
+            "script.log 里也要有服务端下发的网段：{}",
+            log
+        );
+        assert!(log.contains("DONE reason=connect"), "script.log 缺少结束标记：{}", log);
     }
 
     #[cfg(target_os = "windows")]
