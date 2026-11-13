@@ -193,7 +193,7 @@ struct LanShareSnapshot {
 
 - store 文件：`lan_share.json`（tauri-plugin-store 默认目录），键：`settings`
 - 明文 JSON（设备名、目录、指纹不属于机密）；不放进加密的 `config.json`
-- 首次读取没有设置时生成 `fingerprint`（uuid v4），`enabled=false`，`alias` 空（展示时回退主机名）
+- 首次读取没有设置时生成 `fingerprint`（uuid v4），`enabled=true`（首次运行默认开启），`alias` 空（展示时回退主机名）
 - 冷启动：`setup` 里读取设置，`enabled=true` 则后台线程启动；启动失败只记录 `last_error`，不阻断应用启动
 
 ## 6. 错误处理与边界

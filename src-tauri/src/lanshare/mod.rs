@@ -88,7 +88,9 @@ pub struct LanShareSettings {
 impl LanShareSettings {
     pub fn new_with_fingerprint() -> Self {
         Self {
-            enabled: false,
+            // 首次运行（没有设置文件）默认开启：装完就能互相发现，不用先去点开关；
+            // 用户主动关掉后会持久化为 false，之后冷启动保持关闭。
+            enabled: true,
             alias: String::new(),
             download_dir: None,
             fingerprint: uuid::Uuid::new_v4().to_string(),
@@ -872,7 +874,8 @@ mod tests {
     fn snapshot_defaults() {
         let (_dir, state) = state_with_temp_dir();
         let snapshot = state.snapshot();
-        assert!(!snapshot.enabled);
+        // 首次运行（默认设置）功能默认开启
+        assert!(snapshot.enabled);
         assert!(!snapshot.running);
         assert!(snapshot.port.is_none());
         assert!(!snapshot.alias.is_empty());
