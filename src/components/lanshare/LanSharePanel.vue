@@ -326,13 +326,11 @@ watch(
 
 <template>
   <div class="lanshare">
-    <div class="lan-head">
-      <div class="lan-title">
+    <div class="lan-body">
+      <div class="lan-head">
         <h3>局域网分享</h3>
       </div>
-    </div>
 
-    <div class="lan-body">
       <p v-if="loadError" class="lan-alert">{{ loadError }}</p>
       <p v-if="!snapshot && loading" class="lan-empty">正在读取局域网分享状态…</p>
 
@@ -622,15 +620,17 @@ watch(
   overflow: hidden;
 }
 
-/* 页头：只留标题，开关与状态放进顶部状态卡 */
+/* 页头：和设置页同一套排版——标题在滚动内容里，不加分隔线 */
 .lan-head {
   flex-shrink: 0;
-  padding: 16px 20px 12px;
-  border-bottom: 1px solid var(--border-color);
+  display: flex;
+  align-items: center;
+  gap: 16px;
 }
-.lan-title h3 {
+.lan-head h3 {
   font-size: 16px;
   color: var(--text-primary);
+  margin: 0;
 }
 .lan-status {
   display: inline-flex;
@@ -671,7 +671,7 @@ watch(
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 14px 20px 24px;
+  padding: 16px 20px;
   display: flex;
   flex-direction: column;
   gap: 14px;
