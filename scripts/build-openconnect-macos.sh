@@ -66,7 +66,7 @@ case "$ARCH" in
 esac
 [[ "$OUT" = /* ]] || OUT="$REPO_ROOT/$OUT"
 
-for tool in clang make libtool xcrun curl tar shasum; do
+for tool in clang make libtool lipo strip codesign xcrun curl tar shasum; do
   command -v "$tool" >/dev/null 2>&1 || die "缺少构建工具：$tool"
 done
 PKG_CONFIG_BIN="$(command -v pkg-config || command -v pkgconf || true)"
