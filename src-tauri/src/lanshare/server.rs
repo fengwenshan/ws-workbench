@@ -27,8 +27,7 @@ use super::protocol::{
 };
 use super::{
     emit_snapshot, lock_inner, unix_millis, InnerRef, OfferFile, PendingEntry, PendingOffer,
-    ReceivedFile, Session, SessionFile, MAX_FILES, MAX_FILE_SIZE, MAX_PREPARE_BODY, PORT_BASE,
-    PROTOCOL_VERSION,
+    Session, SessionFile, MAX_FILES, MAX_FILE_SIZE, MAX_PREPARE_BODY, PORT_BASE, PROTOCOL_VERSION,
 };
 
 const INFO_PATH: &str = "/api/lanshare/v1/info";
@@ -259,7 +258,6 @@ fn handle_prepare(
         expires_in_ms: 0,
     };
     let offer_id = offer.id.clone();
-    let sender_alias = offer.sender_alias.clone();
     let offer_files = offer.files.clone();
 
     // 先建好通道再登记，命令层拿到的一定是能送回决定的那一半；
@@ -339,7 +337,6 @@ fn handle_prepare(
         guard.sessions.insert(
             session_id.clone(),
             Session {
-                sender_alias,
                 dir,
                 files: session_files,
                 created: Instant::now(),
@@ -365,7 +362,7 @@ fn handle_upload(
     let file_id = required_query(head, "file_id")?;
     let token = required_query(head, "token")?;
 
-    let (size, dir, file_name, from_alias) = {
+    let (size, dir, file_name) = {
         let mut guard = lock_inner(inner);
         guard.prune_sessions();
         let session = guard
@@ -383,12 +380,7 @@ fn handle_upload(
         if file.token != token {
             return Err((409, "上传凭证无效".to_string()));
         }
-        (
-            file.size,
-            session.dir.clone(),
-            file.file_name.clone(),
-            session.sender_alias.clone(),
-        )
+        (file.size, session.dir.clone(), file.file_name.clone())
     };
 
     if head.content_length as u64 != size {
@@ -453,13 +445,6 @@ fn handle_upload(
         } else {
             false
         };
-        guard.push_received(ReceivedFile {
-            file_name,
-            path: path.clone(),
-            size,
-            from_alias,
-            received_at_ms: unix_millis(),
-        });
         if complete {
             guard.remove_session(&session_id);
         }
@@ -704,7 +689,7 @@ mod tests {
     }
 
     #[test]
-    fn accepted_upload_writes_file_and_records_received() {
+    fn accepted_upload_writes_file_and_completes_session() {
         let (dir, state, server) = start_state();
         let body = prepare_body(&[("f0", "hello.txt", 5)]);
         let (status, text) = accept_prepare(&state, server.port, body);
@@ -721,11 +706,6 @@ mod tests {
         assert_eq!(std::fs::read(&saved).unwrap(), b"hello");
         assert_eq!(upload.path, saved.to_string_lossy());
 
-        let snapshot = state.snapshot();
-        assert_eq!(snapshot.recent_received.len(), 1);
-        assert_eq!(snapshot.recent_received[0].file_name, "hello.txt");
-        assert_eq!(snapshot.recent_received[0].from_alias, "测试发送方");
-        assert_eq!(snapshot.recent_received[0].size, 5);
         // 全部文件完成后会话被移除
         assert!(state.inner.lock().unwrap().sessions.is_empty());
     }

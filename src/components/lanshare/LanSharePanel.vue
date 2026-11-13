@@ -1,9 +1,8 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
 import { type UnlistenFn } from '@tauri-apps/api/event'
 import {
-  clearLanShareReceived,
   getLanShareSnapshot,
   onLanShareSendProgress,
   onLanShareSnapshot,
@@ -15,19 +14,17 @@ import {
   type LanPeer,
   type LanShareSnapshot,
   type PendingOffer,
-  type ReceivedFile,
   type SendProgress,
 } from '@/api/lanshare'
-import { openDir, openFile } from '@/api/system'
+import { openDir } from '@/api/system'
 import { pickDirectory, pickFiles } from '@/utils/dialog'
 import { formatBytes } from '@/components/cleaner/format'
-import { formatDateTime } from '@/utils/time'
 
 /**
  * 局域网分享工具页。
  *
  * 面板是 v-show 常驻挂载的：事件监听只在 onMounted 注册一次、onUnmounted 清理，
- * 保证在页面隐藏时也能收到「待接收 / 收到文件 / peer 变化」，切回来直接是最新状态；
+ * 保证在页面隐藏时也能收到「待接收 / peer 变化」，切回来直接是最新状态；
  * props.active 由 false 变 true 时再补一次快照，防止事件漏收。
  */
 const props = defineProps<{
@@ -41,17 +38,19 @@ const loadError = ref('')
 
 /** 顶栏总开关正在请求后端 */
 const toggling = ref(false)
-/** 设备名输入框里的草稿：只有点「保存」才写后端 */
+
+/** 设备名就地编辑：aliasDraft 是编辑态草稿，只有 ✓ / Enter 才写后端（blur 不保存） */
+const aliasEditing = ref(false)
+const aliasSaving = ref(false)
 const aliasDraft = ref('')
-const aliasFocused = ref(false)
-const savingAlias = ref(false)
+const aliasInput = ref<HTMLInputElement | null>(null)
+
 /** 正在保存接收目录 */
 const savingDir = ref(false)
 /** 正在接受 / 拒绝的 offer id */
 const offerBusy = ref<string | null>(null)
 /** 正在选文件 / 发起发送的 peer fingerprint */
 const sendingPeer = ref<string | null>(null)
-const clearingReceived = ref(false)
 
 /** 每个文件一行发送进度，key = transfer_id + file_index */
 interface TransferRow extends SendProgress {
@@ -71,10 +70,6 @@ const peers = computed(() =>
   [...(snapshot.value?.peers ?? [])].sort((a, b) => b.last_seen_ms - a.last_seen_ms),
 )
 const pendingOffers = computed(() => snapshot.value?.pending_offers ?? [])
-const recentReceived = computed(() => snapshot.value?.recent_received ?? [])
-const aliasDirty = computed(
-  () => aliasDraft.value.trim() !== (snapshot.value?.alias ?? ''),
-)
 const statusText = computed(() => {
   if (!snapshot.value) return '读取中…'
   if (snapshot.value.last_error) return '启动失败'
@@ -102,7 +97,8 @@ function errorText(err: unknown): string {
 
 function applySnapshot(next: LanShareSnapshot) {
   snapshot.value = next
-  if (!aliasFocused.value) aliasDraft.value = next.alias ?? ''
+  // 正在编辑设备名时不要被后台快照覆盖草稿
+  if (!aliasEditing.value) aliasDraft.value = next.alias ?? ''
 }
 
 async function refresh() {
@@ -132,22 +128,45 @@ async function toggleEnabled() {
   }
 }
 
+/** 进入设备名编辑态：聚焦并全选当前名字 */
+function startAliasEdit() {
+  if (!snapshot.value) return
+  aliasDraft.value = snapshot.value.alias ?? ''
+  aliasEditing.value = true
+  void nextTick(() => {
+    aliasInput.value?.focus()
+    aliasInput.value?.select()
+  })
+}
+
+/** 取消编辑：恢复原值，不写后端 */
+function cancelAliasEdit() {
+  aliasEditing.value = false
+  aliasDraft.value = snapshot.value?.alias ?? ''
+}
+
+/** 保存设备名：只有 ✓ 按钮 / Enter 会走到这里，blur 不保存 */
 async function saveAlias() {
-  if (!snapshot.value || savingAlias.value) return
+  if (!snapshot.value || aliasSaving.value) return
   const alias = aliasDraft.value.trim()
-  if (!alias || alias === snapshot.value.alias) {
-    aliasDraft.value = snapshot.value.alias
+  if (!alias) {
+    message.warning('设备名不能为空')
     return
   }
-  savingAlias.value = true
+  if (alias === snapshot.value.alias) {
+    aliasEditing.value = false
+    return
+  }
+  aliasSaving.value = true
   try {
     applySnapshot(await setLanShareAlias(alias))
+    aliasEditing.value = false
     message.success('设备名已保存')
   } catch (err) {
+    // 失败时保留编辑态和输入内容，方便直接重试
     message.error(`保存设备名失败：${errorText(err)}`)
-    aliasDraft.value = snapshot.value.alias
   } finally {
-    savingAlias.value = false
+    aliasSaving.value = false
   }
 }
 
@@ -232,44 +251,6 @@ function handleProgress(progress: SendProgress) {
   const row: TransferRow = { ...progress, key }
   const rest = transfers.value.filter((item) => item.key !== key)
   transfers.value = [row, ...rest].slice(0, 80)
-}
-
-async function clearReceivedList() {
-  if (clearingReceived.value) return
-  clearingReceived.value = true
-  try {
-    await clearLanShareReceived()
-    await refresh()
-    message.success('最近接收记录已清空（文件仍保留在磁盘上）')
-  } catch (err) {
-    message.error(`清空记录失败：${errorText(err)}`)
-  } finally {
-    clearingReceived.value = false
-  }
-}
-
-async function openReceivedFile(item: ReceivedFile) {
-  try {
-    await openFile(item.path)
-  } catch (err) {
-    message.error(`打开文件失败：${errorText(err)}`)
-  }
-}
-
-/** 打开「所在目录」：优先用文件自己所在的目录，取不到时退回接收目录 */
-async function openReceivedDir(item: ReceivedFile) {
-  const dir = parentDir(item.path) || snapshot.value?.download_dir || ''
-  if (!dir) return
-  try {
-    await openDir(dir)
-  } catch (err) {
-    message.error(`打开目录失败：${errorText(err)}`)
-  }
-}
-
-function parentDir(path: string): string {
-  const index = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'))
-  return index > 0 ? path.slice(0, index) : ''
 }
 
 /** 待接收倒计时：剩余秒数，过点显示「即将超时」 */
@@ -377,75 +358,114 @@ watch(
           <span class="lan-alert-hint">请检查端口 / 防火墙设置后重新开启。</span>
         </p>
 
-        <!-- 运行状态 -->
-        <section class="card status-card">
-          <div class="status-grid">
-            <div class="status-item">
+        <!-- 顶部状态卡：设备名就地编辑 + 监听信息 + 接收目录 -->
+        <section class="card local-card">
+          <div class="local-grid">
+            <div class="field field-alias">
               <span class="label">本机设备</span>
-              <span class="value">{{ snapshot.alias || '—' }}</span>
+              <div v-if="!aliasEditing" class="alias-view">
+                <span class="alias-name" :title="snapshot.alias">{{ snapshot.alias || '—' }}</span>
+                <button
+                  class="icon-btn"
+                  type="button"
+                  title="编辑设备名"
+                  aria-label="编辑设备名"
+                  @click="startAliasEdit"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M12 20h9" />
+                    <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z" />
+                  </svg>
+                </button>
+              </div>
+              <div v-else class="alias-edit">
+                <input
+                  ref="aliasInput"
+                  v-model="aliasDraft"
+                  class="alias-input"
+                  type="text"
+                  maxlength="64"
+                  :disabled="aliasSaving"
+                  placeholder="默认使用主机名"
+                  @keydown.enter.prevent="saveAlias"
+                  @keydown.esc.prevent="cancelAliasEdit"
+                />
+                <button
+                  class="icon-btn is-ok"
+                  type="button"
+                  title="保存（Enter）"
+                  aria-label="保存设备名"
+                  :disabled="aliasSaving"
+                  @click="saveAlias"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M20 6 9 17l-5-5" />
+                  </svg>
+                </button>
+                <button
+                  class="icon-btn"
+                  type="button"
+                  title="取消（Esc）"
+                  aria-label="取消编辑"
+                  :disabled="aliasSaving"
+                  @click="cancelAliasEdit"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M18 6 6 18M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
             </div>
-            <div class="status-item">
+
+            <div class="field">
               <span class="label">监听端口</span>
               <span class="value mono">{{ snapshot.port ?? '—' }}</span>
             </div>
-            <div class="status-item">
+            <div class="field">
               <span class="label">本机地址</span>
               <span class="value mono">{{ localAddresses || '未获取到可用网卡地址' }}</span>
             </div>
-            <div class="status-item">
+            <div class="field">
               <span class="label">设备指纹</span>
               <span class="value mono" :title="snapshot.fingerprint">{{ shortFingerprint || '—' }}</span>
             </div>
-          </div>
-          <p v-if="!enabled" class="muted">
-            功能已关闭：本机不会广播，也不会接受别人发来的文件。开启后会自动搜索局域网内的设备。
-          </p>
-        </section>
 
-        <!-- 本机设置 -->
-        <section class="card">
-          <h4>本机设置</h4>
-          <div class="setting-row">
-            <span class="label">设备名</span>
-            <input
-              v-model="aliasDraft"
-              class="text-input"
-              :disabled="savingAlias"
-              maxlength="64"
-              placeholder="默认使用主机名"
-              @focus="aliasFocused = true"
-              @blur="aliasFocused = false"
-              @keydown.enter.prevent="saveAlias"
-            />
-            <button
-              class="btn btn-secondary btn-xs"
-              :disabled="savingAlias || !aliasDirty"
-              @click="saveAlias"
-            >
-              {{ savingAlias ? '保存中…' : '保存' }}
-            </button>
+            <div class="field dir-field">
+              <span class="label">接收目录</span>
+              <span class="dir-path mono" :title="snapshot.download_dir || ''">
+                {{ snapshot.download_dir || '—' }}
+              </span>
+              <div class="dir-actions">
+                <button
+                  class="btn btn-secondary btn-xs"
+                  type="button"
+                  :disabled="savingDir"
+                  @click="chooseDownloadDir"
+                >
+                  选择目录
+                </button>
+                <button class="btn btn-secondary btn-xs" type="button" @click="openDownloadDir">
+                  打开目录
+                </button>
+                <button
+                  v-if="snapshot.download_dir_custom"
+                  class="btn btn-secondary btn-xs"
+                  type="button"
+                  :disabled="savingDir"
+                  @click="resetDownloadDir"
+                >
+                  恢复默认
+                </button>
+              </div>
+            </div>
           </div>
-          <div class="setting-row">
-            <span class="label">接收目录</span>
-            <span class="path-text mono" :title="snapshot.download_dir || ''">
-              {{ snapshot.download_dir || '—' }}
-            </span>
-            <button class="btn btn-secondary btn-xs" :disabled="savingDir" @click="chooseDownloadDir">
-              选择目录
-            </button>
-            <button class="btn btn-secondary btn-xs" @click="openDownloadDir">打开目录</button>
-            <button
-              v-if="snapshot.download_dir_custom"
-              class="btn btn-secondary btn-xs"
-              :disabled="savingDir"
-              @click="resetDownloadDir"
-            >
-              恢复默认
-            </button>
-          </div>
+
           <p class="muted">
-            别人分享过来的文件会保存到这里（重名自动加序号，不会覆盖已有文件）。
-            {{ snapshot.download_dir_custom ? '当前是自定义目录。' : '当前是默认目录。' }}
+            文件默认直接保存到系统下载目录（macOS 为 ~/Downloads），重名自动加序号，不会覆盖已有文件。
+            <template v-if="snapshot.download_dir_custom">当前使用自定义目录。</template>
+          </p>
+          <p v-if="!enabled" class="muted">
+            功能已关闭：本机不会广播，也不会接受别人发来的文件。
           </p>
         </section>
 
@@ -475,6 +495,7 @@ watch(
               </span>
               <button
                 class="btn btn-secondary btn-xs"
+                type="button"
                 :disabled="offerBusy === offer.id"
                 @click="respondOffer(offer, false)"
               >
@@ -482,6 +503,7 @@ watch(
               </button>
               <button
                 class="btn btn-primary btn-xs"
+                type="button"
                 :disabled="offerBusy === offer.id"
                 @click="respondOffer(offer, true)"
               >
@@ -491,30 +513,65 @@ watch(
           </div>
         </section>
 
-        <!-- 附近设备 -->
+        <!-- 附近设备：卡片网格 -->
         <section class="card">
           <div class="card-head">
             <h4>附近设备</h4>
-            <span class="muted">{{ peers.length }} 台在线</span>
+            <span v-if="enabled" class="muted count-inline">{{ peers.length }} 台在线</span>
           </div>
-          <p v-if="!enabled" class="lan-empty">功能未开启，开启后才会搜索局域网内的设备。</p>
-          <p v-else-if="!peers.length" class="lan-empty">
-            同一局域网内打开本应用的设备会出现在这里。
-          </p>
-          <ul v-else class="peer-list">
-            <li v-for="peer in peers" :key="peer.fingerprint" class="peer">
-              <div class="peer-main">
-                <span class="peer-name">{{ peer.alias || '未知设备' }}</span>
-                <span class="peer-meta mono">{{ peer.ip }}:{{ peer.port }}</span>
-                <span class="peer-seen">{{ lastSeenText(peer) }}</span>
+
+          <div v-if="!peers.length" class="peer-empty">
+            <svg
+              class="peer-empty-icon"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.5"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <circle cx="6" cy="12" r="2.3" />
+              <circle cx="18" cy="6" r="2.3" />
+              <circle cx="18" cy="18" r="2.3" />
+              <path d="M8.1 10.9l7.8-3.8M8.1 13.1l7.8 3.8" />
+            </svg>
+            <p class="peer-empty-title">
+              {{ enabled ? '暂时没有发现其他设备' : '局域网分享未开启' }}
+            </p>
+            <p class="peer-empty-hint">
+              {{
+                enabled
+                  ? '同一局域网内打开本应用的设备会出现在这里。'
+                  : '开启功能后才会搜索局域网内的设备。'
+              }}
+            </p>
+          </div>
+
+          <ul v-else class="peer-grid">
+            <li v-for="peer in peers" :key="peer.fingerprint" class="peer-card">
+              <div class="peer-card-top">
+                <span class="peer-icon">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <rect x="3" y="4" width="18" height="12" rx="2" />
+                    <path d="M8 20h8M12 16v4" />
+                  </svg>
+                </span>
+                <span class="peer-online" title="在线"></span>
               </div>
-              <button
-                class="btn btn-secondary btn-xs"
-                :disabled="sendingPeer === peer.fingerprint"
-                @click="sendToPeer(peer)"
-              >
-                {{ sendingPeer === peer.fingerprint ? '选择文件…' : '发送文件' }}
-              </button>
+              <div class="peer-name" :title="peer.alias">{{ peer.alias || '未知设备' }}</div>
+              <div class="peer-addr mono" :title="`${peer.ip}:${peer.port}`">{{ peer.ip }}:{{ peer.port }}</div>
+              <div class="peer-seen">{{ lastSeenText(peer) }}</div>
+              <div class="peer-card-foot">
+                <button
+                  class="btn btn-primary btn-xs peer-send"
+                  type="button"
+                  :disabled="sendingPeer === peer.fingerprint"
+                  @click="sendToPeer(peer)"
+                >
+                  {{ sendingPeer === peer.fingerprint ? '选择文件…' : '发送文件' }}
+                </button>
+              </div>
             </li>
           </ul>
         </section>
@@ -523,7 +580,9 @@ watch(
         <section v-if="transfers.length" class="card">
           <div class="card-head">
             <h4>发送进度</h4>
-            <button class="btn btn-secondary btn-xs" @click="clearTransfers">清除记录</button>
+            <button class="btn btn-secondary btn-xs" type="button" @click="clearTransfers">
+              清除记录
+            </button>
           </div>
           <div
             v-for="row in transfers"
@@ -551,39 +610,6 @@ watch(
               <span class="transfer-percent">{{ sendPercent(row) }}%</span>
             </div>
           </div>
-        </section>
-
-        <!-- 最近接收 -->
-        <section class="card">
-          <div class="card-head">
-            <h4>最近接收</h4>
-            <button
-              v-if="recentReceived.length"
-              class="btn btn-secondary btn-xs"
-              :disabled="clearingReceived"
-              @click="clearReceivedList"
-            >
-              清空记录
-            </button>
-          </div>
-          <p v-if="!recentReceived.length" class="lan-empty">
-            还没有收到文件。别人分享时接受后会出现在这里。
-          </p>
-          <ul v-else class="received-list">
-            <li v-for="(item, index) in recentReceived" :key="item.path + index" class="received">
-              <div class="received-main">
-                <span class="file-name" :title="item.path">{{ item.file_name }}</span>
-                <span class="received-meta">
-                  {{ item.from_alias || '未知设备' }} · {{ formatBytes(item.size) }} ·
-                  {{ formatDateTime(item.received_at_ms) }}
-                </span>
-              </div>
-              <div class="received-actions">
-                <button class="btn btn-secondary btn-xs" @click="openReceivedFile(item)">打开文件</button>
-                <button class="btn btn-secondary btn-xs" @click="openReceivedDir(item)">打开所在目录</button>
-              </div>
-            </li>
-          </ul>
         </section>
       </template>
     </div>
@@ -718,30 +744,137 @@ watch(
   border-radius: 10px;
   padding: 1px 8px;
 }
+.count-inline {
+  margin: 0;
+}
+/* 与 .muted 同权重，需要多一层选择器压过它的 margin */
+.card-head .muted.count-inline {
+  margin: 0;
+}
 
-.status-card {
+/* 顶部状态卡：设备名 / 监听信息 / 接收目录 */
+.local-card {
   padding-bottom: 12px;
 }
-.status-grid {
+.local-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 6px 20px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px 20px;
 }
-.status-item {
+.field {
   display: flex;
+  align-items: center;
   gap: 8px;
   font-size: 12px;
-  padding: 3px 0;
   min-width: 0;
+  min-height: 28px;
 }
-.label {
+.field-alias {
+  grid-column: 1 / -1;
+}
+.field .label {
   color: var(--text-muted);
   width: 64px;
   flex-shrink: 0;
 }
-.value {
+.field .value {
   color: var(--text-secondary);
   word-break: break-all;
+}
+
+/* 设备名：普通态与编辑态同高，切换不跳布局 */
+.alias-view,
+.alias-edit {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  min-height: 28px;
+}
+.alias-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.alias-edit {
+  flex: 1;
+  max-width: 420px;
+}
+.alias-input {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: 13px;
+  outline: none;
+}
+.alias-input:focus {
+  border-color: var(--primary);
+}
+.alias-input:disabled {
+  background: var(--bg-readonly);
+  color: var(--text-muted);
+}
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: color 0.15s, background 0.15s, border-color 0.15s;
+}
+.icon-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--primary);
+}
+.icon-btn.is-ok {
+  color: var(--success);
+}
+.icon-btn.is-ok:hover:not(:disabled) {
+  background: rgba(16, 185, 129, 0.12);
+  color: var(--success);
+}
+.icon-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.icon-btn svg {
+  width: 15px;
+  height: 15px;
+}
+
+/* 接收目录：路径省略 + 右侧操作按钮 */
+.dir-field {
+  grid-column: 1 / -1;
+}
+.dir-path {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dir-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
 }
 
 .muted {
@@ -752,41 +885,6 @@ watch(
 }
 .mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-}
-
-.setting-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 8px;
-}
-.text-input {
-  flex: 1;
-  min-width: 0;
-  height: 30px;
-  padding: 0 10px;
-  border: 1px solid var(--border-color);
-  border-radius: 6px;
-  background: var(--bg-input);
-  color: var(--text-primary);
-  font-size: 13px;
-  outline: none;
-}
-.text-input:focus {
-  border-color: var(--primary);
-}
-.text-input:disabled {
-  background: var(--bg-readonly);
-  color: var(--text-muted);
-}
-.path-text {
-  flex: 1;
-  min-width: 0;
-  font-size: 12px;
-  color: var(--text-secondary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .btn.btn-xs {
   padding: 4px 10px;
@@ -867,41 +965,111 @@ watch(
   color: var(--text-secondary);
 }
 
-/* 附近设备 */
-.peer-list {
+/* 附近设备：卡片网格（220-320px 自适应） */
+.peer-grid {
   list-style: none;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 12px;
+}
+.peer-card {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 3px;
+  max-width: 320px;
+  padding: 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--bg-primary);
+  transition: border-color 0.15s, box-shadow 0.15s;
 }
-.peer {
+.peer-card:hover {
+  border-color: var(--primary);
+  box-shadow: 0 4px 14px rgba(59, 130, 246, 0.12);
+}
+.peer-card-top {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
-  gap: 12px;
-  padding: 8px 10px;
-  border-radius: 6px;
-  background: var(--bg-secondary);
+  margin-bottom: 6px;
 }
-.peer-main {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  min-width: 0;
-  flex-wrap: wrap;
+.peer-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  background: var(--bg-active);
+  color: var(--primary);
+  flex-shrink: 0;
+}
+.peer-icon svg {
+  width: 22px;
+  height: 22px;
+}
+.peer-online {
+  width: 8px;
+  height: 8px;
+  margin: 4px 2px 0 0;
+  border-radius: 50%;
+  background: var(--success);
+  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.16);
+  flex-shrink: 0;
 }
 .peer-name {
   font-size: 13px;
   font-weight: 600;
   color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.peer-meta {
+.peer-addr {
   font-size: 12px;
   color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .peer-seen {
   font-size: 12px;
-  color: var(--success);
+  color: var(--text-muted);
+}
+.peer-card-foot {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 8px;
+}
+.peer-send {
+  width: 100%;
+}
+
+/* 附近设备空状态：居中图标 + 提示 */
+.peer-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 34px 16px 38px;
+  text-align: center;
+}
+.peer-empty-icon {
+  width: 56px;
+  height: 56px;
+  color: var(--text-muted);
+  opacity: 0.65;
+}
+.peer-empty-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+.peer-empty-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.6;
 }
 
 /* 发送进度 */
@@ -962,35 +1130,10 @@ watch(
   color: var(--text-muted);
 }
 
-/* 最近接收 */
-.received-list {
-  list-style: none;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.received {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 8px 10px;
-  border-radius: 6px;
-  background: var(--bg-secondary);
-}
-.received-main {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-.received-meta {
-  font-size: 12px;
-  color: var(--text-muted);
-}
-.received-actions {
-  display: flex;
-  gap: 6px;
-  flex-shrink: 0;
+/* 窄窗口：顶部状态卡收成一列，避免字段挤在一起 */
+@media (max-width: 760px) {
+  .local-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 </style>

@@ -14,7 +14,7 @@
 - 双方都能发起 / 接收文件，多文件一次发送，显示发送进度
 - 接收需要确认（不静默落盘）
 - 功能可随时开启 / 关闭；关闭后不再被发现、不再监听
-- 接收目录可指定，默认 `~/Downloads/ws-workbench 局域网分享`
+- 接收目录可指定，默认就是系统「下载」目录（macOS `~/Downloads`，Windows `%USERPROFILE%\Downloads`），不再额外建子文件夹
 - 只做「分享东西」这一个闭环，不做设备配对、加密传输、离线消息、剪贴板同步等
 
 非目标：
@@ -30,18 +30,17 @@
 页面结构：
 
 1. **顶栏**：标题 + 总开关（开启 / 关闭）+ 状态（运行中，端口 53317 / 未开启 / 启动失败原因）
-2. **本机设置**：设备名（默认主机名，可改）、接收目录（显示实际路径，可「选择目录」/「打开目录」）
-3. **附近设备**：发现到的设备列表（设备名、`IP:端口`、最近在线），每项一个「发送文件」按钮；空态说明「同一局域网内打开本应用的设备会出现在这里」
+2. **本机状态卡**：设备名（铅笔图标就地编辑，默认主机名）、监听端口、本机地址、设备指纹、接收目录（默认系统「下载」目录，可「选择目录」/「打开目录」/ 自定义时「恢复默认」）
+3. **附近设备**：卡片网格（设备图标、在线状态点、设备名、`IP:端口`、最近在线、发送按钮）；空态说明「同一局域网内打开本应用的设备会出现在这里」
 4. **待接收**：别人发来的分享请求卡片（发送方、文件列表、总大小、倒计时），「接受 / 拒绝」；60 秒未处理自动拒绝
 5. **发送进度**：每个传输一行，文件名 + 进度条 + 完成 / 失败原因
-6. **最近接收**：最近 20 条接收记录，可「打开文件」「打开所在目录」
 
 细节：
 
-- 功能关闭时：停止 UDP 组播与 HTTP 监听，设备列表清空，页面保留设置与最近接收
+- 功能关闭时：停止 UDP 组播与 HTTP 监听，设备列表清空，页面保留设置（设备名 / 接收目录）
 - 重名文件：接收时自动加 ` (1)`、` (2)` 后缀，不覆盖已有文件
 - 应用冷启动时如果功能是开启状态，自动恢复发现与监听；启动失败在页面显示原因
-- 主窗口在托盘常驻时接收事件仍会更新状态（面板打开时通过事件同步，关闭时状态保留在内存/持久化最近接收）
+- 面板用 `v-show` 常驻挂载：窗口在托盘常驻时事件监听仍在，切回页面即最新状态
 
 ## 3. 协议设计
 
@@ -149,11 +148,10 @@ src/composables/useWorkbenchLayout.ts   # AppView 增加 'lanshare'，快捷键 
 | `lan_share_set_download_dir` | `dir: string \| null` | `LanShareSnapshot` | 校验存在/可创建；空回退默认目录 |
 | `lan_share_respond_offer` | `offer_id: string, accept: bool` | `void` | 接受 / 拒绝待接收请求 |
 | `lan_share_send_files` | `peer_fingerprint: string, paths: string[]` | `string`（transfer_id） | 立即返回，后台线程发送，进度走事件 |
-| `lan_share_clear_received` | — | `void` | 清空最近接收列表（只清记录，不删文件） |
 
 事件：
 
-- `lan-share://snapshot`：`LanShareSnapshot`，peer 变化、offer 增删、收到文件、启停、设置变更时推送
+- `lan-share://snapshot`：`LanShareSnapshot`，peer 变化、offer 增删、启停、设置变更时推送
 - `lan-share://send-progress`：`SendProgress`，每个分块 / 文件完成 / 失败时推送
 
 ### 4.2 数据结构（serde 默认 snake_case，前端类型同名对齐）
@@ -170,8 +168,6 @@ struct PendingOffer {
     total_size: u64, files: Vec<OfferFile>, created_at_ms: i64, expires_in_ms: i64,
 }
 
-struct ReceivedFile { file_name: String, path: String, size: u64, from_alias: String, received_at_ms: i64 }
-
 struct SendProgress {
     transfer_id: String, peer_alias: String, file_name: String,
     file_index: usize, file_total: usize,
@@ -182,8 +178,7 @@ struct LanShareSnapshot {
     enabled: bool, running: bool, alias: String, fingerprint: String,
     port: Option<u16>, download_dir: String, download_dir_custom: bool,
     local_addresses: Vec<String>,
-    peers: Vec<LanPeer>, pending_offers: Vec<PendingOffer>,
-    recent_received: Vec<ReceivedFile>, last_error: Option<String>,
+    peers: Vec<LanPeer>, pending_offers: Vec<PendingOffer>, last_error: Option<String>,
 }
 ```
 
@@ -232,7 +227,7 @@ struct LanShareSnapshot {
 
 - 单测：announce / prepare / info 报文 JSON 解析、文件名清洗与去重、query 解析
 - 单测：`prepare-upload` 拒绝 / 超时 / 接受三条路径（用测试内启动的服务端 + 手动响应）
-- 端到端（单进程双运行时）：运行时 A 启动 HTTP 服务，运行时 B 通过 client 发送两个文件，断言文件落盘、内容一致、`recent_received` 有记录、进度事件完整
+- 端到端（单进程双运行时）：运行时 A 启动 HTTP 服务，运行时 B 通过 client 发送两个文件，断言文件落盘、内容一致、进度事件完整
 - 端口占用回退、目录不存在自动创建各有单测
 
 前端：

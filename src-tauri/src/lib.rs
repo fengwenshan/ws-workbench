@@ -1246,7 +1246,6 @@ pub fn run() {
             commands::lan_share_set_download_dir,
             commands::lan_share_respond_offer,
             commands::lan_share_send_files,
-            commands::lan_share_clear_received,
             // 更新包断点续传：下载 / 安装（前端 useUpdater 调用）
             updates::update_download_resumed,
             updates::update_install_resumed,

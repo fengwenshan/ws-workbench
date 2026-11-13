@@ -18,7 +18,7 @@ pub(crate) mod protocol;
 pub(crate) mod server;
 pub(crate) mod settings;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -58,15 +58,9 @@ pub const MAX_FILE_SIZE: u64 = 20 * 1024 * 1024 * 1024;
 /// prepare-upload 请求体上限
 pub const MAX_PREPARE_BODY: usize = 2 * 1024 * 1024;
 
-/// 最近接收记录条数
-pub const RECENT_RECEIVED_MAX: usize = 20;
-
 /// 事件名
 pub const EVENT_SNAPSHOT: &str = "lan-share://snapshot";
 pub const EVENT_SEND_PROGRESS: &str = "lan-share://send-progress";
-
-/// 默认接收目录名（放在系统下载目录下）
-pub const DEFAULT_DOWNLOAD_DIR_NAME: &str = "ws-workbench 局域网分享";
 
 /// 设置持久化的 store 文件与键
 pub(crate) const STORE_FILE: &str = "lan_share.json";
@@ -151,16 +145,6 @@ pub struct PendingOffer {
     pub expires_in_ms: i64,
 }
 
-/// 最近接收的一条文件记录
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ReceivedFile {
-    pub file_name: String,
-    pub path: String,
-    pub size: u64,
-    pub from_alias: String,
-    pub received_at_ms: i64,
-}
-
 /// 发送进度事件
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct SendProgress {
@@ -188,7 +172,6 @@ pub struct LanShareSnapshot {
     pub local_addresses: Vec<String>,
     pub peers: Vec<LanPeer>,
     pub pending_offers: Vec<PendingOffer>,
-    pub recent_received: Vec<ReceivedFile>,
     pub last_error: Option<String>,
 }
 
@@ -221,7 +204,6 @@ pub(crate) struct SessionFile {
 /// 一次接收会话（一次 prepare-upload 对应一个）
 #[derive(Debug, Clone)]
 pub(crate) struct Session {
-    pub sender_alias: String,
     pub dir: PathBuf,
     pub files: Vec<SessionFile>,
     pub created: Instant,
@@ -248,7 +230,6 @@ pub(crate) struct Inner {
     pub peers: HashMap<String, PeerEntry>,
     pub pending: Vec<PendingEntry>,
     pub sessions: HashMap<String, Session>,
-    pub recent: VecDeque<ReceivedFile>,
     /// 测试用：app 为 None 时把进度事件记在这里，测试断言事件内容
     pub recorded_progress: Vec<SendProgress>,
     pub offer_timeout: Duration,
@@ -285,7 +266,6 @@ impl Inner {
             peers: HashMap::new(),
             pending: Vec::new(),
             sessions: HashMap::new(),
-            recent: VecDeque::new(),
             recorded_progress: Vec::new(),
             offer_timeout: OFFER_TIMEOUT,
             session_ttl: SESSION_TTL,
@@ -385,13 +365,6 @@ impl Inner {
                 true
             }
         });
-    }
-
-    pub(crate) fn push_received(&mut self, file: ReceivedFile) {
-        self.recent.push_front(file);
-        while self.recent.len() > RECENT_RECEIVED_MAX {
-            self.recent.pop_back();
-        }
     }
 
     /// 把等待中的请求删掉（拒绝 / 超时 / 取消），返回被删掉的条目
@@ -705,13 +678,6 @@ impl LanShareState {
         Ok(transfer_id)
     }
 
-    /// 清空最近接收记录（只清记录，不删文件）
-    pub fn clear_received(&self, app: &AppHandle) -> Result<(), String> {
-        lock_inner(&self.inner).recent.clear();
-        emit_snapshot(&self.inner, Some(app));
-        Ok(())
-    }
-
     /// 把设置改动持久化；失败时只返回错误，不改内存里的值（调用方已经改过）。
     fn persist_settings(&self, app: &AppHandle) -> Result<(), String> {
         let settings = lock_inner(&self.inner).settings.clone();
@@ -760,7 +726,6 @@ pub(crate) fn snapshot_of(inner: &Inner) -> LanShareSnapshot {
         local_addresses: inner.local_addresses.clone(),
         peers,
         pending_offers: inner.pending_offers(),
-        recent_received: inner.recent.iter().cloned().collect(),
         last_error: inner.last_error.clone(),
     }
 }
@@ -808,14 +773,21 @@ pub(crate) fn unix_millis() -> i64 {
         .unwrap_or(0)
 }
 
-/// 默认接收目录：系统下载目录 / `ws-workbench 局域网分享`
+/// 默认接收目录：直接使用系统下载目录（macOS 的 ~/Downloads、Windows 的
+/// 用户目录\Downloads），取不到时依次回退应用数据目录 / 临时目录。
 pub fn default_download_dir(app: &AppHandle) -> PathBuf {
-    let base = app
-        .path()
-        .download_dir()
-        .or_else(|_| app.path().app_data_dir())
-        .unwrap_or_else(|_| std::env::temp_dir());
-    base.join(DEFAULT_DOWNLOAD_DIR_NAME)
+    let download = app.path().download_dir().ok();
+    let app_data = app.path().app_data_dir().ok();
+    pick_default_dir(download, app_data, std::env::temp_dir())
+}
+
+/// 纯函数：默认目录的选择与回退（便于单测，不读真实 HOME）
+fn pick_default_dir(
+    download: Option<PathBuf>,
+    app_data: Option<PathBuf>,
+    temp: PathBuf,
+) -> PathBuf {
+    download.or(app_data).unwrap_or(temp)
 }
 
 /// 设备名默认值：主机名；开发构建追加 `(dev)`，同机跑两个版本时能区分。
@@ -907,7 +879,6 @@ mod tests {
         assert!(!snapshot.fingerprint.is_empty());
         assert!(snapshot.peers.is_empty());
         assert!(snapshot.pending_offers.is_empty());
-        assert!(snapshot.recent_received.is_empty());
         assert!(snapshot.last_error.is_none());
         // 测试里默认目录传的是临时目录下的 recv，未指定接收目录时应回退到它
         assert!(snapshot.download_dir.ends_with("recv"));
@@ -976,28 +947,6 @@ mod tests {
     }
 
     #[test]
-    fn recent_received_is_capped() {
-        let (_dir, state) = state_with_temp_dir();
-        let mut inner = lock_inner(&state.inner);
-        for index in 0..(RECENT_RECEIVED_MAX + 5) {
-            inner.push_received(ReceivedFile {
-                file_name: format!("{index}.txt"),
-                path: format!("/tmp/{index}.txt"),
-                size: 1,
-                from_alias: "peer".into(),
-                received_at_ms: index as i64,
-            });
-        }
-        let snapshot = snapshot_of(&inner);
-        assert_eq!(snapshot.recent_received.len(), RECENT_RECEIVED_MAX);
-        // 最新在前
-        assert_eq!(
-            snapshot.recent_received[0].file_name,
-            format!("{}.txt", RECENT_RECEIVED_MAX + 4)
-        );
-    }
-
-    #[test]
     fn normalize_alias_trims_and_truncates() {
         assert_eq!(normalize_alias("  办公室 Mac  "), "办公室 Mac");
         assert_eq!(normalize_alias(""), "");
@@ -1021,6 +970,37 @@ mod tests {
         let inner = Inner::new(settings, dir.path().join("default"));
         assert!(!inner.download_dir_custom);
         assert_eq!(inner.download_dir, dir.path().join("default"));
+    }
+
+    #[test]
+    fn default_dir_is_system_download_dir_without_subfolder() {
+        // 直接落在下载目录本身，不再拼「ws-workbench 局域网分享」子目录
+        let download = PathBuf::from("/home/someone/Downloads");
+        assert_eq!(
+            pick_default_dir(
+                Some(download.clone()),
+                Some(PathBuf::from("/data")),
+                PathBuf::from("/tmp")
+            ),
+            download
+        );
+        assert!(!pick_default_dir(
+            Some(PathBuf::from("/home/someone/Downloads")),
+            None,
+            PathBuf::from("/tmp")
+        )
+        .to_string_lossy()
+        .contains("ws-workbench"));
+
+        // 下载目录拿不到时回退应用数据目录，再回退临时目录
+        assert_eq!(
+            pick_default_dir(None, Some(PathBuf::from("/data")), PathBuf::from("/tmp")),
+            PathBuf::from("/data")
+        );
+        assert_eq!(
+            pick_default_dir(None, None, PathBuf::from("/tmp")),
+            PathBuf::from("/tmp")
+        );
     }
 
     /// 单进程双运行时端到端：A 启动 HTTP 接收服务，B 用 client 发两个文件。
@@ -1075,7 +1055,7 @@ mod tests {
 
         send_handle.join().unwrap().expect("B 发送失败");
 
-        // 断言落盘内容与最近接收
+        // 断言落盘内容
         let recv_dir = dir_a.path().join("recv");
         assert_eq!(
             std::fs::read(recv_dir.join("报告.txt")).unwrap(),
@@ -1086,12 +1066,7 @@ mod tests {
             second_bytes
         );
         let snapshot_a = state_a.snapshot();
-        assert_eq!(snapshot_a.recent_received.len(), 2);
         assert!(snapshot_a.pending_offers.is_empty());
-        assert!(snapshot_a
-            .recent_received
-            .iter()
-            .any(|file| file.file_name == "报告.txt"));
 
         // 发送端进度：两个文件都 done 且没有错误
         let progress = state_b.inner.lock().unwrap().recorded_progress.clone();

@@ -218,12 +218,7 @@ fn announce_senders() -> Vec<UdpSocket> {
     sockets
 }
 
-fn send_announce(
-    inner: &InnerRef,
-    senders: &[UdpSocket],
-    http_port: u16,
-    group: SocketAddr,
-) {
+fn send_announce(inner: &InnerRef, senders: &[UdpSocket], http_port: u16, group: SocketAddr) {
     let announce = {
         let guard = lock_inner(inner);
         Announce::new(

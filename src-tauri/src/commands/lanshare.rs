@@ -58,9 +58,3 @@ pub fn lan_share_send_files(
 ) -> Result<String, String> {
     state(&app)?.send_files(&app, &peer_fingerprint, paths)
 }
-
-/// 清空最近接收记录（只清记录，不删文件）
-#[tauri::command]
-pub fn lan_share_clear_received(app: AppHandle) -> Result<(), String> {
-    state(&app)?.clear_received(&app)
-}

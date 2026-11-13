@@ -43,15 +43,6 @@ export interface PendingOffer {
   expires_in_ms: number
 }
 
-/** 最近接收记录（只记元信息，路径指向下载目录里的真实文件） */
-export interface ReceivedFile {
-  file_name: string
-  path: string
-  size: number
-  from_alias: string
-  received_at_ms: number
-}
-
 /** 发送进度（事件 payload） */
 export interface SendProgress {
   transfer_id: string
@@ -78,7 +69,6 @@ export interface LanShareSnapshot {
   local_addresses: string[]
   peers: LanPeer[]
   pending_offers: PendingOffer[]
-  recent_received: ReceivedFile[]
   last_error: string | null
 }
 
@@ -110,11 +100,6 @@ export function respondLanShareOffer(offerId: string, accept: boolean): Promise<
 /** 选好文件后立即返回 transfer_id，实际发送在后台线程，进度走事件 */
 export function sendLanShareFiles(peerFingerprint: string, paths: string[]): Promise<string> {
   return invoke<string>('lan_share_send_files', { peerFingerprint, paths })
-}
-
-/** 清空最近接收记录（只清记录，不删文件） */
-export function clearLanShareReceived(): Promise<void> {
-  return invoke<void>('lan_share_clear_received')
 }
 
 /** 订阅整份快照事件，返回取消订阅函数 */
