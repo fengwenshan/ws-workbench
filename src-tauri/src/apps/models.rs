@@ -21,7 +21,7 @@ pub enum AppId {
     /// DeepSeek Harness 桌面版：点「打开方式 → DeepSeek」时把目录作为工作区交给它
     DeepSeek,
     /// VPN 唯一的连接程序：命令行版 openconnect。
-    /// Windows 上优先用随程序分发的内置副本，macOS 上走 Homebrew 装的那份。
+    /// macOS / Windows 都用随程序分发的内置副本，不读系统里装的那份。
     Openconnect,
 }
 

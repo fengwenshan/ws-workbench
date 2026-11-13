@@ -251,9 +251,9 @@ pub fn vpn_detect_connectors(
 /// 记住用户指定的 openconnect 运行位置。
 ///
 /// 传进来的可能是可执行文件本身、它所在的目录，或 Homebrew 的 Cellar 版本目录，
-/// 由 `platform::import_openconnect` 统一解析。macOS 上不复制二进制、也不建软链，
-/// 只在 `<data>/vpn/openconnect-path.txt` 里记一行路径；Windows 版用安装包内置副本，
-/// 直接报不支持。
+/// 由 `platform::import_openconnect` 统一解析。当前产品只支持 macOS / Windows，
+/// 两边都固定用安装包内置副本、拒绝导入外部副本；保留这个命令是为了平台层签名统一，
+/// 将来支持 Linux 时直接接上即可。
 #[tauri::command]
 pub fn vpn_import_openconnect(app: AppHandle, source_dir: String) -> Result<String, String> {
     let data_dir = app
@@ -678,8 +678,8 @@ pub async fn vpn_connect(
         return Err("这个配置还没有保存密码，请先在配置里填写密码".to_string());
     }
 
-    // 3. 规则已经在 resolve_proxy_plan 里按模式处理：规则模式过滤停用项，
-    // 全局/直连模式清空规则并覆盖兜底走向。
+    // 3. 规则已经在 resolve_proxy_plan 里整理：只保留启用项；规则始终随请求
+    // 全量下发，全局/直连模式只是不参与判定，运行期切回规则模式无需重连。
 
     // 规则只在规则模式下编译校验：全局/直连用不到规则，不该因为它们不合法连不上。
     // 规则模式下这是 fail-closed —— 宁可连接失败，也不放行一份语义错误的规则集。

@@ -1,6 +1,6 @@
 # VPN 连接器平台层拆分设计
 
-**日期：** 2026-11-12
+**日期：** 2026-11-12（2026-11-13 修订：macOS 改为只认安装包内置的静态 openconnect）
 **状态：** 已经用户确认（方案 A：删除 detect.rs，vpn::platform 成为唯一入口；按平台配置各自管理打包资源）
 
 ## 目标
@@ -12,7 +12,7 @@
 src-tauri/src/vpn/platform/
   mod.rs      唯一做平台分派的地方（整文件 cfg 选择），并对外导出公共 API
   common.rs   共享层：probe、--version 解析、来源展示名、错误描述、pick/fetch、模型
-  macos.rs    macOS：检测（系统安装位置 + 记住的路径）、导入（只记路径）、移除、旧副本/软链清理
+  macos.rs    macOS：检测（只认安装包内置副本）、导入（明确拒绝）、移除、旧登记/副本清理
   windows.rs  Windows：检测（只认安装包内置副本）、导入（明确拒绝）、移除（无登记可移）
 ```
 
@@ -47,13 +47,21 @@ src-tauri/src/vpn/platform/
 
 ### macOS
 
-- 候选来源：`apps::locate`（手动指定 > Homebrew / 常见安装目录 > PATH）+ `<data>/vpn/openconnect-path.txt`
-  里记住的路径（managed 优先级低于 system）。
-- 只在候选里探测存在且可执行的 openconnect，第一个可用即停；不探测安装包里的 Windows 副本。
-- 系统里出现可用副本时清掉「记住的路径」和旧版本留下的副本/软链。
-- 导入：解析可执行文件 / bin 目录 / Cellar 版本目录 → 折算稳定路径 → 真跑一次 `--version`
-  → 只写一行路径，不复制、不建软链。
-- 移除：删掉路径记录 + 旧副本/软链目录。
+2026-11-13 起与 Windows 一致：**只认安装包内置副本**，不再读 Homebrew / 标准前缀 / PATH /
+用户指定的路径，也不提供「选择安装目录」入口。
+
+- 唯一候选：`<资源目录>/apps/openconnect/openconnect`（源码在
+  `src-tauri/resources/openconnect-macos/`，`tauri.macos.conf.json` 负责映射；调试构建在资源
+  未拷进 target 时回退到源码树）。只认无后缀的 `openconnect`，不会把 Windows 的
+  `openconnect.exe` 当成候选。
+- 探测仍然真跑一次 `--version`，跑不起来就报「安装包缺少内置 openconnect」并给出资源路径。
+- 旧版本留下的 `<data>/vpn/openconnect-path.txt`、`<data>/apps/openconnect/`、
+  `<data>/connectors/openconnect/` 在每次检测时清理；内置副本缺失就回到「重新安装」引导，
+  不会偷偷退回外置那份。
+- 导入：直接返回「只使用安装包内置的 openconnect，不支持导入外部副本」。
+- 移除：没有登记可移；调用只做一次旧数据清理，返回成功。
+- 内置二进制是静态链接 GnuTLS 的通用二进制（arm64 + x86_64，`minos 11.0`），构建与许可
+  见 `src-tauri/resources/openconnect-macos/README.md`。
 
 ### Windows
 
@@ -72,8 +80,10 @@ Rust 侧靠 `#[cfg]` 整文件选择：macOS 二进制不编译 `windows.rs`，W
 
 资源侧用 Tauri 2 的平台配置文件（自动与 `tauri.conf.json` 做 JSON merge patch）：
 
-- `tauri.macos.conf.json`（已存在）：`bundle.resources."resources/apps": null` —— mac 包不再带
-  Windows 的 openconnect.exe + DLL（约 9MB）。
+- `tauri.macos.conf.json`：`bundle.resources."resources/apps": null` —— mac 包不再带
+  Windows 的 openconnect.exe + DLL（约 9MB）；同时把 `resources/openconnect-macos` 映射到
+  `apps/openconnect`，并设置 `bundle.macOS.minimumSystemVersion = "11.0"`（内置二进制及其
+  arm64 切片的最低系统要求）。
 - `tauri.windows.conf.json`（新增）：`bundle.resources."resources/zh-Hans.lproj": null` —— Windows
   包不再带 macOS 的本地化资源。
 
@@ -94,8 +104,9 @@ Rust 侧靠 `#[cfg]` 整文件选择：macOS 二进制不编译 `windows.rs`，W
 - Windows 代码：本机交叉 `cargo check --target x86_64-pc-windows-msvc` 会因 ring 的 C 依赖缺少
   MSVC 头文件失败，因此用 stub 宿主工程把 `common.rs` + `windows.rs` 按 Windows 目标
   `--emit=metadata` 编译，专门验证 Windows 平台文件能编译；真实编译由 CI 的 windows job 兜底。
-- 打包配置：检查 JSON 合法；理想情况下构建一次 debug app 确认 `Contents/Resources` 里没有
-  `apps/openconnect`。
+- 打包配置：构建一次 debug app，确认 `Contents/Resources/apps/openconnect/openconnect`
+  存在、能跑 `--version`，且没有混进 Windows 的 `openconnect.exe` / `wintun.dll`；
+  确认 `Info.plist` 的 `LSMinimumSystemVersion` 是 11.0。
 
 ## 不在这一轮
 

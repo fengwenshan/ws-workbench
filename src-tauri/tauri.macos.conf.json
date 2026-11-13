@@ -1,7 +1,11 @@
 {
   "bundle": {
     "resources": {
-      "resources/apps": null
+      "resources/apps": null,
+      "resources/openconnect-macos": "apps/openconnect"
+    },
+    "macOS": {
+      "minimumSystemVersion": "11.0"
     }
   }
 }

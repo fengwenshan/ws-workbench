@@ -505,9 +505,9 @@ watch(
             </div>
           </div>
 
-          <!-- 只有手动指定的 openconnect 才显示位置：系统默认路径是装好就有的，显示出来只是噪音。
-               这个路径就是用户真实选中的可执行文件（程序数据目录里只有一行记录，不存副本）。
-               指定后要能改：跟着给出「更改 / 移除」，不用重装或清数据目录。 -->
+          <!-- 只有 Linux 还允许手动指定 openconnect 才显示位置：macOS / Windows 都用安装包内置副本，
+               内置副本是安装好就有的，显示出来只是噪音。Linux 下指定后要能改：跟着给出「更改 / 移除」，
+               不用重装或清数据目录。 -->
           <div v-if="vpn.manualConnector" class="connector-location">
             <span class="connector-location-label">已指定 openconnect</span>
             <code class="connector-location-path">{{ vpn.manualConnector.path }}</code>
@@ -515,7 +515,7 @@ watch(
               {{ vpn.manualConnector.version }}
             </span>
             <span
-              v-if="!platform.is_windows && vpn.manualConnector.source === 'managed'"
+              v-if="platform.is_linux && vpn.manualConnector.source === 'managed'"
               class="connector-location-actions"
             >
               <button
@@ -539,7 +539,7 @@ watch(
           <VpnInstallGuide
             v-if="vpn.noConnector"
             :guide="vpn.guide"
-            :can-import="!platform.is_windows"
+            :can-import="platform.is_linux"
             @import="handleImport"
             @copy-command="(cmd: string) => vpn.pushLog('info', `已复制命令: ${cmd}`)"
           />

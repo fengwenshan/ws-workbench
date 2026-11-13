@@ -3,7 +3,7 @@ import type { InstallGuide } from '@/types/vpn'
 
 defineProps<{
   guide: InstallGuide | null
-  /** 是否允许「指定 openconnect 位置」（Windows 用内置副本，不显示） */
+  /** 是否允许「指定 openconnect 位置」（macOS / Windows 用安装包内置副本，不显示；只剩 Linux） */
   canImport: boolean
 }>()
 
@@ -47,7 +47,7 @@ async function copyCommand(command: string) {
     <div v-if="canImport" class="guide-import">
       <div class="import-text">
         <strong>已经有 openconnect 了？</strong>
-        <span>选择它所在的目录即可：Homebrew 的 <code>bin</code> 目录、Cellar 里带版本号的 <code>9.21</code> 版本目录（里面有 <code>bin/openconnect</code>）、或自定义前缀里的 <code>bin</code> 都行。程序只记住这个路径，不复制文件，brew 升级后会自动跟着走。</span>
+        <span>选择它所在的目录即可：发行版装在 <code>/usr/bin</code>、<code>/usr/local/bin</code> 的，选对应目录即可；源码装到自定义前缀的，选 <code>bin</code> 目录。程序只记住这个路径，不复制文件，升级后会自动跟着走。</span>
       </div>
       <button class="btn btn-primary" @click="emit('import')">选择安装目录</button>
     </div>

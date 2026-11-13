@@ -95,8 +95,8 @@ const canPack = computed(() => projectType.value === 'layui')
 连接器来源按平台区分：
 
 - **Windows 只认安装包内置的 openconnect**（`src-tauri/resources/apps/openconnect/openconnect.exe` + 同目录 `wintun.dll`）。不扫描注册表、常见安装目录或 PATH，也不提供「指定外部 openconnect」入口，避免把来源不明的二进制拉进提权进程。内置副本缺失时直接报错并提示重装。
-- **macOS 只向外找**，按「专用路径 > 标准前缀 > 记住的路径 > PATH」查找（不探测内置副本 —— 包里的内置 openconnect 只有 Windows 版，macOS 上跑不起来）。自动识别只覆盖标准前缀（Apple Silicon `/opt/homebrew/bin`、Intel `/usr/local/bin`，外加 `/opt/local/bin`）；`brew` 装在自定义前缀（例如 `~/hb`）时不会被自动识别，要用引导里的「选择安装目录」记住路径。反过来，**标准前缀里一旦出现能跑的 openconnect，就按系统默认处理，并直接清掉之前记住的路径** —— 界面上那行「已指定 openconnect + 路径」随之消失。留着旧记录只会在系统那份被卸载后悄悄顶上来，所以干脆不存：用户把 openconnect 从自定义前缀换到标准安装后点一次「检测」即可；将来系统那份没了，就回到安装引导让用户重新指定。
-- **「选择安装目录」在 macOS/Linux 上不复制二进制、也不建软链**，只在 `<data>/vpn/openconnect-path.txt` 里记一行路径，执行时直接用原来的可执行文件：复制件会在 `brew upgrade` 后失配；复制还会先读用户目录里的文件，自定义前缀经常被权限/隐私策略挡住（现场报过 `复制 openconnect 失败: Permission denied (os error 13)`）；而数据目录里出现可执行文件/软链，又会被当成「程序自带的副本」（现场已经有人把它误认成 Windows 内置文件）。旧版本遗留的 `<data>/apps/openconnect/`（或 1.0.25 的 `connectors/openconnect/`）会在下次检测时自动清理：软链的真实目标转成路径记录，旧复制件直接删除（只靠复制件的机器会回到安装引导，重新选一次目录即可）。界面只让选目录、不让选文件：`bin` 目录、Cellar 里带版本号的 `9.21` 版本目录（里面有 `bin/openconnect`）、自定义前缀的 `bin` 都认，后端在目录里自己找可执行文件；Cellar 路径会改指到稳定的 `prefix/bin`。登记成功后在引导卡片下方回显记住的**绝对路径**和版本号（自定义前缀名字五花八门，只能靠这行确认认的是哪个文件），提示停留 6 秒；失败提示一律常驻，不自动消失，免得用户还没看清原因就没了。之后这个位置会长期显示在详情区顶部（`已指定 openconnect` + 路径 + 版本），旁边带「更改」（重新选目录登记）和「移除」（清掉登记、回到安装引导）两个文字按钮——指定错了不用重装或手动清数据目录；**系统默认路径不显示** —— 装好就有的东西摆出来只是噪音，只有手动指定的那份才需要在界面上认领。
+- **macOS 也只认安装包内置的 openconnect**（源码在 `src-tauri/resources/openconnect-macos/openconnect`，安装包里映射到 `Contents/Resources/apps/openconnect/openconnect`）。和 Windows 一样不读 Homebrew、常见安装目录或 PATH，也不提供「指定外部 openconnect」入口；内置副本缺失或跑不起来时直接报错并提示覆盖安装。这份二进制是静态链接 GnuTLS 的自建产物（构建步骤见 `src-tauri/resources/openconnect-macos/README.md`），运行时只依赖 macOS 系统库，不受 `brew upgrade` 影响，也不再要求用户装 brew。
+- macOS 旧版本留下的路径登记（`<data>/vpn/openconnect-path.txt`）和副本/软链（`<data>/apps/openconnect/`、`<data>/connectors/openconnect/`）会在下次检测时清理；清理后只用内置副本，内置副本缺失就回到安装引导。**「选择安装目录」入口在 macOS 与 Windows 上都不再提供**（界面与命令层逻辑只在尚未支持的 Linux 实现里保留）。
 
 判定可用性的方式是真正执行一次 `openconnect --version` 并解析版本号，而不是看文件存在与否 —— 解压后缺依赖 DLL 是很常见的情况，光看路径会把跑不起来的二进制当成可用。
 
@@ -196,7 +196,7 @@ Windows 上的虚拟网卡由 Wintun 驱动提供（`src-tauri/resources/apps/op
 
 #### 安装引导
 
-openconnect 探测失败时，代理页给出按平台区分的安装引导：macOS 明确要求 `brew` 装在标准前缀（`/opt/homebrew`，Intel 是 `/usr/local`）并给出可复制的安装命令与官方文档；Linux 给发行版安装命令；Windows 只说明内置副本缺失并提示覆盖安装，不引导下载外部二进制。已经装在自定义前缀里的用户走引导下方的「选择安装目录」，选中 openconnect 所在的目录（里面有 `bin/openconnect`）即可，不需要重装。
+openconnect 探测失败时，代理页给出按平台区分的安装引导：macOS 与 Windows 都只说明内置副本缺失/无法启动并提示覆盖安装，不引导下载外部二进制；Linux 给发行版安装命令。macOS 与 Windows 都不再提供「选择安装目录」，内置副本缺失只能重装。
 
 ### 系统
 
@@ -241,7 +241,7 @@ openconnect 探测失败时，代理页给出按平台区分的安装引导：ma
 
 顶部「检查更新」卡片显示当前版本，只有查到更高版本时才多显示一行高亮的「最新版本」并出现「立即更新」（右上角「重新检测」会顺带检查一次更新）；下载/安装进度就地显示，下载中断后点「重试」会从断点续传（见「自动更新」）；下面显示运行环境（操作系统、架构、可执行文件后缀、是否需要提权、配置文件位置、各网卡的 MAC 与全部 IP —— 多 IP 逐条列出），以及附件实际落盘位置（可直接打开目录）。
 
-「用编辑器打开项目」使用的应用查找优先级为专用路径 > 标准安装位置 > 记住的路径 > 内置资源 > PATH（Windows 上还有注册表，位置在标准安装位置之前）；VPN 连接器探测不走这条：Windows 只认内置副本，macOS 只向外找（专用路径 > 标准前缀 > 记住的路径 > PATH，内置副本里只有 Windows 版可执行文件，不参与探测）。其中「选择安装目录」入口只对 openconnect 开放（Windows 版用内置副本，不提供该入口）。macOS 与 Linux 下分别检查 `/Applications`、Homebrew 前缀以及 PATH 里的 `/usr/bin`、`/usr/local/bin`。
+「用编辑器打开项目」使用的应用查找优先级为专用路径 > 标准安装位置 > 记住的路径 > 内置资源 > PATH（Windows 上还有注册表，位置在标准安装位置之前）；VPN 连接器探测不走这条：macOS 与 Windows 都只认安装包内置副本，不向外找。其中「选择安装目录」入口在 macOS / Windows 上都不再提供。macOS 与 Linux 下分别检查 `/Applications`、Homebrew 前缀以及 PATH 里的 `/usr/bin`、`/usr/local/bin`（这是「打开方式」的应用定位，与 VPN 连接器无关）。
 
 ### 托盘
 
@@ -275,7 +275,7 @@ macOS 的应用菜单做了汉化，点 Dock 图标会把窗口重新显示出�
 
 - Node 22 与 pnpm（CI 固定 pnpm 10；`pnpm-lock.yaml` 为 9.0 格式）
 - Rust stable 工具链
-- 仅在需要 VPN 时：可用的 openconnect。Windows 必须使用 `src-tauri/resources/apps/openconnect/` 里的内置副本（安装包会一起打进去），macOS 用 `brew install openconnect` 装到标准前缀（`/opt/homebrew`，Intel 是 `/usr/local`）；装在自定义前缀里的用引导里的「选择安装目录」记住路径（只记路径，不复制文件）。mac 包里**不带**内置 openconnect（`resources/apps` 只在 Windows 包里，见「构建与发布」）
+- 仅在需要 VPN 时：安装包内置的 openconnect。macOS 用 `src-tauri/resources/openconnect-macos/` 里的静态构建产物（安装包会一起打进去，不再需要 `brew install openconnect`），Windows 用 `src-tauri/resources/apps/openconnect/` 里的内置副本 + `wintun.dll`。两个平台都不读系统里装的那份。
 - VPN 连接需要管理员授权，见「权限与进程拆分」；两个平台都用路由注入做规则分流，不抓包，macOS 用系统 utun，Windows 用内置 `wintun.dll`
 
 ## 开发
@@ -366,7 +366,7 @@ node scripts/release.mjs                    # Windows 版直接在 Windows 主�
 
 Windows 安装包（NSIS 的 `exe` 与 WiX 的 `msi`）必须在 Windows 主机上构建：Tauri 打 MSI 依赖 WiX Toolset，而 WiX 只有 Windows 可执行文件，交叉编译拿不到。
 
-**安装包内容按平台裁剪**：`src-tauri/` 下两份平台配置都是 JSON Merge Patch（RFC 7396，`null` 即删除），Tauri 2 构建时自动和 `tauri.conf.json` 合并：`tauri.macos.conf.json` 把 `bundle.resources` 里的 `resources/apps` 去掉，所以 mac 包不含内置的 Windows openconnect 运行时（约 9 MB）；`tauri.windows.conf.json` 把 `resources/zh-Hans.lproj` 去掉，所以 Windows 包不带 macOS 的本地化资源（`resources/apps` 继续由 `tauri.conf.json` 打进 Windows 包）。VPN 探测逻辑也按平台拆文件：Windows 只探内置副本、不向外找；macOS 只向外找、不探内置（见上文「连接器来源」）。改一边不会把另一边的行为带偏。
+**安装包内容按平台裁剪**：`src-tauri/` 下两份平台配置都是 JSON Merge Patch（RFC 7396，`null` 即删除），Tauri 2 构建时自动和 `tauri.conf.json` 合并：`tauri.macos.conf.json` 把 `bundle.resources` 里的 `resources/apps` 去掉，再把 `resources/openconnect-macos` 映射到 `Contents/Resources/apps/openconnect`，所以 mac 包带的是自己的静态 openconnect（不含 Windows 运行时约 9 MB 的 exe + DLL）；`tauri.windows.conf.json` 把 `resources/zh-Hans.lproj` 去掉，所以 Windows 包不带 macOS 的本地化资源（`resources/apps` 继续由 `tauri.conf.json` 打进 Windows 包）。VPN 探测逻辑也按平台拆文件：macOS / Windows 都只探内置副本、不向外找（见上文「连接器来源」）。改一边不会把另一边的行为带偏。
 
 Windows 安装器启动时，NSIS 会先把自解压内容写到 `%TEMP%`。如果 `%TEMP%` 不可写（受限环境、安全软件拦截、沙箱），会弹出 `NSIS Error: Error writing temporary file. Make sure your temp folder is valid.`——这是运行环境问题，不是安装包损坏。把 `TEMP` / `TMP` 指到一个可写目录再从资源管理器运行安装包即可；构建产物旁的 `安装（临时目录重定向）.cmd` 就是做这件事（把 `TEMP` 设到同目录 `install-tmp` 后启动安装器）。
 
@@ -509,6 +509,7 @@ VPN 会话目录同时被主进程和提权 worker 使用，因此不做路径�
 其余已知限制：
 
 - 打包只支持 Layui 项目
+- macOS 最低系统版本 11.0：内置 openconnect 是 arm64 + x86_64 的静态产物（`minos 11.0`），`tauri.macos.conf.json` 把 `LSMinimumSystemVersion` 固定为 11.0；10.13–10.15 的旧机器不再支持
 - 相对路径含空格的文件会被跳过
 - 分流只处理 IPv4：域名解析可能返回 AAAA，IPv6 目标不进隧道、仍走系统默认路由
 - 域名分流只覆盖系统解析器（getaddrinfo）：自带 DoH/DoT 的应用不受控

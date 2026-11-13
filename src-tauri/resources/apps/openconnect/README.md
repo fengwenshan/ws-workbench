@@ -61,8 +61,9 @@ Wintun 网卡在 `Get-NetAdapter` 里显示的驱动描述是 `OpenConnect Tunne
 
 ## macOS
 
-本目录只用于 Windows。macOS 上走系统里已有的 openconnect（Homebrew 等），
-不打包二进制，见 `vpn/guide.rs` 里的安装引导。
+本目录只用于 Windows。macOS 的内置运行时放在另一份目录
+`src-tauri/resources/openconnect-macos/`（静态链接 GnuTLS 的自建产物，
+打包时映射到 `Contents/Resources/apps/openconnect/`），见那份 README。
 
 ## 升级步骤
 
