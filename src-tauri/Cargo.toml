@@ -117,8 +117,16 @@ windows = { version = "0.61", features = [
     "Win32_System_Memory",
     "Win32_System_Power",
     "Win32_System_ProcessStatus",
+    # 关机前收尾：ShutdownBlockReasonCreate/Destroy（WM_QUERYENDSESSION 里用）
+    "Win32_System_Shutdown",
     "Win32_System_Threading",
     "Win32_Graphics_Gdi",
+    # 网络出口变更通知：NotifyUnicastIpAddressChange（换 Wi-Fi 后重建布线）
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
     "Win32_UI_Accessibility",
     "Win32_UI_WindowsAndMessaging",
+    # 窗口子类化：SetWindowSubclass / DefSubclassProc（拦截 WM_QUERYENDSESSION）
+    "Win32_UI_Shell",
 ] }

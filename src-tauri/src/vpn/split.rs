@@ -38,6 +38,8 @@ use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+#[cfg(target_os = "windows")]
+use std::time::Instant;
 
 use super::dns_client;
 use super::models::VpnRule;
@@ -99,6 +101,12 @@ const PROBE_TIMEOUT: Duration = Duration::from_millis(2500);
 /// Windows：一轮解析最多等多久（域名多、并发线程多时兜底）
 #[cfg(target_os = "windows")]
 const RESOLVE_ROUND_DEADLINE: Duration = Duration::from_secs(5);
+/// Windows：多久查一次「连规则地址、却不是从隧道发出的既有连接」。
+///
+/// 这类连接不会自愈（路由只影响新连接），查得再勤也改不了它们，只是报给用户看，
+/// 所以间隔放长；60 秒一次足够让人在日志里看到 nginx 这类代理被点名。
+#[cfg(target_os = "windows")]
+const BYPASS_CHECK_INTERVAL: Duration = Duration::from_secs(60);
 
 /// 本会话见过的 DNS 应答：查询名 -> A 记录。
 ///
@@ -739,6 +747,12 @@ pub struct SplitTunnel {
     /// Windows：NRPT 是否指向本机 127.0.0.1:53 转发器
     #[cfg(target_os = "windows")]
     local_dns_proxy: bool,
+    /// Windows：上次检查「绕过规则的已有连接」的时间（见 `guard`）
+    #[cfg(target_os = "windows")]
+    last_bypass_check: Option<Instant>,
+    /// Windows：已经报过的 `pid:远端地址`，同一条连接不重复刷日志
+    #[cfg(target_os = "windows")]
+    bypass_reported: std::collections::BTreeSet<String>,
     /// 本机转发器收到的查询数：Windows 用来确认 NRPT→loopback 是否真的通了
     dns_queries: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,
@@ -817,6 +831,10 @@ impl SplitTunnel {
             adapter_dns_fallback: false,
             #[cfg(target_os = "windows")]
             local_dns_proxy: false,
+            #[cfg(target_os = "windows")]
+            last_bypass_check: None,
+            #[cfg(target_os = "windows")]
+            bypass_reported: std::collections::BTreeSet::new(),
             dns_queries: Arc::new(AtomicUsize::new(0)),
             stop: Arc::new(AtomicBool::new(false)),
             thread: None,
@@ -1476,7 +1494,12 @@ impl SplitTunnel {
     }
 
     /// 路由守护：隧道路由被别的东西改掉时补回来，解析器配置被删时补回来。
-    pub fn guard(&self) {
+    ///
+    /// 返回需要写进 worker.log 的提示行：guard 手里没有会话目录，日志由调用方写。
+    /// 目前只有 Windows 的「绕过分流的既有连接」会返回内容。
+    pub fn guard(&mut self) -> Vec<String> {
+        #[allow(unused_mut)]
+        let mut messages: Vec<String> = Vec::new();
         #[cfg(target_os = "macos")]
         {
             let target = route::RouteTarget::new(0, &self.tun_dev, "");
@@ -1554,6 +1577,16 @@ impl SplitTunnel {
                     let _ = super::win_dns::set_interface_dns(self.tun_index(), &self.vpn_dns);
                 }
             }
+            // 连规则内网地址、却不是从隧道发出的既有连接：路由管不到它们
+            // （路由只在建立新连接时选路），只能点名告诉用户是哪个程序。
+            let due = self
+                .last_bypass_check
+                .map(|at| at.elapsed() >= BYPASS_CHECK_INTERVAL)
+                .unwrap_or(true);
+            if due {
+                self.last_bypass_check = Some(Instant::now());
+                messages.extend(self.report_bypassing_connections());
+            }
         }
         #[cfg(target_os = "macos")]
         for path in &self.resolver_files {
@@ -1562,6 +1595,96 @@ impl SplitTunnel {
                 let _ = std::fs::write(path, resolver_file_content(self.forwarder_port));
             }
         }
+        messages
+    }
+
+    /// 找出「连的是规则内网地址、却不是从隧道发出的」连接并生成日志行。
+    ///
+    /// 为什么需要：路由注入只能影响**新连接**的选路。已经在跑的连接（典型是
+    /// nginx / 数据库客户端这种长连接代理）会一直走原来的物理网卡，表现就是
+    /// 「走 nginx 代理出去的请求不受规则限制」——用户在界面上看不到任何异常，
+    /// 只有日志能说清「不是规则没生效，是这条连接早于规则建立」。
+    ///
+    /// 判定依据：远端落在我们的隧道路由里（`/32` 与 IP 规则网段），而本地地址
+    /// 不是隧道网卡上的地址。反过来「从隧道发出」的连接直接跳过。
+    #[cfg(target_os = "windows")]
+    fn report_bypassing_connections(&mut self) -> Vec<String> {
+        use std::collections::HashMap;
+
+        // 隧道路由：固定路由（VPN DNS / IP 规则） + 从 DNS 应答学到的 /32
+        let mut routed: Vec<(u32, u8)> = Vec::new();
+        for cidr in &self.static_routes {
+            if let Ok(parsed) = route::parse_cidr(cidr) {
+                routed.push(parsed);
+            }
+        }
+        if let Ok(dynamic) = self.dynamic.lock() {
+            for ip in dynamic.iter() {
+                routed.push((u32::from(*ip), 32));
+            }
+        }
+        if routed.is_empty() {
+            return Vec::new();
+        }
+
+        let script = format!(
+            "$ErrorActionPreference='SilentlyContinue'; \
+             $tun=@(Get-NetIPAddress -InterfaceIndex {} -AddressFamily IPv4 | \
+               ForEach-Object {{ $_.IPAddress }}); \
+             $conns=@(Get-NetTCPConnection -State Established | \
+               Where-Object {{ $_.RemoteAddress -match '^\\d+\\.\\d+\\.\\d+\\.\\d+$' }} | \
+               ForEach-Object {{ [pscustomobject]@{{ local=$_.LocalAddress; \
+                 remote=$_.RemoteAddress; pid=[int]$_.OwningProcess }} }}); \
+             [pscustomobject]@{{ tun=$tun; conns=$conns }} | ConvertTo-Json -Depth 4 -Compress",
+            self.tun_index
+        );
+        let Ok(json) = crate::winps::run_json(&script) else {
+            return Vec::new();
+        };
+        let found = bypassing_from_value(&json, &routed);
+        if found.is_empty() {
+            return Vec::new();
+        }
+
+        // 同一条连接不重复报：每轮都刷只会把日志淹掉
+        let mut fresh: Vec<BypassConnection> = Vec::new();
+        for conn in found {
+            if self.bypass_reported.len() >= 128 {
+                break;
+            }
+            let key = format!("{}:{}", conn.pid, conn.remote);
+            if self.bypass_reported.insert(key) {
+                fresh.push(conn);
+            }
+        }
+        if fresh.is_empty() {
+            return Vec::new();
+        }
+
+        let pids: Vec<u32> = {
+            let mut list: Vec<u32> = fresh.iter().map(|conn| conn.pid).collect();
+            list.sort_unstable();
+            list.dedup();
+            list
+        };
+        let names: HashMap<u32, String> = process_names(&pids);
+
+        let mut lines = vec![format!(
+            "[分流] 有 {} 条连接连的是规则内网地址，却不是从隧道发出的：\
+             它们建立于路由注入之前，路由改不了已有连接",
+            fresh.len()
+        )];
+        for conn in fresh.iter().take(5) {
+            let who = names
+                .get(&conn.pid)
+                .cloned()
+                .unwrap_or_else(|| format!("pid {}", conn.pid));
+            lines.push(format!(
+                "[分流]   {} -> {}（重启这个程序后，新连接才会按规则走）",
+                who, conn.remote
+            ));
+        }
+        lines
     }
 
     /// 收工时回收一切：线程、动态路由、固定路由、解析器配置。
@@ -2359,12 +2482,116 @@ pub(crate) fn del_tunnel_route(cidr: &str, tun_dev: &str, tun_index: u32) -> Res
     }
 }
 
+/// 一条「连的是规则内网地址、却不是从隧道发出的」连接。
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BypassConnection {
+    pid: u32,
+    remote: String,
+}
+
+/// `ip` 是否落在 `network/prefix` 里。
+#[cfg(target_os = "windows")]
+fn cidr_contains(network: u32, prefix: u8, ip: u32) -> bool {
+    if prefix == 0 {
+        return true;
+    }
+    let mask = u32::MAX << (32 - u32::from(prefix).min(32));
+    network & mask == ip & mask
+}
+
+/// 从 `Get-NetIPAddress` / `Get-NetTCPConnection` 的 JSON 里挑出绕过分流的连接。
+///
+/// 抽成纯函数是为了能测：判定逻辑（远端在隧道路由里、本地不是隧道地址）
+/// 比跑 PowerShell 更值得断言。
+#[cfg(target_os = "windows")]
+fn bypassing_from_value(
+    value: &serde_json::Value,
+    routed: &[(u32, u8)],
+) -> Vec<BypassConnection> {
+    fn as_list(value: Option<&serde_json::Value>) -> Vec<serde_json::Value> {
+        match value {
+            Some(serde_json::Value::Array(items)) => items.clone(),
+            Some(serde_json::Value::Null) | None => Vec::new(),
+            // ConvertTo-Json 对单元素数组会退化成对象，这里按一条处理
+            Some(single) => vec![single.clone()],
+        }
+    }
+
+    let tunnel_ips: Vec<String> = as_list(value.get("tun"))
+        .iter()
+        .filter_map(|item| item.as_str().map(str::to_string))
+        .collect();
+    let mut out = Vec::new();
+    for conn in as_list(value.get("conns")) {
+        let local = conn.get("local").and_then(|v| v.as_str()).unwrap_or("");
+        let remote = conn.get("remote").and_then(|v| v.as_str()).unwrap_or("");
+        let pid = conn.get("pid").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        if remote.is_empty() || pid == 0 {
+            continue;
+        }
+        // 本地地址就是隧道地址：这条连接本来就从隧道走，不算绕过
+        if tunnel_ips.iter().any(|ip| ip == local) {
+            continue;
+        }
+        let Ok(remote_ip) = remote.parse::<std::net::Ipv4Addr>() else {
+            continue;
+        };
+        let remote_ip = u32::from(remote_ip);
+        if routed
+            .iter()
+            .any(|(network, prefix)| cidr_contains(*network, *prefix, remote_ip))
+        {
+            out.push(BypassConnection {
+                pid,
+                remote: remote.to_string(),
+            });
+        }
+    }
+    out
+}
+
+/// 按 PID 查进程名。查不到就不给名字，日志里退回 `pid N`。
+#[cfg(target_os = "windows")]
+fn process_names(pids: &[u32]) -> std::collections::HashMap<u32, String> {
+    use std::collections::HashMap;
+
+    let mut names = HashMap::new();
+    let list = pids
+        .iter()
+        .map(|pid| pid.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let script = format!(
+        "Get-Process -Id {} -ErrorAction SilentlyContinue | \
+         Select-Object Id,ProcessName | ConvertTo-Json -Compress",
+        list
+    );
+    let Ok(text) = crate::winps::run(&script) else {
+        return names;
+    };
+    let Ok(json) = crate::winps::parse_json(&text) else {
+        return names;
+    };
+    for item in crate::winps::json_array(json) {
+        let id = item.get("Id").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        let name = item
+            .get("ProcessName")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if id != 0 && !name.is_empty() {
+            names.insert(id, name);
+        }
+    }
+    names
+}
+
 /// 刷新 DNS 缓存，并让系统重新读解析器配置。
 ///
 /// 不刷新的话：新配置不生效（旧答案还在缓存里），断开后残留的解析结果
 /// 也会继续指向内网地址。
-pub(crate) fn flush_dns_cache() {
-    #[cfg(target_os = "macos")]
+pub(crate) fn flush_dns_cache() {    #[cfg(target_os = "macos")]
     {
         let _ = std::process::Command::new("/usr/sbin/dscacheutil")
             .arg("-flushcache")
@@ -3247,5 +3474,65 @@ mod tests {
         let text = encode_ledger(&entries);
         assert_eq!(parse_ledger(&text), entries);
         assert!(parse_ledger("garbage\n\n").is_empty());
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn cidr_contains_handles_prefix_boundaries() {
+        let net = u32::from(std::net::Ipv4Addr::new(10, 10, 0, 0));
+        assert!(cidr_contains(net, 16, u32::from(std::net::Ipv4Addr::new(10, 10, 3, 17))));
+        assert!(!cidr_contains(net, 16, u32::from(std::net::Ipv4Addr::new(10, 11, 0, 1))));
+        // /0 = 全部；/32 = 只等于它自己
+        assert!(cidr_contains(0, 0, 8_080));
+        let host = u32::from(std::net::Ipv4Addr::new(192, 168, 6, 9));
+        assert!(cidr_contains(host, 32, host));
+        assert!(!cidr_contains(host, 32, host + 1));
+    }
+
+    /// 现场场景：nginx 的上游长连接在 VPN 连上之前就建立了，远端是规则里的内网
+    /// 地址、本地却不是隧道地址 —— 这条要报出来，否则用户只会看到「走 nginx 的
+    /// 请求不受规则限制」。
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn bypass_report_finds_connections_that_skip_the_tunnel() {
+        let json = serde_json::json!({
+            "tun": ["10.255.0.6"],
+            "conns": [
+                // 从隧道发出：正常，不报
+                {"local": "10.255.0.6", "remote": "10.10.3.17", "pid": 100},
+                // 物理网卡直连内网：绕过，报
+                {"local": "192.168.1.42", "remote": "10.10.3.17", "pid": 4242},
+                // 不在隧道路由里：本来就不该走 VPN，不报
+                {"local": "192.168.1.42", "remote": "203.0.113.9", "pid": 100},
+                // 本机回环 / 解析不了的一律忽略
+                {"local": "127.0.0.1", "remote": "127.0.0.1", "pid": 100},
+                {"local": "192.168.1.42", "remote": "", "pid": 100}
+            ]
+        });
+        let routed = vec![(
+            u32::from(std::net::Ipv4Addr::new(10, 10, 0, 0)),
+            16u8,
+        )];
+        let found = bypassing_from_value(&json, &routed);
+        assert_eq!(found.len(), 1, "只报物理网卡直连内网的那条");
+        assert_eq!(found[0].pid, 4242);
+        assert_eq!(found[0].remote, "10.10.3.17");
+    }
+
+    /// ConvertTo-Json 对单元素数组会退化成对象：解析不能因此丢掉唯一的连接。
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn bypass_report_tolerates_single_item_json() {
+        let json = serde_json::json!({
+            "tun": "10.255.0.6",
+            "conns": {"local": "192.168.1.42", "remote": "10.10.3.17", "pid": 7}
+        });
+        let routed = vec![(
+            u32::from(std::net::Ipv4Addr::new(10, 10, 3, 0)),
+            24u8,
+        )];
+        let found = bypassing_from_value(&json, &routed);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].pid, 7);
     }
 }

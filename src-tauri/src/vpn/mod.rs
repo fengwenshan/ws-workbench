@@ -30,6 +30,8 @@
 //! - `win_job`     Windows 专用：Job 对象，worker 被强杀时让 openconnect 一起退出
 //! - `elevate`     提权启动（Windows 计划任务免 UAC / macOS 系统授权框）
 //! - `notify`      系统通知（连接生效 / 规则热更新 / 代理模式切换）
+//! - `netwatch`    网络出口变更通知（Windows 地址变更回调，换网后触发重连）
+//! - `shutdown`    关机前收尾（Windows `WM_QUERYENDSESSION`，先断开再放行关机）
 //! - `worker`      提权进程入口，连接生命周期主体
 //! - `guide`       openconnect 不可用时的安装引导
 //!
@@ -49,12 +51,14 @@ pub mod elevate;
 pub mod fulltunnel;
 pub mod guide;
 pub mod models;
+pub mod netwatch;
 pub mod notify;
 pub mod platform;
 pub mod route;
 pub mod rule_engine;
 pub mod script;
 pub mod session;
+pub mod shutdown;
 pub mod split;
 pub mod worker;
 #[cfg(target_os = "windows")]

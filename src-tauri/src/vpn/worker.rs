@@ -32,6 +32,18 @@ pub const EXIT_OK: i32 = 0;
 pub const EXIT_NO_REQUEST: i32 = 2;
 pub const EXIT_FAILED: i32 = 3;
 
+/// 换网后最多自动重连几次。换 Wi-Fi 时地址会连着变好几次（断开旧地址、
+/// 拿到新地址、DHCP 续约），次数留够覆盖抖动，但不至于无限重连。
+const MAX_NETWORK_RESTARTS: u32 = 3;
+
+/// 一趟隧道运行的结局。
+enum TunnelRun {
+    /// 正常收尾：退出码原样交给进程
+    Exited(i32),
+    /// 换网导致这趟隧道不成立：布线已回收，外层按新出口重连
+    Restart,
+}
+
 /// 判断某个 PID 对应的进程是否还在。
 ///
 /// worker 用来看主进程是否还活着：任务管理器强杀是「进程直接消失」，
@@ -107,6 +119,12 @@ struct Worker {
     stale_alive_checks: u32,
     /// 心跳过期：主进程已经不在了，循环里看到就把隧道收掉
     parent_lost: bool,
+    /// 网络出口变更通知（仅 Windows；没有时保持原来的 15s 路由守护）
+    netwatch: Option<crate::vpn::netwatch::Watcher>,
+    /// 上次处理过的变更代号
+    net_generation: u64,
+    /// 换网后需要重连：主循环看到就撤布线、重新拉起 openconnect
+    restart_requested: bool,
 }
 
 impl Worker {
@@ -127,6 +145,11 @@ impl Worker {
             updated_at: stamp,
             ..VpnStatus::default()
         };
+        let netwatch = crate::vpn::netwatch::spawn();
+        let net_generation = netwatch
+            .as_ref()
+            .map(|watcher| watcher.generation())
+            .unwrap_or(0);
         Worker {
             session,
             request,
@@ -150,6 +173,9 @@ impl Worker {
             last_alive_check: Instant::now(),
             stale_alive_checks: 0,
             parent_lost: false,
+            netwatch,
+            net_generation,
+            restart_requested: false,
         }
     }
 
@@ -546,6 +572,50 @@ Get-Service -Name Dnscache | Format-List Status,StartType
         ));
     }
 
+    /// 换网检测：系统报告有网卡地址变更后，比对物理默认出口是否真的变了。
+    ///
+    /// 只比「网关 + 接口索引」：换 Wi-Fi 时这两样一定变（新网段的新网关），
+    /// 而隧道网卡自己上下线、DHCP 续租不会改变物理默认出口 —— 那些事件
+    /// 不该触发重连，否则一连上就会自己把自己踢掉。
+    fn poll_network_change(&mut self) {
+        let Some(generation) = self.netwatch.as_ref().map(|watcher| watcher.generation()) else {
+            return;
+        };
+        if generation == self.net_generation {
+            return;
+        }
+        self.net_generation = generation;
+        // 换网时地址事件会连着来好几条（旧地址删除、新地址加入），先等系统稳定，
+        // 顺便把这段窗口里堆积的事件一起吃掉。
+        thread::sleep(Duration::from_millis(1200));
+        if let Some(watcher) = self.netwatch.as_ref() {
+            self.net_generation = watcher.generation();
+        }
+
+        let before = self.snapshot.clone();
+        self.take_snapshot();
+        if !network_exit_changed(&before, &self.snapshot) {
+            // 隧道网卡上下线、DHCP 续租都会走到这里，不用重连
+            return;
+        }
+        self.log(&format!(
+            "[网络] 物理出口变化：{} via {} (if#{}) -> {} via {} (if#{})",
+            before.default_if_alias,
+            before.default_gateway,
+            before.default_if_index,
+            self.snapshot.default_if_alias,
+            self.snapshot.default_gateway,
+            self.snapshot.default_if_index
+        ));
+        if self.status.phase != VpnPhase::Connected {
+            // 连接过程中换网：这条连接按旧出口建，失败由 connect 超时 / 脚本失败处理，
+            // 不必在这里打断（打断反而会让用户看到一次莫名其妙的「正在重连」）。
+            self.log("[网络] 连接还在进行，本次不触发重连");
+            return;
+        }
+        self.restart_requested = true;
+    }
+
     /// 轮询 mode 文件：变化时只改判定开关，已建立的连接不受影响
     fn poll_mode_change(&mut self) {
         if self.last_mode_check.elapsed() < Duration::from_millis(200) {
@@ -645,9 +715,15 @@ Get-Service -Name Dnscache | Format-List Status,StartType
             full.guard();
             return;
         }
-        // 规则模式：守护隧道路由 + 按域名解析配置
-        if let Some(split) = self.split.as_ref() {
-            split.guard();
+        // 规则模式：守护隧道路由 + 按域名解析配置。
+        // 顺带把「绕过分流的既有连接」（典型是 nginx 这类长连接代理）报出来：
+        // 路由改不了已建立的连接，只能在日志里点名，否则表现成「规则没生效」。
+        let messages = match self.split.as_mut() {
+            Some(split) => split.guard(),
+            None => Vec::new(),
+        };
+        for line in messages {
+            self.log(&line);
         }
     }
 
@@ -708,6 +784,15 @@ Get-Service -Name Dnscache | Format-List Status,StartType
             vpn_dns,
             tun_dev
         ));
+        // 自己带 DNS 客户端的程序（典型是 nginx 的 `resolver` 指令、数据库驱动）
+        // 会绕过 NRPT / 本机转发器直接问 8.8.8.8 之类的外部服务器，拿到的地址
+        // 自然不在规则里。这条提示只在有域名规则时给，否则纯 IP 规则用不到。
+        if !plan.domains.is_empty() {
+            self.log(
+                "[分流] 提示：自己配了 DNS 的程序（如 nginx 的 resolver 指令）不经过本机规则解析；\
+                 把它指到 127.0.0.1:53 才能拿到按规则解析的内网地址",
+            );
+        }
         // VPN 服务器自己的公网 IP 绝不能进隧道：否则 openconnect 的 TLS/DTLS
         // 会被自己的路由抓回隧道打环（现场日志出现过「内网 IP 203.0.113.10
         // 已注入隧道」，那正是服务器地址）。
@@ -1060,13 +1145,19 @@ Get-Service -Name Dnscache | Format-List Status,StartType
         Ok((child, args))
     }
 
-    /// 跑完整个 openconnect 会话
-    fn run_openconnect(&mut self) -> i32 {
+    /// 跑一趟隧道：拉起 openconnect，守到它退出或收到停止请求。
+    ///
+    /// 返回 [`TunnelRun::Restart`] 表示「换网了，这趟不算数」：布线已经回收，
+    /// 外层循环会按新出口重新拉起一次（见 [`Worker::run_openconnect`]）。
+    fn run_tunnel(&mut self) -> TunnelRun {
         self.take_snapshot();
+        // 连接超时按「这一趟」算，不看 status.started_at：换网重连时 started_at
+        // 还是第一次连接的时间，用它会让第二趟一进循环就判超时。
+        let attempt_started = Instant::now();
 
         let (mut child, spawn_args) = match self.connect_openconnect() {
             Ok(pair) => pair,
-            Err(e) => return self.fail(&e),
+            Err(e) => return TunnelRun::Exited(self.fail(&e)),
         };
         self.log(&format!(
             "[隧道] openconnect 已启动，pid {}，程序 {}，参数 {}",
@@ -1100,12 +1191,27 @@ Get-Service -Name Dnscache | Format-List Status,StartType
             self.poll_mode_change();
             self.poll_rules_change();
             self.check_parent_alive();
+            self.poll_network_change();
 
             if self.parent_lost || self.session.is_stop_requested() {
                 if !self.parent_lost {
                     self.log("[worker] 收到停止请求");
                 }
                 break;
+            }
+
+            // 换网后原隧道已经不成立：先把这趟的布线收干净，再交给外层按新出口重连。
+            // 不能只重装路由就算完 —— openconnect 的 TCP 连接绑在旧地址上，
+            // 它自己空闲时根本察觉不到链路已断（现场：状态一直「已连接」，内网全不通）。
+            if self.restart_requested {
+                self.restart_requested = false;
+                self.log("[网络] 换网后原隧道已失效，断开并按新出口重连");
+                let _ = child.kill();
+                let _ = child.wait();
+                self.drain_output(&rx);
+                self.cleanup_routes();
+                self.set_phase(VpnPhase::Connecting, "网络已切换，正在按新出口重连");
+                return TunnelRun::Restart;
             }
 
             // 脚本没跑起来 -> 网卡参数永远拿不到 -> 没必要白等到 120s 超时。
@@ -1131,7 +1237,7 @@ Get-Service -Name Dnscache | Format-List Status,StartType
                          如需排查请把会话目录里的 worker.log、script.log、powershell.log 一并提供。",
                         raw, hint
                     );
-                    return self.fail(&reason);
+                    return TunnelRun::Exited(self.fail(&reason));
                 }
             }
 
@@ -1141,7 +1247,7 @@ Get-Service -Name Dnscache | Format-List Status,StartType
                     // openconnect 进程，网络可能处于黑洞状态。
                     let _ = child.kill();
                     let _ = child.wait();
-                    return self.fail(&e);
+                    return TunnelRun::Exited(self.fail(&e));
                 }
                 #[cfg(target_os = "windows")]
                 self.dump_network_state("接管成功后");
@@ -1185,7 +1291,7 @@ Get-Service -Name Dnscache | Format-List Status,StartType
                         self.set_phase(VpnPhase::Disconnected, "隧道已断开");
                         self.cleanup_routes();
                         let _ = self.session.write_status(&self.status);
-                        EXIT_OK
+                        TunnelRun::Exited(EXIT_OK)
                     } else {
                         let mut reason = format!(
                             "openconnect 退出（code {}），未能建立隧道：{}",
@@ -1202,14 +1308,14 @@ Get-Service -Name Dnscache | Format-List Status,StartType
                             reason.push('。');
                             reason.push_str(&hint);
                         }
-                        return self.fail(&reason);
+                        TunnelRun::Exited(self.fail(&reason))
                     };
                 }
                 Ok(None) => {}
-                Err(e) => return self.fail(&format!("等待 openconnect 失败: {}", e)),
+                Err(e) => return TunnelRun::Exited(self.fail(&format!("等待 openconnect 失败: {}", e))),
             }
 
-            if !routes_applied && elapsed_since(&self.status.started_at) > CONNECT_TIMEOUT {
+            if !routes_applied && attempt_started.elapsed() > CONNECT_TIMEOUT {
                 let _ = child.kill();
                 let _ = child.wait();
                 let reason = format!(
@@ -1217,7 +1323,7 @@ Get-Service -Name Dnscache | Format-List Status,StartType
                     CONNECT_TIMEOUT.as_secs(),
                     self.tail_summary()
                 );
-                return self.fail(&reason);
+                return TunnelRun::Exited(self.fail(&reason));
             }
 
             if routes_applied && Instant::now() >= guard_at {
@@ -1237,7 +1343,41 @@ Get-Service -Name Dnscache | Format-List Status,StartType
         self.session.remove_control_files();
         self.session.scrub_request();
         self.set_phase(VpnPhase::Disconnected, "已断开");
-        EXIT_OK
+        TunnelRun::Exited(EXIT_OK)
+    }
+
+    /// 外层：跑隧道，换网就在同一进程里按新出口重连，其它结局直接交退出码。
+    ///
+    /// 为什么在 worker 内部重连，而不是让界面「断开 -> 再连一次」：
+    /// 重连需要的密码就在 worker 手里的请求里，界面那边还要考虑用户有没有改配置、
+    /// 规则是否已经热更新过；而且界面看到的是「连接中」而不是一次断开再连接，
+    /// 不会闪出一条「已断开」通知。重连次数有上限，避免换网抖动时无限重连。
+    fn run_openconnect(&mut self) -> i32 {
+        let mut attempt = 0u32;
+        loop {
+            // 重连间隙里用户可能已经点了断开 / 主进程已经退出：别再拉起一趟
+            if self.parent_lost || self.session.is_stop_requested() {
+                return EXIT_OK;
+            }
+            match self.run_tunnel() {
+                TunnelRun::Exited(code) => return code,
+                TunnelRun::Restart => {
+                    attempt += 1;
+                    if attempt > MAX_NETWORK_RESTARTS {
+                        return self.fail(&format!(
+                            "换网后连续 {} 次重连都没能连上，请检查网络后手动重新连接",
+                            MAX_NETWORK_RESTARTS
+                        ));
+                    }
+                    self.log(&format!(
+                        "[网络] 第 {} 次按新出口重连（最多 {} 次）",
+                        attempt, MAX_NETWORK_RESTARTS
+                    ));
+                    // 给系统一点时间把新网卡的路由/DNS 稳定下来，否则刚拉起就失败
+                    thread::sleep(Duration::from_millis(800));
+                }
+            }
+        }
     }
 
     fn drain_output(&mut self, rx: &Receiver<String>) {
@@ -1316,6 +1456,27 @@ pub fn tunnel_next_hop(vpn_ip: &str, netmask: &str) -> String {
 
 fn now() -> String {
     crate::util::time::now_local_rfc3339()
+}
+
+/// 物理出口是否换了。
+///
+/// Windows 比接口索引 + 网关：换 Wi-Fi 时两者都会变。macOS 拿不到接口索引
+/// （恒为 0），只剩网关和接口名可比 —— 同一台机器换 Wi-Fi 时接口名都是 en0、
+/// 网关却几乎一定不同；DHCP 续租把网关改掉的情况也该重连，方向是对的。
+fn network_exit_changed(before: &NetworkSnapshot, after: &NetworkSnapshot) -> bool {
+    if before.default_gateway.is_empty() && after.default_gateway.is_empty() {
+        return false;
+    }
+    if before.default_gateway != after.default_gateway {
+        return true;
+    }
+    if before.default_if_index != 0
+        && after.default_if_index != 0
+        && before.default_if_index != after.default_if_index
+    {
+        return true;
+    }
+    false
 }
 
 /// 两个 exe 路径是否指同一个程序文件。
@@ -2262,5 +2423,54 @@ mod tests {
             "隧道还没就绪，不能把阶段写成已连接"
         );
         assert!(worker.full.is_none(), "还没就绪时不应安装全局路由");
+    }
+
+    fn snapshot(alias: &str, gateway: &str, index: u32) -> NetworkSnapshot {
+        NetworkSnapshot {
+            default_gateway: gateway.to_string(),
+            default_if_index: index,
+            default_if_alias: alias.to_string(),
+            local_subnets: vec![],
+        }
+    }
+
+    /// 换 Wi-Fi：新网段对应新网关，必须判定为「出口变了」并触发重连。
+    #[test]
+    fn switching_wifi_network_is_detected() {
+        let before = snapshot("WLAN", "192.168.1.1", 12);
+        let after = snapshot("WLAN", "10.0.0.1", 12);
+        assert!(
+            network_exit_changed(&before, &after),
+            "网关变了就是换网，哪怕还是同一块网卡"
+        );
+    }
+
+    /// 同一网关换到了另一块网卡（有线插上、Wi-Fi 退居备用）也算换网。
+    #[test]
+    fn switching_interface_with_same_gateway_is_detected() {
+        let before = snapshot("WLAN", "192.168.1.1", 12);
+        let after = snapshot("以太网", "192.168.1.1", 7);
+        assert!(network_exit_changed(&before, &after));
+    }
+
+    /// 隧道网卡自己上下线、DHCP 续租不改默认出口：不能重连，
+    /// 否则一连上就会被自己的地址变更事件踢掉，陷入「连上-重连」循环。
+    #[test]
+    fn tunnel_churn_does_not_look_like_a_network_switch() {
+        let same = snapshot("WLAN", "192.168.1.1", 12);
+        assert!(!network_exit_changed(&same, &same));
+        // macOS 没有接口索引（恒为 0），网关没变就不算换网
+        let mac_before = snapshot("en0", "192.168.1.1", 0);
+        let mac_after = snapshot("en0", "192.168.1.1", 0);
+        assert!(!network_exit_changed(&mac_before, &mac_after));
+    }
+
+    /// 两份快照都没拿到物理默认出口（例如全部流量已被 VPN 接管）时，
+    /// 空网关不应被当成「变了」。
+    #[test]
+    fn missing_gateway_on_both_sides_is_not_a_change() {
+        let before = NetworkSnapshot::default();
+        let after = NetworkSnapshot::default();
+        assert!(!network_exit_changed(&before, &after));
     }
 }

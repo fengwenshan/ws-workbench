@@ -1277,6 +1277,57 @@ Exception calling "CreateToastNotifier" with "1" argument(s):
 
 ---
 
+### 14.24 15:40 现场三连：关机不断隧道 / 换网后失效 / 代理程序不受规则限制
+
+三个现场反馈先各自判断「能不能做、做到什么程度」，再落地：
+
+**① 连着 VPN 时关机：要不要拦？**
+必须拦，但**不阻止**关机。现在的行为是「进程被系统结束」，于是 `teardown` 根本没跑：
+`/32` 路由、NRPT 规则留在注册表里，openconnect 还在跑；下次开机 `cleanup_stale` 才收拾，
+中间这段时间内网域名全解析不了。修法是在主窗口子类过程里接 `WM_QUERYENDSESSION`
+（`vpn/shutdown.rs`）：写 `stop.flag` → 最多等 2.5s 让状态落到 `Disconnected` → 返回 `TRUE`
+放行。**故意不返回 `FALSE`**：返回 FALSE 会把用户这次关机整个取消，必须自己重新发起，
+而 `lParam` 只带「注销/临界关机」，区分不出用户点的是关机还是重启 —— 重新发起时选错动作
+（把重启变成关机）比少拦几秒更糟。代价是「2.5s 内清不完就放行」，靠下次启动的
+`cleanup_stale` 兜底；这也是 Windows 上 Idea / 终端那类「先收尾再关机」的实现路线，
+区别只是它们用 `ShutdownBlockReasonCreate` 显示「正在断开 VPN」，本程序只在 worker.log
+留痕（窗口常驻托盘、用户看不到对话框，加阻塞原因反而像卡死）。
+
+**② 换无线网后 VPN「显示已连接但全不通」**
+根因不在路由守护，而在**隧道绑在旧物理地址上**：openconnect 的 TCP 连接绑的是旧网卡的
+地址/网关，空闲时它察觉不到链路已断；`guard()` 每 15s 只会把路由往**已死的隧道**上补，
+所以状态一直「已连接」。修法分三层：
+1. `vpn/netwatch.rs`：`NotifyUnicastIpAddressChange(AF_UNSPEC)` 注册地址变更回调，
+   回调只把 `AtomicU64` 代号 +1（它跑在系统线程上，不能做重活，也不能起 PowerShell）；
+2. `Worker::poll_network_change`：代号变了先等 1.2s 让事件聚拢，再重取快照，比
+   「物理默认网关 + 接口索引」—— 只有真变了才重连；隧道网卡自己拿到地址、DHCP 续租
+   都不会改变物理默认出口，所以不会出现「一连上就把自己踢掉」的自激循环；
+3. `run_openconnect` 拆成「外层重连循环 + 每趟 `run_tunnel`」：换网时杀掉 openconnect、
+   `cleanup_routes()` 撤掉布线，按新出口重连（上限 3 次，抖动时不无限重连）。
+   界面看到的是「连接中 → 已连接」，不会闪一条「已断开」。
+
+**③ nginx 这类代理「不受规则限制」**
+先分清两种绕过，都修不了「已建立的连接」，但要让用户知道是哪一种：
+- **DNS 侧**：nginx 的 `resolver` / 数据库驱动自带解析器，直接问外部 DNS，拿到的地址
+  不经过本机规则 → 连接时在 worker.log 明确提示「把它指到 `127.0.0.1:53`」；
+- **连接侧**：代理的上游长连接在 VPN 连上**之前**就建立了，路由注入只影响新连接的选路，
+  已有 socket 会一直走物理网卡。`SplitTunnel::guard` 每 60s 用一次 PowerShell 比对
+  `Get-NetTCPConnection`（Established）与本会话的隧道路由：远端在路由里、本地地址却不是
+  隧道地址的，按进程点名写日志（`nginx -> 10.10.3.17（重启这个程序后，新连接才会按规则走）`），
+  同一条连接只报一次。
+
+本轮验证：`cargo check --lib` 通过；`cargo test --lib vpn::` → **224 passed, 0 failed**
+（新增 `network_exit_changed` 三条、`cidr_contains` 一条、`bypass_report_*` 两条；
+注意测试要跑在可写目录：本机低完整性 shell 下 `%TEMP%` 建目录会被拒，把 `TEMP`/`TMP`
+指到工作区即可复现全绿）。新增 Cargo 特性 `Win32_System_Shutdown`、`Win32_UI_Shell`、
+`Win32_NetworkManagement_IpHelper`、`Win32_NetworkManagement_Ndis`、`Win32_Networking_WinSock`。
+
+已知边界（本轮不做）：关机收尾有 2.5s 预算，慢磁盘上可能只完成一半（下次启动兜底）；
+换网重连复用同一份 `request.json` 里的凭据，服务端如果会话数受限会先看到旧会话超时；
+「代理程序自带 DNS」这条只能提示、不能透明劫持（要劫持得在 WFP/NAT 层拦 53 端口）。
+
+---
+
 ## 15. 参考资料
 
 - OpenConnect 官方仓库：<https://gitlab.com/openconnect/openconnect>

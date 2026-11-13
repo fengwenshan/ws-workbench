@@ -1255,6 +1255,11 @@ pub fn run() {
             // 「未响应」；等页面就绪再显示，用户看到的就是能立刻操作的界面。
             create_main_window(app)?;
 
+            // 关机 / 重启前先把 VPN 断开再放行：VPN 连着的时候直接关机，
+            // 隧道进程、`/32` 路由和 NRPT 规则都来不及回收，下次开机内网域名
+            // 会全部解析不了。Windows 上用 WM_QUERYENDSESSION 拦截（见 shutdown.rs）。
+            vpn::shutdown::install(app.handle());
+
             // dev 模式（裸二进制）Dock 会显示系统占位图标，这里补上真实图标
             #[cfg(target_os = "macos")]
             set_dock_icon();
