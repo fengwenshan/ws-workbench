@@ -631,12 +631,15 @@ Get-Service -Name Dnscache | Format-List Status,StartType
         crate::vpn::split::plan(&self.current_rules, &self.current_default_policy)
     }
 
-    /// 规则模式的落地实现：不捕获、不抢默认路由、不改系统 DNS，只做两件事——
+    /// 规则模式的落地实现：不捕获、不抢默认路由、不改系统 DNS，只做两类布线——
     ///
-    /// 1. 把命中「走 VPN」的域名交给 VPN DNS 解析：macOS 写 `/etc/resolver/<域名>`
-    ///    + 本机转发器，Windows 写 NRPT 规则（见 `split.rs` / `win_dns.rs`）；
-    /// 2. 把这些域名解析出来的内网 IP 装 `/32` 隧道路由（macOS 在转发时注入，
-    ///    Windows 由后台解析线程注入）。
+    /// 1. **IP 规则**（`IP-CIDR`）：命中的网段直接装成隧道路由，不经过 DNS，
+    ///    连接完成即生效；「直连」例外装一条更具体的直连路由（macOS 与系统同前缀
+    ///    冲突时用 `route change` 覆盖、断开还原，见 `split::ip_route_plan`）；
+    /// 2. **域名规则**：把命中「走 VPN」的域名交给 VPN DNS 解析：macOS 写
+    ///    `/etc/resolver/<域名>` + 本机转发器，Windows 写 NRPT 规则（见 `split.rs` /
+    ///    `win_dns.rs`），再把解析出来的内网 IP 装 `/32` 隧道路由（macOS 在转发时
+    ///    注入，Windows 由后台解析线程注入）。
     ///
     /// 默认路由和系统 DNS 一律不动，所以结构上不可能再出现「一连上就全网断」。
     /// 任何一步失败都只是「本次分流不生效」，隧道照旧，网络不受影响。

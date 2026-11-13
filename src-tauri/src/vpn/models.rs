@@ -86,7 +86,7 @@ impl VpnPhase {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VpnRule {
     pub id: String,
-    /// 只有两类会生效：DOMAIN / DOMAIN-SUFFIX（见 `rule_engine::RuleKind`；`IP-CIDR` 已下线）
+    /// 会生效的类型：DOMAIN / DOMAIN-SUFFIX / IP-CIDR（见 `rule_engine::RuleKind`）
     pub kind: String,
     pub value: String,
     #[serde(default = "default_policy_str")]
