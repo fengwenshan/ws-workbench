@@ -256,6 +256,10 @@ async function closeDialog() {
             @input="onValueInput"
             @press-enter="submitRule"
           />
+          <p v-if="kind === 'IP-CIDR'" class="field-hint">
+            网段说明：192.168.6.115/32 只对 192.168.6.115 生效；192.168.6.0/24 覆盖整个
+            网段（.0–.255）。
+          </p>
           <p v-if="ipWrittenAsDomain" class="field-hint">
             这看起来是 IP：域名规则填 IP 不会生效，请把类型改成「IP / 网段」
           </p>
