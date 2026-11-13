@@ -1,15 +1,15 @@
 {
-  "version": "1.0.22",
-  "notes": "ws-workbench v1.0.22",
-  "pub_date": "2026-11-11T14:51:21Z",
+  "version": "1.0.23",
+  "notes": "ws-workbench v1.0.23",
+  "pub_date": "2026-11-13T06:58:58Z",
   "platforms": {
     "windows-x86_64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVE0rL3NzZVMwbk91SDhjYU85ZXdTM2tXalhHVmxRWURmVjBTcmJhempOUjkxcHlEVWZoMEpPall0UElLNThGaVBVVVIvVGg1Mk02WS8rSjhFTkVaNE82M2c1ckNZeVFvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NDA4Njc2CWZpbGU6d3Mtd29ya2JlbmNoXzEuMC4yMl94NjQtc2V0dXAuZXhlCXZlcnNpb246MS4wLjIyCjFEd0ZsUzd5VjY5cWlkeVN0L1krSlZPS0oxRUhsazlFOTRORkpSWWpQaDJueDl0YWxPWElQSDQ4SjhPckVtUmRhSG00Vk1ha3lIZEdYWUZ6U0ovWkRBPT0K",
       "url": "https://gitee.com/feng_wenshan/ws-workbench/releases/download/v1.0.22/ws-workbench-setup.exe"
     },
     "darwin-aarch64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVE0rL3NzZVMwbktTQU04cTdpU2VVRmo3NTgxZUErelNkY0I5TW9HSEhZVk1QajJMWFBWZmJ6S0ovcldGanp3bnlZN2lFbmIyQVlqalNwOTBBK0cxUFF0Znk2a2VkYWcwPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NDA4NDgwCWZpbGU6d3Mtd29ya2JlbmNoLmFwcC50YXIuZ3oJdmVyc2lvbjoxLjAuMjIKZmQzbkp5RnYxY2kxQitwdlcxcUNGSE9zbUVRblEwVTZ3aWxXOVh5cWMwRlZvQ3pvcGZHY1JiNXFzWWoyc3kxWDRHTWlCaGJZMG9PNENuSzlKUnJYQ0E9PQo=",
-      "url": "https://gitee.com/feng_wenshan/ws-workbench/releases/download/v1.0.22/ws-workbench_aarch64.app.tar.gz"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVE0rL3NzZVMwbkgrWUZ0SXpKdVJkbWhvYlJTR2FFZ2NCYWEvKzc2c0M5YVFIWGdaRjJTM0ZkZVNGcno1QVBsQ3dBLzlpYm84MkVMUWFtQ0xVTHpadzRSelh4YUs0WndFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NTUzMTMyCWZpbGU6d3Mtd29ya2JlbmNoLmFwcC50YXIuZ3oJdmVyc2lvbjoxLjAuMjMKVjJPZk9IWml5R0N2Rkp0NC9FWHlKQVZ2Y3M4a09ZTFdDMlpwUXd3OHdyR3VKZEoxSW9GVVYwaGh5blJjVXRiNXFXaTdCck15Zm8vbkFKODBONFk5REE9PQo=",
+      "url": "https://github.com/fengwenshan/ws-workbench/releases/download/v1.0.23/ws-workbench_aarch64.app.tar.gz"
     },
     "darwin-x86_64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVE0rL3NzZVMwbkZ6TEk3MTBXVmZ5UjhIVlVKZTBPL1NDZDdjbzJjaUppKzRVNlVSdXE2TTdHL09wN3hUZTdURGg2d1JmdjRGVFlocmdZM0lWeWhua3I5cmJaamszMUE0PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NDA4NTA2CWZpbGU6d3Mtd29ya2JlbmNoLmFwcC50YXIuZ3oJdmVyc2lvbjoxLjAuMjIKeXpNUFhwNUEwRUFraXd6ekxGcVdwL2twQk9qdXJDWG82emprUkJqR3JRT2s1VlBLaC8wN0hvbHF4eTJYWUhtcExPNGpvV0R0SWpSemdOOXhoVHVSQVE9PQo=",
