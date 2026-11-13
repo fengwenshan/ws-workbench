@@ -4,7 +4,7 @@
 //! 触发，**不再弹 UAC**。只有首次注册那一下需要管理员确认。
 //! 如果注册失败（比如用户没批准），自动退回「每次连接弹一次 UAC」的直接提权方式。
 //!
-//! macOS：brew 装的 openconnect 需要 root 才能建 utun，用 `osascript` 的
+//! macOS：内置的 openconnect 需要 root 才能建 utun，用 `osascript` 的
 //! `with administrator privileges` 拉起 worker（系统授权框，与 Windows 的 UAC 对应）。
 //!
 //! 关键约束：提权进程**无法继承父进程的标准句柄**，所以 worker 的一切结果都通过

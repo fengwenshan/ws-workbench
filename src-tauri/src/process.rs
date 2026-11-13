@@ -21,7 +21,7 @@ pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// 现场就是这么炸的：终端里跑（`LANG=C.UTF-8`）一切正常，打包成 .app 从 Finder
 /// 启动时环境里没有 `LANG` / `LC_ALL`，gettext 退回系统语言，界面报
 /// 「未找到 openconnect，请先安装」，可 `which openconnect` 明明指向
-/// `/opt/homebrew/bin/openconnect`。GUI 进程拿不到稳定的 `LANG`，不能靠环境碰运气，
+/// `.../bin/openconnect`。GUI 进程拿不到稳定的 `LANG`，不能靠环境碰运气，
 /// 凡是输出要被解析的子进程都统一钉死。
 ///
 /// 注意只给「输出要被解析」的命令用；拉起用户的编辑器 / 终端这类可见程序

@@ -146,8 +146,9 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
   /**
    * 手动指定的 openconnect（配置里的专用路径，或「指定位置」登记的那份）。
    *
-   * 只有它需要在界面上显示路径：系统默认路径（Homebrew 标准前缀、PATH）是安装好就有的，
-   * 显示出来只是噪音；而自定义前缀叫什么名字都可能，不显示就不知道程序认的是哪个文件。
+   * 只有 Linux 还会出现：macOS / Windows 都固定用安装包内置副本，`source` 是 `bundled`，
+   * 内置副本是安装好就有的，显示出来只是噪音；Linux 的自定义前缀叫什么名字都可能，
+   * 不显示就不知道程序认的是哪个文件。
    */
   const manualConnector = computed<ConnectorInfo | null>(() => {
     const connector = bestConnector.value
@@ -226,10 +227,10 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
   }
 
   /**
-   * 指定已有的 openconnect 安装目录（macOS/Linux 上就是登记路径，不复制文件）。
+   * 指定已有的 openconnect 安装目录（只在 Linux 上可用：macOS / Windows 固定用内置副本）。
    *
-   * 只让用户选目录：Homebrew 的 `bin` 目录、Cellar 里带版本号的 `9.21` 版本目录、
-   * 自定义前缀的 `bin` 都行 —— 可执行文件一定在目录里（`openconnect` 或
+   * 只让用户选目录：发行版的 `/usr/bin`、`/usr/local/bin`，或源码安装的
+   * `<前缀>/bin` 都行 —— 可执行文件一定在目录里（`openconnect` 或
    * `bin/openconnect`），后端自己解析，不用用户再精确到文件。
    *
    * 返回值是后端给的提示文案（里面带登记到的绝对路径），用户取消选择时返回空串。
