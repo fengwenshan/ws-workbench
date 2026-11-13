@@ -14,6 +14,8 @@ mod config;
 mod deepseek;
 // Hosts 在线编辑
 mod hosts;
+// 局域网分享（发现 + HTTP 收发）
+mod lanshare;
 // 「设置 → 资源」：DSH 插件等资源的检查/下载/安装/卸载
 mod resources;
 // `pub(crate)`：cleaner 模块要复用 openwith 里的图标提取（mac_icon / windows_icons）
@@ -30,6 +32,7 @@ pub use clipboard::*;
 pub use config::*;
 pub use deepseek::*;
 pub use hosts::*;
+pub use lanshare::*;
 pub use openwith::*;
 pub use project::*;
 pub use resources::*;

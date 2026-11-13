@@ -25,6 +25,7 @@ import VpnPanel from "@/components/vpn/VpnPanel.vue";
 import VpnStatusDot from "@/components/vpn/VpnStatusDot.vue";
 import SettingsPanel from "@/components/settings/SettingsPanel.vue";
 import CleanerPanel from "@/components/cleaner/CleanerPanel.vue";
+import LanSharePanel from "@/components/lanshare/LanSharePanel.vue";
 import QuickOpenPalette from "@/components/QuickOpenPalette.vue";
 import AttachmentPreview from "@/components/AttachmentPreview.vue";
 import { getAppName, isDevBuild } from "@/api/app";
@@ -738,6 +739,22 @@ async function handlePack(project: any, asZip: boolean = false) {
               <path d="M18.5 15l.8 1.9 1.9.8-1.9.8-.8 1.9-.8-1.9-1.9-.8 1.9-.8z" />
             </svg>
           </button>
+          <!-- 局域网分享：发现同一局域网里运行本应用的设备并互传文件 -->
+          <button
+            class="rail-btn"
+            :class="{ active: view === 'lanshare' }"
+            :aria-current="view === 'lanshare' ? 'page' : undefined"
+            :title="shortcutTitle('局域网分享', '5')"
+            aria-label="局域网分享"
+            @click="selectTool('lanshare')"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="6" cy="12" r="2.3" />
+              <circle cx="18" cy="6" r="2.3" />
+              <circle cx="18" cy="18" r="2.3" />
+              <path d="M8.1 10.9l7.8-3.8M8.1 13.1l7.8 3.8" />
+            </svg>
+          </button>
         </div>
         <div class="rail-bottom">
           <button
@@ -840,6 +857,11 @@ async function handlePack(project: any, asZip: boolean = false) {
         <!-- 清理工具 -->
         <div v-show="view === 'cleaner'" class="workspace-body">
           <CleanerPanel :active="view === 'cleaner'" />
+        </div>
+
+        <!-- 局域网分享工具 -->
+        <div v-show="view === 'lanshare'" class="workspace-body">
+          <LanSharePanel :active="view === 'lanshare'" />
         </div>
 
         <!-- 设置工具 -->

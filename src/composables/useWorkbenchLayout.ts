@@ -3,7 +3,7 @@ import { safeGet, safeSet } from './safeStorage'
 import { platform } from '@/platform'
 
 /** 工具页标识 */
-export type AppView = 'home' | 'proxy' | 'cleaner' | 'settings'
+export type AppView = 'home' | 'proxy' | 'cleaner' | 'lanshare' | 'settings'
 
 const TREE_WIDTH_KEY = 'ws-workbench:layout:tree-width'
 const TREE_COLLAPSED_KEY = 'ws-workbench:layout:tree-collapsed'
@@ -134,6 +134,10 @@ export function useWorkbenchLayout() {
       case '4':
         event.preventDefault()
         selectTool('cleaner')
+        break
+      case '5':
+        event.preventDefault()
+        selectTool('lanshare')
         break
       case 'b':
         event.preventDefault()

@@ -237,6 +237,18 @@ openconnect 探测失败时，代理页给出按平台区分的安装引导：ma
 
 已知取舍：默认组合在应用运行期间是全局注册的，会接管 Chrome / 编辑器里同款「粘贴为纯文本」快捷键。若和你的习惯冲突，在「系统 → 剪贴板」齿轮里换一个即可（历史与面板逻辑不用动）。
 
+### 局域网分享（LocalSend 风格）
+
+同一局域网里、都开着本应用的设备会自动出现在左侧图标栏的「局域网分享」页（快捷键 `5`），选中对方就能把本机文件发过去；对方面板会弹出待接收卡片，点「接受」文件才落盘，点「拒绝」或 60 秒不处理就取消。
+
+- 页顶总开关默认关闭：关闭后不组播、不监听端口；开启后同一局域网内 3 秒内互相可见（15 秒没有心跳视为离线，从列表移除）
+- 发现走 UDP 组播 `224.0.0.167:53317`；传输是内置的明文 HTTP 服务，端口默认 `53317`，被占用时在 `53317..53326` 里顺延，实际端口写进广播
+- 发送：一次可选多个文件，逐文件流式上传，面板按文件显示进度；接收方点「接受」后后端才生成与会话绑定的一次性上传 token，`upload` 校验 session / 文件 id / token 与登记大小
+- 接收目录默认 `~/Downloads/ws-workbench 局域网分享`，可在面板里改（会做一次写探测）；重名文件自动加 ` (1)` 后缀，不覆盖已有文件；文件名只取 basename，路径分隔符 / `..` 会被清洗
+- 最近接收最多 20 条（只在内存里，重启清空），可打开文件或所在目录，也可清空记录（不删文件）
+- 只做本应用之间的互传：自定义协议，不与官方 LocalSend 互通；传输不加密，建议只在可信局域网使用
+- macOS 首次使用会请求「本地网络」权限（`src-tauri/Info.plist` 里写了用途说明）；Windows 首次监听会弹防火墙放行提示，允许后即可被其他设备发现
+
 ### 设置
 
 顶部「检查更新」卡片显示当前版本，只有查到更高版本时才多显示一行高亮的「最新版本」并出现「立即更新」（右上角「重新检测」会顺带检查一次更新）；下载/安装进度就地显示，下载中断后点「重试」会从断点续传（见「自动更新」）；下面显示运行环境（操作系统、架构、可执行文件后缀、是否需要提权、配置文件位置、各网卡的 MAC 与全部 IP —— 多 IP 逐条列出），以及附件实际落盘位置（可直接打开目录）。
@@ -542,6 +554,7 @@ VPN 会话目录同时被主进程和提权 worker 使用，因此不做路径�
 - 托盘快捷面板的原生弹出（真实点菜单栏图标）受 macOS 辅助功能/屏幕录制权限限制，自动化测试只覆盖了页面渲染、位置计算与 `cargo check`，首次使用请手动点一下确认弹窗位置与失焦收起
 - 快捷面板的透明圆角窗口在 macOS 上依赖 `macos-private-api`，因此不支持 Mac App Store 渠道
 - 剪贴板历史在 macOS / Windows 启用（Linux 不启用）；历史加密落 SQLite、图片附件单独密文存放，**不联网**；默认快捷键在应用运行期间全局生效，会占用其它 app 的同款组合，可在「系统 → 剪贴板」齿轮里改。富文本回贴是尽力而为：依赖 source app 是否写入 HTML、目标 app 是否接受 HTML，图片过多或过大时可能降级成纯文本
+- 局域网分享只做 IPv4、只在本应用之间互通（自定义协议，不与官方 LocalSend 兼容），传输明文、无配对密码；发现端口固定 UDP 53317 并开了端口复用（`SO_REUSEADDR` + `SO_REUSEPORT`），同机同时跑开发版和安装版可以互相发现（HTTP 端口各自从 53317 起顺延）；最近接收记录只在内存里，重启清空
 - Hosts 在线编辑需要管理员授权；Windows 的提权写入 / UAC 取消 / DNS flush 只做了代码审查，需实机验收；非 UTF-8 的 hosts 文件会被拒绝编辑；没有语法校验，写错条目需自己负责（可随时从备份还原）
 - 更新包的断点续传只在「同版本 + 同下载 URL」内有效；服务端不支持 Range 时会退化为整包重下，系统清掉应用缓存目录后重试也会从 0 开始。Windows 上的「下载 → 退出 → 安装 → 重启」全链路只做了代码审查，需实机验收
 
@@ -560,6 +573,7 @@ src-tauri/src/
     quick.rs       托盘快捷面板：隐藏、按页签内容调整高度、底部「显示主界面 / 退出」
     clipboard.rs   剪贴板历史命令层：changeCount 采集 / 运行时状态 / 面板显隐
     hosts.rs       Hosts 在线编辑：读取 / 保存 / 备份列表 / 还原（整文件写入）
+    lanshare.rs    局域网分享命令层：快照 / 启停 / 设备名与接收目录 / 接收确认 / 发送
   util/            通用能力层
     fs.rs          目录创建、文本读写、可写性探测
     time.rs        本地 RFC3339 / UTC 毫秒时间戳
@@ -578,6 +592,10 @@ src-tauri/src/
                    rich.rs（HTML 图文抽取 / 还原 / 哈希 / 缩略图）、store.rs（SQLite 读写与附件路径）
   hosts/           Hosts 在线编辑：内容校验（mod.rs）、备份（store.rs）、
                    提权写入在 file/ 下按平台拆（scripts.rs 放纯脚本文本生成）
+  lanshare/        局域网分享：mod.rs 运行期状态/快照/启停、protocol.rs 报文与文件名清洗、
+                   settings.rs 设置持久化（lan_share.json）、discovery.rs UDP 组播发现、
+                   server.rs 接收 HTTP 服务（prepare 等待确认 / upload 流式落盘）、
+                   client.rs 发送端（探活 / prepare-upload / 分块上传 / 进度事件）
   cleaner/         系统工具：安装列表/卸载/关联文件/残留扫描 + 屏幕休眠、弹窗拦截的后端
     related.rs     卸载窗口关联文件清单组装（分组 / 默认勾选 / 使用情况文案）
     installer_macos/ / installer_windows/  卸载实现，按平台拆
@@ -616,12 +634,13 @@ src/
                    PopupPanel / SleepPanel / StartupPanel / DefaultAppsPanel
     hosts/         HostsEditor（整文件在线编辑 + 备份还原，编辑区是 Monaco）
     clipboard/     ClipboardManager（「系统 → 剪贴板」管理页签）
+    lanshare/      LanSharePanel（局域网分享工具页：开关 / 设备 / 待接收 / 进度 / 最近接收）
   composables/     useConfig / usePack / useVpn / useCleaner / useApps / useUpdater /
                    useWorkbenchLayout / useEntitySelection / useProjectForm /
                    useDeleteConfirm / safeStorage / useKeepAwake / useStartup / usePopup /
                    useDefaultApps / useHosts / useClipboardHistory
   api/             后端命令的类型化封装（config / project / system / attachments / apps / cleaner /
-                   sleep / startup / popup / defaultapps / clipboard / hosts）
+                   sleep / startup / popup / defaultapps / clipboard / hosts / lanshare）
   editor/          Monaco 集成（hosts 语言 / 主题 / worker，首次打开 Hosts 页签才加载）
   utils/           通用小工具（time / dialog / path / error / hostsTokens / note-text /
                    note-assets / note-clipboard）
