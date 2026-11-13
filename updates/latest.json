@@ -5,15 +5,15 @@
   "platforms": {
     "windows-x86_64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVE0rL3NzZVMwbkMxZFFXS3doTXc1RUw2ZytLdDFjZEVRTVhUZHVRbVFKVDZZN0hHeVJtZG5ubDZ4c01NOVdrRllGTEYzaUVwWDlNRlpTM0dGcElKMy9NOHpSS3hxekFZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NTUzNDQyCWZpbGU6d3Mtd29ya2JlbmNoXzEuMC4yM194NjQtc2V0dXAuZXhlCXZlcnNpb246MS4wLjIzCmJwQU5KK1kxRWNkZmxVNTNyb3hzNG1qL2NlY2lXQjFuZjBEQmRTRlprZTFiVUtic3dILy9zSGtDVVljNjBEWGdmbVdhQXhubDFlOS9USFZDejY3SERnPT0K",
-      "url": "https://github.com/fengwenshan/ws-workbench/releases/download/v1.0.23/ws-workbench-setup.exe"
+      "url": "https://gitee.com/feng_wenshan/ws-workbench/releases/download/v1.0.23/ws-workbench-setup.exe"
     },
     "darwin-aarch64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVE0rL3NzZVMwbkgrWUZ0SXpKdVJkbWhvYlJTR2FFZ2NCYWEvKzc2c0M5YVFIWGdaRjJTM0ZkZVNGcno1QVBsQ3dBLzlpYm84MkVMUWFtQ0xVTHpadzRSelh4YUs0WndFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NTUzMTMyCWZpbGU6d3Mtd29ya2JlbmNoLmFwcC50YXIuZ3oJdmVyc2lvbjoxLjAuMjMKVjJPZk9IWml5R0N2Rkp0NC9FWHlKQVZ2Y3M4a09ZTFdDMlpwUXd3OHdyR3VKZEoxSW9GVVYwaGh5blJjVXRiNXFXaTdCck15Zm8vbkFKODBONFk5REE9PQo=",
-      "url": "https://github.com/fengwenshan/ws-workbench/releases/download/v1.0.23/ws-workbench_aarch64.app.tar.gz"
+      "url": "https://gitee.com/feng_wenshan/ws-workbench/releases/download/v1.0.23/ws-workbench_aarch64.app.tar.gz"
     },
     "darwin-x86_64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVE0rL3NzZVMwblBQUU41Q3NFWXpVN2szWElPTnk2TFQ5a1Q1Wklwc2l5Z3lXUG5WSWUybEM2L0RUVnpOODNrTmdaVUkyTFpQbmJZK0NZbFl6ckJQcnFROXFhaEtseGd3PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NTUzMzMyCWZpbGU6d3Mtd29ya2JlbmNoLmFwcC50YXIuZ3oJdmVyc2lvbjoxLjAuMjMKMXpLSGlvbVFDUXV6c00wK0JKZHhuYlliL1czaWVOb3d1Umc5dXBleFh1UHN2RUdTcVFUMGZMdzFZanlncEVSaG5HNk8vTXFMT3hrYXdWZ2dpeVA0QUE9PQo=",
-      "url": "https://github.com/fengwenshan/ws-workbench/releases/download/v1.0.23/ws-workbench_x86_64.app.tar.gz"
+      "url": "https://gitee.com/feng_wenshan/ws-workbench/releases/download/v1.0.23/ws-workbench_x86_64.app.tar.gz"
     }
   }
 }
