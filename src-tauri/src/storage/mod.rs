@@ -39,6 +39,18 @@ pub(crate) const DATA_MARKERS: &[&str] = &[
     "vpn",
 ];
 
+/// SQLite 数据库主文件名（与 [`crate::db`] 的 `DB_FILE` 保持一致）。
+const DB_MARKER: &str = "ws-workbench.db";
+
+/// SQLite 的附属文件：WAL 模式下崩溃/断电会留下 `-wal`，里面可能有尚未回写
+/// 主库的已提交事务；必须跟数据库主文件一起搬，否则删旧目录时会把它们一起删掉，
+/// 造成「升级后最近的数据丢了」。
+const DB_SIDECARS: &[&str] = &[
+    "ws-workbench.db-wal",
+    "ws-workbench.db-shm",
+    "ws-workbench.db-journal",
+];
+
 /// 启动时迁移旧数据目录；失败只打日志，不阻断启动。
 pub fn migrate_on_startup(app: &AppHandle) -> Result<(), String> {
     let home = app
@@ -78,6 +90,9 @@ pub(crate) fn migrate_into(target: &Path, legacy_dirs: &[PathBuf]) -> Result<(),
             }
             move_path(&source, &dest)?;
             moved += 1;
+            if *marker == DB_MARKER {
+                move_db_sidecars(legacy, target)?;
+            }
         }
         if moved == 0 {
             eprintln!(
@@ -117,6 +132,18 @@ pub(crate) fn migrate_into(target: &Path, legacy_dirs: &[PathBuf]) -> Result<(),
 
 fn has_data(dir: &Path) -> bool {
     DATA_MARKERS.iter().any(|marker| dir.join(marker).exists())
+}
+
+/// 数据库主文件迁移后，紧接着搬它的附属文件；目标已有同名附属文件时保留目标。
+fn move_db_sidecars(legacy: &Path, target: &Path) -> Result<(), String> {
+    for sidecar in DB_SIDECARS {
+        let source = legacy.join(sidecar);
+        let dest = target.join(sidecar);
+        if source.exists() && !dest.exists() {
+            move_path(&source, &dest)?;
+        }
+    }
+    Ok(())
 }
 
 /// 移动文件或目录；跨盘 `rename` 会失败，退化为「复制到目标 → 删源」。
@@ -211,6 +238,24 @@ mod tests {
         // 非数据文件不迁移；旧目录搬空后删除
         assert!(!target.join("uninstall-info.txt").exists());
         assert!(!legacy.exists(), "旧目录应在迁移成功后删除");
+    }
+
+    #[test]
+    fn migrates_sqlite_wal_sidecars_with_database() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("app-data");
+        let legacy = root.path().join("legacy");
+        write_file(&legacy.join("ws-workbench.db"), "db");
+        // 模拟崩溃/断电后残留的 WAL：里面有尚未回写主库的已提交事务
+        write_file(&legacy.join("ws-workbench.db-wal"), "wal");
+        write_file(&legacy.join("ws-workbench.db-shm"), "shm");
+
+        migrate_into(&target, &[legacy.clone()]).unwrap();
+
+        assert_eq!(std::fs::read_to_string(target.join("ws-workbench.db")).unwrap(), "db");
+        assert_eq!(std::fs::read_to_string(target.join("ws-workbench.db-wal")).unwrap(), "wal");
+        assert_eq!(std::fs::read_to_string(target.join("ws-workbench.db-shm")).unwrap(), "shm");
+        assert!(!legacy.exists(), "主库和附属文件都搬走后旧目录应删除");
     }
 
     #[test]
