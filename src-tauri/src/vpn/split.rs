@@ -38,7 +38,7 @@ use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 use std::time::Instant;
 
 use super::dns_client;
@@ -101,11 +101,12 @@ const PROBE_TIMEOUT: Duration = Duration::from_millis(2500);
 /// Windows：一轮解析最多等多久（域名多、并发线程多时兜底）
 #[cfg(target_os = "windows")]
 const RESOLVE_ROUND_DEADLINE: Duration = Duration::from_secs(5);
-/// Windows：多久查一次「连规则地址、却不是从隧道发出的既有连接」。
+/// 多久查一次「连规则地址、却不是从隧道发出的既有连接」。
 ///
 /// 这类连接不会自愈（路由只影响新连接），查得再勤也改不了它们，只是报给用户看，
 /// 所以间隔放长；60 秒一次足够让人在日志里看到 nginx 这类代理被点名。
-#[cfg(target_os = "windows")]
+/// Windows 用 PowerShell 查，macOS 用一次 `lsof`。
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 const BYPASS_CHECK_INTERVAL: Duration = Duration::from_secs(60);
 
 /// 本会话见过的 DNS 应答：查询名 -> A 记录。
@@ -747,11 +748,11 @@ pub struct SplitTunnel {
     /// Windows：NRPT 是否指向本机 127.0.0.1:53 转发器
     #[cfg(target_os = "windows")]
     local_dns_proxy: bool,
-    /// Windows：上次检查「绕过规则的已有连接」的时间（见 `guard`）
-    #[cfg(target_os = "windows")]
+    /// Windows / macOS：上次检查「绕过规则的已有连接」的时间（见 `guard`）
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     last_bypass_check: Option<Instant>,
-    /// Windows：已经报过的 `pid:远端地址`，同一条连接不重复刷日志
-    #[cfg(target_os = "windows")]
+    /// Windows / macOS：已经报过的 `pid:远端地址`，同一条连接不重复刷日志
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     bypass_reported: std::collections::BTreeSet<String>,
     /// 本机转发器收到的查询数：Windows 用来确认 NRPT→loopback 是否真的通了
     dns_queries: Arc<AtomicUsize>,
@@ -831,9 +832,9 @@ impl SplitTunnel {
             adapter_dns_fallback: false,
             #[cfg(target_os = "windows")]
             local_dns_proxy: false,
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
             last_bypass_check: None,
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
             bypass_reported: std::collections::BTreeSet::new(),
             dns_queries: Arc::new(AtomicUsize::new(0)),
             stop: Arc::new(AtomicBool::new(false)),
@@ -1496,7 +1497,7 @@ impl SplitTunnel {
     /// 路由守护：隧道路由被别的东西改掉时补回来，解析器配置被删时补回来。
     ///
     /// 返回需要写进 worker.log 的提示行：guard 手里没有会话目录，日志由调用方写。
-    /// 目前只有 Windows 的「绕过分流的既有连接」会返回内容。
+    /// 目前 Windows / macOS 的「绕过分流的既有连接」会返回内容。
     pub fn guard(&mut self) -> Vec<String> {
         #[allow(unused_mut)]
         let mut messages: Vec<String> = Vec::new();
@@ -1595,6 +1596,19 @@ impl SplitTunnel {
                 let _ = std::fs::write(path, resolver_file_content(self.forwarder_port));
             }
         }
+        // macOS 没有 NRPT，但「绕过规则的既有连接」同样只能点名不能改路由：
+        // 用一次 lsof 找出远端在隧道路由、本地却不是隧道地址的 TCP 长连接。
+        #[cfg(target_os = "macos")]
+        {
+            let due = self
+                .last_bypass_check
+                .map(|at| at.elapsed() >= BYPASS_CHECK_INTERVAL)
+                .unwrap_or(true);
+            if due {
+                self.last_bypass_check = Some(Instant::now());
+                messages.extend(self.report_bypassing_connections());
+            }
+        }
         messages
     }
 
@@ -1609,20 +1623,7 @@ impl SplitTunnel {
     /// 不是隧道网卡上的地址。反过来「从隧道发出」的连接直接跳过。
     #[cfg(target_os = "windows")]
     fn report_bypassing_connections(&mut self) -> Vec<String> {
-        use std::collections::HashMap;
-
-        // 隧道路由：固定路由（VPN DNS / IP 规则） + 从 DNS 应答学到的 /32
-        let mut routed: Vec<(u32, u8)> = Vec::new();
-        for cidr in &self.static_routes {
-            if let Ok(parsed) = route::parse_cidr(cidr) {
-                routed.push(parsed);
-            }
-        }
-        if let Ok(dynamic) = self.dynamic.lock() {
-            for ip in dynamic.iter() {
-                routed.push((u32::from(*ip), 32));
-            }
-        }
+        let routed = self.routed_cidrs();
         if routed.is_empty() {
             return Vec::new();
         }
@@ -1642,21 +1643,7 @@ impl SplitTunnel {
             return Vec::new();
         };
         let found = bypassing_from_value(&json, &routed);
-        if found.is_empty() {
-            return Vec::new();
-        }
-
-        // 同一条连接不重复报：每轮都刷只会把日志淹掉
-        let mut fresh: Vec<BypassConnection> = Vec::new();
-        for conn in found {
-            if self.bypass_reported.len() >= 128 {
-                break;
-            }
-            let key = format!("{}:{}", conn.pid, conn.remote);
-            if self.bypass_reported.insert(key) {
-                fresh.push(conn);
-            }
-        }
+        let fresh = fresh_bypass_connections(&found, &mut self.bypass_reported);
         if fresh.is_empty() {
             return Vec::new();
         }
@@ -1667,24 +1654,86 @@ impl SplitTunnel {
             list.dedup();
             list
         };
-        let names: HashMap<u32, String> = process_names(&pids);
+        let names = process_names(&pids);
+        bypass_report_lines(&fresh, &names)
+    }
 
-        let mut lines = vec![format!(
-            "[分流] 有 {} 条连接连的是规则内网地址，却不是从隧道发出的：\
-             它们建立于路由注入之前，路由改不了已有连接",
-            fresh.len()
-        )];
-        for conn in fresh.iter().take(5) {
-            let who = names
-                .get(&conn.pid)
-                .cloned()
-                .unwrap_or_else(|| format!("pid {}", conn.pid));
-            lines.push(format!(
-                "[分流]   {} -> {}（重启这个程序后，新连接才会按规则走）",
-                who, conn.remote
-            ));
+    /// macOS：用一次 `lsof` 找出「连规则内网、却不是从隧道发出」的既有连接。
+    ///
+    /// 与 Windows 的 PowerShell 版本共用判定（`bypassing_from_value`）和
+    /// 去重/排版（`fresh_bypass_connections` / `bypass_report_lines`）：
+    /// 两个平台唯一不同的是「连接从哪来」——Windows 走 `Get-NetTCPConnection`，
+    /// macOS 走 `lsof -F pcn`（一次输出 pid、进程名、本地/远端地址）。
+    #[cfg(target_os = "macos")]
+    fn report_bypassing_connections(&mut self) -> Vec<String> {
+        use std::collections::HashMap;
+
+        let routed = self.routed_cidrs();
+        if routed.is_empty() {
+            return Vec::new();
         }
-        lines
+        let tunnel_ips = self.tunnel_ipv4_addresses();
+        let (text, _ok) = crate::process::run_with_timeout(
+            std::path::Path::new(LSOF_BIN),
+            &["-nP", "-iTCP", "-sTCP:ESTABLISHED", "-F", "pcn"],
+            Duration::from_secs(10),
+        );
+        let conns = parse_lsof_established(&text);
+        if conns.is_empty() {
+            return Vec::new();
+        }
+        let value = serde_json::json!({
+            "tun": tunnel_ips,
+            "conns": conns
+                .iter()
+                .map(|conn| serde_json::json!({
+                    "local": conn.local,
+                    "remote": conn.remote,
+                    "pid": conn.pid,
+                }))
+                .collect::<Vec<_>>(),
+        });
+        let found = bypassing_from_value(&value, &routed);
+        let fresh = fresh_bypass_connections(&found, &mut self.bypass_reported);
+        if fresh.is_empty() {
+            return Vec::new();
+        }
+
+        let mut names: HashMap<u32, String> = HashMap::new();
+        for conn in &conns {
+            names
+                .entry(conn.pid)
+                .or_insert_with(|| conn.command.clone());
+        }
+        bypass_report_lines(&fresh, &names)
+    }
+
+    /// 本会话应当走隧道的目的网段：固定路由（VPN DNS / IP 规则）+ DNS 学到的 `/32`。
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    fn routed_cidrs(&self) -> Vec<(u32, u8)> {
+        let mut routed: Vec<(u32, u8)> = Vec::new();
+        for cidr in &self.static_routes {
+            if let Ok(parsed) = route::parse_cidr(cidr) {
+                routed.push(parsed);
+            }
+        }
+        if let Ok(dynamic) = self.dynamic.lock() {
+            for ip in dynamic.iter() {
+                routed.push((u32::from(*ip), 32));
+            }
+        }
+        routed
+    }
+
+    /// 隧道网卡当前的所有 IPv4 地址；`lsof` 里本地地址命中这些的连接不算绕过。
+    #[cfg(target_os = "macos")]
+    fn tunnel_ipv4_addresses(&self) -> Vec<String> {
+        route::list_interfaces()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|info| info.alias == self.tun_dev)
+            .filter_map(|info| info.ip.parse::<Ipv4Addr>().ok().map(|ip| ip.to_string()))
+            .collect()
     }
 
     /// 收工时回收一切：线程、动态路由、固定路由、解析器配置。
@@ -2483,7 +2532,7 @@ pub(crate) fn del_tunnel_route(cidr: &str, tun_dev: &str, tun_index: u32) -> Res
 }
 
 /// 一条「连的是规则内网地址、却不是从隧道发出的」连接。
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BypassConnection {
     pid: u32,
@@ -2491,7 +2540,7 @@ struct BypassConnection {
 }
 
 /// `ip` 是否落在 `network/prefix` 里。
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 fn cidr_contains(network: u32, prefix: u8, ip: u32) -> bool {
     if prefix == 0 {
         return true;
@@ -2504,7 +2553,7 @@ fn cidr_contains(network: u32, prefix: u8, ip: u32) -> bool {
 ///
 /// 抽成纯函数是为了能测：判定逻辑（远端在隧道路由里、本地不是隧道地址）
 /// 比跑 PowerShell 更值得断言。
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 fn bypassing_from_value(
     value: &serde_json::Value,
     routed: &[(u32, u8)],
@@ -2549,6 +2598,112 @@ fn bypassing_from_value(
         }
     }
     out
+}
+
+/// macOS 上取已建立 TCP 连接用的 lsof 路径（系统自带）。
+#[cfg(target_os = "macos")]
+const LSOF_BIN: &str = "/usr/sbin/lsof";
+
+/// `lsof -nP -iTCP -sTCP:ESTABLISHED -F pcn` 里的一条连接。
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LsofConnection {
+    pid: u32,
+    command: String,
+    local: String,
+    remote: String,
+}
+
+/// 解析 `lsof -F pcn` 的分段输出。
+///
+/// 格式：`p<pid>` 开一个进程段，`c<进程名>` 只出现一次，`n<本地>-><远端>` 是连接。
+/// 只收 IPv4 端点：IPv6 端点长这样 `[::1]:443`，而分流按 IPv4 工作。
+/// 解析不了的端点（含 lsof 的权限警告等杂行）直接跳过，不影响其它连接。
+#[cfg(target_os = "macos")]
+fn parse_lsof_established(text: &str) -> Vec<LsofConnection> {
+    fn endpoint_ipv4(part: &str) -> Option<String> {
+        let (ip, port) = part.rsplit_once(':')?;
+        if port.is_empty() || !port.chars().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        ip.parse::<Ipv4Addr>().ok().map(|ip| ip.to_string())
+    }
+
+    let mut out = Vec::new();
+    let mut pid: Option<u32> = None;
+    let mut command = String::new();
+    for line in text.lines() {
+        match line.as_bytes().first().copied() {
+            Some(b'p') => {
+                pid = line[1..].trim().parse::<u32>().ok();
+                command.clear();
+            }
+            Some(b'c') => command = line[1..].to_string(),
+            Some(b'n') => {
+                let (Some(pid), Some((local, remote))) = (pid, line[1..].split_once("->")) else {
+                    continue;
+                };
+                let (Some(local), Some(remote)) = (endpoint_ipv4(local), endpoint_ipv4(remote))
+                else {
+                    continue;
+                };
+                out.push(LsofConnection {
+                    pid,
+                    command: command.clone(),
+                    local,
+                    remote,
+                });
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// 同一条连接（pid + 远端地址）只报一次：guard 每 15 秒一轮，重复刷会把日志淹掉。
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn fresh_bypass_connections(
+    found: &[BypassConnection],
+    reported: &mut std::collections::BTreeSet<String>,
+) -> Vec<BypassConnection> {
+    let mut fresh = Vec::new();
+    for conn in found {
+        if reported.len() >= 128 {
+            break;
+        }
+        let key = format!("{}:{}", conn.pid, conn.remote);
+        if reported.insert(key) {
+            fresh.push(conn.clone());
+        }
+    }
+    fresh
+}
+
+/// 把「绕过分流的连接」排成 worker.log 里的几行；查不到进程名就退回 `pid N`。
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn bypass_report_lines(
+    fresh: &[BypassConnection],
+    names: &std::collections::HashMap<u32, String>,
+) -> Vec<String> {
+    if fresh.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = vec![format!(
+        "[分流] 有 {} 条连接连的是规则内网地址，却不是从隧道发出的：\
+         它们建立于路由注入之前，路由改不了已有连接",
+        fresh.len()
+    )];
+    for conn in fresh.iter().take(5) {
+        let who = names
+            .get(&conn.pid)
+            .cloned()
+            .unwrap_or_else(|| format!("pid {}", conn.pid));
+        lines.push(format!(
+            "[分流]   {} -> {}（重启这个程序后，新连接才会按规则走）",
+            who, conn.remote
+        ));
+    }
+    lines
 }
 
 /// 按 PID 查进程名。查不到就不给名字，日志里退回 `pid N`。
@@ -3477,7 +3632,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     fn cidr_contains_handles_prefix_boundaries() {
         let net = u32::from(std::net::Ipv4Addr::new(10, 10, 0, 0));
         assert!(cidr_contains(net, 16, u32::from(std::net::Ipv4Addr::new(10, 10, 3, 17))));
@@ -3493,7 +3648,7 @@ mod tests {
     /// 地址、本地却不是隧道地址 —— 这条要报出来，否则用户只会看到「走 nginx 的
     /// 请求不受规则限制」。
     #[test]
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     fn bypass_report_finds_connections_that_skip_the_tunnel() {
         let json = serde_json::json!({
             "tun": ["10.255.0.6"],
@@ -3521,7 +3676,7 @@ mod tests {
 
     /// ConvertTo-Json 对单元素数组会退化成对象：解析不能因此丢掉唯一的连接。
     #[test]
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     fn bypass_report_tolerates_single_item_json() {
         let json = serde_json::json!({
             "tun": "10.255.0.6",
@@ -3534,5 +3689,61 @@ mod tests {
         let found = bypassing_from_value(&json, &routed);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].pid, 7);
+    }
+
+    /// lsof 的 `-F pcn` 输出：按 `p` 分段、`c` 给进程名、`n` 给一条连接。
+    /// 现场 nginx 那类代理的长连接就是从这里读出来的。
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn parse_lsof_established_extracts_ipv4_connections() {
+        let text = "p4242\ncnginx\nf7\nn192.168.1.42:53000->10.10.3.17:443\n\
+                    p7\nccurl\nf3\nn[fe80::1]:60000->10.10.0.1:443\n\
+                    p9\ncbad\nnnot-an-address->1.2.3.4:80\nn192.168.1.5:1->203.0.113.9:80\n";
+        let conns = parse_lsof_established(text);
+        assert_eq!(conns.len(), 2, "IPv6 与解析不了的端点都要跳过：{conns:?}");
+        assert_eq!(conns[0].pid, 4242);
+        assert_eq!(conns[0].command, "nginx");
+        assert_eq!(conns[0].local, "192.168.1.42");
+        assert_eq!(conns[0].remote, "10.10.3.17");
+        // 同一个进程段里前一条连接解析失败，不影响后面的
+        assert_eq!(conns[1].pid, 9);
+        assert_eq!(conns[1].command, "bad");
+        assert_eq!(conns[1].local, "192.168.1.5");
+        assert_eq!(conns[1].remote, "203.0.113.9");
+    }
+
+    /// 同一条连接（pid + 远端）只报一次；报过之后不再刷日志。
+    #[test]
+    fn bypass_report_names_processes_and_dedupes() {
+        let found = vec![
+            BypassConnection {
+                pid: 4242,
+                remote: "10.10.3.17".into(),
+            },
+            BypassConnection {
+                pid: 4242,
+                remote: "10.10.3.17".into(),
+            },
+            BypassConnection {
+                pid: 7,
+                remote: "10.10.3.18".into(),
+            },
+        ];
+        let mut reported = BTreeSet::new();
+        let fresh = fresh_bypass_connections(&found, &mut reported);
+        assert_eq!(fresh.len(), 2, "同一条连接只算一次");
+
+        let mut names = std::collections::HashMap::new();
+        names.insert(4242u32, "nginx".to_string());
+        let lines = bypass_report_lines(&fresh, &names);
+        assert_eq!(lines.len(), 3, "头部 + 两条明细：{lines:?}");
+        assert!(lines[0].contains("2 条"));
+        assert!(lines[1].contains("nginx -> 10.10.3.17"));
+        assert!(lines[2].contains("pid 7"), "查不到进程名时退回 pid：{lines:?}");
+
+        assert!(
+            fresh_bypass_connections(&found, &mut reported).is_empty(),
+            "同样的连接第二次不再报"
+        );
     }
 }

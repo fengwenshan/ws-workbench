@@ -1491,6 +1491,16 @@ pub fn run() {
             vpn::commands::shutdown(app_handle);
         }
 
+        // macOS 的关机 / 注销不会走 ExitRequested —— AppKit 的 terminate 会直接到
+        // applicationWillTerminate → tao 的 LoopDestroyed → RunEvent::Exit。在这里
+        // 同步等 worker 把隧道、路由、解析器配置撤掉再让进程退出；loginwindow 会
+        // 等本进程退出，所以这几秒就是「先断开再关机」。Windows 同名逻辑在
+        // WM_QUERYENDSESSION 里（vpn/shutdown.rs），不在这里重复。
+        #[cfg(target_os = "macos")]
+        if let tauri::RunEvent::Exit = event {
+            vpn::shutdown::before_exit(app_handle);
+        }
+
         // 非 macOS 平台没有 Reopen 事件，这里显式忽略参数避免 unused 警告
         #[cfg(not(target_os = "macos"))]
         {

@@ -129,6 +129,14 @@ const canPack = computed(() => projectType.value === 'layui')
 
 `DOMAIN-KEYWORD` / `PROCESS-NAME` / `DST-PORT` / `RULE-SET` 需要按连接抓包或按进程判定，路由注入模式没有落点，保存时直接报错并提示改法，不会再「显示已启用但从不生效」。
 
+#### 关机 / 换网 / 代理长连接
+
+三个「隧道本身没坏、但用户以为规则失效」的场景，macOS 与 Windows 用同一套处理：
+
+- **关机 / 重启 / 注销前先断开**：在系统终止流程里同步写停止请求，最多等 2.5 秒让 worker 撤掉路由与解析器配置再放行。Windows 走 `WM_QUERYENDSESSION` 子类过程；macOS 走 `RunEvent::Exit`（`applicationWillTerminate → LoopDestroyed`，loginwindow 会等本进程退出，所以这几秒等于「先断开再关机」）。Windows 上不返回 `FALSE` 拦关机：`lParam` 区分不出关机 / 重启 / 休眠，拦下来再自己发起容易把重启变成关机。超时也放行，残留交给下次启动的 `cleanup_stale` / `restore_stale` 兜底；强制关机、断电这类系统不给收尾机会的情况拦不住。
+- **换网后自动重连**：Windows 用 `NotifyUnicastIpAddressChange` 地址变更回调；macOS 每 2 秒用 `getifaddrs` 取一次「接口名 + IPv4」指纹（只是系统调用、不起子进程），代号一变 worker 再比一次物理默认出口。确认换了网就撤掉旧布线、重新拉起 openconnect；隧道网卡自身抖动不算换网。
+- **点名「绕过规则的已有连接」**：路由注入只影响新连接，nginx / 数据库客户端这类长连接建立于布线之前，改路由也带不进去。worker 每 60 秒扫一次已建立的 TCP 连接：远端落在隧道路由里、本地又不是隧道地址的，在日志里点名进程与远端地址（Windows `Get-NetTCPConnection`，macOS `lsof -nP -iTCP -sTCP:ESTABLISHED -F pcn`），提示「重启这个程序后新连接才会按规则走」。nginx 自己配的 DNS（`resolver` / DoH）同样拦不住，日志里给的是同一条建议。
+
 #### 系统通知
 
 四个「状态真的变了」的时刻发一条**系统通知**（Windows 通知 / macOS 通知中心），窗口最小化到托盘、或者用户切到别的应用时也能知道结果：

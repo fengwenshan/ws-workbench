@@ -119,7 +119,7 @@ struct Worker {
     stale_alive_checks: u32,
     /// 心跳过期：主进程已经不在了，循环里看到就把隧道收掉
     parent_lost: bool,
-    /// 网络出口变更通知（仅 Windows；没有时保持原来的 15s 路由守护）
+    /// 网络出口变更通知（Windows 地址回调 / macOS 2s 轮询；没有时保持原来的 15s 路由守护）
     netwatch: Option<crate::vpn::netwatch::Watcher>,
     /// 上次处理过的变更代号
     net_generation: u64,

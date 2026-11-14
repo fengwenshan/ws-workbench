@@ -1328,6 +1328,71 @@ Exception calling "CreateToastNotifier" with "1" argument(s):
 
 ---
 
+### 14.25 16:20 macOS 对齐三连：关机收尾 / 换网重连 / 代理长连接点名
+
+Windows 侧三个修复（14.24）已在 `9dea788` 落地；本轮在 `feat/master` 上补 macOS 对等实现，
+先把「macOS 有没有对应的系统钩子」逐个确认，再改代码。
+
+**① 关机 / 重启 / 注销前断开**
+
+macOS 没有 `WM_QUERYENDSESSION`。查 tao 0.37.2 的 delegate 实现：只实现了
+`applicationWillTerminate:`，**没有**实现 `applicationShouldTerminate:` —— 也就是应用
+没有「否决关机」的机会。系统关机 / 注销的路径是
+`applicationWillTerminate → AppState::exit() → Event::LoopDestroyed →`
+`tauri-runtime-wry` 的 `callback(RunEvent::Exit)`（`lib.rs:4131` 附近），
+`RunEvent::ExitRequested` 只在显式退出（Cmd+Q / 菜单退出）时发，系统关机不会走它。
+所以收尾点挂在 `RunEvent::Exit`（`lib.rs` 里原有 `ExitRequested` 只处理主动退出）。
+
+「阻止关机」这件事在 macOS 上不需要、也做不到：注销 / 关机时 loginwindow 会等应用退出，
+在 `applicationWillTerminate` 的同步回调里等 2.5s 撤布线，效果就是「先断开再关机」；
+强制关机 / 断电这类系统不给收尾机会的情况拦不住，和 Windows 的边界一致。
+等待预算与 Windows 共用（`SHUTDOWN_BUDGET_MS = 2500`）：`stop.flag` → 轮询状态 ≤2.5s →
+放行；超时不阻塞退出，残留由下次启动的 `split::cleanup_stale` / `fulltunnel::restore_stale` 兜底。
+收尾逻辑抽成会话级的 `disconnect_session_with_budget(session, kind, budget)`，预算可注入，
+Windows 的 `WM_QUERYENDSESSION` 与 macOS 的 `RunEvent::Exit` 共用同一段代码。
+
+**② 换无线网后失效**
+
+macOS 没有等价于 `NotifyUnicastIpAddressChange` 的轻量回调：`SCDynamicStore` 需要
+`SystemConfiguration` 的 FFI + 队列，为本项目加一套 C 绑定不划算。改为
+`vpn/netwatch.rs` 每 2 秒用 `getifaddrs` 取「接口名 + IPv4」指纹（纯系统调用、不起子进程），
+变了就把 `GENERATION` +1。worker 端不改判定：代号变了再等 1.2s 聚拢、重取快照，比
+`Worker::network_exit_changed`（物理默认网关；macOS 的接口 index 恒为 0，所以靠网关/别名比），
+真换了出口就 `restart_requested`，由已有的 `run_openconnect` 外层重连循环撤布线、重连
+（上限 3 次）。**隧道网卡自己上下线也会改变指纹**，所以不能拿「代号变了」当结论，
+必须再比一次物理出口 —— 否则一连上就把自己踢掉；这一点在实现里由
+`network_exit_changed` 保证。
+
+**③ nginx 这类代理「不受规则限制」**
+
+根因和 Windows 相同：内核在 `connect()` 时就选好路由，已有 socket 不会因为后注入的路由改道。
+macOS 侧用系统自带的 `lsof -nP -iTCP -sTCP:ESTABLISHED -F pcn` 取已建立连接
+（`-F` 分段输出：`p<pid>` / `c<进程名>` / `n<本地>-><远端>`，本机实测 IPv6 端点形如
+`[fe80::1]:60000->[10.10.0.1]:443`），解析成 `(pid, 进程名, 本地, 远端)`，只收 IPv4 端点；
+隧道路由集合 = 固定路由（VPN DNS / IP 规则）+ 从 DNS 应答学到的 `/32`，
+隧道本地地址集合 = 隧道网卡（`tun_dev` 别名）上的 IPv4。远端命中路由、本地又不在隧道地址里的，
+按 `pid:远端` 去重后写 worker.log 点名（`nginx -> 10.10.3.17（重启这个程序后，新连接才会按规则走）`），
+每 60 秒检查一次（与 Windows 的 `BYPASS_CHECK_INTERVAL` 共用）。判定复用 Windows 那份
+`bypassing_from_value`（含 JSON 单元素退化处理），只有「连接从哪来」分平台
+（Windows PowerShell / macOS lsof）。nginx 自己配的 DNS（`resolver` / DoH）拦不住，
+日志给的是同一条「重启程序 / 把解析指到本机转发器」的建议，不做透明劫持。
+
+本轮验证（macOS 本机）：`cargo check` 0 warning；全量 `cargo test --offline` →
+**596 passed / 0 failed / 4 ignored**。新增用例：netwatch 指纹与 watcher 可用性 2 条、
+lsof 解析（IPv6 / 坏端点跳过）1 条、代理连接去重与排版 1 条、
+`disconnect_session_with_budget` 三条（等 worker 断开 / 超时放行 / 本来断开直接放行），
+原来只跑 Windows 的 `cidr_contains` 与两条 `bypass_report_*` 放开到 macOS。
+冒烟：临时给主进程加 `WS_SMOKE_QUIT_AFTER_MS` 触发 `app.exit(0)`，确认
+`RunEvent::Exit` 走到收尾逻辑并在会话目录 worker.log 留下
+`[关机] 系统请求退出/关机，VPN 未连接，直接放行`（钩子测完已删）。
+
+已知边界：Windows 侧（14.24）仍只在代码层复查过，没有真机验证；macOS 的
+`/usr/sbin/lsof` 在权限受限环境下可能报不出别的用户的进程（本程序查的是当前用户进程，
+够用，但 root 启动的代理进程会漏），日志里会表现为「没有发现」，不会误报；
+2s 轮询在极端省电状态下可能被系统合并，换网后的重连会有秒级延迟。
+
+---
+
 ## 15. 参考资料
 
 - OpenConnect 官方仓库：<https://gitlab.com/openconnect/openconnect>
