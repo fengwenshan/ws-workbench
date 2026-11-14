@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- macOS 14+ 首次监听/组播时会弹「本地网络」权限，给用户一个看得懂的理由。
+	     该文件由 Tauri 打包时与自动生成的 Info.plist 合并。 -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>用于在局域网内发现同样运行 ws-workbench 的设备，并在双方确认后互传文件。</string>
+</dict>
+</plist>

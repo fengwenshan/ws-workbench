@@ -5905,6 +5905,7 @@ dependencies = [
  "serde_json",
  "sm3",
  "sm4",
+ "socket2",
  "sysinfo",
  "tauri",
  "tauri-build",

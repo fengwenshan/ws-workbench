@@ -14,6 +14,8 @@ mod cleaner;
 mod clipboard;
 /// Hosts 在线编辑（macOS + Windows）
 mod hosts;
+/// 局域网分享：UDP 组播发现 + 明文 HTTP 文件收发
+mod lanshare;
 mod packer;
 pub mod apps;
 mod platform;
@@ -1237,6 +1239,13 @@ pub fn run() {
             commands::hosts_backups,
             commands::hosts_restore,
             commands::hosts_open_file_dir,
+            // 局域网分享（2026-11-13 设计）：快照 / 启停 / 设置 / 接收确认 / 发送 / 清空记录
+            commands::lan_share_snapshot,
+            commands::lan_share_set_enabled,
+            commands::lan_share_set_alias,
+            commands::lan_share_set_download_dir,
+            commands::lan_share_respond_offer,
+            commands::lan_share_send_files,
             // 更新包断点续传：下载 / 安装（前端 useUpdater 调用）
             updates::update_download_resumed,
             updates::update_install_resumed,
@@ -1316,6 +1325,18 @@ pub fn run() {
 
             // 轮询会话目录里的状态文件，把 VPN 状态与日志推给前端
             vpn::commands::start_status_poller(app.handle().clone());
+
+            // 局域网分享：运行期状态（启停 / peer 表 / 待接收请求 / 接收会话）。
+            // 冷启动时按设置恢复监听；启动失败只记录原因，不阻断应用启动。
+            app.manage(lanshare::LanShareState::from_app(app.handle()));
+            {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    if let Some(state) = handle.try_state::<lanshare::LanShareState>() {
+                        state.restore_on_startup(&handle);
+                    }
+                });
+            }
 
             // 托盘：关掉窗口后应用仍在后台运行。
             //

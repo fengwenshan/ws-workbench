@@ -71,6 +71,9 @@ sysinfo = { version = "0.40", default-features = false, features = ["system"] }
 trash = "5.3"
 # 读 macOS 应用的 Info.plist
 plist = "1"
+# 局域网分享：UDP 发现端口要开 SO_REUSEADDR，同机开发版 + 安装版（或测试脚本）
+# 才能同时监听 53317；std 的 UdpSocket 没有暴露这个选项。它本来就在 tauri 的依赖树里。
+socket2 = "0.6"
 
 [dev-dependencies]
 # updates 模块的测试要直接 await 断点续传的下载函数（本机 mock HTTP 服务）
