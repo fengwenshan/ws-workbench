@@ -1130,6 +1130,7 @@ pub fn run() {
             commands::validate_project,
             commands::detect_project_type,
             commands::detect_vcs,
+            commands::detect_vcs_many,
             commands::open_dir,
             commands::open_file,
             commands::list_open_with_apps,

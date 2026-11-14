@@ -1073,6 +1073,7 @@ mod tests {
             updated_at: String::new(),
             note: String::new(),
             attachments: Vec::new(),
+            pack_include: None,
         }
     }
 

@@ -35,6 +35,7 @@ Vditor 的运行时资源（lute / highlight.js / i18n / 图标 / 内容主题�
 - 上传目录：设置页全局默认目录 → 数据目录下的 `attachments/`（未设置时按需创建；默认目录跟数据库同一个「数据仓库」，不可写时一起回退，见「数据与配置」）
 - 预览 = 应用内按需解密渲染（图像走 `wst-img` 协议，不生成明文临时文件）；下载 = 解密到指定路径；重命名只改元信息；删除会连同密文 blob 一起删
 - `⌘/Ctrl+P` 快速搜索命中附件时也走应用内预览，同样不在系统临时目录留明文副本
+- 快速搜索也搜项目：输入关键字后按项目名、分组路径和识别到的 Git / SVN 远端地址做「包含」匹配（支持局部关键字），选中直接跳到该项目；地址在打开搜索时按源目录现查并缓存，不写进项目配置
 - 上传与解密进度通过 `attachment-progress` 事件推给界面
 
 笔记里插入的图片（工具栏选图、粘贴剪贴板图片或拖入）同样走加密上传，正文只保存 `wst-img://`（macOS/Linux）或 `http://wst-img.localhost`（Windows）地址，编辑器渲染时由自定义协议按需解密返回，不落明文图片文件；这些图片不占用「上传」页的附件列表，而是显示在笔记右侧的「附件」栏里。
@@ -59,7 +60,7 @@ const canPack = computed(() => projectType.value === 'layui')
 - **开始打包**：逐个复制到输出目录，复制前会清空输出目录
 - **打包 ZIP**：流式 Deflate 直接写 zip，不落中间产物；zip 内会多包一层输出目录名，条目名按 UTF-8 写入并置位 bit 11
 
-打包用**白名单（layui 项目打包规则）**：只有命中规则的文件才进包，规则统一放在**设置页 →「layui 项目打包规则」**，项目级不再单独配置。
+打包用**白名单（layui 项目打包规则）**：只有命中规则的文件才进包。规则放在**项目「配置 → 打包包含规则」**里，每个 layui 项目一套；项目没单独配置时沿用全局默认规则（`AppConfig.default_include`，老版本在设置页编辑的那份），「恢复默认」就是清掉项目覆盖、重新继承默认。输入纯后缀（如 `psd`、`.psd`）会自动补成 `*.psd`，方便给每个项目加自己的特殊文件类型。
 
 ```
 *.html *.htm *.css *.js *.mjs *.json
@@ -79,10 +80,10 @@ const canPack = computed(() => projectType.value === 'layui')
 - NTKO 正文控件相关：`.cab`（`rsOfficeRender.js` 的 `codebase` 指向 `xmodules/pcip/module/lib/ntko/ntkoControl.cab`，IE 下由浏览器请求安装）、`.ftl`（控件模板 `ntko_lib.ftl`，前端不直接请求，但这类工程常与静态资源同目录部署、由后端 include，漏了正文控件起不来）
 - **`.` 或 `_` 开头的路径段一律跳过**（任意层级，文件或目录都算）：`.svn`/`.git`/`.idea`/`.vscode`、`.DS_Store`、`_draft.html`、`partials/_header.html` 都由这一条硬规则兜住，不占规则名额
 - 匹配语义：不带 `/` 的规则按**文件名**匹配、任意层级都算（`*.png`）；带 `/` 的按**相对源目录的路径**匹配（`assets/**`、`js/app.js`）
-- 规则清空 = 视为未配置：除 `.`/`_` 开头的条目外全部打包（避免误删规则后打出空包）
+- 规则清空 = 视为未配置：除 `.`/`_` 开头的条目外全部打包。项目配置页因此把「清空」处理成回退到默认规则，避免误把整个目录打进包
 - 路径里含空格的文件始终跳过
 
-默认规则定义在 `src-tauri/src/models.rs` 的 `DEFAULT_INCLUDE`，带版本号（当前 `DEFAULT_INCLUDE_VERSION = 5`）：老配置（没有 include 字段）加载时自动补上默认集，之后用户自己删掉的规则不会被重新塞回去。「恢复默认」按钮调用 `get_default_include_rules` 取同一份清单。
+默认规则定义在 `src-tauri/src/models.rs` 的 `DEFAULT_INCLUDE`，带版本号（当前 `DEFAULT_INCLUDE_VERSION = 5`）：老配置（没有 include 字段）加载时自动补上默认集，之后用户自己删掉的规则不会被重新塞回去。项目级覆盖存在 `ProjectConfig.pack_include`（`None` = 继承全局默认），打包时前端取「项目规则非空 ? 项目规则 : 全局默认」传给后端，空数组不会直接传给打包器（后端把空规则当成「全部放行」）。
 
 遍历由 `ignore::WalkBuilder` 完成，标准过滤全部关闭、不跟随符号链接；`.`/`_` 开头的条目在 `filter_entry` 里直接剪掉，包含规则用 `globset` 在遍历结果上过滤（文件名匹配 + 路径匹配两个集合）。相对路径中任一段含空格的文件会被跳过。输出目录与 zip 自身通过 `extra_excludes` 整棵子树剪掉，避免上一次的产物被再打一遍。
 
@@ -213,7 +214,7 @@ openconnect 探测失败时，代理页给出按平台区分的安装引导：ma
 - **软件卸载**：Windows 读注册表 `Uninstall` 键（HKLM 64/32 位、HKCU），macOS 扫 `/Applications` 与 `~/Applications`；支持按名称/发布者/位置搜索，按名称、大小、安装日期排序（顺序记在本地）。行内「卸载」打开独立卸载窗口（820×560，macOS 隐藏标题、红绿灯浮在内容上；Windows 自绘标题栏，与主界面一致）：按「程序文件 / 支持文件 / 缓存文件」列出关联文件——程序文件 = 主 `.app` + Spotlight/兜底目录找到的同 id 副本，支持/缓存复用残留规则；带大小、版本、置信度：默认只勾缓存/日志/崩溃报告（可重建）和必须卸载的应用本体；设置、账号、插件配置等用户数据默认保留，点「彻底删除（含用户数据）」或手动勾选才会清理，low 只列出不勾选，底部「全选」可全选，应用本体始终必选。点「确认删除」先只读检测是否在运行：不在运行直接执行；在运行弹二次确认（进程数与进程名），点「强制退出」先按平台正常退出（macOS `NSRunningApplication.terminate()`、Windows `CloseMainWindow()`），3 秒内退不干净就逐进程强杀（macOS `SIGKILL`、Windows `taskkill /PID … /T /F`），每 250ms 重新检测并补杀重启出来的新进程，全部进程消失后才继续（总上限约 20 秒，退不干净即中止并提示）。随后先跑应用自带卸载程序（macOS 主 `.app` 移入废纸篓；MSI 的 `/I` 自动换 `/X`，需要时一次 UAC），卸载完成后自动再扫一次残留——仍有残留就回到勾选页（提示「卸载已完成。重新扫描到 N 项残留」，主按钮变「清理残留」），没有残留直接进结果页——再按本次扫描白名单删除勾选的关联文件：卸载程序已删掉的路径记「跳过」不算失败，需 root 的条目走一次合并授权；结果页给出删除/跳过/失败明细，失败项可在结果页「重试清理」，卸载/删除后主列表自动刷新。运行中的应用本体不出现在列表里，命令层也会再拦一次——不能卸载自己。
 - **卸载 ws-workbench 自己**：macOS 安装包（DMG）里带「卸载 ws-workbench.command」。DMG 根目录另外还有「安装说明.txt」和「安装 ws-workbench.command」：双击后者会自动把 app 复制到 `/Applications`、执行 `sudo xattr -cr /Applications/ws-workbench.app` 清除隔离属性（未公证的包直接双击会被 Gatekeeper 拦成「已损坏」/「无法验证开发者」）并启动。卸载双击后先正常退出应用，退不掉会询问是否强制退出；**所有相关进程归零后才继续**，否则直接报「卸载失败」且不删除任何文件。继续后列出应用本体、数据目录、附件上传目录、剪贴板图片和 WebView 缓存，并弹出多选勾选：设置/数据库/剪贴板历史、附件目录、缓存/日志/偏好设置三类，默认**全部不勾（保留）**，勾选的类别二次确认后删除（附件/数据库删除后不可恢复）。自定义到应用数据目录之外的附件目录只提醒、不自动删；真实路径由应用启动/保存设置时写入 `uninstall-info.txt`（纯路径，不含密钥）。Windows 继续使用安装器自带的标准卸载器（设置 → 应用 → 卸载），安装包里的 NSIS 钩子会在删文件前检查 `ws-workbench.exe`（在运行就问是否强制退出，退不掉直接中止）、读取同一份 `uninstall-info.txt`，并调用 App 写在数据目录里的 `uninstall-choose-data.ps1` 显示同样的三类多选框；勾选结果写在 `%APPDATA%\ws-wb-uninstall-selection.txt`，NSIS 按结果删除、未勾选一律保留，自定义附件目录只提示不删；静默卸载/勾选脚本缺失/调用失败都按保留数据处理。
 - **弹窗拦截**（仅 Windows）：火绒式的规则拦截。默认关闭，总开关持久化，开启后下次启动自动恢复；后台线程每 500ms `EnumWindows` 扫可见顶层窗口——**先匹配拦截规则**（进程必须一致，窗口类 / 标题子串可选，命中直接 `WM_CLOSE` / `SW_HIDE` 并记一条拦截记录），没有规则才走启发式打分（工具窗口 / 不抢焦点 / 始终置顶 / 无标题 / 尺寸异常 / 类名与标题广告线索 / 进程不在前台），可疑窗口进「可疑记录」等用户处理。对可疑弹窗点「拦截此类」会生成一条持久化规则（默认按「进程 + 窗口类」，同一个广告位换标题/素材也能拦；也可选「仅此弹窗」或「该程序全部」），之后同类弹窗出现即自动关闭；「从窗口添加」直接列出当前可见窗口挑选一个加规则，规则可停用 / 删除 / 立即执行，命中次数与最近命中时间落 `<data_dir>/popup-rules.json`。可选「智能拦截」（默认关）：没有命中规则时，按分数阈值 + 至少两条命中原因 + 系统保护表 + 忽略名单 + 每分钟上限自动处理，设置存 `popup-settings.json`；忽略名单（白名单）存 `popup-ignore.json`。界面用 exe 的版本信息取应用名和图标（取不到退回进程名 + 首字母色块）。不注入、不装驱动、不杀进程。
-- **屏幕休眠**：阻止系统空闲睡眠（参考 Amphetamine 的公开电源断言方案），并支持「自动保持规则」（Triggers）：指定 App 运行时 / 接通电源时 / 连接外接显示器时自动保持，条件失效自动释放；手动开启优先，规则只释放自己开的会话。规则存 `<data_dir>/sleep-triggers.json`，后台 5 秒探测一次（`sysinfo` 进程列表、`pmset -g batt` / `GetSystemPowerStatus`、CoreGraphics 活动屏幕数 / `GetSystemMetrics(SM_CMONITORS)`），全部只读、不需要管理员权限。macOS 用 IOKit `IOPMAssertionCreateWithName`（`PreventUserIdleSystemSleep`，不勾「允许屏幕关闭」时再加 `PreventUserIdleDisplaySleep`，断言名 `ws-workbench Keep Awake`）；Windows 用专用线程持有 `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED [| ES_DISPLAY_REQUIRED])`。时长按会话式菜单选（参考 Amphetamine 的「开启新会话」）：不限时 / 5·10·15·20·25·30·45 分钟 / 1·2·3·4·6·8·12 小时，或自定义小时+分钟，点时长立即开始一个会话，到点自动释放（状态查询还有一道惰性回收）；不需要 root / 管理员，也不做登录级保活。
+- **屏幕休眠**：阻止系统空闲睡眠（参考 Amphetamine 的公开电源断言方案），并支持「自动保持规则」（Triggers）：指定 App 运行时 / 接通电源时 / 连接外接显示器时自动保持，条件失效自动释放；手动开启优先，规则只释放自己开的会话。规则存 `<data_dir>/sleep-triggers.json`，后台 5 秒探测一次（`sysinfo` 进程列表、`pmset -g batt` / `GetSystemPowerStatus`、CoreGraphics 活动屏幕数 / `GetSystemMetrics(SM_CMONITORS)`），全部只读、不需要管理员权限。macOS 用 IOKit `IOPMAssertionCreateWithName`（`PreventUserIdleSystemSleep`，不勾「允许显示器睡眠」时再加 `PreventUserIdleDisplaySleep`，断言名 `ws-workbench Keep Awake`）；Windows 用专用线程持有 `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED [| ES_DISPLAY_REQUIRED])`。时长按会话式菜单选（参考 Amphetamine 的「开启新会话」）：不限时 / 5·10·15·20·25·30·45 分钟 / 1·2·3·4·6·8·12 小时，或自定义小时+分钟，点时长立即开始一个会话，到点自动释放（状态查询还有一道惰性回收）；不需要 root / 管理员，也不做登录级保活。
 - **Hosts**：把系统 hosts 的完整内容直接读进等宽编辑器，想加什么行就加什么行，`⌘/Ctrl+S` 保存整份文件（保存前自动备份 + 一次系统授权，取消不会改动文件）。路径固定：macOS `/etc/hosts`，Windows `%SystemRoot%\System32\drivers\etc\hosts`；「备份 N」可展开最近 30 份备份并还原（路径见「打开目录」按钮的提示）。编辑器是 Monaco（VS Code 内核，本地打包、首次打开 Hosts 页签时懒加载）：行号对齐、注释 / IPv4 / IPv6 / 主机名高亮、非法地址标红，支持撤销重做、查找替换（`⌘/Ctrl+F`）、多光标与右键菜单。非 UTF-8 的 hosts 会拒绝编辑，避免写坏原有内容；CRLF 文件会保持原来的换行风格。
 安全约束：普通删除只进废纸篓；需 root 的条目走一次提权批处理（`rm -rf` / `Remove-Item`，不经过废纸篓，删除前会明确提示）；所有路径过白名单校验，`/`、主目录、`/System`、`/usr`、`C:\Windows` 等硬拒绝；`pkgutil` 安装收据只读展示；系统应用（SIP / `com.apple.*`）不提供卸载。macOS 的废纸篓走 `NSFileManager` API，不会弹「控制 Finder」的自动化授权。弹窗拦截不做注入/驱动/进程结束；屏幕休眠不碰合盖与主动睡眠。
 
@@ -222,7 +223,7 @@ openconnect 探测失败时，代理页给出按平台区分的安装引导：ma
 **托盘快捷面板**：右键点菜单栏/任务栏图标弹出柠檬式的无边框小面板（`quick.html`，360 宽，高度随当前页签内容 + 底部操作栏自动调整，失焦或再右键一次托盘图标收起），两个页签：
 
 - **VPN**：当前状态与配置名、「连接/断开」、规则/全局/直连三种代理模式即切。
-- **休眠**：一键保持唤醒 / 停止，15 分钟 / 30 分钟 / 1 小时 / 不限四档时长，状态点与剩余时间实时刷新（复用系统页「屏幕休眠」的同一套命令与 composable）。
+- **休眠**：一键保持唤醒 / 停止，15 分钟 / 30 分钟 / 1 小时 / 不限四档时长；状态与主窗口「屏幕休眠」双向同步：主窗口里开的会话这里显示「剩余约 X 分钟 · 共 Y」并高亮对应档位，保持中也能直接点其它档位切换时长，停止后面板沿用该时长。复用系统页同一套命令与 composable，面板自己按 5 秒轮询、每次弹出 / 切回休眠页签立即补拉，不会出现主窗口在保持、面板还显示「未开启」。
 
 面板底部固定一条操作栏：**显示主界面**（收起面板并唤出主窗口）和 **退出**（结束整个应用）。面板只做快速查看与动作；卸载、残留清理、规则编辑仍在主窗口。窗口位置以点击时的全局光标为锚点计算（托盘事件里的 rect 是窗口局部坐标，不能当屏幕坐标用）：面板在菜单栏图标下方 / 任务栏图标上方，水平居中于图标（像 Lemon 那样图标悬在面板上方中间），贴边时夹进显示器范围；macOS 全程用 AppKit 逻辑点（`NSEvent::mouseLocation` + `CGDisplayBounds` + `NSScreen` 菜单栏高度），因为 tao 的 cursor/monitor 接口在 Retina 缩放下把物理像素和逻辑点混算了。逻辑在 `lib.rs::panel_origin_at`，有 8 个单测（位置夹取、展开方向、切换页签变高时顶边/底边不动）。
 
@@ -508,7 +509,7 @@ Gitee 仓库的默认分支可能是 `master`（Gitee 新建仓库默认）或 `
 
 业务数据（分组、项目、笔记、附件元信息、VPN 配置、规则集）存在应用私有目录的 `ws-workbench.db`（SQLite）中：表里只留 `id`、`group_id`、`sort_order` 等少量明文列，每行内容序列化成 JSON 后用 SM4 信封加密，存进 `payload` 列。一级项目的 `group_id` 记为空串（列本身 NOT NULL，不需要改表结构）；分组与一级项目的混排顺序存在 `config.json` 的 `tree_order`（一级 id 序列）里。`AppConfig` 与前端命令保持不变，加载时从多表组装，保存时与内存快照做 diff、事务内只写变化的行。
 
-应用设置（layui 项目打包规则、上次选中的 VPN 配置、默认上传目录、worker 会话目录）仍存在 `config.json`（`tauri-plugin-store`，键名 `app_config`），**整份加密**：SM4-CBC + 随机 IV + HMAC-SM3，信封形如 `v1.<b64(iv)>.<b64(ct)>.<b64(mac)>`。主密钥（32 字节）首次启动时随机生成，macOS 存系统钥匙串（`ws-workbench-vault` / `ws-workbench`），Windows 用 DPAPI 加密后写进 `<app_data_dir>/.vault_key`。
+应用设置（全局默认打包规则、上次选中的 VPN 配置、默认上传目录、worker 会话目录）仍存在 `config.json`（`tauri-plugin-store`，键名 `app_config`），**整份加密**：SM4-CBC + 随机 IV + HMAC-SM3，信封形如 `v1.<b64(iv)>.<b64(ct)>.<b64(mac)>`。主密钥（32 字节）首次启动时随机生成，macOS 存系统钥匙串（`ws-workbench-vault` / `ws-workbench`），Windows 用 DPAPI 加密后写进 `<app_data_dir>/.vault_key`。
 
 前端写 localStorage 也一律走 `safeStorage`：值经 `vault_encrypt` 变成密文再落盘。
 

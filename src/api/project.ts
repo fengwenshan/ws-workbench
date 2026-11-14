@@ -10,3 +10,8 @@ export function detectProjectType(sourceDir: string): Promise<ProjectType> {
 export function detectVcs(sourceDir: string): Promise<VcsInfo> {
   return invoke<VcsInfo>('detect_vcs', { sourceDir })
 }
+
+/** 批量识别（快速搜索用）：返回顺序与入参一致 */
+export function detectVcsMany(sourceDirs: string[]): Promise<VcsInfo[]> {
+  return invoke<VcsInfo[]>('detect_vcs_many', { sourceDirs })
+}

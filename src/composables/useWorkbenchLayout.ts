@@ -60,6 +60,16 @@ export function useWorkbenchLayout() {
     if (tool === 'proxy') vpnMenuCollapsed.value = false
   }
 
+  /**
+   * 程序化跳回项目页：只切视图、必要时展开项目树。
+   * 点「项目」图标走 selectTool——那套语义是「再点一次就把项目树收起」，
+   * 搜索面板跳转不能带这个副作用（在首页选搜索结果会把树收起来）。
+   */
+  function openHome() {
+    view.value = 'home'
+    if (treeCollapsed.value) setTreeCollapsed(false)
+  }
+
   function shortcutTitle(label: string, key: string) {
     return `${label} (${isMac.value ? '⌘' : 'Ctrl+'}${key})`
   }
@@ -174,6 +184,7 @@ export function useWorkbenchLayout() {
     isMac,
     shortcutTitle,
     selectTool,
+    openHome,
     treeWidth,
     treeCollapsed,
     vpnMenuCollapsed,

@@ -16,7 +16,15 @@ import { useProjectForm, type CreateTab } from "@/composables/useProjectForm";
 import { useDeleteConfirm } from "@/composables/useDeleteConfirm";
 import { initPlatform, platform } from "@/platform";
 import appIcon from "@/assets/app-icon.png";
-import type { AttachmentMeta, EntityKind, QuickAttachmentItem } from "@/types";
+import type {
+  AttachmentMeta,
+  EntityKind,
+  ProjectConfig,
+  QuickAttachmentItem,
+  QuickPaletteChoose,
+  QuickProjectItem,
+  VcsInfo,
+} from "@/types";
 import ProjectList from "@/components/ProjectList.vue";
 import GroupDetail from "@/components/GroupDetail.vue";
 import ProjectDetail from "@/components/ProjectDetail.vue";
@@ -28,6 +36,7 @@ import CleanerPanel from "@/components/cleaner/CleanerPanel.vue";
 import LanSharePanel from "@/components/lanshare/LanSharePanel.vue";
 import QuickOpenPalette from "@/components/QuickOpenPalette.vue";
 import AttachmentPreview from "@/components/AttachmentPreview.vue";
+import { detectVcsMany } from "@/api/project";
 import { getAppName, isDevBuild } from "@/api/app";
 
 /** 标题栏上的应用名：开发构建带 -dev，发布版是 ws-workbench（由 Rust 侧按构建给出） */
@@ -102,6 +111,7 @@ const {
   isMac,
   shortcutTitle,
   selectTool,
+  openHome,
   treeWidth,
   treeCollapsed,
   vpnMenuCollapsed,
@@ -235,8 +245,73 @@ const quickItems = computed<QuickAttachmentItem[]>(() => {
   return out;
 });
 
+// 项目的 Git / SVN 地址不在配置里持久化，打开搜索时按源目录现查（只查一次，
+// 源目录变了才重查）；结果回来前先按「无仓库信息」展示，不阻塞搜索。
+type ProjectVcsCache = Record<string, { dir: string; info: VcsInfo }>;
+
+const projectVcs = ref<ProjectVcsCache>({});
+let projectVcsSeq = 0;
+
+function allProjects(): Array<{ id: string; name: string; source_dir: string; groupName: string }> {
+  const out: Array<{ id: string; name: string; source_dir: string; groupName: string }> = [];
+  for (const project of config.value.projects ?? []) {
+    out.push({
+      id: project.id,
+      name: project.name,
+      source_dir: project.source_dir,
+      groupName: "",
+    });
+  }
+  for (const group of config.value.groups ?? []) {
+    for (const project of group.projects ?? []) {
+      out.push({
+        id: project.id,
+        name: project.name,
+        source_dir: project.source_dir,
+        groupName: group.name,
+      });
+    }
+  }
+  return out;
+}
+
+async function loadProjectVcs() {
+  const seq = ++projectVcsSeq;
+  const targets = allProjects().filter(
+    (project) =>
+      project.source_dir && projectVcs.value[project.id]?.dir !== project.source_dir,
+  );
+  if (targets.length === 0) return;
+  try {
+    const infos = await detectVcsMany(targets.map((project) => project.source_dir));
+    if (seq !== projectVcsSeq) return;
+    targets.forEach((project, index) => {
+      const info = infos[index];
+      if (info) projectVcs.value[project.id] = { dir: project.source_dir, info };
+    });
+  } catch {
+    // 目录已不存在 / 没有 git、svn 命令：按「无仓库信息」处理，不影响搜索
+  }
+}
+
+/** 快速搜索的项目结果：名称 + 分组路径 + Git/SVN 地址 */
+const quickProjects = computed<QuickProjectItem[]>(() =>
+  allProjects().map((project) => {
+    const cached = projectVcs.value[project.id];
+    const info = cached && cached.dir === project.source_dir ? cached.info : null;
+    return {
+      id: project.id,
+      name: project.name,
+      path: project.groupName ? `${project.groupName} / ${project.name}` : project.name,
+      vcsType: info?.vcs_type ?? "none",
+      vcsUrl: info?.url ?? "",
+    };
+  }),
+);
+
 function openQuickSearch() {
   quickOpenVisible.value = true;
+  void loadProjectVcs();
 }
 
 function handleQuickKeydown(event: KeyboardEvent) {
@@ -251,15 +326,22 @@ function handleQuickKeydown(event: KeyboardEvent) {
 const quickPreviewOpen = ref(false);
 const quickPreviewMeta = ref<AttachmentMeta | null>(null);
 
-function handleQuickChoose(item: QuickAttachmentItem) {
+function handleQuickChoose(result: QuickPaletteChoose) {
   quickOpenVisible.value = false;
+  // 项目结果：直接跳到它所在的页面（附件预览只有附件才弹）
+  if (result.kind === "project") {
+    selection.value = { kind: "project", id: result.project.id };
+    openHome();
+    return;
+  }
+  const item = result.attachment;
   // 附件属于别的分组/项目时先切过去，关掉预览后看到的就是它所在的页面
   if (
     selection.value?.kind !== item.entityKind ||
     selection.value?.id !== item.entityId
   ) {
     selection.value = { kind: item.entityKind, id: item.entityId };
-    selectTool("home");
+    openHome();
   }
   quickPreviewMeta.value = item;
   quickPreviewOpen.value = true;
@@ -559,11 +641,6 @@ async function handleUpdate(id: string, data: any) {
   await updateProject(id, data);
 }
 
-async function handleUpdateDefaultInclude(rules: string[]) {
-  config.value.default_include = rules;
-  await saveConfig();
-}
-
 async function handleSetDefaultUploadDir(dir: string | null) {
   try {
     await setDefaultUploadDir(dir);
@@ -575,8 +652,13 @@ async function handleSetDefaultUploadDir(dir: string | null) {
   }
 }
 
-async function handlePack(project: any, asZip: boolean = false) {
-  await pack(project, config.value.default_include, asZip);
+async function handlePack(project: ProjectConfig, asZip: boolean = false) {
+  // 项目自己的包含规则优先；没配置（null / 空）时沿用全局默认，避免把空数组
+  // 传给后端（后端把空规则当成「全部放行」）。
+  const include = project.pack_include?.length
+    ? project.pack_include
+    : config.value.default_include;
+  await pack(project, include, asZip);
 }
 </script>
 
@@ -605,15 +687,15 @@ async function handlePack(project: any, asZip: boolean = false) {
       <!-- 居中搜索：仿 VS Code 命令中心，点击或 ⌘/Ctrl+P 呼出快速搜索 -->
       <button
         class="titlebar-search"
-        :title="shortcutTitle('搜索附件', 'P')"
-        aria-label="搜索附件"
+        :title="shortcutTitle('搜索附件或项目', 'P')"
+        aria-label="搜索附件或项目"
         @click="openQuickSearch"
       >
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
           <circle cx="11" cy="11" r="6" />
           <path d="M15.5 15.5L20 20" />
         </svg>
-        <span class="titlebar-search-label">搜索附件</span>
+        <span class="titlebar-search-label">搜索附件或项目</span>
         <span class="titlebar-search-hint">{{ isMac ? '⌘P' : 'Ctrl+P' }}</span>
       </button>
       <div class="titlebar-actions">
@@ -829,6 +911,7 @@ async function handlePack(project: any, asZip: boolean = false) {
               :key="'project-' + selection.id"
               :project="selectedProject"
               :default-upload-dir="config.default_upload_dir"
+              :default-include="config.default_include"
               @update="handleUpdate"
               @pack="handlePack"
               @update-note="(id, note) => handleEntityNote('project', id, note)"
@@ -869,9 +952,7 @@ async function handlePack(project: any, asZip: boolean = false) {
           <SettingsPanel
             :active="view === 'settings'"
             :default-upload-dir="config.default_upload_dir"
-            :default-include="config.default_include"
             @update-default-upload-dir="handleSetDefaultUploadDir"
-            @update-default-include="handleUpdateDefaultInclude"
           />
         </div>
 
@@ -1005,6 +1086,7 @@ async function handlePack(project: any, asZip: boolean = false) {
       <QuickOpenPalette
         v-if="quickOpenVisible"
         :items="quickItems"
+        :projects="quickProjects"
         @close="quickOpenVisible = false"
         @choose="handleQuickChoose"
       />

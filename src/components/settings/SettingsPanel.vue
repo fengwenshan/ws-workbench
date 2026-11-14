@@ -1,25 +1,22 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { getConfigPath, getDefaultIncludeRules, getStorageInfo, type StorageInfo } from '@/api/config'
+import { getConfigPath, getStorageInfo, type StorageInfo } from '@/api/config'
 import { resolveUploadDir } from '@/api/attachments'
 import { ensureDir, getNetworkInfo, openDir, type NetworkInfo } from '@/api/system'
 import { getAppVersion } from '@/api/app'
 import { platform } from '@/platform'
 import { AUTO_CHECK_INTERVAL_MS, useUpdater } from '@/composables/useUpdater'
 import { pickDirectory } from '@/utils/dialog'
-import RulesEditor from '@/components/RulesEditor.vue'
 import ResourcePanel from '@/components/settings/ResourcePanel.vue'
 
 const props = defineProps<{
   defaultUploadDir: string | null
-  defaultInclude: string[]
   /** 当前工具页是否激活（App.vue 的 view === 'settings'）；设置页是 v-show 常驻挂载的 */
   active: boolean
 }>()
 
 const emit = defineEmits<{
   updateDefaultUploadDir: [dir: string | null]
-  updateDefaultInclude: [rules: string[]]
 }>()
 
 const configPath = ref('')
@@ -35,31 +32,6 @@ const resourcePanel = ref<InstanceType<typeof ResourcePanel> | null>(null)
 const resourceBusy = ref(false)
 /** 附件实际落盘目录：设置里的地址，未设置时解析成 App 私有 attachments 目录 */
 const resolvedUploadDir = ref('')
-
-/** 打包包含规则：跟设置一起保存，改动立即回写配置 */
-const localIncludeRules = ref<string[]>([])
-
-watch(
-  () => props.defaultInclude,
-  (rules) => {
-    localIncludeRules.value = [...(rules ?? [])]
-  },
-  { immediate: true },
-)
-
-function onIncludeRulesChange(rules: string[]) {
-  localIncludeRules.value = rules
-  emit('updateDefaultInclude', rules)
-}
-
-async function resetIncludeRules() {
-  try {
-    const defaults = await getDefaultIncludeRules()
-    onIncludeRulesChange([...defaults])
-  } catch (err: any) {
-    message.value = `恢复默认包含规则失败：${err}`
-  }
-}
 
 const uploadDirSource = computed(() =>
   props.defaultUploadDir ? '设置里指定的地址' : 'App 私有目录（未指定时的默认位置）',
@@ -484,22 +456,6 @@ function formatBytes(bytes: number): string {
       </div>
     </section>
 
-    <!-- 打包包含规则：白名单，只有命中的文件才进包 -->
-    <section class="card">
-      <div class="card-head">
-        <h4>layui 项目打包规则</h4>
-        <button class="btn btn-secondary btn-xs" @click="resetIncludeRules">恢复默认</button>
-      </div>
-      <RulesEditor
-        v-model="localIncludeRules"
-        placeholder="输入规则后回车添加，如 *.html、js/**"
-        @update:modelValue="onIncludeRulesChange"
-      />
-      <p class="rule-tip rule-tip-dim">
-        自动过滤 点、_开始和空格的文件/目录
-      </p>
-    </section>
-
     <ResourcePanel ref="resourcePanel" @busy="resourceBusy = $event" />
   </div>
 </template>
@@ -562,24 +518,6 @@ function formatBytes(bytes: number): string {
   right: 0;
   top: 50%;
   transform: translateY(-50%);
-}
-.rule-tip {
-  font-size: 12px;
-  line-height: 1.7;
-  color: var(--text-muted);
-  margin-bottom: 8px;
-}
-.rule-tip-dim {
-  margin-top: 8px;
-  margin-bottom: 0;
-}
-.rule-tip code {
-  padding: 1px 4px;
-  border-radius: 4px;
-  background: var(--bg-tag);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 12px;
-  color: var(--text-tag);
 }
 .card {
   border: 1px solid var(--border-color);

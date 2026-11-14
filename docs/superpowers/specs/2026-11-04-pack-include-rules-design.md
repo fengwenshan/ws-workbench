@@ -49,3 +49,4 @@
 
 - 2026-11-04：默认包含集加入 `*.doc`（旧版 Word 模板，部分 layui 工程的 WebOffice 新建正文只提供 `.doc`），`DEFAULT_INCLUDE_VERSION` 升到 4；老配置加载时由 `migrate_default_include` 自动追加该规则。
 - 2026-11-12：默认包含集加入 `*.cab` 与 `*.ftl`（NTKO 正文控件：`rsOfficeRender.js` 的 `codebase` 指向 `lib/ntko/ntkoControl.cab`，控件模板 `ntko_lib.ftl` 由后端 include），`DEFAULT_INCLUDE_VERSION` 升到 5；老配置加载时由 `migrate_default_include` 自动追加这两条规则。
+- 2026-11-14：打包规则从设置页移到项目「配置 → 打包包含规则」，每个 layui 项目一套（`ProjectConfig.pack_include: Option<Vec<String>>`；`None` = 继承全局默认 `AppConfig.default_include`，也就是老设置页那份规则）。输入纯后缀（`psd` / `.psd`）自动补成 `*.psd`；清空规则时回退到继承默认，避免空数组被后端当成「全部放行」。前端打包时取「项目规则非空 ? 项目规则 : 全局默认」，不把空数组传给打包器。
