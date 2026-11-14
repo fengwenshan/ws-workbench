@@ -118,7 +118,13 @@ Function un.wsWbChooseData
     Return
   ${EndIf}
 
-  StrCpy $0 "$APPDATA\com.ws.workbench\uninstall-choose-data.ps1"
+  ; 优先用安装目录里随包发布的那份（bundle.resources）：它是当前版本自带的界面，
+  ; 用户「装完就卸载、从没启动过应用」时 AppData 里可能还是旧版本写下的脚本。
+  ; 都没有才回退到 AppData 里的副本（老版本安装没有这份资源）。
+  StrCpy $0 "$INSTDIR\resources\windows\uninstall-choose-data.ps1"
+  ${IfNot} ${FileExists} "$0"
+    StrCpy $0 "$APPDATA\com.ws.workbench\uninstall-choose-data.ps1"
+  ${EndIf}
   ${IfNot} ${FileExists} "$0"
     StrCpy $0 "$APPDATA\ws-workbench\uninstall-choose-data.ps1"
   ${EndIf}
