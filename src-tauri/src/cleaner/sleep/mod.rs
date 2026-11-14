@@ -1,4 +1,4 @@
-//! 「屏幕休眠」页签：防休眠（阻止系统空闲睡眠 / 屏幕关闭）。
+//! 「屏幕休眠」页签：防休眠（阻止系统空闲睡眠 / 显示器睡眠）。
 //!
 //! 设计见 docs/superpowers/specs/2026-11-07-system-tools-design.md 4.1。
 //!
@@ -36,7 +36,7 @@ use windows as platform;
 pub struct KeepAwakeStatus {
     /// 是否正在阻止空闲睡眠
     pub active: bool,
-    /// true 表示「允许屏幕关闭」，即只拦系统空闲睡眠
+    /// true 表示「允许显示器睡眠」，即只拦系统空闲睡眠
     pub allow_display_sleep: bool,
     /// 开始时刻（epoch 毫秒）；未激活为 None
     pub started_at_ms: Option<u64>,
@@ -77,18 +77,22 @@ fn now_ms() -> u64 {
 }
 
 fn hint(allow_display_sleep: bool) -> String {
-    let base = if cfg!(target_os = "windows") {
-        "已阻止系统空闲睡眠；屏保、合盖与主动睡眠不受控，现代待机下可能被系统挂起。"
-    } else if cfg!(target_os = "macos") {
-        "已阻止系统空闲睡眠和屏幕关闭；合盖休眠不在支持范围。"
-    } else {
-        "当前平台不支持保持唤醒。"
-    };
-    if allow_display_sleep && cfg!(any(target_os = "macos", target_os = "windows")) {
-        format!("{base}（允许屏幕关闭）")
-    } else {
-        base.to_string()
+    if !cfg!(any(target_os = "macos", target_os = "windows")) {
+        return "当前平台不支持保持唤醒。".to_string();
     }
+    let base = if cfg!(target_os = "windows") {
+        "屏保、合盖与主动睡眠不受控，现代待机下可能被系统挂起。"
+    } else {
+        "合盖休眠不在支持范围。"
+    };
+    let head = if allow_display_sleep {
+        "已阻止系统空闲睡眠，显示器仍会正常睡眠"
+    } else if cfg!(target_os = "windows") {
+        "已阻止系统空闲睡眠，显示器保持常亮"
+    } else {
+        "已阻止系统空闲睡眠和显示器关闭，显示器保持常亮"
+    };
+    format!("{head}；{base}")
 }
 
 fn status_from(session: &Session) -> KeepAwakeStatus {

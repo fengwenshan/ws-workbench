@@ -39,26 +39,84 @@ const SLEEP_PRESETS: Array<{ label: string; seconds: number | null }> = [
 const sleepPreset = ref<number | null>(15 * 60)
 const sleepBusy = computed(() => keepAwake.starting || keepAwake.stopping)
 
+/** 最近一次拿到后端状态的本地时刻：把剩余时长加回来还原会话总时长 */
+const statusAtMs = ref(Date.now())
+watch(
+  () => keepAwake.status,
+  () => {
+    statusAtMs.value = Date.now()
+  },
+)
+
+/** 保持中时反推会话开始时长（主窗口里选的是 1 小时，这里也要高亮 1 小时） */
+const activeSeconds = computed<number | null>(() => {
+  const status = keepAwake.status
+  if (!status?.active) return null
+  if (status.remaining_secs == null || status.started_at_ms == null) return null
+  return status.remaining_secs + (statusAtMs.value - status.started_at_ms) / 1000
+})
+
+const unlimitedActive = computed(
+  () => keepAwake.active && keepAwake.status?.remaining_secs == null,
+)
+
+/** 未开启时高亮面板里选中的时长；保持中时高亮真正在跑的时长 */
+function presetSelected(seconds: number | null): boolean {
+  if (!keepAwake.active) return sleepPreset.value === seconds
+  if (seconds === null) return unlimitedActive.value
+  return activeSeconds.value != null && Math.abs(activeSeconds.value - seconds) <= 5
+}
+
+/** 秒数转「x 小时 y 分 / x 分钟」 */
+function formatSleepDuration(totalSecs: number): string {
+  const secs = Math.max(0, Math.round(totalSecs))
+  const hours = Math.floor(secs / 3600)
+  const minutes = Math.round((secs % 3600) / 60)
+  if (hours > 0) return minutes > 0 ? `${hours} 小时 ${minutes} 分` : `${hours} 小时`
+  return `${Math.max(1, minutes)} 分钟`
+}
+
 /** 面板里只显示「大概还剩多久」，精确到分钟，避免每秒刷一遍 */
 const sleepRemaining = computed(() => {
   const status = keepAwake.status
   if (!status?.active) return ''
   if (status.remaining_secs == null) return '不限时，到点手动停止'
   const minutes = Math.max(1, Math.ceil(status.remaining_secs / 60))
-  return `剩余约 ${minutes} 分钟`
+  const total = activeSeconds.value
+  return total == null
+    ? `剩余约 ${minutes} 分钟`
+    : `剩余约 ${minutes} 分钟 · 共 ${formatSleepDuration(total)}`
 })
 
 async function toggleSleep() {
   if (keepAwake.active) {
-    await keepAwake.stop()
-  } else {
-    await keepAwake.start(sleepPreset.value, false)
+    // 停止后把面板选中的时长设为刚才那场，下次开启沿用
+    const current = SLEEP_PRESETS.find((preset) => presetSelected(preset.seconds))
+    const ok = await keepAwake.stop()
+    if (ok && current) sleepPreset.value = current.seconds
+    return
   }
+  await keepAwake.start(sleepPreset.value, false)
+}
+
+/**
+ * 点时长快捷项：未开启时只是选中（点「开启」才生效）；
+ * 保持中点其它时长等于切换会话时长，和主窗口的交互一致。
+ */
+async function chooseSleepPreset(seconds: number | null): Promise<void> {
+  if (sleepBusy.value) return
+  if (!keepAwake.active) {
+    sleepPreset.value = seconds
+    return
+  }
+  // 点当前正在跑的时长不重置计时
+  if (presetSelected(seconds)) return
+  await keepAwake.start(seconds, keepAwake.status?.allow_display_sleep ?? false)
 }
 
 function sleepHint(): string {
   const hint = keepAwake.status?.platform_hint
-  return hint || '开启后系统不会因空闲睡眠，屏幕保持常亮。'
+  return hint || '开启后系统不会因空闲睡眠，显示器保持常亮。'
 }
 
 // ============================== VPN ==============================
@@ -182,12 +240,21 @@ onMounted(() => {
   }
   observeActivePane()
   schedulePanelHeightSync()
+  // 主窗口里也能开启/切换/停止保持唤醒，托盘面板必须自己轮询才能跟上；
+  // 页面隐藏时 useKeepAwake 会暂停节拍，重新显示后补拉。
+  keepAwake.startPolling()
   // 面板隐藏期间状态可能变化（比如托盘点连接后提示条变长），
   // 重新显示拿到焦点时再量一次，避免按旧高度弹出。
-  window.addEventListener('focus', schedulePanelHeightSync)
+  window.addEventListener('focus', handlePanelFocus)
   document.addEventListener('visibilitychange', handleVisibilityChange)
   document.addEventListener('keydown', handleKeydown)
 })
+
+/** 面板重新弹出：立刻补一次状态，避免先闪一下旧状态再等 5 秒轮询 */
+function handlePanelFocus(): void {
+  schedulePanelHeightSync()
+  keepAwake.wake()
+}
 
 /** Esc 收起面板：除了点外面/再点托盘，给键盘留一条确定的关闭路径 */
 function handleKeydown(event: KeyboardEvent): void {
@@ -199,17 +266,22 @@ function handleKeydown(event: KeyboardEvent): void {
 }
 
 function handleVisibilityChange(): void {
-  if (document.visibilityState === 'visible') schedulePanelHeightSync()
+  if (document.visibilityState !== 'visible') return
+  schedulePanelHeightSync()
+  // visibilitychange 恢复时 useKeepAwake 会自己排下一次轮询，这里再唤醒一次
+  keepAwake.wake()
 }
 
 watch(tab, () => {
   observeActivePane()
   schedulePanelHeightSync()
+  // 切到休眠页签时可能刚在别处开关过会话，先拉一次再展示
+  if (tab.value === 'sleep') keepAwake.wake()
 })
 
 onUnmounted(() => {
   paneObserver?.disconnect()
-  window.removeEventListener('focus', schedulePanelHeightSync)
+  window.removeEventListener('focus', handlePanelFocus)
   document.removeEventListener('visibilitychange', handleVisibilityChange)
   document.removeEventListener('keydown', handleKeydown)
   keepAwake.stopPolling()
@@ -298,7 +370,7 @@ onUnmounted(() => {
           <span class="vpn-status-dot" :class="{ on: keepAwake.active }" aria-hidden="true" />
           <div class="vpn-meta">
             <strong>{{ keepAwake.active ? '保持唤醒中' : '未开启' }}</strong>
-            <p>{{ keepAwake.active ? sleepRemaining : '屏幕保持常亮，不做登录级保活' }}</p>
+            <p>{{ keepAwake.active ? sleepRemaining : '显示器保持常亮，不做登录级保活' }}</p>
           </div>
           <button
             type="button"
@@ -326,11 +398,11 @@ onUnmounted(() => {
             :key="preset.label"
             type="button"
             class="mode-btn"
-            :class="{ active: sleepPreset === preset.seconds }"
+            :class="{ active: presetSelected(preset.seconds) }"
             role="radio"
-            :aria-checked="sleepPreset === preset.seconds"
-            :disabled="keepAwake.active"
-            @click="sleepPreset = preset.seconds"
+            :aria-checked="presetSelected(preset.seconds)"
+            :disabled="sleepBusy"
+            @click="chooseSleepPreset(preset.seconds)"
           >
             {{ preset.label }}
           </button>
@@ -599,6 +671,10 @@ html body,
 .mode-btn:disabled {
   opacity: 0.6;
   cursor: default;
+}
+/* 保持中时「当前时长」不可再点，但仍然要看清是它 */
+.mode-btn.active:disabled {
+  opacity: 1;
 }
 
 .qp-muted {
