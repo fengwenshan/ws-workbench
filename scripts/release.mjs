@@ -360,14 +360,20 @@ function build() {
   execFileSync(process.execPath, [TAURI_CLI, ...args], { cwd: ROOT, stdio: 'inherit', env })
 }
 
-function findArtifacts(platform) {
+function findArtifacts(platform, version) {
   const dir = bundleDir(platform)
   if (!existsSync(dir)) {
     fail(`找不到构建产物目录: ${dir}\n请确认构建已成功完成`)
   }
   const files = readdirSync(dir)
-  const bundle = files.find(platform.matchBundle)
-  const sig = files.find(platform.matchSig)
+  // 产物目录会同时留着历史版本的包（1.0.0、1.0.24 …），一定要按本次版本挑，
+  // 否则 --version 覆盖了构建版本、导出却拿的是目录里最旧的那个 exe。
+  const wanted = (f) => (version ? f.includes(`_${version}_`) : true)
+  const bundle =
+    files.find((f) => platform.matchBundle(f) && wanted(f)) ||
+    files.find(platform.matchBundle)
+  const sig =
+    files.find((f) => platform.matchSig(f) && wanted(f)) || files.find(platform.matchSig)
   if (!bundle || (!sig && !NO_SIGN)) {
     fail(
       `在 ${dir} 里找不到安装包或签名文件\n` +
@@ -722,7 +728,7 @@ async function main() {
 
   build()
 
-  const { bundlePath, sigPath } = findArtifacts(platform)
+  const { bundlePath, sigPath } = findArtifacts(platform, version)
 
   if (NO_SIGN) {
     // 未签名产物不能进更新通道：客户端拿到没有 signature 的条目会直接拒绝更新。
