@@ -339,6 +339,8 @@ watch(
           启动失败：{{ snapshot.last_error }}
           <span class="lan-alert-hint">请检查端口 / 防火墙设置后重新开启。</span>
         </p>
+        <!-- 服务在跑、只是设置有改动没存住：跟「启动失败」分开显示，别吓人 -->
+        <p v-if="snapshot.warning" class="lan-warn">{{ snapshot.warning }}</p>
 
         <!-- 顶部状态卡：设备名就地编辑 + 监听信息 + 接收目录 -->
         <section class="card local-card">
@@ -690,6 +692,17 @@ watch(
 }
 .lan-alert-hint {
   color: var(--text-muted);
+}
+/* 非致命提示（服务在跑，只是设置有变化没存住）：不能再用红色「启动失败」的样式 */
+.lan-warn {
+  margin: 0;
+  padding: 8px 12px;
+  border-radius: 6px;
+  border: 1px solid rgba(245, 158, 11, 0.32);
+  background: rgba(245, 158, 11, 0.08);
+  color: #b45309;
+  font-size: 12px;
+  line-height: 1.6;
 }
 
 .card {

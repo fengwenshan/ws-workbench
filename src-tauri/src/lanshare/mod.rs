@@ -174,7 +174,13 @@ pub struct LanShareSnapshot {
     pub local_addresses: Vec<String>,
     pub peers: Vec<LanPeer>,
     pub pending_offers: Vec<PendingOffer>,
+    /// 致命错误：只有「服务没起来」才写这里，界面据此显示「启动失败」
     pub last_error: Option<String>,
+    /// 非致命问题：服务正常运行，只是设置没能写进磁盘之类。
+    /// 和 `last_error` 分开，避免再出现「运行中 + 启动失败」同时成立的矛盾状态
+    /// （现场：保存设置瞬时被拒，功能明明已经起来了，界面却红字报启动失败）。
+    #[serde(default)]
+    pub warning: Option<String>,
 }
 
 /// peer 表条目：展示字段 + 连接地址 + 过期判断用的本地时钟
@@ -228,6 +234,8 @@ pub(crate) struct Inner {
     pub running: bool,
     pub port: Option<u16>,
     pub last_error: Option<String>,
+    /// 非致命问题（目前只有「设置没能写进磁盘」）：服务照常运行，只是偏好没存住
+    pub warning: Option<String>,
     pub local_addresses: Vec<String>,
     pub peers: HashMap<String, PeerEntry>,
     pub pending: Vec<PendingEntry>,
@@ -264,6 +272,7 @@ impl Inner {
             running: false,
             port: None,
             last_error: None,
+            warning: None,
             local_addresses: Vec::new(),
             peers: HashMap::new(),
             pending: Vec::new(),
@@ -449,12 +458,13 @@ impl LanShareState {
         snapshot_of(&lock_inner(&self.inner))
     }
 
-    /// 启停功能。启动失败时把原因写进 `last_error` 并把开关回退到关闭。
+    /// 启停功能。启动失败时把原因写进 `last_error` 并把开关回退到关闭；
+    /// 仅仅是「设置存不下来」不会影响功能，只记 `warning`。
     pub fn set_enabled(&self, app: &AppHandle, enabled: bool) -> LanShareSnapshot {
         if enabled {
             match self.start(app) {
                 Ok(()) => {
-                    self.mutate_settings(app, |settings| settings.enabled = true);
+                    self.save_enabled(app, true);
                 }
                 Err(err) => {
                     self.stop_runtime();
@@ -462,16 +472,30 @@ impl LanShareState {
                         let mut inner = lock_inner(&self.inner);
                         inner.last_error = Some(err);
                     }
-                    self.mutate_settings(app, |settings| settings.enabled = false);
+                    self.save_enabled(app, false);
                 }
             }
         } else {
             // stop_runtime 已清空待接收 / 会话，进行中的 HTTP 线程收到通道断开后返回 403
             self.stop_runtime();
-            self.mutate_settings(app, |settings| settings.enabled = false);
+            self.save_enabled(app, false);
             emit_snapshot(&self.inner, Some(app));
         }
         self.snapshot()
+    }
+
+    /// 把「开/关」写进设置并落盘。
+    ///
+    /// 现场问题：保存瞬时被拒（`拒绝访问 os error 5`）时，原来的实现在
+    /// `mutate_settings` 里把错误写进 `last_error`，界面于是显示「启动失败」，
+    /// 而服务其实已经起来了 —— 又因为提示语固定是「请检查端口 / 防火墙」，
+    /// 排查方向直接被带偏。现在保存失败只记 `warning`，并且不影响运行状态。
+    fn save_enabled(&self, app: &AppHandle, enabled: bool) {
+        {
+            let mut inner = lock_inner(&self.inner);
+            inner.settings.enabled = enabled;
+        }
+        self.persist_with_warning(app);
     }
 
     /// 冷启动恢复：设置里 enabled=true 时后台启动，失败只记录原因不阻断应用启动。
@@ -488,14 +512,7 @@ impl LanShareState {
                     inner.settings.enabled = false;
                     inner.last_error = Some(err);
                 }
-                if let Err(save_err) = self.persist_settings(app) {
-                    let mut inner = lock_inner(&self.inner);
-                    inner.last_error = Some(format!(
-                        "{}；保存设置失败：{}",
-                        inner.last_error.clone().unwrap_or_default(),
-                        save_err
-                    ));
-                }
+                self.persist_with_warning(app);
                 emit_snapshot(&self.inner, Some(app));
             }
         }
@@ -569,6 +586,10 @@ impl LanShareState {
         inner.running = false;
         inner.port = None;
         inner.local_addresses.clear();
+        // 停下来之后不该再挂着上一次的错误/提示：否则界面上「未开启」还红字写着
+        // 「启动失败」，用户会以为关不掉。真正启动失败时调用方紧接着会重新写入。
+        inner.last_error = None;
+        inner.warning = None;
     }
 
     /// 修改设备名；空串回退主机名。立即重新 announce。
@@ -578,7 +599,8 @@ impl LanShareState {
             let mut inner = lock_inner(&self.inner);
             inner.settings.alias = alias;
         }
-        self.persist_settings(app)?;
+        // 存不下来只提示，不当成失败：名字已经生效了
+        self.persist_with_warning(app);
         self.request_announce();
         emit_snapshot(&self.inner, Some(app));
         Ok(self.snapshot())
@@ -609,7 +631,8 @@ impl LanShareState {
             inner.download_dir = next_dir;
             inner.download_dir_custom = custom;
         }
-        self.persist_settings(app)?;
+        // 同上：写盘失败不阻断，接收目录已经切过去了
+        self.persist_with_warning(app);
         emit_snapshot(&self.inner, Some(app));
         Ok(self.snapshot())
     }
@@ -680,21 +703,33 @@ impl LanShareState {
         Ok(transfer_id)
     }
 
-    /// 把设置改动持久化；失败时只返回错误，不改内存里的值（调用方已经改过）。
-    fn persist_settings(&self, app: &AppHandle) -> Result<(), String> {
+    /// 落盘并处理失败：重试几次，仍失败只记 `warning`。
+    ///
+    /// 重试是因为实测这类「拒绝访问」多数是瞬时的（杀毒/索引服务在同一个文件上
+    /// 抖一下），隔几十毫秒再来通常就过了；真存不下来也不该把功能说成失败的，
+    /// 但必须告诉用户「重启后可能回到上次的状态」——否则关掉功能后重启又自己
+    /// 开起来，用户只会觉得开关坏了。
+    fn persist_with_warning(&self, app: &AppHandle) {
         let settings = lock_inner(&self.inner).settings.clone();
-        settings::save(app, &settings)
-    }
-
-    fn mutate_settings(&self, app: &AppHandle, mutate: impl FnOnce(&mut LanShareSettings)) {
-        {
-            let mut inner = lock_inner(&self.inner);
-            mutate(&mut inner.settings);
+        let mut last = String::new();
+        for attempt in 0..3 {
+            match settings::save(app, &settings) {
+                Ok(()) => {
+                    lock_inner(&self.inner).warning = None;
+                    return;
+                }
+                Err(err) => {
+                    last = err;
+                    if attempt < 2 {
+                        std::thread::sleep(Duration::from_millis(80));
+                    }
+                }
+            }
         }
-        if let Err(err) = self.persist_settings(app) {
-            let mut inner = lock_inner(&self.inner);
-            inner.last_error = Some(format!("保存设置失败：{err}"));
-        }
+        let mut inner = lock_inner(&self.inner);
+        inner.warning = Some(format!(
+            "{last}。本次改动已在运行时生效，但重启后可能回到上次保存的状态"
+        ));
     }
 
     fn request_announce(&self) {
@@ -729,6 +764,7 @@ pub(crate) fn snapshot_of(inner: &Inner) -> LanShareSnapshot {
         peers,
         pending_offers: inner.pending_offers(),
         last_error: inner.last_error.clone(),
+        warning: inner.warning.clone(),
     }
 }
 
@@ -883,9 +919,29 @@ mod tests {
         assert!(snapshot.peers.is_empty());
         assert!(snapshot.pending_offers.is_empty());
         assert!(snapshot.last_error.is_none());
+        assert!(snapshot.warning.is_none());
         // 测试里默认目录传的是临时目录下的 recv，未指定接收目录时应回退到它
         assert!(snapshot.download_dir.ends_with("recv"));
         assert!(!snapshot.download_dir_custom);
+    }
+
+    /// 现场问题回归：保存设置瞬时被拒时，界面曾把「保存失败」当成「启动失败」，
+    /// 于是「运行中」和「启动失败」同时成立。现在这类问题只走 warning，
+    /// 不会污染 last_error。
+    #[test]
+    fn save_failure_is_a_warning_not_a_start_failure() {
+        let (_dir, state) = state_with_temp_dir();
+        {
+            let mut inner = lock_inner(&state.inner);
+            inner.running = true;
+            inner.port = Some(53317);
+            inner.warning = Some("保存设置失败：拒绝访问。(os error 5)".to_string());
+        }
+        let snapshot = state.snapshot();
+        assert!(snapshot.running, "服务还在跑");
+        assert_eq!(snapshot.port, Some(53317));
+        assert!(snapshot.last_error.is_none(), "保存失败不能算启动失败");
+        assert!(snapshot.warning.is_some(), "要让用户看到「设置没存住」");
     }
 
     #[test]

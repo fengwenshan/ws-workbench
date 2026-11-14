@@ -69,7 +69,10 @@ export interface LanShareSnapshot {
   local_addresses: string[]
   peers: LanPeer[]
   pending_offers: PendingOffer[]
+  /** 致命错误：服务没起来，界面显示「启动失败」 */
   last_error: string | null
+  /** 非致命问题：服务在跑，只是设置没能存住（重启后可能回退） */
+  warning: string | null
 }
 
 /** 拉取当前快照（页面初始化 / 切回页面时刷新） */
