@@ -250,10 +250,16 @@ pub(crate) fn refresh(app: &AppHandle, settings: &AppSettings) {
         }
         // Windows 卸载器的勾选界面：和清单放在同一目录，保证卸载时能找到。
         // PowerShell 5.1 读无 BOM 的 .ps1 会按 ANSI 解析，中文标签必须带 BOM。
+        // 资源文件本身也带 BOM（这样在仓库里直接跑也能正常显示中文），
+        // 所以这里只在缺失时补一个，避免写出两个 BOM。
         #[cfg(target_os = "windows")]
         {
             let script_path = dir.join(CHOOSE_DATA_SCRIPT_FILE);
-            let script = format!("\u{feff}{}", CHOOSE_DATA_SCRIPT);
+            let script = if CHOOSE_DATA_SCRIPT.starts_with('\u{feff}') {
+                CHOOSE_DATA_SCRIPT.to_string()
+            } else {
+                format!("\u{feff}{}", CHOOSE_DATA_SCRIPT)
+            };
             if let Err(err) = write_private(&script_path, &script) {
                 eprintln!(
                     "[uninstall-info] 写入 {} 失败: {}",
@@ -390,7 +396,7 @@ mod tests {
         // 测试直接读资源文件，保证 macOS 测试也能校验；常量本身只在 Windows 编译。
         let script = include_str!("../resources/windows/uninstall-choose-data.ps1");
         // NSIS 按这个输出格式解析用户勾选：data/upload/cache 三个开关。
-        for key in ["data=$data", "upload=$uploadDel", "cache=$cache"] {
+        for key in ["data=$data", "upload=$upload", "cache=$cache"] {
             assert!(script.contains(key), "missing {key}");
         }
         // 输出文件固定；取消时写 cancel=1 表示全部保留。
