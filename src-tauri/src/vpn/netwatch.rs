@@ -12,9 +12,13 @@
 //! 隧道网卡自己上下线也会触发回调，所以调用方不能拿「代号变了」当结论，
 //! 必须再比一次物理默认出口（见 `worker::Worker::network_exit_changed`）。
 
+// 代号只在 Windows 的地址变更回调里读写；其它平台由 current_generation 返回 0，
+// 不加 cfg 会在 macOS / Linux 上留下 unused import / dead_code 警告。
+#[cfg(target_os = "windows")]
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// 单调递增的变更代号。只在 Windows 上有真实值，其它平台恒为 0。
+#[cfg(target_os = "windows")]
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 
 /// 变更通知句柄。
