@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  Windows 测试二进制的清单。
+
+  为什么需要：VPN 的关机拦截用了 SetWindowSubclass（Win32_UI_Shell），链接时会带进
+  comctl32 **v6** 才有的导入（TaskDialogIndirect 等）。应用本体有 Tauri 生成的应用清单，
+  所以正常运行没事；但 `cargo test` 产出的测试 exe 默认没有清单，加载器拿到的是
+  system32 里的 v5.82，启动即 0xc0000139（STATUS_ENTRYPOINT_NOT_FOUND）——表现成
+  「一个测试都没跑就整体失败」，很容易被误判成代码问题。
+
+  由 scripts/test-windows.ps1 通过 RUSTFLAGS 注入，不影响正式构建。
+-->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls" version="6.0.0.0" processorArchitecture="*" publicKeyToken="6595b64144ccf1df" language="*"/>
+    </dependentAssembly>
+  </dependency>
+</assembly>
