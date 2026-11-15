@@ -139,7 +139,7 @@ const PHASE_TEXT: Record<string, string> = {
 }
 
 const activeMode = computed<VpnProxyMode>(() => (vpn.proxyMode as VpnProxyMode) ?? 'rule')
-const modeLocked = computed(() => vpn.phaseBusy || vpn.connecting)
+const modeLocked = computed(() => vpn.phaseBusy || vpn.connecting || !vpn.canControl)
 const statusText = computed(
   () => PHASE_TEXT[vpn.status.phase as string] ?? (vpn.isConnected ? '已连接' : '未连接'),
 )
@@ -151,6 +151,8 @@ const modeError = ref('')
 
 async function toggleVpn() {
   modeError.value = ''
+  // 另一个窗口连着的：按钮已置灰，这里再挡一道
+  if (!vpn.canControl) return
   await vpn.toggleConnection()
 }
 
@@ -331,12 +333,17 @@ onUnmounted(() => {
             type="button"
             class="qp-conn"
             :class="{ connected: vpn.isConnected }"
-            :disabled="vpnBusy"
+            :disabled="vpnBusy || !vpn.canControl"
+            :title="vpn.canControl ? '' : `VPN 正由「${vpn.owner?.name ?? '另一个窗口'}」连接，只有那个窗口能断开`"
             @click="toggleVpn"
           >
-            {{ vpn.isConnected ? '断开' : '连接' }}
+            {{ vpn.canControl ? (vpn.isConnected ? '断开' : '连接') : '另一窗口' }}
           </button>
         </div>
+
+        <p v-if="vpn.owner && !vpn.owner.mine" class="qp-tip warn">
+          VPN 正由「{{ vpn.owner.name }}」连接，这里只能看；断开请到那个窗口。
+        </p>
 
         <p v-if="vpn.status.error" class="qp-tip warn">{{ vpn.status.error }}</p>
 

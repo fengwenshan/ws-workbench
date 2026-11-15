@@ -19,6 +19,7 @@ import type {
   VpnSnapshotPayload,
   VpnStatus,
 } from '@/types/vpn'
+import type { SessionOwnerView } from '@/types/vpn'
 import { BUSY_PHASES, RETIRED_RULE_KINDS } from '@/types/vpn'
 
 const RETIRED_KINDS: readonly string[] = RETIRED_RULE_KINDS
@@ -118,6 +119,10 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
 
   /** 运行期「当前生效配置」；同通道切换后指向切过去的那份 */
   const policyProfileId = ref('')
+  /** 当前这条连接归谁：另一个窗口连的时候本窗口只能看 */
+  const owner = ref<SessionOwnerView | null>(null)
+  /** 能不能操作（连接 / 断开 / 改规则）：不是自己连的就只能看 */
+  const canControl = computed(() => !owner.value || owner.value.mine)
   /** 配置 id -> 通道身份哈希，用于渲染「共用通道」 */
   const identities = ref<Record<string, string>>({})
 
@@ -276,6 +281,7 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
       const payload = await invoke<VpnSnapshotPayload>('vpn_get_snapshot')
       status.value = payload.status
       policyProfileId.value = payload.policy_profile_id || payload.status.profile_id || ''
+      owner.value = payload.owner ?? null
       if (payload.elevation) {
         elevation.value = { ...(elevation.value ?? ({} as ElevationInfo)), hint: payload.elevation } as ElevationInfo
       }
@@ -671,6 +677,7 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
         status.value = event.payload.status
         policyProfileId.value =
           event.payload.policy_profile_id || event.payload.status.profile_id || ''
+        owner.value = event.payload.owner ?? null
         if (event.payload.elevation) {
           elevation.value = { ...(elevation.value ?? ({} as ElevationInfo)), hint: event.payload.elevation }
         }
@@ -713,6 +720,8 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
     selectedProfile,
     proxyMode,
     policyProfileId,
+    owner,
+    canControl,
     identities,
     sharesTunnel,
     switchToProfile,

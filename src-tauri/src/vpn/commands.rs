@@ -170,7 +170,7 @@ fn resolve_session_dir(app: &AppHandle) -> Result<(PathBuf, String), String> {
 /// 探测失败会重试几次：杀毒软件/索引器短暂持有刚建的目录、或沙箱在切换策略的
 /// 一瞬间收紧权限，都会让一次探测假失败，进而把整个会话退到临时目录直到重启。
 fn probe_writable(base: &std::path::Path) -> Option<PathBuf> {
-    let dir = base.join("vpn");
+    let dir = base.join(session_subdir());
     for attempt in 0..3 {
         if attempt > 0 {
             std::thread::sleep(std::time::Duration::from_millis(120));
@@ -190,6 +190,72 @@ fn probe_writable(base: &std::path::Path) -> Option<PathBuf> {
 
 fn session_of(app: &AppHandle) -> Result<VpnSession, String> {
     Ok(VpnSession::new(session_dir(app)?))
+}
+
+/// 会话子目录名：安装包和开发版共用同一个（`app_data_dir` 相同，identifier 都是
+/// `com.ws.workbench`）。
+///
+/// 曾经试着按构建分开（开发版 `vpn-dev`），代价是两个窗口互相看不见状态：开发版
+/// 显示「未连接」而隧道其实是安装包连着的，于是被诱导再连一次、抢同一套路由。
+/// 现在改成共享目录 + 归属标记（见 `session_owner_view` / `ensure_can_control`）：
+/// 谁连的谁才能断开，别的实例只看不动。
+pub fn session_subdir() -> &'static str {
+    "vpn"
+}
+
+/// 界面用的归属视图：谁开着这条连接、是不是本进程。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SessionOwnerView {
+    pub pid: u32,
+    /// 实例名（`ws-workbench` / `ws-workbench-dev`）
+    pub name: String,
+    /// false = 只能看，连接 / 断开 / 改规则都按不动
+    pub mine: bool,
+}
+
+fn owner_label(owner: &crate::vpn::session::SessionOwner) -> String {
+    if owner.name.trim().is_empty() {
+        "另一个窗口".to_string()
+    } else {
+        owner.name.clone()
+    }
+}
+
+/// 当前这条连接归谁：`owner.json` 只在连接存在期间存在，断开时由 worker 删掉。
+pub fn session_owner_view(session: &VpnSession) -> Option<SessionOwnerView> {
+    let owner = session.read_owner()?;
+    Some(SessionOwnerView {
+        pid: owner.pid,
+        name: owner_label(&owner),
+        mine: owner.pid == std::process::id(),
+    })
+}
+
+/// 只有开这条连接的实例能断开 / 改规则，其余实例一律拒绝。
+///
+/// 退出收尾（托盘退出、Cmd+Q、关机）也走这个判断：`owner.json` 指向另一个还活着
+/// 的进程时，本次退出不能拆别人的隧道，也不能删它的控制文件。记录里的进程已经
+/// 消失（崩溃 / 被强杀）则放行，由本次操作接管收尾。
+pub fn ensure_can_control(session: &VpnSession) -> Result<(), String> {
+    check_control(session, std::process::id(), is_process_alive)
+}
+
+/// [`ensure_can_control`] 的纯判定版本：进程存活判断注入进来，单测不用真去查进程表。
+fn check_control(
+    session: &VpnSession,
+    mine: u32,
+    alive: impl Fn(u32) -> bool,
+) -> Result<(), String> {
+    let Some(owner) = session.read_owner() else {
+        return Ok(());
+    };
+    if owner.pid == mine || !alive(owner.pid) {
+        return Ok(());
+    }
+    Err(format!(
+        "VPN 正由「{}」连接：只有那个窗口能断开或修改，这个窗口只能看状态",
+        owner_label(&owner)
+    ))
 }
 
 /// 上次注册免 UAC 计划任务时用的会话目录（记在配置里）。
@@ -523,11 +589,16 @@ fn session_is_active(session: &VpnSession) -> bool {
 #[tauri::command]
 pub fn vpn_set_proxy_mode(state: State<'_, VpnState>, mode: String) -> Result<(), String> {
     let mode = ProxyMode::parse(&mode)?;
-    let runtime = state.0.lock().map_err(|_| "内部状态锁定失败".to_string())?;
-    if !session_is_active(&runtime.session) {
+    // 先把 session 复制出来再判归属：确认归属可能要查一次进程表，不能攥着状态锁等
+    let session = {
+        let runtime = state.0.lock().map_err(|_| "内部状态锁定失败".to_string())?;
+        runtime.session.clone()
+    };
+    if !session_is_active(&session) {
         return Ok(());
     }
-    runtime.session.write_mode(mode.as_str())
+    ensure_can_control(&session)?;
+    session.write_mode(mode.as_str())
 }
 
 /// 运行期推送规则。
@@ -545,19 +616,20 @@ pub fn vpn_push_rules(
     let enabled: Vec<VpnRule> = rules.into_iter().filter(|r| r.enabled).collect();
     validate_rule_set(&enabled, &default_policy)?;
     let enabled_count = enabled.len();
-    let (profile_name, session) = {
+    // 同样：归属判定放在锁外（判定可能要查进程表），锁里只做文件读写
+    let session = {
         let runtime = state.0.lock().map_err(|_| "内部状态锁定失败".to_string())?;
-        if !session_is_active(&runtime.session) {
-            return Ok(());
-        }
-        let profile_name = runtime
-            .session
-            .read_status()
-            .map(|status| status.profile_name)
-            .unwrap_or_default();
-        runtime.session.write_rules(&enabled, &default_policy)?;
-        (profile_name, runtime.session.clone())
+        runtime.session.clone()
     };
+    if !session_is_active(&session) {
+        return Ok(());
+    }
+    ensure_can_control(&session)?;
+    let profile_name = session
+        .read_status()
+        .map(|status| status.profile_name)
+        .unwrap_or_default();
+    session.write_rules(&enabled, &default_policy)?;
     // 写进请求文件只代表 worker 会在 200ms 内读到；流水线上这就是「已生效」。
     // 锁已经放开再发通知：PowerShell 要几十到几百毫秒，别占着状态锁。
     spawn_notify(
@@ -609,11 +681,19 @@ pub fn vpn_switch_profile(
     rules: Vec<VpnRule>,
     default_policy: Option<String>,
 ) -> Result<bool, String> {
+    // 归属判定放在取锁之前：判定可能要查进程表，别占着状态锁等
+    {
+        let session = {
+            let runtime = state.0.lock().map_err(|_| "内部状态锁定失败".to_string())?;
+            runtime.session.clone()
+        };
+        if !session_is_active(&session) {
+            return Err("当前未连接".to_string());
+        }
+        ensure_can_control(&session)?;
+    }
     let mut runtime = state.0.lock().map_err(|_| "内部状态锁定失败".to_string())?;
     let session = runtime.session.clone();
-    if !session_is_active(&session) {
-        return Err("当前未连接".to_string());
-    }
     let status = session.read_status().unwrap_or_default();
     let target = conn_identity(&profile);
     match decide_switch(Some(status.conn_identity.as_str()), Some(target.as_str())) {
@@ -648,9 +728,16 @@ pub async fn vpn_connect(
 ) -> Result<ConnectResult, String> {
     // 已有活动连接时拒绝再次连接：多个 worker 会抢同一套路由。
     // 同通道切换走 vpn_switch_profile，不需要重建隧道。
+    // 连接是另一个窗口开的（开发版 / 安装包同时开着）时也拒绝，并把话说明白。
     if let Ok(runtime) = state.0.lock() {
         if session_is_active(&runtime.session) {
-            return Err("已有活动连接，请先断开当前连接".to_string());
+            return Err(match session_owner_view(&runtime.session) {
+                Some(owner) if !owner.mine => format!(
+                    "VPN 正由「{}」连接，请到那个窗口断开后再连（这个窗口只能看状态）",
+                    owner.name
+                ),
+                _ => "已有活动连接，请先断开当前连接".to_string(),
+            });
         }
     }
     // 兜底策略由前端从所选规则集透传，缺省或空白时退回直连
@@ -731,6 +818,12 @@ pub async fn vpn_connect(
     // 把主进程 PID 也落盘：worker 每个循环都会看它，界面进程被任务管理器强杀时
     // 立刻就能发现并收掉隧道，不用等心跳文件过期；心跳文件继续作为兜底。
     session.write_gui_pid(std::process::id())?;
+    // 记下归属：只有本实例能断开 / 改规则。别的实例看得到状态，但按不动按钮 ——
+    // 否则关掉开发版就会把安装包正在用的隧道一起拆了（现场 Windows / macOS 都有）。
+    session.write_owner(&crate::vpn::session::SessionOwner {
+        pid: std::process::id(),
+        name: crate::app_display_name(),
+    })?;
 
     // 接下来可能弹出 UAC 并等用户点确认，这一步必须放开锁：
     // 否则状态轮询线程会被一起卡住，界面看上去就像死了。
@@ -750,6 +843,8 @@ pub async fn vpn_connect(
                 session.append_log(&format!("[启动] 直接启动 worker 失败: {}", e));
                 // 请求里有明文密码：启动没成功就不能把它留在盘上
                 session.scrub_request();
+                // 连接没起来就不要继续「持有」它，否则另一个窗口会一直只读
+                session.release_owner(std::process::id());
                 return Err(e);
             }
         }
@@ -787,6 +882,8 @@ pub async fn vpn_connect(
                 session.append_log(&format!("[启动] worker 启动失败: {}", e));
                 // 用户拒绝 UAC / 计划任务拉不起来时，worker 不会来擦这份请求
                 session.scrub_request();
+                // 同上：没连上就释放归属，免得另一个窗口被永久置灰
+                session.release_owner(std::process::id());
                 return Err(e);
             }
         }
@@ -903,6 +1000,9 @@ pub async fn vpn_disconnect(app: AppHandle, state: State<'_, VpnState>) -> Resul
         runtime.policy_profile_id = None;
         (runtime.session.clone(), ())
     };
+    // 这条连接是别的窗口开的：不给断。真正的归属在 owner.json 里，界面上的按钮
+    // 只是提前置灰，用户绕过界面（快捷面板 / 旧版本前端）也断不掉。
+    ensure_can_control(&session)?;
 
     let status = session.read_status().unwrap_or_default();
     // 不能只看 status：连接刚起步时 `prepare()` 刚清过 status.json，worker 还没写
@@ -926,6 +1026,7 @@ pub async fn vpn_disconnect(app: AppHandle, state: State<'_, VpnState>) -> Resul
             },
             elevation: String::new(),
             policy_profile_id: String::new(),
+            owner: session_owner_view(&session),
         },
     )
     .ok();
@@ -1004,6 +1105,8 @@ pub struct VpnSnapshotPayload {
     pub elevation: String,
     /// 运行期「当前生效配置」；为空时以 status.profile_id 为准
     pub policy_profile_id: String,
+    /// 这条连接归谁；`Some` 且 `mine == false` 时界面只读
+    pub owner: Option<SessionOwnerView>,
 }
 
 #[tauri::command]
@@ -1015,6 +1118,7 @@ pub fn vpn_get_snapshot(state: State<'_, VpnState>) -> VpnSnapshotPayload {
                 status: VpnStatus::default(),
                 elevation: String::new(),
                 policy_profile_id: String::new(),
+                owner: None,
             }
         }
     };
@@ -1027,6 +1131,7 @@ pub fn vpn_get_snapshot(state: State<'_, VpnState>) -> VpnSnapshotPayload {
         status,
         elevation: runtime.elevation.clone(),
         policy_profile_id,
+        owner: session_owner_view(&runtime.session),
     }
 }
 
@@ -1113,7 +1218,17 @@ pub fn start_status_poller(app: AppHandle) {
             if let Some(status) = status {
                 let policy_profile_id =
                     policy_owner.unwrap_or_else(|| status.profile_id.clone());
-                let json = serde_json::to_string(&status).unwrap_or_default();
+                let owner = session_owner_view(&session);
+                // 归属变化（另一个窗口连上 / 断开）也要推给界面，否则按钮状态会停在旧值
+                let owner_key = owner
+                    .as_ref()
+                    .map(|view| format!("{}:{}", view.pid, view.mine))
+                    .unwrap_or_default();
+                let json = format!(
+                    "{}|{}",
+                    serde_json::to_string(&status).unwrap_or_default(),
+                    owner_key
+                );
                 if json != last_status_json {
                     last_status_json = json;
                     let _ = app.emit(
@@ -1122,6 +1237,7 @@ pub fn start_status_poller(app: AppHandle) {
                             status: status.clone(),
                             elevation: elevation.clone(),
                             policy_profile_id: policy_profile_id.clone(),
+                            owner,
                         },
                     );
                 }
@@ -1222,6 +1338,11 @@ fn mode_label(mode: &str) -> &'static str {
 /// 应用退出前请求 worker 停止，避免留下无人回收的路由
 pub fn shutdown(app: &AppHandle) {
     if let Ok(session) = session_of(app) {
+        // 隧道是另一个窗口开的：这次退出不能碰它，也别删它的控制文件
+        if let Err(reason) = ensure_can_control(&session) {
+            session.append_log(&format!("[退出] {reason}"));
+            return;
+        }
         if let Some(status) = session.read_status() {
             // 即使状态已经写成 Disconnected/Failed，只要 worker 进程还活着，
             // 也要发停止请求：它可能还在杀 openconnect、还原路由。
@@ -1249,6 +1370,11 @@ pub fn shutdown_and_wait(app: &AppHandle, timeout: Duration) {
     let Ok(session) = session_of(app) else {
         return;
     };
+    // 隧道是另一个窗口开的：这次退出不能碰它
+    if let Err(reason) = ensure_can_control(&session) {
+        session.append_log(&format!("[退出] {reason}"));
+        return;
+    }
     session.append_log("[退出] 收到托盘退出请求，开始收尾");
     let status = session.read_status();
     let pid = status.as_ref().map(|status| status.pid).unwrap_or(0);
@@ -1318,6 +1444,11 @@ fn prepare_update_for_install(app: &AppHandle) -> Result<(), String> {
     let Ok(session) = session_of(app) else {
         return Ok(());
     };
+    // 连接是别的窗口开的：更新要替换程序文件，必须先在那边断开，不能替它拆隧道
+    if let Err(reason) = ensure_can_control(&session) {
+        session.append_log(&format!("[更新] {reason}"));
+        return Err(reason);
+    }
     let status = session.read_status();
     let phase = status
         .as_ref()
@@ -1368,6 +1499,52 @@ fn worker_stopped(session: &VpnSession, pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_dir_is_shared_between_builds() {
+        // 开发版和安装包的 app_data_dir 是同一个：共用会话目录才能互相看见状态，
+        // 「谁能断开」靠 owner.json 判定，不靠目录隔离。
+        assert_eq!(session_subdir(), "vpn");
+    }
+
+    #[test]
+    fn only_the_owner_can_close_or_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = VpnSession::new(dir.path().to_path_buf());
+        // 从没连过：谁都可以操作
+        assert!(check_control(&session, 100, |_| true).is_ok());
+        session
+            .write_owner(&crate::vpn::session::SessionOwner {
+                pid: 200,
+                name: "ws-workbench".to_string(),
+            })
+            .unwrap();
+        // 另一个窗口开的、而且它还活着：连接 / 断开 / 改规则全部拒绝
+        let err = check_control(&session, 100, |pid| pid == 200).unwrap_err();
+        assert!(err.contains("ws-workbench"), "提示里要带上是哪个窗口：{err}");
+        assert!(err.contains("只能看状态"), "提示要说清只能看：{err}");
+        // 开它的窗口已经没了（崩溃残留）：允许接管收尾
+        assert!(check_control(&session, 100, |_| false).is_ok());
+        // 自己开的：正常操作
+        assert!(check_control(&session, 200, |_| true).is_ok());
+        // 归属视图跟着走：本进程开的 mine = true
+        assert!(session_owner_view(&session).unwrap().mine == (200 == std::process::id()));
+    }
+
+    #[test]
+    fn prepare_clears_the_previous_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = VpnSession::new(dir.path().to_path_buf());
+        session
+            .write_owner(&crate::vpn::session::SessionOwner {
+                pid: 200,
+                name: "ws-workbench-dev".to_string(),
+            })
+            .unwrap();
+        session.prepare().unwrap();
+        // 新会话开始前必须清掉旧归属，否则新连接会被当成「别人的」
+        assert!(session.read_owner().is_none());
+    }
 
     #[test]
     fn update_waits_only_for_live_phases() {
@@ -1441,7 +1618,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
 
         let dir = probe_writable(&root).expect("临时目录应该可写");
-        assert!(dir.ends_with("vpn"), "实际: {}", dir.display());
+        assert!(dir.ends_with(session_subdir()), "实际: {}", dir.display());
         // 探针文件不能留在用户的会话目录里
         assert!(!dir.join(".write-probe").exists());
 
@@ -1469,7 +1646,7 @@ mod tests {
     fn probe_rejects_directory_that_exists_but_cannot_be_written() {
         let root = std::env::temp_dir().join(format!("ws-probe-ro-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(root.join("vpn").join(".write-probe")).unwrap();
+        std::fs::create_dir_all(root.join(session_subdir()).join(".write-probe")).unwrap();
 
         assert!(
             probe_writable(&root).is_none(),

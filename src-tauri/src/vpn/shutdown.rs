@@ -157,6 +157,12 @@ fn disconnect_before_exit(app: &tauri::AppHandle, kind: &str) -> bool {
     let Some(session) = current_session(app) else {
         return true;
     };
+    // 隧道是另一个窗口开的（开发版 / 安装包各开一个，共用同一个会话目录）：
+    // 关机请求发给了本进程，但不该由它拆掉别人的连接。
+    if let Err(reason) = crate::vpn::commands::ensure_can_control(&session) {
+        session.append_log(&format!("[关机] 系统请求{kind}：{reason}，本次不动它"));
+        return true;
+    }
     disconnect_session_with_budget(&session, kind, Duration::from_millis(SHUTDOWN_BUDGET_MS))
 }
 
