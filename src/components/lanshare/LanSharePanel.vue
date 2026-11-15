@@ -262,13 +262,12 @@ function remainingText(offer: PendingOffer): string {
   return `${seconds} 秒后自动拒绝`
 }
 
-/** 设备最近在线：按 last_seen_ms 显示相对时间 */
-function lastSeenText(peer: LanPeer): string {
+/** 在线判定：心跳 3 秒一次，三次没续上就把状态点点灰（列表要 15 秒后才真正移除） */
+const PEER_ONLINE_WINDOW_MS = 10_000
+
+function isPeerOnline(peer: LanPeer): boolean {
   const delta = now.value - peer.last_seen_ms
-  if (!Number.isFinite(delta) || delta < 0) return '在线'
-  if (delta < 2000) return '在线'
-  if (delta < 12000) return `${Math.round(delta / 1000)} 秒前在线`
-  return '即将离线'
+  return !Number.isFinite(delta) || delta < PEER_ONLINE_WINDOW_MS
 }
 
 function sendPercent(row: SendProgress): number {
@@ -549,11 +548,14 @@ watch(
                     <path d="M8 20h8M12 16v4" />
                   </svg>
                 </span>
-                <span class="peer-online" title="在线"></span>
+                <span
+                  class="peer-online"
+                  :class="{ 'is-offline': !isPeerOnline(peer) }"
+                  :title="isPeerOnline(peer) ? '在线' : '离线'"
+                ></span>
               </div>
               <div class="peer-name" :title="peer.alias">{{ peer.alias || '未知设备' }}</div>
               <div class="peer-addr mono" :title="`${peer.ip}:${peer.port}`">{{ peer.ip }}:{{ peer.port }}</div>
-              <div class="peer-seen">{{ lastSeenText(peer) }}</div>
               <div class="peer-card-foot">
                 <button
                   class="btn btn-primary btn-xs peer-send"
@@ -1034,6 +1036,10 @@ watch(
   box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.16);
   flex-shrink: 0;
 }
+.peer-online.is-offline {
+  background: var(--text-muted, #c0c4cc);
+  box-shadow: none;
+}
 .peer-name {
   font-size: 13px;
   font-weight: 600;
@@ -1048,10 +1054,6 @@ watch(
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-.peer-seen {
-  font-size: 12px;
-  color: var(--text-muted);
 }
 .peer-card-foot {
   display: flex;

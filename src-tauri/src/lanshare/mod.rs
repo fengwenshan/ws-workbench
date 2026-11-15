@@ -19,7 +19,7 @@ pub(crate) mod server;
 pub(crate) mod settings;
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex, MutexGuard};
@@ -119,9 +119,13 @@ impl Default for LanShareSettings {
 pub struct LanPeer {
     pub fingerprint: String,
     pub alias: String,
+    /// 当前选定、也确实连得上的地址（探测成功后会被换成 VPN / 其它网卡的地址）
     pub ip: String,
     pub port: u16,
     pub device_type: String,
+    /// 对端自报的全部 IPv4，第一项是 announce 的来源地址；面板上显示的是 `ip`
+    #[serde(default)]
+    pub addresses: Vec<String>,
     /// 最近一次收到 announce 的 Unix 毫秒时间，面板用来显示「最近在线」
     pub last_seen_ms: i64,
 }
@@ -305,12 +309,29 @@ impl Inner {
         if fingerprint.is_empty() {
             return false;
         }
+        let addresses = peer_addresses(addr, &announce.addresses);
+        // 已经是探测过的地址（比如 VPN 地址）就不要被下一条 announce 盖回 LAN 地址，
+        // 否则每 3 秒都要重新探测一次，面板上的地址也会闪。
+        let kept_ip = self
+            .peers
+            .get(&fingerprint)
+            .map(|entry| entry.peer.ip.clone())
+            .filter(|ip| addresses.iter().any(|item| item == ip));
+        let ip = kept_ip
+            .or_else(|| addresses.first().cloned())
+            .unwrap_or_default();
+        let port = announce.port;
+        let peer_addr = ip
+            .parse::<IpAddr>()
+            .map(|parsed| SocketAddr::new(parsed, port))
+            .unwrap_or(addr);
         let peer = LanPeer {
             fingerprint: fingerprint.clone(),
             alias: announce.alias.trim().to_string(),
-            ip: addr.ip().to_string(),
-            port: announce.port,
+            ip,
+            port,
             device_type: announce.device_type.clone(),
+            addresses: addresses.clone(),
             last_seen_ms: now_ms,
         };
         match self.peers.get_mut(&fingerprint) {
@@ -318,9 +339,10 @@ impl Inner {
                 let changed = entry.peer.alias != peer.alias
                     || entry.peer.ip != peer.ip
                     || entry.peer.port != peer.port
-                    || entry.peer.device_type != peer.device_type;
+                    || entry.peer.device_type != peer.device_type
+                    || entry.peer.addresses != peer.addresses;
                 entry.peer = peer;
-                entry.addr = addr;
+                entry.addr = peer_addr;
                 entry.last_seen = now;
                 changed
             }
@@ -329,13 +351,30 @@ impl Inner {
                     fingerprint,
                     PeerEntry {
                         peer,
-                        addr,
+                        addr: peer_addr,
                         last_seen: now,
                     },
                 );
                 true
             }
         }
+    }
+
+    /// 探测结果写回：把 `ip` 作为这台设备的可用地址。返回是否真的改了。
+    pub(crate) fn set_peer_ip(&mut self, fingerprint: &str, ip: &str) -> bool {
+        let Ok(parsed) = ip.parse::<IpAddr>() else {
+            return false;
+        };
+        let Some(entry) = self.peers.get_mut(fingerprint) else {
+            return false;
+        };
+        if entry.peer.ip == ip {
+            return false;
+        }
+        let port = entry.peer.port;
+        entry.peer.ip = ip.to_string();
+        entry.addr = SocketAddr::new(parsed, port);
+        true
     }
 
     /// 掉线的 peer 从列表移除；返回是否真的有变化。
@@ -693,6 +732,7 @@ impl LanShareState {
             alias: peer.alias.clone(),
             ip: peer.ip.clone(),
             port: peer.port,
+            addresses: peer.addresses.clone(),
         };
         let inner = self.inner.clone();
         let app_handle = app.clone();
@@ -876,6 +916,25 @@ pub fn local_ipv4_addresses() -> Vec<String> {
     addresses
 }
 
+/// 对端地址候选：announce 的来源地址排第一，其余用对方自报的 IPv4（去重、只留合法 v4）。
+///
+/// 开着 VPN 时来源地址常常是「局域网地址」，而真正通的是 VPN 地址
+/// （或者反过来），所以两边都留着，由发送端挨个探测。
+fn peer_addresses(source: SocketAddr, advertised: &[String]) -> Vec<String> {
+    let mut list: Vec<String> = Vec::new();
+    if let IpAddr::V4(ip) = source.ip() {
+        list.push(ip.to_string());
+    }
+    for raw in advertised {
+        let value = raw.trim();
+        if value.parse::<Ipv4Addr>().is_err() || list.iter().any(|item| item == value) {
+            continue;
+        }
+        list.push(value.to_string());
+    }
+    list
+}
+
 /// 创建目录并做一次写探测，确认用户选的目录真能写。
 fn ensure_writable_dir(dir: &Path) -> Result<(), String> {
     std::fs::create_dir_all(dir)
@@ -975,6 +1034,38 @@ mod tests {
         // 超过 15 秒被移除
         assert!(inner.prune_peers(now + PEER_TIMEOUT + Duration::from_secs(1)));
         assert!(inner.peers.is_empty());
+    }
+
+    /// 现场问题回归：两台机器都在 192.168.3.0/24 又都开着 VPN，announce 从 LAN 网卡发出，
+    /// 但真正连得上的只有 VPN 地址。peer 要把全部地址留着，探测成功后记住 VPN 地址，
+    /// 后面的 announce 不能把它盖回 LAN 地址（否则每 3 秒重探测一次、面板地址乱跳）。
+    #[test]
+    fn peer_addresses_keep_probed_one() {
+        let (_dir, state) = state_with_temp_dir();
+        let now = Instant::now();
+        let lan = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 3, 11)), 53317);
+        let mut announce = announce("Mac", "fp-mac", 53317);
+        announce.addresses = vec!["192.168.3.11".to_string(), "192.168.136.98".to_string()];
+
+        let mut inner = lock_inner(&state.inner);
+        assert!(inner.upsert_peer(&announce, lan, now, 1000));
+        let peer = inner.peer_by_fingerprint("fp-mac").unwrap();
+        assert_eq!(peer.ip, "192.168.3.11", "首选还是 announce 的来源地址");
+        assert_eq!(peer.addresses.len(), 2);
+
+        // 探测到 VPN 地址能连，写回
+        assert!(inner.set_peer_ip("fp-mac", "192.168.136.98"));
+        assert_eq!(
+            inner.peer_by_fingerprint("fp-mac").unwrap().ip,
+            "192.168.136.98"
+        );
+
+        // 下一条 announce 仍然从 LAN 网卡来：地址不翻回去，也不算「有变化」
+        assert!(!inner.upsert_peer(&announce, lan, now, 4000));
+        assert_eq!(
+            inner.peer_by_fingerprint("fp-mac").unwrap().ip,
+            "192.168.136.98"
+        );
     }
 
     #[test]
@@ -1088,6 +1179,7 @@ mod tests {
             alias: state_a.snapshot().alias,
             ip: "127.0.0.1".to_string(),
             port: server.port,
+            addresses: vec!["127.0.0.1".to_string()],
         };
         let inner_b = state_b.inner.clone();
         let paths = vec![

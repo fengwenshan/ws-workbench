@@ -35,6 +35,12 @@ const PREPARE_PATH: &str = "/api/lanshare/v1/prepare-upload";
 const UPLOAD_PATH: &str = "/api/lanshare/v1/upload";
 const CANCEL_PATH: &str = "/api/lanshare/v1/cancel";
 
+/// 收上传正文时允许的单次读等待。请求头仍然只给 30 秒（正常客户端都是秒回），
+/// 但正文要跟发送端的写超时（120 秒）对齐：现场发大文件到 24% 就报
+/// 「远程主机强迫关闭了一个现有的连接」，多半是链路上卡了三十秒、接收端
+/// 先按超时把连接关了，发送端紧接着写就吃到 RST。
+const UPLOAD_READ_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// 接收服务句柄：Drop 时置停止标记并 join accept 线程。
 pub(crate) struct HttpServer {
     pub port: u16,
@@ -63,6 +69,12 @@ impl HttpServer {
                 }
                 match listener.accept() {
                     Ok((stream, source)) => {
+                        // 监听 socket 为了轮询停止标记设了非阻塞；accept 出来的连接会把
+                        // 这个标志带进来（macOS/BSD 一定继承，Windows 实测同样会），
+                        // 于是正文还没到齐时 read 立刻返回 EAGAIN / WSAEWOULDBLOCK(10035)，
+                        // 表现就是「对方未接收：读取请求体失败」或传到一半被 RST。
+                        // 这里显式改回阻塞，后面的 SO_RCVTIMEO 才有意义。
+                        let _ = stream.set_nonblocking(false);
                         let connection_inner = inner.clone();
                         let connection_app = app.clone();
                         // 每个连接一个线程：prepare 会等用户确认，不能堵住 accept
@@ -409,7 +421,11 @@ fn handle_upload(
         }
     }
 
-    let copy_result = std::io::copy(&mut (&mut *reader).take(size), &mut file);
+    let copy_result = {
+        // 正文读取放宽到和发送端写超时一致，避免链路上稍微卡一下就被接收端先判死
+        let _ = reader.get_mut().set_read_timeout(Some(UPLOAD_READ_TIMEOUT));
+        std::io::copy(&mut (&mut *reader).take(size), &mut file)
+    };
     drop(file);
     let written = match copy_result {
         Ok(written) => written,
@@ -552,6 +568,32 @@ fn test_request(port: u16, method: &str, path: &str, body: &[u8]) -> (u16, Strin
     parse_response(&raw)
 }
 
+/// 分两次发：先请求头，隔一会儿再发正文。
+///
+/// 局域网里这俩通常挤在同一个报文里，所以「正文没到齐时 read 会怎样」一直没被测到。
+/// 一旦走 VPN / 跨网段（MSS 更小、分段更碎），正文就会晚到几十毫秒；如果 accept
+/// 出来的连接被监听 socket 的非阻塞标志带进来（BSD/macOS 一定继承，Windows 上实测
+/// 也会），read 会立刻返回 EAGAIN/10035，现场表现就是「对方未接收：读取请求体失败」
+/// 或传到一半被 RST。
+#[cfg(test)]
+fn test_request_split(port: u16, method: &str, path: &str, body: &[u8]) -> (u16, String) {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("连接测试服务失败");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(15)))
+        .unwrap();
+    let head = format!(
+        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).unwrap();
+    stream.flush().unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    stream.write_all(body).unwrap();
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).unwrap();
+    parse_response(&raw)
+}
+
 #[cfg(test)]
 fn parse_response(raw: &[u8]) -> (u16, String) {
     let split = raw
@@ -639,6 +681,19 @@ mod tests {
                 ("token", file.token.as_str()),
             ])
         )
+    }
+
+    /// 回归：正文晚到（分两个报文）时，服务端必须等，而不是立刻报 EAGAIN。
+    #[test]
+    fn body_in_a_second_segment_is_read() {
+        let (_dir, _state, server) = start_state();
+        let body = prepare_body(&[]);
+        let (status, message) = test_request_split(server.port, "POST", PREPARE_PATH, &body);
+        assert_eq!(status, 400);
+        assert!(
+            message.contains("没有要接收的文件"),
+            "正文应该被正常读到；拿到这个说明 read 在正文到达前就返回了：{message}"
+        );
     }
 
     #[test]

@@ -19,12 +19,13 @@ use super::protocol::{
     encode_query, ErrorResponse, FileToken, InfoResponse, PrepareUploadRequest,
     PrepareUploadResponse, SenderInfo,
 };
-use super::{emit_progress, lock_inner, InnerRef, OfferFile, SendProgress, MAX_FILE_SIZE};
+use super::{
+    emit_progress, emit_snapshot, lock_inner, InnerRef, OfferFile, SendProgress, MAX_FILE_SIZE,
+};
 
 /// 上传分块大小：每块推一次进度
 const CHUNK_SIZE: usize = 256 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-const INFO_TIMEOUT: Duration = Duration::from_secs(10);
 /// prepare 最长等 60 秒确认，这里留 30 秒余量
 const PREPARE_TIMEOUT: Duration = Duration::from_secs(90);
 const UPLOAD_TIMEOUT: Duration = Duration::from_secs(120);
@@ -37,6 +38,8 @@ pub(crate) struct SendPeer {
     pub alias: String,
     pub ip: String,
     pub port: u16,
+    /// 对端自报的全部 IPv4（含 `ip`）；发送前逐个探测，挑第一个连得上的
+    pub addresses: Vec<String>,
 }
 
 /// 一个待发送的本地文件
@@ -62,14 +65,15 @@ pub(crate) fn run_send(
         (guard.effective_alias(), guard.settings.fingerprint.clone())
     };
 
-    // 1. 探活：确认对面还在监听，顺便拿到对方设备名（失败不致命，信息只用于展示）
-    if let Err(err) =
-        request_json::<InfoResponse>(peer, "GET", "/api/lanshare/v1/info", None, INFO_TIMEOUT)
-    {
-        let message = format!("连接对方设备失败：{err}");
-        emit_failure(inner, app, peer, transfer_id, &files, 0, &message);
-        return Err(message);
-    }
+    // 1. 选地址 + 探活一次搞定：逐个候选发 /info，第一个通的既是「能用的地址」也是「对面在监听」
+    let peer = match probe_peer(peer, inner, app) {
+        Ok(peer) => peer,
+        Err(message) => {
+            emit_failure(inner, app, peer, transfer_id, &files, 0, &message);
+            return Err(message);
+        }
+    };
+    let peer = &peer;
 
     // 2. 提交文件清单，等接收方确认（最长 60 秒，由服务端控制）
     let offer_files: Vec<OfferFile> = files
@@ -266,7 +270,7 @@ fn upload_file(
         }
         stream
             .write_all(&buffer[..read])
-            .map_err(|err| format!("写入对端连接失败：{err}"))?;
+            .map_err(|err| format!("写入对端连接失败：{}", io_error(&err)))?;
         sent += read as u64;
         on_progress(sent);
     }
@@ -333,12 +337,119 @@ fn peer_addr(peer: &SendPeer) -> Result<SocketAddr, String> {
         .map_err(|err| format!("对端地址无效 {}:{}：{err}", peer.ip, peer.port))
 }
 
+/// 单个候选地址的探测超时
+const PROBE_TIMEOUT: Duration = Duration::from_millis(800);
+
+/// 候选地址：`peer.ip` 优先，其余来自对端自报的 `addresses`（去重、保序）。
+fn candidate_ips(peer: &SendPeer) -> Vec<String> {
+    let mut candidates: Vec<String> = Vec::new();
+    for raw in std::iter::once(&peer.ip).chain(peer.addresses.iter()) {
+        let value = raw.trim();
+        if value.is_empty() || candidates.iter().any(|item| item == value) {
+            continue;
+        }
+        candidates.push(value.to_string());
+    }
+    candidates
+}
+
+/// 地址选定后写回 peer 表（面板上显示的就是这个地址）。
+fn remember_peer_ip(peer: &SendPeer, ip: &str, inner: &InnerRef, app: Option<&AppHandle>) -> bool {
+    if ip == peer.ip {
+        return false;
+    }
+    let changed = lock_inner(inner).set_peer_ip(&peer.fingerprint, ip);
+    if changed {
+        emit_snapshot(inner, app);
+    }
+    changed
+}
+
+/// 探活 + 选地址：逐个候选发 `/info`，第一个通的就用它。
+///
+/// 现场问题：两台机器都在 `192.168.3.0/24`，但各自连着 VPN，VPN 又推送了
+/// `192.168.3.0/24` 的路由 —— 于是「局域网地址」反而不可达，通的只有 VPN 地址。
+/// 以前只用 announce 的来源地址发一次，必然失败。
+fn probe_peer(
+    peer: &SendPeer,
+    inner: &InnerRef,
+    app: Option<&AppHandle>,
+) -> Result<SendPeer, String> {
+    let mut tried: Vec<String> = Vec::new();
+    let mut last_error = String::new();
+    for ip in candidate_ips(peer) {
+        let mut candidate = peer.clone();
+        candidate.ip = ip.clone();
+        match request_json::<InfoResponse>(
+            &candidate,
+            "GET",
+            "/api/lanshare/v1/info",
+            None,
+            PROBE_TIMEOUT,
+        ) {
+            Ok(_) => {
+                remember_peer_ip(peer, &ip, inner, app);
+                return Ok(candidate);
+            }
+            Err(err) => {
+                last_error = err;
+                tried.push(format!("{ip}:{}", peer.port));
+            }
+        }
+    }
+    let mut message = format!("连接对方设备失败：{last_error}");
+    if tried.len() > 1 {
+        message.push_str(&format!(
+            "（试过 {}；开了 VPN / 多网卡时请确认两端能直接互相访问）",
+            tried.join("、")
+        ));
+    }
+    Err(message)
+}
+
+/// 纯 TCP 探测（不发请求），给发现线程挑「面板上显示哪个地址」用。
+///
+/// 真正要发文件时还会走 `probe_peer` 用 `/info` 再确认一次。
+pub(crate) fn resolve_peer(
+    peer: &SendPeer,
+    inner: &InnerRef,
+    app: Option<&AppHandle>,
+) -> Result<SendPeer, String> {
+    let mut tried: Vec<String> = Vec::new();
+    for ip in candidate_ips(peer) {
+        let Ok(addr) = format!("{ip}:{}", peer.port).parse::<SocketAddr>() else {
+            continue;
+        };
+        if TcpStream::connect_timeout(&addr, PROBE_TIMEOUT).is_ok() {
+            remember_peer_ip(peer, &ip, inner, app);
+            let mut resolved = peer.clone();
+            resolved.ip = ip;
+            return Ok(resolved);
+        }
+        tried.push(format!("{ip}:{}", peer.port));
+    }
+    Err(format!("都连不上：{}", tried.join("、")))
+}
+
+/// 把网络 IO 错误翻成用户能对上号的说法。
+fn io_error(err: &std::io::Error) -> String {
+    let mut text = err.to_string();
+    let reset = err.kind() == std::io::ErrorKind::ConnectionReset
+        || matches!(err.raw_os_error(), Some(10054) | Some(104) | Some(54));
+    if reset {
+        text.push_str(
+            "（对端在传输中途断开了连接：接收端应用被关掉、切换网络或 VPN 掉线都会这样）",
+        );
+    }
+    text
+}
+
 fn read_response(stream: TcpStream) -> Result<(u16, Vec<u8>), String> {
     let mut reader = BufReader::new(stream);
     let mut status_line = String::new();
     let read = reader
         .read_line(&mut status_line)
-        .map_err(|err| format!("读取响应失败：{err}"))?;
+        .map_err(|err| format!("读取响应失败：{}", io_error(&err)))?;
     if read == 0 {
         return Err("对端没有返回响应".to_string());
     }
@@ -494,6 +605,7 @@ mod tests {
             alias: "对端设备".to_string(),
             ip: "127.0.0.1".to_string(),
             port,
+            addresses: vec!["127.0.0.1".to_string()],
         }
     }
 

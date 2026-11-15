@@ -26,6 +26,13 @@ pub struct Announce {
     pub port: u16,
     #[serde(default = "default_device_type")]
     pub device_type: String,
+    /// 本机全部 IPv4（第一项是发出这条 announce 的网卡地址）。
+    ///
+    /// 开着 VPN / 有多块网卡时，announce 的来源地址只是「包从哪块网卡出去的」，
+    /// 不一定是对方回连得上的地址（现场：家里和公司都是 192.168.3.0/24，
+    /// 对端拿 LAN 地址回连会被 VPN 路由吞掉）。带上全量地址让对端自己探测。
+    #[serde(default)]
+    pub addresses: Vec<String>,
 }
 
 fn default_device_type() -> String {
@@ -42,7 +49,14 @@ impl Announce {
             fingerprint: fingerprint.into(),
             port,
             device_type: DEVICE_TYPE.to_string(),
+            addresses: Vec::new(),
         }
+    }
+
+    /// 带上本机全部 IPv4：对端会逐个探测，挑真正连得上的那个用。
+    pub fn with_addresses(mut self, addresses: Vec<String>) -> Self {
+        self.addresses = addresses;
+        self
     }
 
     /// 是否是本应用、本协议版本的合法 announce。
@@ -457,11 +471,18 @@ mod tests {
 
     #[test]
     fn announce_roundtrip_and_validation() {
-        let announce = Announce::new("我的 Mac", "fp-1", 53317);
+        let announce = Announce::new("我的 Mac", "fp-1", 53317).with_addresses(vec![
+            "192.168.3.11".to_string(),
+            "192.168.136.98".to_string(),
+        ]);
         let json = announce.to_json();
         let parsed = Announce::from_json(json.as_bytes()).unwrap();
         assert_eq!(parsed, announce);
         assert!(parsed.is_valid());
+        assert_eq!(
+            parsed.addresses,
+            vec!["192.168.3.11".to_string(), "192.168.136.98".to_string()]
+        );
 
         let mut wrong_app = announce.clone();
         wrong_app.app = "other-app".to_string();
@@ -472,6 +493,15 @@ mod tests {
         assert!(!wrong_version.is_valid());
 
         assert!(Announce::from_json(b"not-json").is_err());
+    }
+
+    #[test]
+    fn announce_without_addresses_still_parses() {
+        // 旧版本不认识 addresses 字段，新版本也要能收旧报文
+        let json = r#"{"app":"ws-workbench-lanshare","type":"announce","version":1,"alias":"old","fingerprint":"fp-old","port":53317,"device_type":"desktop"}"#;
+        let parsed = Announce::from_json(json.as_bytes()).unwrap();
+        assert!(parsed.is_valid());
+        assert!(parsed.addresses.is_empty());
     }
 
     #[test]

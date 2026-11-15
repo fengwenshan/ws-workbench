@@ -60,11 +60,17 @@
   "alias": "冯文山的 MacBook",
   "fingerprint": "稳定 UUID，首次开启时生成并持久化",
   "port": 53317,
-  "device_type": "desktop"
+  "device_type": "desktop",
+  "addresses": ["192.168.3.11", "192.168.136.98"]
 }
 ```
 
-- 收到后以「报文源 IP + 报文里的 port」作为对端地址；`fingerprint` 相同的报文视为自己，忽略
+- `addresses` 是本机全部 IPv4（第一项是发出这条 announce 的网卡地址）；旧版本没有这个字段，按空数组处理
+- 收到后候选地址 = [报文源 IP] + `addresses`（去重）；**不能**直接拿源 IP 当对端地址
+- 候选地址逐个探测（TCP connect，800 ms/个），第一个通的写回 peer 表并显示在面板上；发送前再用 `/info` 确认一次，失败自动换下一个候选
+- 组播只有一个方向通（VPN 抢路由、防火墙只挡一个方向）时：收到新设备即用单播回一份 announce 给它探测成功的地址，并且每 3 秒对已知设备各单播一份心跳，保证双方 `last_seen` 都能续上
+- announce 的发送 socket 按网卡各建一个并显式 `IP_MULTICAST_IF`：Windows 发组播是按路由表选出口的，只绑源地址会被 VPN 的 `224.0.0.0/4` 路由抢走
+- `fingerprint` 相同的报文视为自己，忽略
 
 ### 3.2 传输（HTTP over TCP，明文）
 

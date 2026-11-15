@@ -120,20 +120,31 @@ fn run(
     // 只靠一个 socket 发可能根本出不了物理网卡。按本机 IPv4 各绑一个发送源，
     // 保证每个物理 / 隧道网卡上都能发出组播（接收仍走上面绑定 53317 的 socket）。
     let mut senders = announce_senders();
+    let mut addresses = local_ipv4_addresses();
     let mut senders_at = Instant::now();
+    // 单播回包 / 心跳用的 socket：不绑网卡，让系统按目的地址选出口
+    // （组播在 VPN、防火墙场景下经常只有一个方向通，单播能补上另一个方向）
+    let unicast = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok();
 
     while !stop.load(Ordering::Relaxed) {
         // 网络切换（拔网线、连 / 断 VPN）后重新枚举一次发送网卡
         if senders_at.elapsed() >= Duration::from_secs(60) {
             senders = announce_senders();
+            addresses = local_ipv4_addresses();
             senders_at = Instant::now();
         }
         let due = last_announce
             .map(|at| at.elapsed() >= ANNOUNCE_INTERVAL)
             .unwrap_or(true);
         if due {
-            send_announce(&inner, &senders, http_port, group_addr);
+            send_announce(&inner, &senders, &addresses, http_port, group_addr);
             last_announce = Some(Instant::now());
+            // 对已知设备再单播一遍：组播只有一个方向通时，对面也能靠这些包续上 last_seen
+            if let Some(socket) = unicast.as_ref() {
+                for addr in known_peer_addrs(&inner) {
+                    send_announce_to(&inner, socket, addr, http_port, &addresses);
+                }
+            }
         }
 
         match socket.recv_from(&mut buf) {
@@ -159,9 +170,19 @@ fn run(
                     .get(&announce.fingerprint)
                     .map(|at| at.elapsed() >= Duration::from_secs(1))
                     .unwrap_or(true);
-                if changed && may_reply {
-                    send_announce(&inner, &senders, http_port, group_addr);
-                    last_reply.insert(announce.fingerprint, now);
+                if changed {
+                    // 挨个探测它的地址，把连得上的那个写进 peer 表（开 VPN 时来源地址常常连不上）
+                    let resolved =
+                        resolve_peer_address(&inner, app.as_ref(), &announce.fingerprint);
+                    if may_reply {
+                        // 除了组播回包，再用单播直接回给探测成功的那个地址：
+                        // 组播被单向拦住时，对面只有靠这一包才能看见我们
+                        if let (Some(socket), Some(addr)) = (unicast.as_ref(), resolved) {
+                            send_announce_to(&inner, socket, addr, http_port, &addresses);
+                        }
+                        send_announce(&inner, &senders, &addresses, http_port, group_addr);
+                        last_reply.insert(announce.fingerprint.clone(), now);
+                    }
                 }
             }
             Err(err)
@@ -193,19 +214,28 @@ fn run(
 
 /// 为每块本机网卡建一个 announce 发送 socket。
 ///
-/// 绑到网卡自己的 IPv4 上，组播的出口就固定在这块网卡（源地址选路），
-/// 不依赖系统默认路由——开着全局 VPN 时默认路由在 utun 上，LAN 上的设备会看不到我们。
+/// 绑到网卡自己的 IPv4 上，并且显式设 `IP_MULTICAST_IF`：只绑源地址不够——
+/// Windows 发组播是按路由表选出口的，开着 VPN 时 `224.0.0.0/4` 会走虚拟网卡，
+/// announce 根本出不了物理网卡（对端也就永远看不到我们）。
 fn announce_senders() -> Vec<UdpSocket> {
+    use socket2::{Domain, Protocol, Socket, Type};
+
     let mut sockets = Vec::new();
     for address in local_ipv4_addresses() {
         let Ok(ip) = address.parse::<Ipv4Addr>() else {
             continue;
         };
-        if let Ok(socket) = UdpSocket::bind((ip, 0)) {
-            let _ = socket.set_multicast_loop_v4(true);
-            let _ = socket.set_multicast_ttl_v4(1);
-            sockets.push(socket);
+        let Ok(socket) = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)) else {
+            continue;
+        };
+        if socket.bind(&SocketAddr::from((ip, 0)).into()).is_err() {
+            continue;
         }
+        // 出口网卡固定到这块网卡，绕开 VPN 抢走组播路由的问题
+        let _ = socket.set_multicast_if_v4(&ip);
+        let _ = socket.set_multicast_loop_v4(true);
+        let _ = socket.set_multicast_ttl_v4(1);
+        sockets.push(socket.into());
     }
     if sockets.is_empty() {
         // 枚举不到网卡时退回默认出口，至少保证单机 / 特殊网卡环境下还能发
@@ -218,20 +248,80 @@ fn announce_senders() -> Vec<UdpSocket> {
     sockets
 }
 
-fn send_announce(inner: &InnerRef, senders: &[UdpSocket], http_port: u16, group: SocketAddr) {
-    let announce = {
-        let guard = lock_inner(inner);
-        Announce::new(
-            guard.effective_alias(),
-            guard.settings.fingerprint.clone(),
-            http_port,
-        )
+/// 探测一台设备的所有候选地址，把能连上的写回 peer 表（面板上显示的就是它），并返回该地址。
+///
+/// 放在发现线程里同步做：只在设备新出现 / 地址表变化时触发，最多阻塞一两秒。
+fn resolve_peer_address(
+    inner: &InnerRef,
+    app: Option<&AppHandle>,
+    fingerprint: &str,
+) -> Option<SocketAddr> {
+    let peer = lock_inner(inner).peer_by_fingerprint(fingerprint)?;
+    let send_peer = super::client::SendPeer {
+        fingerprint: peer.fingerprint.clone(),
+        alias: peer.alias.clone(),
+        ip: peer.ip.clone(),
+        port: peer.port,
+        addresses: peer.addresses.clone(),
     };
-    let payload = announce.to_json();
+    let resolved = super::client::resolve_peer(&send_peer, inner, app).ok()?;
+    format!("{}:{}", resolved.ip, resolved.port)
+        .parse::<SocketAddr>()
+        .ok()
+}
+
+/// 已知设备当前选定的地址（单播心跳用）
+fn known_peer_addrs(inner: &InnerRef) -> Vec<SocketAddr> {
+    let guard = lock_inner(inner);
+    let mut addrs: Vec<SocketAddr> = guard
+        .peers
+        .values()
+        .filter_map(|entry| {
+            format!("{}:{}", entry.peer.ip, entry.peer.port)
+                .parse()
+                .ok()
+        })
+        .collect();
+    addrs.sort();
+    addrs.dedup();
+    addrs
+}
+
+fn announce_payload(inner: &InnerRef, http_port: u16, addresses: &[String]) -> String {
+    let guard = lock_inner(inner);
+    Announce::new(
+        guard.effective_alias(),
+        guard.settings.fingerprint.clone(),
+        http_port,
+    )
+    .with_addresses(addresses.to_vec())
+    .to_json()
+}
+
+fn send_announce(
+    inner: &InnerRef,
+    senders: &[UdpSocket],
+    addresses: &[String],
+    http_port: u16,
+    group: SocketAddr,
+) {
+    let payload = announce_payload(inner, http_port, addresses);
     for socket in senders {
         // 单块网卡发送失败（网卡刚断开等）不影响其它网卡
         let _ = socket.send_to(payload.as_bytes(), group);
     }
+}
+
+/// 单播一份 announce 给某个已知地址（补组播只有一个方向通的情况）
+fn send_announce_to(
+    inner: &InnerRef,
+    socket: &UdpSocket,
+    addr: SocketAddr,
+    http_port: u16,
+    addresses: &[String],
+) {
+    let payload = announce_payload(inner, http_port, addresses);
+    let _ = socket.send_to(payload.as_bytes(), addr);
 }
 
 #[cfg(test)]

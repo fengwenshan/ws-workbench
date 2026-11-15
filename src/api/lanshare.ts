@@ -17,9 +17,12 @@ export const EVENT_SEND_PROGRESS = 'lan-share://send-progress'
 export interface LanPeer {
   fingerprint: string
   alias: string
+  /** 当前选定、也确实连得上的地址（可能是 VPN / 其它网卡） */
   ip: string
   port: number
   device_type: string
+  /** 对端自报的全部 IPv4，第一项是 announce 来源地址 */
+  addresses: string[]
   /** 最后一次收到 announce 的毫秒时间戳 */
   last_seen_ms: number
 }
