@@ -363,6 +363,131 @@ fn tray_icon_image() -> Option<tauri::image::Image<'static>> {
     tauri::image::Image::from_bytes(bytes).ok()
 }
 
+// ===== 托盘自检（**只在 Windows 编入**，macOS 的托盘路径保持原样）=====
+//
+// 起因：开发版在沙箱里跑时「窗口正常、右下角没有图标」。查下来是进程被降成低完整性
+// （令牌 S-1-16-4096），而低完整性进程往 Explorer 的托盘窗口发 `Shell_NotifyIconW`
+// 会被 UIPI 挡掉；tray-icon 又把这个失败静默吞了，代码层面完全看不出来。下面几段是
+// 纯诊断：不改任何平台的实际行为，也不参与 macOS / Linux 的编译。
+
+/// 当前进程的完整性级别：0x1000 = 低、0x2000 = 中、0x3000 = 高、0x4000 = 系统。
+#[cfg(target_os = "windows")]
+fn process_integrity_level() -> Option<u32> {
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::Security::{
+        GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TokenIntegrityLevel,
+        TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
+    };
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    unsafe {
+        let mut token = HANDLE::default();
+        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).ok()?;
+
+        let mut size = 0u32;
+        let _ = GetTokenInformation(token, TokenIntegrityLevel, None, 0, &mut size);
+        if size == 0 {
+            let _ = CloseHandle(token);
+            return None;
+        }
+        let mut buf = vec![0u8; size as usize];
+        let result = GetTokenInformation(
+            token,
+            TokenIntegrityLevel,
+            Some(buf.as_mut_ptr() as *mut _),
+            size,
+            &mut size,
+        );
+        let _ = CloseHandle(token);
+        result.ok()?;
+
+        let label = &*(buf.as_ptr() as *const TOKEN_MANDATORY_LABEL);
+        let count = GetSidSubAuthorityCount(label.Label.Sid);
+        if count.is_null() || *count == 0 {
+            return None;
+        }
+        let rid = GetSidSubAuthority(label.Label.Sid, (*count - 1) as u32);
+        if rid.is_null() {
+            return None;
+        }
+        Some(*rid)
+    }
+}
+
+/// 完整性级别 → 日志里那一小段文字
+#[cfg(target_os = "windows")]
+fn integrity_label() -> String {
+    match process_integrity_level() {
+        Some(0x1000) => "低（沙箱：注册不了托盘图标）".to_string(),
+        Some(0x2000) => "中".to_string(),
+        Some(0x3000) => "高（管理员）".to_string(),
+        Some(0x4000) => "系统".to_string(),
+        Some(other) => format!("0x{other:X}"),
+        None => "未知".to_string(),
+    }
+}
+
+/// 启动时把「构建类型 / 进程完整性 / 托盘图标」打出来（自检 1/3）。
+///
+/// 图标那栏是 `None` 时说明 `Image::from_bytes` 没解出来：托盘照样会建，但 NIF_ICON
+/// 不置位，Explorer 里就是一个点不中的空位 —— 看起来同样是「没有图标」。
+#[cfg(target_os = "windows")]
+fn report_tray_startup(icon: Option<&tauri::image::Image<'static>>) {
+    eprintln!(
+        "[tray] 自检: 构建={} 完整性={} exe={:?} 图标={}",
+        if is_dev_build() { "dev" } else { "release" },
+        integrity_label(),
+        std::env::current_exe().ok(),
+        match icon {
+            Some(icon) => format!("{}x{}", icon.width(), icon.height()),
+            None => "解码失败（会建成看不见的空图标）".to_string(),
+        }
+    );
+    // 低完整性（沙箱）是「开发环境没有托盘图标」最常见也最不直观的原因：代码全对，
+    // 但 Shell_NotifyIconW 跨完整性被 UIPI 挡掉。这里直接把结论写出来。
+    if matches!(process_integrity_level(), Some(0x1000)) {
+        eprintln!(
+            "[tray] 自检: 进程跑在低完整性（沙箱）下 —— UIPI 不允许它注册托盘图标，图标不会出现，写 %APPDATA% 也会被拒；把开发版放到沙箱外的目录再跑"
+        );
+    }
+}
+
+/// 启动 3 秒后回查托盘图标在通知区域里的位置（自检 3/3），用来区分「图标根本没注册
+/// 上」和「注册上了但收在 ^ 溢出区」。
+///
+/// 为什么需要它：`tray.build(app)?` 返回 Ok 只说明 tray-icon 把宿主窗口建起来了，
+/// 它把 `Shell_NotifyIconW` 的失败静默吞掉（源码注释：Explorer 没准备好时先留着，
+/// 等 `TaskbarCreated` 再注册）。于是「窗口正常、右下角什么都没有」时，光看返回值
+/// 判断不了是哪一种：
+/// - 进程是低完整性（沙箱 / 受限令牌）→ UIPI 挡住跨完整性消息，图标压根注册不上；
+/// - 注册上了，但 Explorer 把它收在 `^` 溢出区（新 exe 默认如此）→ 也不在任务栏上。
+///
+/// 查到矩形 = Windows 确实把这条图标排在通知区域里，看不见只是显示设置的问题；
+/// 查不到 = 它此刻没摆在通知区域（收在 `^` 里没展开时 Windows 也给不出矩形），
+/// 再等 7 秒复查一次（避开 Explorer 启动慢）。
+#[cfg(target_os = "windows")]
+fn spawn_tray_diagnostics<R: Runtime>(app: AppHandle<R>) {
+    std::thread::spawn(move || {
+        for delay in [3u64, 7u64] {
+            std::thread::sleep(std::time::Duration::from_secs(delay));
+            let Some(tray) = app.tray_by_id("main") else {
+                eprintln!("[tray] 自检: 找不到 id=main 的托盘图标");
+                return;
+            };
+            match tray.rect() {
+                Ok(Some(rect)) => {
+                    eprintln!("[tray] 自检: 图标已注册，屏幕矩形 {rect:?}");
+                    return;
+                }
+                Ok(None) => eprintln!(
+                    "[tray] 自检: 查不到图标矩形 —— 它此刻不在通知区域（收在 ^ 里没展开，或没注册上）"
+                ),
+                Err(err) => eprintln!("[tray] 自检: 取图标矩形失败: {err}"),
+            }
+        }
+    });
+}
+
 // macOS 的 Dock 图标来自 .app 包里的 icns；`tauri dev` 跑的是裸二进制，
 // 没有 bundle，Dock 会退回系统那个黑底「exec」占位图标。
 // 启动时显式设一次 applicationIconImage，dev 和安装包的观感就一致了。
@@ -1371,11 +1496,28 @@ pub fn run() {
                         _ => {}
                     }
                 });
-            if let Some(icon) = tray_icon_image() {
+            // 自检 1/3：只在 Windows 报告一下图标字节解出来没有（报告本身是
+            // `#[cfg(windows)]`，macOS 的托盘路径和以前逐字一致）。
+            let tray_icon = tray_icon_image();
+            #[cfg(target_os = "windows")]
+            report_tray_startup(tray_icon.as_ref());
+            if let Some(icon) = tray_icon {
                 // macOS 菜单栏深浅色由系统决定，模板图交给系统着色；开发版也是模板图
                 // （开发标识是镂空点，不依赖颜色），所以这里不按构建区分
                 tray = tray.icon(icon).icon_as_template(cfg!(target_os = "macos"));
             }
+            // 自检 2/3：build 报错时别让它只留一行 panic 栈（报错会让 setup 整段失败）
+            #[cfg(target_os = "windows")]
+            {
+                if let Err(err) = tray.build(app) {
+                    eprintln!("[tray] 创建托盘图标失败: {err}");
+                    return Err(err.into());
+                }
+                // 自检 3/3：交给 Windows 之后，Explorer 到底认没认这条图标
+                spawn_tray_diagnostics(app.handle().clone());
+            }
+            // macOS / Linux：保持原样，一行都不多
+            #[cfg(not(target_os = "windows"))]
             tray.build(app)?;
 
             // 主窗口兜底：前端加载失败（或首屏逻辑异常）时不会调 app_ready，
