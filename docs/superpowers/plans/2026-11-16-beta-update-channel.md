@@ -186,10 +186,11 @@ fn pick_channel(beta: &str, stable: &str) -> &'static str {
 - [ ] **Step 5: 跑测试确认通过**
 
 ```bash
-cd src-tauri && cargo test --quiet version_comparison_handles_prerelease derives_beta_endpoints pick_channel 2>&1 | tail -20
+cd src-tauri && cargo test --quiet 2>&1 | tail -20
 ```
 
-Expected：三个测试 PASS（`cargo test` 会顺带跑全量，其它已有测试也应保持通过）。
+Expected：全量 PASS（含三个新测试；`cargo test` 只接受一个 TESTNAME 过滤参数，
+所以这里直接跑全量，不要一次传多个名字）。
 
 - [ ] **Step 6: 提交**
 
@@ -519,10 +520,11 @@ Expected：编译失败，报 `no field developer_mode`。
 - [ ] **Step 4: 跑测试确认通过**
 
 ```bash
-cd src-tauri && cargo test --quiet app_settings_roundtrip_from_config developer_mode_defaults_to_false 2>&1 | tail -10
+cd src-tauri && cargo test --quiet 2>&1 | tail -10
 ```
 
-Expected：PASS。
+Expected：全量 PASS（含 `app_settings_roundtrip_from_config` 与
+`developer_mode_defaults_to_false`）。
 
 - [ ] **Step 5: 前端类型**
 
@@ -530,7 +532,7 @@ Expected：PASS。
 
 ```ts
   /** 开发者模式：开启后接收内测版（beta）更新；缺省 / false = 只收正式版 */
-  developer_mode?: boolean''
+  developer_mode?: boolean
 ```
 
 `src/composables/useConfig.ts` 的 `loadConfig` 里，把
