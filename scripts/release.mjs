@@ -10,6 +10,8 @@
  *   node scripts/release.mjs --dmg           # macOS 额外生成 dmg（Intel / Apple Silicon 各一份）
  *   node scripts/release.mjs --target x86_64-apple-darwin     # 在 Apple Silicon 上交叉编 Intel 版
  *   node scripts/release.mjs --target aarch64-apple-darwin    # Apple Silicon 版
+ *   node scripts/release.mjs --beta           # beta 通道：只发 Gitee（需要 GITEE_TOKEN）
+ *   node scripts/release.mjs --beta --no-publish   # 离线只构建 beta 包，不联网发布
  *
  * Windows 的安装包（NSIS 的 exe + MSI）必须在 Windows 主机上构建：Tauri 打 MSI
  * 依赖 WiX，跨平台交叉编译拿不到；脚本会自动把 exe 作为更新载荷、MSI 作为
@@ -21,6 +23,8 @@
  *   TAURI_SIGNING_PRIVATE_KEY  签名私钥的内容；不设时回退读 ~/.tauri/ws-workbench.key
  *   GITHUB_TOKEN               GitHub 令牌（CI 里用 Actions 自动注入的那个），
  *                              创建发行版、上传附件、推送更新清单都需要
+ *   GITEE_TOKEN                Gitee 私人令牌：beta 通道读写 Gitee 发行版和清单需要
+ *   GITEE_BRANCH               Gitee 清单所在分支；不设时按 main 读
  *
  * 两个平台分别在各自可用的环境里执行即可：脚本会把本平台条目「合并」进
  * updates/latest.json，不会覆盖另一个平台。
@@ -29,9 +33,14 @@
  * 客户端从 raw.githubusercontent.com 上的固定文件读取清单，再按清单里的
  * github.com/<repo>/releases/download 地址下载安装包。
  *
- * Gitee 镜像不在这里做：三个平台的构建 job 并行跑，镜像要等安装包都齐了
- * 才能开始，所以由 release.yml 里串行的 gitee-sync job 调 scripts/gitee-sync.mjs：
+ * 正式通道的 Gitee 镜像不在本脚本里做：三个平台的构建 job 并行跑，镜像要等安装包
+ * 都齐了才能开始，所以由 release.yml 里串行的 gitee-sync job 调 scripts/gitee-sync.mjs：
  * 把安装包传到 Gitee 同名 tag 的发行版，再把两份清单的下载地址改写成 Gitee。
+ *
+ * beta 通道（--beta）是例外：只发 Gitee，完全不碰 GitHub。构建当前平台的签名包、
+ * 写 release/beta-latest.json，再直接调 scripts/gitee-sync.mjs --beta 上传并合并
+ * Gitee 上的 updates/beta/latest.json。发布需要 GITEE_TOKEN；加 --no-publish
+ * （离线路径）时只构建、不读写远端，也不做回滚预检。
  */
 import { execFileSync } from 'node:child_process'
 import {
@@ -83,8 +92,15 @@ const GITEE_REPO = process.env.GITEE_REPO || 'feng_wenshan/ws-workbench'
 const GITEE_TOKEN = process.env.GITEE_TOKEN || ''
 const GITEE_API = process.env.GITEE_API_BASE || 'https://gitee.com/api/v5'
 const GITEE_WEB = process.env.GITEE_WEB_BASE || 'https://gitee.com'
+/** Gitee 清单分支：沿用 gitee-sync 的约定（GITEE_BRANCH，未设置时是 main） */
+const GITEE_BRANCH = process.env.GITEE_BRANCH || 'main'
 /** beta 通道：构建当前平台 → 写 Gitee beta 清单；完全不碰 GitHub */
 const BETA = process.argv.includes('--beta')
+/**
+ * gitee-sync.mjs 的 PLATFORMS 只认这三个更新平台键。beta 构建前先校验，
+ * 免得平台键写错还白跑一次完整构建（两个文件的清单要保持一致）。
+ */
+const BETA_PLATFORM_KEYS = ['windows-x86_64', 'darwin-aarch64', 'darwin-x86_64']
 
 const require = createRequire(import.meta.url)
 /**
@@ -103,6 +119,8 @@ const KEY_PATH = process.env.TAURI_SIGNING_PRIVATE_KEY_PATH
 
 /** 更新清单的固定文件名 */
 const ASSET_MANIFEST = 'latest.json'
+/** beta 清单在 Gitee 仓库里的路径（与 gitee-sync.mjs 的 BETA_MANIFEST 一致） */
+const GITEE_BETA_MANIFEST = `${UPDATES_DIR}/beta/${ASSET_MANIFEST}`
 
 function argValue(flag) {
   const i = process.argv.indexOf(flag)
@@ -113,10 +131,16 @@ const TARGET = process.env.TAURI_TARGET || argValue('--target') || ''
 /** 额外生成 macOS 的 dmg 安装包（见 createDmg 的说明） */
 const WANT_DMG = process.argv.includes('--dmg')
 /**
+ * 命令行显式给的版本号。beta 通道只认它：RELEASE_VERSION 是稳定通道 CI 的语义，
+ * 不能让一个稳定版本号把 --beta 的「显式版本」判断带偏（见 resolveBetaVersion）。
+ */
+const CLI_VERSION = argValue('--version') || ''
+/**
  * 版本号覆盖：CI 由 preflight 从 tauri.conf.json 读出，再经 --version 传进来（不再依赖 tag），
  * 通过 tauri build --config 注入，构建出的 app 与清单版本保持一致，也不改源文件造成提交回环。
+ * beta 通道在 resolveBetaVersion 后会把这里改写成 beta 版本号。
  */
-let VERSION_OVERRIDE = argValue('--version') || process.env.RELEASE_VERSION || ''
+let VERSION_OVERRIDE = CLI_VERSION || process.env.RELEASE_VERSION || ''
 
 function log(msg) {
   console.log(`\x1b[36m[release]\x1b[0m ${msg}`)
@@ -397,6 +421,26 @@ function findArtifacts(platform, version) {
     )
   }
   return { bundlePath: join(dir, bundle), sigPath: sig ? join(dir, sig) : '' }
+}
+
+/**
+ * beta 的产物必须是这次构建写出来的。
+ * macOS 的更新包名不带版本号（<Product>.app.tar.gz），findArtifacts 的
+ * `_<version>_` 过滤对它无效（会走 fallback），构建没刷新产物时可能把上一次的
+ * 包/签名当成本次的，出现「Gitee 上版本号是新的、字节是旧的」。
+ */
+function assertBetaArtifactsFresh(bundlePath, sigPath, buildStartedAt) {
+  const freshAfter = buildStartedAt - 60_000
+  for (const p of [bundlePath, sigPath]) {
+    const mtimeMs = statSync(p).mtimeMs
+    if (mtimeMs < freshAfter) {
+      fail(
+        `beta 产物不是本次构建生成的: ${p}\n` +
+          `  修改时间 ${new Date(mtimeMs).toISOString()}，构建开始 ${new Date(buildStartedAt).toISOString()}\n` +
+          '请先清理 src-tauri/target/release/bundle 再重新构建'
+      )
+    }
+  }
 }
 
 /** 读取已提交的 latest.json，用于把另一个平台的条目合并进来 */
@@ -735,16 +779,43 @@ async function publish(version, platform, entry) {
 
 // ===== beta 通道（只发 Gitee） =====
 
-/** 调 Gitee Open API（只读接口够用） */
-async function giteeApi(path) {
+/** 调 Gitee Open API（只读接口够用）；query 里的参数会拼进 URL（如 contents 的 ref） */
+async function giteeApi(path, query = {}) {
   const url = new URL(`${GITEE_API}${path}`)
+  for (const [key, value] of Object.entries(query)) {
+    if (value !== undefined && value !== null) url.searchParams.set(key, String(value))
+  }
   if (GITEE_TOKEN) url.searchParams.set('access_token', GITEE_TOKEN)
   const res = await fetch(url, { headers: { 'User-Agent': 'ws-workbench-release' } })
   const text = await res.text()
   if (!res.ok) {
-    throw new Error(`Gitee API ${res.status} ${path}: ${text.slice(0, 300)}`)
+    const err = new Error(`Gitee API ${res.status} ${path}: ${text.slice(0, 300)}`)
+    err.status = res.status
+    throw err
   }
   return text ? JSON.parse(text) : null
+}
+
+/**
+ * 读 Gitee 仓库里的一个清单文件（只读，不碰 GitHub）。
+ * 文件或分支不存在时返回 null；其它错误（网络 / 非法 JSON）抛给调用方决定是否降级。
+ */
+async function readGiteeManifest(relPath) {
+  let data
+  try {
+    data = await giteeApi(`/repos/${GITEE_REPO}/contents/${relPath}`, { ref: GITEE_BRANCH })
+  } catch (err) {
+    // 空仓库 / 分支不存在时 Gitee 也可能回 400（gitee-sync 同样按「没有清单」处理）
+    if (err.status === 404 || err.status === 400) return null
+    throw err
+  }
+  if (!data || !data.content) return null
+  const text = Buffer.from(data.content, 'base64').toString('utf8')
+  try {
+    return JSON.parse(text)
+  } catch (err) {
+    throw new Error(`Gitee 清单 ${relPath} 不是合法 JSON：${err.message}`)
+  }
 }
 
 /** Gitee 上所有发行版（分页拉全，用来找已用过的 beta 号） */
@@ -772,33 +843,84 @@ function versionGt(a, b) {
   return false
 }
 
+/** 解析 `X.Y.Z-beta.N`；N 只认正整数（beta.0 / beta.01 / beta.1.2 都不算） */
+function parseBetaVersion(version) {
+  const m = /^(\d+)\.(\d+)\.(\d+)-beta\.([1-9]\d*)$/.exec(String(version || '').trim())
+  if (!m) return null
+  return { base: [Number(m[1]), Number(m[2]), Number(m[3])], beta: Number(m[4]) }
+}
+
+/**
+ * 请求的 beta 是否严格旧于远端（用于阻止 beta 通道回滚）。
+ * 先按 base 的 X.Y.Z 数值比，base 相同再比 beta.N；任一方解析不了就返回 false。
+ */
+function isBetaDowngrade(remoteVersion, requestedVersion) {
+  const remote = parseBetaVersion(remoteVersion)
+  const requested = parseBetaVersion(requestedVersion)
+  if (!remote || !requested) return false
+  for (let i = 0; i < 3; i += 1) {
+    if (requested.base[i] !== remote.base[i]) return requested.base[i] < remote.base[i]
+  }
+  return requested.beta < remote.beta
+}
+
+/**
+ * 最新正式版 = max(Gitee 发行版里的 vX.Y.Z tag, Gitee 正式清单 updates/latest.json 的 version)。
+ * 只看 tag 不够：Gitee 的镜像可能落后 GitHub，tag 里没有真正的正式版时，
+ * base 会放到比真实正式版还低的位置。清单读不到就退回只看 tag。
+ */
+async function latestStableVersion(tags) {
+  const fromTags = tags
+    .filter((tag) => /^v\d+\.\d+\.\d+$/.test(tag))
+    .map((tag) => tag.slice(1))
+    .reduce((best, cur) => (best && !versionGt(cur, best) ? best : cur), '')
+
+  let fromManifest = ''
+  try {
+    const manifest = await readGiteeManifest(`${UPDATES_DIR}/${ASSET_MANIFEST}`)
+    const version = String(manifest?.version || '').trim()
+    if (/^\d+\.\d+\.\d+$/.test(version)) fromManifest = version
+    else if (manifest) log(`Gitee 正式清单里的 version 不是 X.Y.Z，忽略: ${version || '(空)'}`)
+  } catch (err) {
+    log(`读取 Gitee 正式清单失败，只用发行版 tag 判断最新正式版: ${err.message}`)
+  }
+
+  if (!fromTags) return fromManifest
+  if (!fromManifest) return fromTags
+  return versionGt(fromManifest, fromTags) ? fromManifest : fromTags
+}
+
 /**
  * 解析这次要发的 beta 版本号。
- * - base 来自 tauri.conf.json；N = Gitee 上已有 `v<base>-beta.*` 的最大值 + 1；
+ * - base 来自 tauri.conf.json；N = Gitee 上已有 `v<base>-beta.N` 的最大值 + 1；
  * - 可以用 --version 指定（补齐平台时必须用同一个版本号）；
- * - base 必须大于最新正式版，防止「beta 线版本号被正式版反超」。
+ * - base 必须大于最新正式版（Gitee tag 与正式清单取较大者），
+ *   防止「beta 线版本号被正式版反超」。
  */
 async function resolveBetaVersion() {
   const base = readConfVersion()
+  if (!/^\d+\.\d+\.\d+$/.test(base)) {
+    fail(
+      `tauri.conf.json 的 version 必须是 X.Y.Z 形式（beta 的 base）: ${base}\n` +
+        'beta 版本号形如 <base>-beta.N，base 里不能再带 -beta 后缀'
+    )
+  }
 
-  // 显式 --version：补齐平台 / 本机只构建时用，不再查 Gitee（离线也能跑）
-  if (VERSION_OVERRIDE) {
-    if (!/^\d+\.\d+\.\d+-beta\.\d+$/.test(VERSION_OVERRIDE)) {
-      fail(`--version 必须是 X.Y.Z-beta.N 形式: ${VERSION_OVERRIDE}`)
+  // 显式 --version：补齐平台 / 本机只构建时用，不查 Gitee（离线也能跑）。
+  // 只认命令行参数：RELEASE_VERSION 是稳定通道 CI 的语义，不能拿它当 beta 的显式版本。
+  if (CLI_VERSION) {
+    if (!/^\d+\.\d+\.\d+-beta\.[1-9]\d*$/.test(CLI_VERSION)) {
+      fail(`--version 必须是 X.Y.Z-beta.N 形式: ${CLI_VERSION}`)
     }
-    if (!VERSION_OVERRIDE.startsWith(`${base}-beta.`)) {
-      fail(`--version 的 base 必须和 tauri.conf.json 一致（${base}）: ${VERSION_OVERRIDE}`)
+    if (!CLI_VERSION.startsWith(`${base}-beta.`)) {
+      fail(`--version 的 base 必须和 tauri.conf.json 一致（${base}）: ${CLI_VERSION}`)
     }
-    return VERSION_OVERRIDE
+    return CLI_VERSION
   }
 
   const releases = await listGiteeReleases()
   const tags = releases.map((item) => item.tag_name).filter(Boolean)
-  const stableVersions = tags.filter((tag) => /^v\d+\.\d+\.\d+$/.test(tag)).map((tag) => tag.slice(1))
-  const latestStable = stableVersions.reduce(
-    (best, cur) => (best && !versionGt(cur, best) ? best : cur),
-    ''
-  )
+  const latestStable = await latestStableVersion(tags)
   if (latestStable && !versionGt(base, latestStable)) {
     fail(
       `tauri.conf.json 的版本 ${base} 必须大于最新正式版 ${latestStable}；` +
@@ -809,8 +931,10 @@ async function resolveBetaVersion() {
   const prefix = `v${base}-beta.`
   const used = tags
     .filter((tag) => tag.startsWith(prefix))
-    .map((tag) => Number(tag.slice(prefix.length)))
-    .filter((value) => Number.isFinite(value) && value > 0)
+    .map((tag) => tag.slice(prefix.length))
+    // 只认纯正整数：旧逻辑用 Number 会把 beta.1.2 算成 1.2，再把 N 推出小数
+    .filter((suffix) => /^[1-9]\d*$/.test(suffix))
+    .map((suffix) => Number(suffix))
   return `${base}-beta.${used.length > 0 ? Math.max(...used) + 1 : 1}`
 }
 
@@ -820,8 +944,9 @@ function ensureBetaGuards() {
   if (!SKIP_PUBLISH && !GITEE_TOKEN) fail('beta 发布需要 GITEE_TOKEN（Gitee 私人令牌）')
   const branch = git(['rev-parse', '--abbrev-ref', 'HEAD']).trim()
   // 补齐平台时通常在另一台机器 checkout 同一个提交（detached HEAD），
-  // 这种场景必须显式给 --version，保证补的是同一个 beta 号
-  if (branch !== 'beta' && !VERSION_OVERRIDE) {
+  // 这种场景必须显式给 --version，保证补的是同一个 beta 号。
+  // 只认命令行 --version：环境变量 RELEASE_VERSION 属于稳定通道，不能放开这条守卫。
+  if (branch !== 'beta' && !CLI_VERSION) {
     fail(
       `--beta 必须在 beta 分支上执行（或在任意提交上配合 --version 补齐平台），当前分支: ${branch}`
     )
@@ -831,25 +956,98 @@ function ensureBetaGuards() {
   }
 }
 
+/**
+ * 显式 --version 发布前先看 Gitee 上的 beta 清单：比远端旧就直接停。
+ * gitee-sync 里也有同样的判断，但那里要等完整构建、上传阶段才执行；这里提前到
+ * 构建之前，省一次白跑的编译。远端读不到（404 / 网络）就告警放行。
+ */
+async function assertBetaNotRollback(requested) {
+  let remote
+  try {
+    remote = await readGiteeManifest(GITEE_BETA_MANIFEST)
+  } catch (err) {
+    log(`读取 Gitee beta 清单失败，跳过回滚预检: ${err.message}`)
+    return
+  }
+  const remoteVersion = String(remote?.version || '').trim()
+  if (!remoteVersion) {
+    log('Gitee 上还没有 beta 清单，跳过回滚预检')
+    return
+  }
+  if (isBetaDowngrade(remoteVersion, requested)) {
+    fail(`beta 通道不回滚：Gitee 上已是 ${remoteVersion}，不能发 ${requested}`)
+  }
+  log(`Gitee 上的 beta 版本: ${remoteVersion}（允许发布 ${requested}）`)
+}
+
+/**
+ * beta 的 Windows MSI 导出（复刻 collectAssets 里的稳定通道逻辑，目标目录相同）：
+ * 更新载荷是 NSIS 的 exe，MSI 只是手工安装包；gitee-sync 只从 release/
+ * 找 `ws-workbench_<version>_x64_en-US.msi`，不导出就会漏掉。
+ */
+function exportBetaWindowsMsi(platform) {
+  if (!platform.key.startsWith('windows-')) return ''
+  const dir = bundleDir({ ...platform, bundleSubdir: 'msi' })
+  if (!existsSync(dir)) return ''
+  const product = readConf().productName
+  const file = readdirSync(dir).find(
+    (name) => name.startsWith(product) && name.endsWith('.msi')
+  )
+  if (!file) return ''
+  copyFileSync(join(dir, file), join(OUT_DIR, file))
+  return file
+}
+
+/** 发布后看 Gitee beta 清单里还缺哪些平台；读不到就只认为「其它平台」缺，不误报本平台 */
+async function missingBetaPlatforms(currentKey) {
+  let keys = [currentKey]
+  try {
+    const manifest = await readGiteeManifest(GITEE_BETA_MANIFEST)
+    keys = [...new Set([currentKey, ...Object.keys(manifest?.platforms || {})])]
+  } catch (err) {
+    log(`读取 Gitee beta 清单失败，无法确认已发布平台: ${err.message}`)
+  }
+  return BETA_PLATFORM_KEYS.filter((key) => !keys.includes(key))
+}
+
 /** beta 发布主流程：构建当前平台 → 写本地 beta 清单 → 调 gitee-sync --beta */
 async function releaseBeta() {
   ensureBetaGuards()
-  const version = await resolveBetaVersion()
-  VERSION_OVERRIDE = version
-  log(`beta 版本: ${version}（base 来自 tauri.conf.json）`)
 
   const product = readConf().productName || 'app'
   const platform = resolvePlatform(product)
+  // 平台键写错（比如 TAURI_TARGET 拼成 darwin-x64）时先停：gitee-sync 不认这个键，
+  // 否则会白构建一场，到上传阶段才失败
+  if (!BETA_PLATFORM_KEYS.includes(platform.key)) {
+    fail(
+      `beta 通道不支持平台键 ${platform.key}（只支持 ${BETA_PLATFORM_KEYS.join(' / ')}）\n` +
+        '请检查 --target / TAURI_TARGET 是否写错'
+    )
+  }
+
+  const version = await resolveBetaVersion()
+  VERSION_OVERRIDE = version
+  log(`beta 版本: ${version}（base 来自 tauri.conf.json）`)
+  log(`平台: ${platform.key} (${platform.label})`)
+
+  // 显式 --version 通常是补平台 / 补发：先比 Gitee 上的 beta 版本，别等构建完才被拦。
+  // --no-publish 是离线路径，不碰网络。
+  if (CLI_VERSION && !SKIP_PUBLISH) await assertBetaNotRollback(CLI_VERSION)
+
+  const buildStartedAt = Date.now()
   build()
 
   const { bundlePath, sigPath } = findArtifacts(platform, version)
-  if (!sigPath) fail('没有签名文件：beta 通道只接受签名产物')
+  assertBetaArtifactsFresh(bundlePath, sigPath, buildStartedAt)
   const signature = readFileSync(sigPath, 'utf8').trim()
   if (!signature) fail('签名文件为空，构建可能没有正确签名')
 
   mkdirSync(OUT_DIR, { recursive: true })
   copyFileSync(bundlePath, join(OUT_DIR, platform.assetFile))
   log(`已导出 release/${platform.assetFile}`)
+  // Windows 的 MSI 也导出：gitee-sync 才会把手工安装包一起传上去
+  const msi = exportBetaWindowsMsi(platform)
+  if (msi) log(`已导出 release/${msi}`)
   if (WANT_DMG) createDmg(platform, version)
 
   const tag = `v${version}`
@@ -873,26 +1071,48 @@ async function releaseBeta() {
   }
 
   log('发布到 Gitee …')
-  execFileSync(
-    process.execPath,
-    [
-      'scripts/gitee-sync.mjs',
-      '--beta',
-      '--version',
-      version,
-      '--dir',
-      OUT_DIR,
-      '--manifest',
-      localManifest,
-    ],
-    { cwd: ROOT, stdio: 'inherit' }
-  )
+  try {
+    execFileSync(
+      process.execPath,
+      [
+        'scripts/gitee-sync.mjs',
+        '--beta',
+        '--version',
+        version,
+        '--dir',
+        OUT_DIR,
+        '--manifest',
+        localManifest,
+      ],
+      { cwd: ROOT, stdio: 'inherit' }
+    )
+  } catch (err) {
+    // gitee-sync 可能已经建了 tag/发行版、写了部分平台的清单；这里把状态和
+    // 「怎么补」讲清楚，避免第一反应是重跑 `pnpm release:beta`（那会 +1 个 beta 号）。
+    console.error(
+      `\n\x1b[31m[release] Gitee 同步失败: ${err.message}\x1b[0m\n` +
+        `  beta ${tag}（${platform.key}）可能已经在 Gitee 上创建了 tag/发行版，\n` +
+        '  updates/beta/latest.json 也可能已经被更新（清单只包含上传成功的平台）。\n' +
+        '  修复问题后补发同一个版本（只补平台，不会分配新的 beta 号）：\n' +
+        `    node scripts/release.mjs --beta --version ${version}\n` +
+        '  不要直接重跑 pnpm release:beta：那会按 Gitee 上已有的最大 beta 号 +1。\n'
+    )
+    throw err
+  }
 
   const sha = git(['rev-parse', 'HEAD']).trim()
   log(`beta 发布完成: ${tag} (${platform.key})，提交 ${sha}`)
-  log('补齐其它平台：在对应机器上 checkout 同一个提交，用同一个 --version 再跑一次：')
+  const missing = await missingBetaPlatforms(platform.key)
+  if (missing.length === 0) {
+    log('三个平台都已发布，无需补齐')
+    return
+  }
+  log(`还缺平台: ${missing.join(', ')}`)
+  log('在对应机器上 checkout 同一个提交，用同一个 --version 再跑一次：')
   log(`  node scripts/release.mjs --beta --version ${version}`)
-  log('（mac 上补 Intel 版再加 --target x86_64-apple-darwin）')
+  if (missing.includes('darwin-x86_64')) {
+    log('（macOS 补 Intel 版再加 --target x86_64-apple-darwin）')
+  }
 }
 
 async function main() {
