@@ -6,7 +6,11 @@ import { resolveUploadDir } from '@/api/attachments'
 import { ensureDir, getNetworkInfo, openDir, type NetworkInfo } from '@/api/system'
 import { getAppVersion } from '@/api/app'
 import { platform } from '@/platform'
-import { AUTO_CHECK_INTERVAL_MS, useUpdater } from '@/composables/useUpdater'
+import {
+  AUTO_CHECK_INTERVAL_MS,
+  isUpdateBusy,
+  useUpdater,
+} from '@/composables/useUpdater'
 import { pickDirectory } from '@/utils/dialog'
 import ResourcePanel from '@/components/settings/ResourcePanel.vue'
 
@@ -181,6 +185,13 @@ const updaterBusy = computed(
     updateStatus.value === 'downloading' ||
     updateStatus.value === 'preparing',
 )
+
+/**
+ * 下载 / 安装进行中：此时不能切开发者模式。
+ * 切换会 closePending + reset，把 installUpdate 正在用的 rid 清掉，安装会失败。
+ * checking 不在其中：那次检查的结果由 useUpdater 的轮次号丢弃。
+ */
+const updateBusy = computed(() => isUpdateBusy(updateStatus.value))
 
 /** 顶部「重新检测」：刷新环境信息与检查更新都算在忙，防止下载中途重复触发 */
 const refreshBusy = computed(
@@ -357,6 +368,7 @@ function formatBytes(bytes: number): string {
           <span class="info-value channel-value">
             <Switch
               :checked="developerMode"
+              :disabled="updateBusy"
               size="small"
               @change="(checked) => handleDeveloperModeChange(!!checked)"
             />

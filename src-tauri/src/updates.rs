@@ -233,6 +233,15 @@ async fn check_with_endpoints(
         .map_err(|err| format!("更新检查失败：{err}"))
 }
 
+/// 校验更新通道：只接受 `stable` / `beta`，其余一律报错。
+/// 不校验的话任意字符串都会落进稳定通道，前端传错参数也不会被发现。
+fn validate_channel(channel: &str) -> Result<(), String> {
+    match channel {
+        "stable" | "beta" => Ok(()),
+        other => Err(format!("未知更新通道：{other}")),
+    }
+}
+
 /// 检查更新：`stable` 只看稳定清单；`beta` 同时看 beta 清单和稳定清单，取版本更高者。
 ///
 /// `timeout` 是每个端点的 HTTP 请求超时，不是整个检查的总时限；beta 模式下两份
@@ -247,6 +256,7 @@ pub async fn update_check(
     timeout: Option<u64>,
 ) -> Result<Option<UpdateMetadata>, String> {
     let timeout = Duration::from_millis(timeout.unwrap_or(10_000));
+    validate_channel(&channel)?;
     let endpoints = configured_endpoints(webview.app_handle());
 
     // 两个通道各自对应一份清单，互相独立：beta 模式先把 beta 检查丢到后台任务，
@@ -1113,6 +1123,16 @@ mod tests {
         );
         assert_eq!(version_is_newer("1.0.18", "1.0.18"), Some(false));
         assert_eq!(version_is_newer("not-a-version", "1.0.18"), None);
+    }
+
+    #[test]
+    fn validate_channel_accepts_known_channels() {
+        assert!(validate_channel("stable").is_ok());
+        assert!(validate_channel("beta").is_ok());
+        assert_eq!(
+            validate_channel("nightly"),
+            Err("未知更新通道：nightly".to_string())
+        );
     }
 
     #[test]

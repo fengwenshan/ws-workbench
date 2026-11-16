@@ -91,6 +91,7 @@ const {
   installUpdate,
   restartApp,
   setDeveloperMode,
+  initDeveloperMode,
   startDailyCheck,
   stopDailyCheck,
 } = useUpdater();
@@ -430,7 +431,9 @@ const {
 // 所以启动检查放在 loading 由 true 变 false 之后，避免先按稳定通道查一次。
 let updaterInitialized = false;
 async function initUpdater() {
-  setDeveloperMode(config.value.developer_mode ?? false);
+  // 启动时只同步通道，不能走 setDeveloperMode：它会清掉「忽略此版本」，
+  // 导致每次启动都把用户已经忽略的版本重新提示一遍。
+  initDeveloperMode(config.value.developer_mode ?? false);
   isPrerelease.value = await isPrereleaseBuild();
   // 开发构建一律不查：裸二进制装不了更新（Windows 上会把 dev 可执行文件覆盖成发布版）
   if (await isDevBuild()) return;

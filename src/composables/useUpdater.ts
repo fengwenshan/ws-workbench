@@ -43,6 +43,15 @@ export interface UpdateDownloadResult {
 
 type PendingUpdate = Update
 
+/**
+ * 下载 / 安装是否正在进行。
+ * 这两个阶段 installUpdate 还握着 pending 的 rid，清掉 pending 会让后续安装失败，
+ * 所以切换通道要挡掉。checking 不算：在飞行中的检查结果由 `checkSeq` 丢弃。
+ */
+export function isUpdateBusy(status: UpdateStatus): boolean {
+  return status === 'downloading' || status === 'preparing'
+}
+
 /** 每日自动校验时间点（时, 分）：上午 10:00、下午 16:00 */
 export const DAILY_CHECK_TIMES: ReadonlyArray<readonly [number, number]> = [
   [10, 0],
@@ -103,7 +112,7 @@ const upToDate = ref(false)
 const devBuild = ref(false)
 const dismissedVersion = ref<string>('')
 
-/** 开发者模式：开着就收内测版，关着只收正式版（持久化到 config.json） */
+/** 开发者模式：开着就收内测版，关着只收正式版（由 App.vue 在切换时写入 config.json） */
 const developerMode = ref(false)
 /** 当前生效的更新通道：由 developerMode 直接派生，检查命令只认它 */
 const channel = computed<UpdateChannel>(() => (developerMode.value ? 'beta' : 'stable'))
@@ -111,6 +120,8 @@ const channel = computed<UpdateChannel>(() => (developerMode.value ? 'beta' : 's
 /** 后端 `update_check` 返回的 Update 对象（rid 对应 Rust 侧资源）；下载失败时保留，供「重试」断点续传 */
 let pending: PendingUpdate | null = null
 let scheduleTimer: ReturnType<typeof setTimeout> | null = null
+/** 检查轮次：切通道 / 重置时递增，用来丢弃还在飞行中的旧通道检查结果 */
+let checkSeq = 0
 
 // 忽略版本与「是否开发构建」只在模块初始化时读一次
 void (async () => {
@@ -143,20 +154,33 @@ function dismissCurrent() {
 }
 
 /**
- * 开关开发者模式（= 切换内测 / 正式通道）。
+ * 开关开发者模式（= 切换内测 / 正式通道），供设置页切换使用。
  *
- * 只有值真的变了才清状态，避免每次启动都白丢一次检查结果。
- * 注意这里不主动检查：调用方（App.vue 启动 / 设置页切换）自己决定何时查，
- * 否则启动时会查两遍。
+ * 只有值真的变了才清状态；下载 / 安装进行中直接忽略，避免清掉正在使用的 rid。
+ * 注意这里不主动检查：调用方（App.vue 的切换处理器）自己决定何时查。
+ * 启动时同步 config 请用 initDeveloperMode，它不会清「忽略此版本」。
  */
 function setDeveloperMode(enabled: boolean) {
   if (developerMode.value === enabled) return
+  // 下载 / 安装中切通道会清掉 pending 的 rid，安装会失败：等流程结束再切
+  if (isUpdateBusy(status.value)) return
   developerMode.value = enabled
+  // 先递增轮次，让还在飞行中的旧通道检查结果回来后直接丢弃
+  checkSeq += 1
   closePending()
   reset()
   // 换了通道，之前的「忽略此版本」不应该继续压住新通道的提示
   dismissedVersion.value = ''
   void safeSet(DISMISS_KEY, '')
+}
+
+/**
+ * 初始化开发者模式（只用于启动时）：
+ * 只同步值，不清状态、不落盘。启动时 config 已经决定了通道，
+ * 若在这里走 setDeveloperMode 的清理逻辑，每次启动都会把「忽略此版本」抹掉。
+ */
+function initDeveloperMode(enabled: boolean) {
+  developerMode.value = enabled
 }
 
 /**
@@ -166,6 +190,8 @@ function setDeveloperMode(enabled: boolean) {
  */
 async function checkUpdate(options: { silent?: boolean } = {}): Promise<UpdateInfo | null> {
   const silent = options.silent === true
+  // 本轮检查的序号：resolve 时若已被新的检查 / 切通道顶掉，就丢弃这次结果
+  const seq = ++checkSeq
   status.value = 'checking'
   errorMessage.value = ''
   upToDate.value = false
@@ -175,6 +201,15 @@ async function checkUpdate(options: { silent?: boolean } = {}): Promise<UpdateIn
   resumedFrom.value = 0
   try {
     const update = await checkUpdateForChannel(channel.value, CHECK_TIMEOUT_MS)
+    if (seq !== checkSeq) {
+      // 过期结果：可能是切通道 / 重置前发出的检查，不能覆盖当前状态
+      if (update) {
+        void update.close().catch(() => {
+          // 资源已失效时忽略
+        })
+      }
+      return null
+    }
     if (!update) {
       closePending()
       info.value = null
@@ -193,13 +228,15 @@ async function checkUpdate(options: { silent?: boolean } = {}): Promise<UpdateIn
     status.value = 'available'
     return info.value
   } catch (err: any) {
+    // 过期检查的失败不再写 error / status，避免覆盖新通道的检查结果
+    if (seq !== checkSeq) return null
     // 失败时保留 pending 与 info：网络恢复后点「重试」还能接着断点续传，
     // 设置页也能把「检查失败」和已查到的版本一起显示出来。
     status.value = silent ? 'idle' : 'error'
     errorMessage.value = String(err)
     return null
   } finally {
-    lastCheckedAt.value = Date.now()
+    if (seq === checkSeq) lastCheckedAt.value = Date.now()
   }
 }
 
@@ -348,6 +385,7 @@ const updaterApi = {
   devBuild,
   developerMode,
   setDeveloperMode,
+  initDeveloperMode,
   dismissedVersion,
   hasUpdatePrompt,
   dismissCurrent,

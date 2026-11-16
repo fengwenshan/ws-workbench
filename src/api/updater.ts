@@ -33,8 +33,8 @@ export async function checkUpdateForChannel(
 ): Promise<Update | null> {
   const result = await invoke<UpdateCheckResult | null>('update_check', { channel, timeout })
   if (!result) return null
-  // 用插件导出的 Update 类包一层：它自带 close()（释放后端 resource table 里的 update），
-  // 也和 `pending.download()` 等原有类型兼容。
+  // 用插件导出的 Update 类包一层：目的是拿到 close()（释放 Rust 侧的资源），
+  // 并保持 `update_download_resumed` / `update_install_resumed` 依赖的 rid / version 契约。
   return new Update({
     rid: result.rid,
     currentVersion: result.currentVersion,
