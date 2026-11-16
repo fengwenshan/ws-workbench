@@ -408,7 +408,8 @@ function build() {
   } catch (err) {
     // 签名私钥设了密码时，Tauri 会交互式要密码；密码不对只会甩一行
     // "incorrect updater private key password"，很容易被误当成构建失败。
-    if (!NO_SIGN && !process.env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD) {
+    // 已经显式配了密码（包括空值）就不再提示，避免别的失败原因被误导。
+    if (!NO_SIGN && process.env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD === undefined) {
       console.error(
         '\n提示：如果签名私钥设了密码，Tauri 会交互式询问；密码不对就会在这里失败。\n' +
           '  把正确密码写进 env.local（不要提交，已被 .gitignore 忽略）：\n' +
