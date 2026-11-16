@@ -36,11 +36,14 @@ function onToggle(enabled: boolean) {
 </template>
 
 <style scoped>
+/* 白色悬浮卡片：和设置页其它卡片同一套阴影，不用边框 */
 .settings-card {
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
-  background: var(--bg-primary);
-  padding: 14px;
+  border-radius: 14px;
+  background: #fff;
+  padding: 16px 18px;
+  box-shadow:
+    0 1px 2px rgba(15, 23, 42, 0.04),
+    0 10px 30px -18px rgba(15, 23, 42, 0.28);
 }
 .sound-row {
   display: flex;
@@ -56,6 +59,7 @@ function onToggle(enabled: boolean) {
 }
 .sound-title {
   font-size: 13px;
+  font-weight: 600;
   color: var(--text-primary);
 }
 .sound-desc {

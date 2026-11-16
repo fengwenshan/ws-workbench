@@ -8,7 +8,7 @@ import { useLanShareChat } from './useLanShareChat'
 import { useLanShareNotify } from './useLanShareNotify'
 
 /**
- * 局域网分享页壳：左栏「设备列表」+ 右栏「聊天 / 设置」。
+ * LANLink 页壳：左栏「设备列表」+ 右栏「聊天 / 设置」（Glass Deck 视觉，刷新 §2）。
  *
  * 状态与事件编排都在 `useLanShareChat` 里，这里只负责布局和接线，
  * 保持组件文件只做展示层的事情。
@@ -30,9 +30,6 @@ const {
   draft,
   loading,
   loadError,
-  enabled,
-  statusText,
-  statusClass,
   now,
   sendingText,
   sendingFiles,
@@ -60,6 +57,12 @@ const {
 
 // 免打扰开关与设置页共享同一份单例状态（右键菜单里的勾选态）
 const { dnd, toggleDnd } = useLanShareNotify()
+
+/** 齿轮：设置页没有「返回聊天」按钮了，已在该页时再点一次回到聊天 */
+function toggleSettings() {
+  if (pane.value === 'settings') pane.value = 'chat'
+  else openSettings()
+}
 </script>
 
 <template>
@@ -69,14 +72,11 @@ const { dnd, toggleDnd } = useLanShareNotify()
         :items="mergedPeers"
         :active-id="activePeerId"
         :settings-active="pane === 'settings'"
-        :enabled="enabled"
         :loading="loading"
-        :status-text="statusText"
-        :status-class="statusClass"
         :now="now"
         @select="selectPeer"
         @context-menu="openPeerMenu"
-        @open-settings="openSettings"
+        @open-settings="toggleSettings"
       />
     </aside>
 
@@ -86,7 +86,6 @@ const { dnd, toggleDnd } = useLanShareNotify()
       <LanShareSettings
         v-if="pane === 'settings'"
         :snapshot="snapshot"
-        @close="pane = 'chat'"
         @updated="applySnapshot"
       />
       <LanChatPane
@@ -142,44 +141,70 @@ const { dnd, toggleDnd } = useLanShareNotify()
 </template>
 
 <style scoped>
-/* 两栏壳：左栏固定 280px（窄窗口收窄），右栏吃掉剩余宽度；整体铺满 workspace-body */
+/* 模块画布：浅色渐变 + 左上光晕；整体圆角 16 浮在应用底色上 */
 .lan-share-chat {
+  position: relative;
   flex: 1;
   min-height: 0;
   display: flex;
+  gap: 12px;
+  margin: 10px 12px 12px;
+  padding: 12px;
+  border-radius: 16px;
   overflow: hidden;
+  background: linear-gradient(160deg, #f3f6fc 0%, #eef2f9 55%, #edf1f8 100%);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
 }
+.lan-share-chat::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(60% 55% at 8% 0%, rgba(99, 102, 241, 0.1), transparent 70%);
+  pointer-events: none;
+}
+
+/* 左栏：半透明玻璃表面，不用右边框，与右栏靠间距和阴影分层 */
 .lan-side {
-  width: 280px;
+  position: relative;
+  width: 300px;
   flex-shrink: 0;
   min-height: 0;
   display: flex;
-  border-right: 1px solid var(--border-color);
-  background: var(--bg-secondary);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.55);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  overflow: hidden;
 }
+
+/* 右栏：近白表面 + 中等阴影，像浮起来的对话卡 */
 .lan-main {
+  position: relative;
   flex: 1;
   min-width: 0;
   min-height: 0;
   display: flex;
   flex-direction: column;
-  background: var(--bg-primary);
+  border-radius: 16px;
+  background: #fbfcfe;
+  box-shadow: 0 10px 30px -18px rgba(15, 23, 42, 0.28);
+  overflow: hidden;
 }
+
 .lan-alert {
-  margin: 8px 16px 0;
+  flex-shrink: 0;
+  margin: 10px 16px 0;
   padding: 8px 12px;
-  border-radius: 6px;
-  border: 1px solid rgba(239, 68, 68, 0.3);
-  background: rgba(239, 68, 68, 0.06);
+  border-radius: 10px;
+  background: rgba(239, 68, 68, 0.08);
   color: var(--danger);
   font-size: 12px;
   line-height: 1.6;
-  flex-shrink: 0;
 }
 
-@media (max-width: 760px) {
+@media (max-width: 900px) {
   .lan-side {
-    width: 220px;
+    width: 240px;
   }
 }
 </style>

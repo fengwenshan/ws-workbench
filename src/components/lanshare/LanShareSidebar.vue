@@ -3,28 +3,23 @@ import { formatListTime } from './format'
 import type { MergedPeer } from './types'
 
 /**
- * 左栏：机器列表 + 底部设置入口。
+ * 左栏：LANLink 字标 + 设备列表 + 设置入口（Glass Deck 视觉，刷新 §2.2）。
  *
  * 只负责展示与抛事件，排序 / 合并 / 在线判定都在 LanSharePanel 里做，
- * 避免两处逻辑各算一遍导致顺序不一致。
+ * 避免两处逻辑各算一遍导致顺序不一致。列表项用玻璃 hover + 白色选中卡 +
+ * 左侧主色指示条；设置入口收到页头右侧齿轮，不再占用底部 footer。
  */
-const { items, activeId, settingsActive, enabled, loading, statusText, statusClass, now } =
-  defineProps<{
-    items: MergedPeer[]
-    /** 当前选中的设备 id */
-    activeId: string | null
-    /** 右栏当前是设置页（设置按钮高亮） */
-    settingsActive: boolean
-    /** 分享功能是否已开启（决定列表空态文案） */
-    enabled: boolean
-    /** 首次读取快照 / 会话中，空态显示「读取中」而不是「未开启」 */
-    loading: boolean
-    /** 底部运行状态文案 / 样式：运行中 / 未开启 / 启动失败 */
-    statusText: string
-    statusClass: string
-    /** 1 秒一跳的时间基准，用来刷新「今天 HH:mm / 昨天 / MM-DD」 */
-    now: number
-  }>()
+const { items, activeId, settingsActive, loading, now } = defineProps<{
+  items: MergedPeer[]
+  /** 当前选中的设备 id */
+  activeId: string | null
+  /** 右栏当前是设置页（齿轮高亮） */
+  settingsActive: boolean
+  /** 首次读取快照 / 会话中，空态显示「正在读取」 */
+  loading: boolean
+  /** 1 秒一跳的时间基准，用来刷新「今天 HH:mm / 昨天 / MM-DD」 */
+  now: number
+}>()
 
 const emit = defineEmits<{
   select: [id: string]
@@ -58,7 +53,43 @@ function onKeydown(event: KeyboardEvent, item: MergedPeer) {
 <template>
   <nav class="sidebar">
     <header class="side-head">
-      <h3>局域网分享</h3>
+      <span class="brand-mark" aria-hidden="true">
+        <svg
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+        >
+          <circle cx="5.5" cy="12" r="2.1" />
+          <circle cx="18.5" cy="12" r="2.1" />
+          <path d="M7.6 12h8.8" />
+        </svg>
+      </span>
+      <h3 class="brand-name">LANLink</h3>
+      <button
+        class="settings-btn"
+        :class="{ active: settingsActive }"
+        type="button"
+        title="设置"
+        aria-label="设置"
+        @click="emit('open-settings')"
+      >
+        <svg
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.7"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <circle cx="12" cy="12" r="3" />
+          <path
+            d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9v.09a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"
+          />
+        </svg>
+      </button>
     </header>
 
     <div class="list-wrap">
@@ -95,7 +126,7 @@ function onKeydown(event: KeyboardEvent, item: MergedPeer) {
         </li>
       </ul>
 
-      <!-- 空态：没开启 / 已开启但还没发现设备，提示不一样 -->
+      <!-- 空态：读取中 / 等待同一网络中的设备 -->
       <div v-else class="peer-empty">
         <svg
           class="peer-empty-icon"
@@ -113,111 +144,136 @@ function onKeydown(event: KeyboardEvent, item: MergedPeer) {
           <path d="M8.1 10.9l7.8-3.8M8.1 13.1l7.8 3.8" />
         </svg>
         <p class="peer-empty-title">
-          {{ loading ? '正在读取…' : enabled ? '暂时没有发现设备' : '局域网分享未开启' }}
+          {{ loading ? '正在读取…' : '等待同一网络中的设备' }}
         </p>
         <p class="peer-empty-hint">
           {{
             loading
-              ? '正在获取局域网分享状态。'
-              : enabled
-                ? '同一局域网内打开本应用的设备会出现在这里。'
-                : '在下方「设置」里开启后，才能发现局域网内的设备。'
+              ? '正在获取设备信息。'
+              : '在另一台电脑打开 LANLink，保持同一 Wi-Fi 即可互相发现。'
           }}
         </p>
       </div>
     </div>
-
-    <footer class="side-foot">
-      <button
-        class="settings-entry"
-        :class="{ active: settingsActive }"
-        type="button"
-        @click="emit('open-settings')"
-      >
-        <svg
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="1.7"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          aria-hidden="true"
-        >
-          <circle cx="12" cy="12" r="3" />
-          <path
-            d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9v.09a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"
-          />
-        </svg>
-        <span>设置</span>
-      </button>
-      <span class="run-status" :class="statusClass">
-        <span class="run-dot"></span>
-        {{ statusText }}
-      </span>
-    </footer>
   </nav>
 </template>
 
 <style scoped>
 .sidebar {
+  position: relative;
   width: 100%;
   min-height: 0;
   display: flex;
   flex-direction: column;
 }
 
-/* 与右栏头部同高，标题基线一致 */
+/* 页头：LANLink 字标 + 右侧齿轮；无下边框，用留白分层 */
 .side-head {
   flex-shrink: 0;
-  height: var(--panel-header-height, 40px);
+  height: 56px;
   display: flex;
   align-items: center;
-  padding: 0 16px;
-  border-bottom: 1px solid var(--border-color);
+  gap: 8px;
+  padding: 0 12px 0 18px;
 }
-.side-head h3 {
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--text-primary);
+.brand-mark {
+  display: inline-flex;
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  color: var(--primary);
+}
+.brand-mark svg {
+  width: 20px;
+  height: 20px;
+}
+.brand-name {
   margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: var(--text-primary);
+}
+.settings-btn {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: none;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.16s, color 0.16s, box-shadow 0.16s;
+}
+.settings-btn:hover {
+  background: rgba(255, 255, 255, 0.8);
+  color: var(--text-primary);
+}
+.settings-btn.active {
+  background: rgba(255, 255, 255, 0.95);
+  color: var(--primary);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.05);
+}
+.settings-btn svg {
+  width: 17px;
+  height: 17px;
 }
 
 .list-wrap {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 8px 8px 12px;
+  padding: 2px 10px 14px;
 }
 .peer-list {
   list-style: none;
+  margin: 0;
+  padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 4px;
 }
 
-/* 列表项：整行可点；hover 时右侧删除按钮浮出来（绝对定位，避免文字换行跳动） */
+/* 列表项：默认透明；hover 玻璃上浮；选中白色卡片 + 左侧主色指示条 */
 .peer-item {
   position: relative;
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 9px 10px;
-  border-radius: 8px;
+  padding: 10px 12px 10px 14px;
+  border-radius: 12px;
   cursor: pointer;
-  transition: background 0.15s, color 0.15s;
   outline: none;
+  transition: background 0.16s, box-shadow 0.16s, transform 0.16s;
 }
 .peer-item:hover {
-  background: var(--bg-hover);
+  background: rgba(255, 255, 255, 0.75);
+  transform: translateY(-1px);
 }
 .peer-item:focus-visible {
-  box-shadow: inset 0 0 0 2px var(--primary);
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.35);
 }
 .peer-item.active {
-  background: var(--bg-active);
+  background: rgba(255, 255, 255, 0.95);
+  box-shadow:
+    0 1px 2px rgba(15, 23, 42, 0.05),
+    0 12px 28px -18px rgba(37, 99, 235, 0.45);
 }
-.peer-item.active .item-name {
-  color: var(--text-active);
+.peer-item.active::before {
+  content: '';
+  position: absolute;
+  left: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 18px;
+  border-radius: 3px;
+  background: var(--primary);
 }
 .peer-item.active .online-dot {
   box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.16);
@@ -266,9 +322,6 @@ function onKeydown(event: KeyboardEvent, item: MergedPeer) {
   flex-shrink: 0;
   font-size: 11px;
   color: var(--text-muted);
-}
-.item-bottom {
-  padding-right: 2px;
 }
 .item-preview {
   flex: 1;
@@ -324,85 +377,26 @@ function onKeydown(event: KeyboardEvent, item: MergedPeer) {
   opacity: 0.6;
 }
 .peer-empty-title {
+  margin: 0;
   font-size: 13px;
   font-weight: 600;
   color: var(--text-secondary);
 }
 .peer-empty-hint {
+  margin: 0;
   font-size: 12px;
   color: var(--text-muted);
   line-height: 1.6;
 }
 
-/* 底部：设置入口 + 运行状态点 */
-.side-foot {
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 10px;
-  border-top: 1px solid var(--border-color);
-}
-.settings-entry {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 30px;
-  padding: 0 10px;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--text-secondary);
-  font-size: 13px;
-  cursor: pointer;
-  transition: background 0.15s, color 0.15s;
-}
-.settings-entry:hover {
-  background: var(--bg-hover);
-  color: var(--primary);
-}
-.settings-entry.active {
-  background: var(--bg-active);
-  color: var(--text-active);
-  font-weight: 600;
-}
-.settings-entry svg {
-  width: 16px;
-  height: 16px;
-}
-.run-status {
-  margin-left: auto;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  color: var(--text-muted);
-  white-space: nowrap;
-}
-.run-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--text-muted);
-  flex-shrink: 0;
-}
-.run-status.is-on {
-  color: var(--success);
-}
-.run-status.is-on .run-dot {
-  background: var(--success);
-  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.16);
-}
-.run-status.is-busy {
-  color: var(--warning);
-}
-.run-status.is-busy .run-dot {
-  background: var(--warning);
-}
-.run-status.is-error {
-  color: var(--danger);
-}
-.run-status.is-error .run-dot {
-  background: var(--danger);
+/* 减少动效：关掉上浮，只保留颜色变化 */
+@media (prefers-reduced-motion: reduce) {
+  .peer-item,
+  .settings-btn {
+    transition: none;
+  }
+  .peer-item:hover {
+    transform: none;
+  }
 }
 </style>

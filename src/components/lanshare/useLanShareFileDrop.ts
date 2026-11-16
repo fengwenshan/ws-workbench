@@ -89,7 +89,7 @@ export function useLanShareFileDrop(ctx: FileDropContext) {
     if (!data) return
     const target = ctx.peer()
     if (!target) {
-      antMessage.warning('请先开启局域网分享并选择一台设备')
+      antMessage.warning('请先选择一台设备')
       return
     }
     if (!target.online) {
@@ -149,7 +149,7 @@ export function useLanShareFileDrop(ctx: FileDropContext) {
     event.preventDefault()
     const target = ctx.peer()
     if (!target) {
-      antMessage.warning('请先开启局域网分享并选择一台设备')
+      antMessage.warning('请先选择一台设备')
       return
     }
     if (!target.online) {

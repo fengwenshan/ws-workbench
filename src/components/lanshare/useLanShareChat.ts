@@ -74,24 +74,6 @@ export function useLanShareChat(isActive: () => boolean) {
   let messagesSeq = 0
   const recentlyReadAt = new Map<string, number>()
 
-  const enabled = computed(() => snapshot.value?.enabled ?? false)
-  const running = computed(() => snapshot.value?.running ?? false)
-  const statusText = computed(() => {
-    if (!snapshot.value) return '读取中…'
-    if (snapshot.value.last_error) return '启动失败'
-    if (running.value) return '运行中'
-    if (enabled.value) return '启动中…'
-    return '未开启'
-  })
-  const statusClass = computed(() => {
-    // 还没读到快照时保持中性灰点，别一开始就红成「启动失败」
-    if (!snapshot.value) return 'is-off'
-    if (snapshot.value.last_error) return 'is-error'
-    if (running.value) return 'is-on'
-    if (enabled.value) return 'is-busy'
-    return 'is-off'
-  })
-
   /** 在线判定：last_seen_ms 在窗口内即绿点（与改造前 isPeerOnline 一致） */
   function isPeerOnline(peer: LanPeer): boolean {
     const delta = now.value - peer.last_seen_ms
@@ -249,7 +231,7 @@ export function useLanShareChat(isActive: () => boolean) {
       applySnapshot(next)
       if (activePeerId.value) await refreshMessages(activePeerId.value)
     } catch (err) {
-      loadError.value = `读取局域网分享状态失败：${errorText(err)}`
+      loadError.value = `读取 LANLink 状态失败：${errorText(err)}`
     } finally {
       loading.value = false
     }
@@ -453,10 +435,6 @@ export function useLanShareChat(isActive: () => boolean) {
     draft,
     loading,
     loadError,
-    enabled,
-    running,
-    statusText,
-    statusClass,
     now,
     sendingText,
     sendingFiles,

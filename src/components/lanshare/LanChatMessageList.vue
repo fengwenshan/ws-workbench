@@ -162,11 +162,11 @@ watch(
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 14px 18px 18px;
+  padding: 8px 20px 16px;
   display: flex;
   flex-direction: column;
   gap: 14px;
-  background: var(--bg-secondary);
+  background: transparent;
 }
 
 .date-sep {
@@ -175,12 +175,13 @@ watch(
   justify-content: center;
   padding: 4px 0;
 }
+/* 日期不再用胶囊底色，只留居中的细字 */
 .date-sep span {
-  padding: 2px 10px;
-  border-radius: 10px;
-  background: var(--bg-tag);
-  color: var(--text-secondary);
+  padding: 0;
+  background: transparent;
+  color: var(--text-muted);
   font-size: 11px;
+  letter-spacing: 0.02em;
 }
 
 /* 消息行：「头像 + 内容」两栏；自己在右用 row-reverse */
@@ -244,13 +245,16 @@ watch(
   word-break: break-word;
   white-space: pre-wrap;
 }
+/* 气泡用阴影分层，不用边框；自己一侧淡主色底 */
 .msg-row.is-in .bubble {
-  background: var(--bg-primary);
-  border: 1px solid var(--border-color);
+  background: #fff;
+  box-shadow:
+    0 1px 2px rgba(15, 23, 42, 0.04),
+    0 10px 30px -22px rgba(15, 23, 42, 0.28);
   border-top-left-radius: 4px;
 }
 .msg-row.is-out .bubble {
-  background: rgba(59, 130, 246, 0.08);
+  background: rgba(59, 130, 246, 0.1);
   border-top-right-radius: 4px;
 }
 

@@ -1,15 +1,13 @@
 import { ref } from 'vue'
+import chimeUrl from '@/assets/sounds/chime-done.mp3'
 
 /**
- * 局域网分享「消息提示音 + 免打扰」单例（设计 §4）。
+ * 局域网分享「消息提示音 + 免打扰」单例（设计 §4 / LANLink 刷新 §3）。
  *
- * 左侧右键菜单和设置页开关共享同一份状态：`dnd` 存在 localStorage，
- * 开关都调用 `setDnd/toggleDnd`，两边通过这个模块级的 ref 自动同步。
- * 提示音用 WebAudio 现场合成（880Hz → 660Hz 两声短音），不引音频资源文件；
- * 浏览器要求音频上下文在用户手势后才能出声，所以首次 pointerdown / keydown 时 resume。
- *
- * 只在「收到对方的新消息」时响（useLanShareChat 的 chat 事件里判断
- * kind='message' && direction='in'）；自己发的、状态更新、已读、删除都不响。
+ * 提示音用 dsh-chime 插件的「任务完成」音效 `chime-done.mp3`（MIT，732B），
+ * 由 Vite 处理成资源 URL，不引第三方依赖。左侧右键菜单和设置页开关共享同一份
+ * `dnd`（localStorage），只在「收到对方的新消息」时播放；浏览器要求音频在用户
+ * 手势后才能出声，所以首次 pointerdown / keydown 时静默 play 一次解锁。
  */
 
 /** 免打扰持久化 key（设计 §4 约定） */
@@ -27,7 +25,7 @@ function loadDnd(): boolean {
 /** 免打扰（true = 不播放提示音） */
 const dnd = ref(loadDnd())
 
-let audioContext: AudioContext | null = null
+let audio: HTMLAudioElement | null = null
 let unlockBound = false
 
 function persist(value: boolean) {
@@ -47,25 +45,33 @@ function toggleDnd() {
   setDnd(!dnd.value)
 }
 
-/** 懒创建 AudioContext（Safari / WKWebView 需要 webkit 前缀） */
-function ensureContext(): AudioContext | null {
+/** 懒创建 audio 元素（同一个实例复用，避免每条消息都 new） */
+function ensureAudio(): HTMLAudioElement | null {
   if (typeof window === 'undefined') return null
-  const Ctor =
-    window.AudioContext ??
-    (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
-  if (!Ctor) return null
-  if (!audioContext) audioContext = new Ctor()
-  return audioContext
+  if (!audio) {
+    audio = new Audio(chimeUrl)
+    audio.preload = 'auto'
+    audio.volume = 0.7
+  }
+  return audio
 }
 
+/** 首次用户手势时静默播一下再暂停：解锁 WebView 的自动播放限制 */
 function unlockAudio() {
-  if (!audioContext) return
-  void audioContext.resume().catch(() => {
-    /* 还没有用户手势时 resume 会失败，等下一次手势再试 */
-  })
+  const player = ensureAudio()
+  if (!player) return
+  void player
+    .play()
+    .then(() => {
+      player.pause()
+      player.currentTime = 0
+    })
+    .catch(() => {
+      /* 还没有用户手势时 play 会被拒绝，等下一次手势再试 */
+    })
 }
 
-/** 用户第一次点击 / 按键时解锁音频上下文（只绑一次） */
+/** 用户第一次点击 / 按键时解锁音频（只绑一次） */
 function bindUnlockOnce() {
   if (unlockBound || typeof window === 'undefined') return
   unlockBound = true
@@ -78,33 +84,17 @@ function bindUnlockOnce() {
   window.addEventListener('keydown', unlock, true)
 }
 
-/** 单声短音：指数包络避免爆音 */
-function playTone(ctx: AudioContext, frequency: number, startAt: number, duration: number) {
-  const osc = ctx.createOscillator()
-  const gain = ctx.createGain()
-  osc.type = 'sine'
-  osc.frequency.setValueAtTime(frequency, startAt)
-  gain.gain.setValueAtTime(0.0001, startAt)
-  gain.gain.exponentialRampToValueAtTime(0.16, startAt + 0.01)
-  gain.gain.exponentialRampToValueAtTime(0.0001, startAt + duration)
-  osc.connect(gain)
-  gain.connect(ctx.destination)
-  osc.start(startAt)
-  osc.stop(startAt + duration + 0.02)
-}
-
-/** 收到对方消息时播放「叮咚」双音；免打扰或环境不支持时静默跳过 */
+/** 收到对方消息时播放完成音；免打扰或环境不支持时静默跳过 */
 function playMessageSound() {
   if (dnd.value) return
   try {
-    const ctx = ensureContext()
-    if (!ctx) return
+    const player = ensureAudio()
+    if (!player) return
     bindUnlockOnce()
-    unlockAudio()
-    // 上下文还没解锁时 currentTime 不动，排两声短音即可；解锁后会正常出声
-    const startAt = ctx.currentTime + 0.01
-    playTone(ctx, 880, startAt, 0.08)
-    playTone(ctx, 660, startAt + 0.1, 0.09)
+    player.currentTime = 0
+    void player.play().catch(() => {
+      /* 未解锁 / 播放被拒：等用户下一次手势后自然恢复 */
+    })
   } catch (err) {
     console.warn('[lanshare] 播放提示音失败', err)
   }

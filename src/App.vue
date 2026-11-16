@@ -371,7 +371,7 @@ onUnmounted(() => window.removeEventListener("keydown", handleQuickKeydown));
 onMounted(() => window.addEventListener("ws-open-settings", onOpenSettings));
 onUnmounted(() => window.removeEventListener("ws-open-settings", onOpenSettings));
 
-// 托盘「消息」列表点了某条会话：后端发 lan-share://open-chat，主窗口切到局域网分享页。
+// 托盘「消息」列表点了某条会话：后端发 lan-share://open-chat，主窗口切到 LANLink 页。
 // 具体选中哪个会话由 useLanShareChat 监听同一事件处理（面板 v-show 常驻挂载）。
 let lanShareOpenChatUnlisten: UnlistenFn | null = null;
 onMounted(async () => {
@@ -881,13 +881,13 @@ async function handlePack(project: ProjectConfig, asZip: boolean = false) {
               <path d="M18.5 15l.8 1.9 1.9.8-1.9.8-.8 1.9-.8-1.9-1.9-.8 1.9-.8z" />
             </svg>
           </button>
-          <!-- 局域网分享：发现同一局域网里运行本应用的设备并互传文件 -->
+          <!-- LANLink：发现同一局域网里运行本应用的设备并互传文件 -->
           <button
             class="rail-btn"
             :class="{ active: view === 'lanshare' }"
             :aria-current="view === 'lanshare' ? 'page' : undefined"
-            :title="shortcutTitle('局域网分享', '5')"
-            aria-label="局域网分享"
+            :title="shortcutTitle('LANLink', '5')"
+            aria-label="LANLink"
             @click="selectTool('lanshare')"
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -1002,7 +1002,7 @@ async function handlePack(project: ProjectConfig, asZip: boolean = false) {
           <CleanerPanel :active="view === 'cleaner'" />
         </div>
 
-        <!-- 局域网分享工具 -->
+        <!-- LANLink 工具 -->
         <div v-show="view === 'lanshare'" class="workspace-body">
           <LanSharePanel :active="view === 'lanshare'" />
         </div>

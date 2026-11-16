@@ -2,7 +2,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 
 /**
- * 局域网分享（LocalSend 风格）命令封装。
+ * LANLink（局域网分享，LocalSend 风格）命令封装。
  *
  * 字段统一用后端的 snake_case（与设计文档 4.2 的 Rust 结构同名对齐），
  * 只有 invoke 的参数名按 Tauri 约定用 camelCase。
@@ -14,7 +14,7 @@ export const EVENT_SNAPSHOT = 'lan-share://snapshot'
 export const EVENT_SEND_PROGRESS = 'lan-share://send-progress'
 /** 聊天数据变化事件：新消息 / 已读 / 会话被删除（payload 只带 peer_id/kind/direction，正文靠重新拉取） */
 export const EVENT_CHAT = 'lan-share://chat'
-/** 从托盘消息列表点某条会话：主窗口切到局域网分享并定位到该会话 */
+/** 从托盘消息列表点某条会话：主窗口切到 LANLink 并定位到该会话 */
 export const EVENT_OPEN_CHAT = 'lan-share://open-chat'
 
 /** 局域网内发现到的另一台设备 */
@@ -149,11 +149,6 @@ export function getLanShareSnapshot(): Promise<LanShareSnapshot> {
   return invoke<LanShareSnapshot>('lan_share_snapshot')
 }
 
-/** 开启 / 关闭：开启会起 UDP 组播发现 + HTTP 接收服务，返回最新快照 */
-export function setLanShareEnabled(enabled: boolean): Promise<LanShareSnapshot> {
-  return invoke<LanShareSnapshot>('lan_share_set_enabled', { enabled })
-}
-
 /** 修改设备名（空串回退主机名），返回最新快照 */
 export function setLanShareAlias(alias: string): Promise<LanShareSnapshot> {
   return invoke<LanShareSnapshot>('lan_share_set_alias', { alias })
@@ -243,11 +238,6 @@ export function setLanSharePeerRemark(
   remark: string,
 ): Promise<LanShareSnapshot> {
   return invoke<LanShareSnapshot>('lan_share_set_peer_remark', { peerId, remark })
-}
-
-/** 设置「接收文件前是否需要确认」（默认 false：直接接收），返回最新快照 */
-export function setLanShareRequireAccept(requireAccept: boolean): Promise<LanShareSnapshot> {
-  return invoke<LanShareSnapshot>('lan_share_set_require_accept', { requireAccept })
 }
 
 /** 打开文件所在目录（目录不存在时后端退到最近存在的上级） */

@@ -162,13 +162,16 @@ async function openFolderAction() {
 </template>
 
 <style scoped>
-/* 文件卡：白底、12px 圆角、细边框；小窗时收到容器宽度以内 */
+/* 文件卡：白底 12px 圆角 + 阴影分层（与消息气泡同一套 elevation），小窗收到容器宽度内 */
 .file-card {
   width: 320px;
   max-width: 100%;
-  border: 1px solid var(--border-color);
+  border: 1px solid transparent;
   border-radius: 12px;
   background: var(--bg-primary);
+  box-shadow:
+    0 1px 2px rgba(15, 23, 42, 0.04),
+    0 10px 30px -22px rgba(15, 23, 42, 0.28);
   overflow: hidden;
 }
 .file-card.is-failed {
@@ -229,7 +232,7 @@ async function openFolderAction() {
   align-items: center;
   gap: 8px;
   padding: 8px 12px;
-  border-top: 1px solid var(--border-color);
+  background: var(--bg-secondary);
 }
 .file-state {
   flex: 1;

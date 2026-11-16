@@ -8,10 +8,11 @@ import LanRemarkEditor from './LanRemarkEditor.vue'
 import { useLanShareFileDrop } from './useLanShareFileDrop'
 
 /**
- * 右栏聊天壳：头部设备信息 + 消息流 + 输入区。
+ * 右栏聊天壳：头部设备信息 + 消息流 + 输入区（Glass Deck 视觉，刷新 §2）。
  *
- * 头部按钉钉观感放头像 + 显示名（备注优先于设备名），名字旁的铅笔就地起备注
- * （LanRemarkEditor，保存仍走父组件统一调 API）。
+ * 头部无下边框：头像 + 显示名（备注优先于设备名）+ 第二行「原名 · IP」；
+ * 名字旁的铅笔就地起备注（LanRemarkEditor，保存仍走父组件统一调 API）。
+ * 输入区是浮在底部的白色圆角卡，不再用上边框切分。
  * 消息流拆在 LanChatMessageList 里；这里只做输入框交互与把事件转给 LanSharePanel。
  */
 const props = defineProps<{
@@ -54,10 +55,12 @@ const emit = defineEmits<{
   'send-dropped-files': [files: DroppedFileInput[]]
 }>()
 
-const peerAddress = computed(() => {
-  const runtime = props.peer?.peer
-  if (!runtime) return '设备不在线'
-  return `${runtime.ip}:${runtime.port}`
+/** 头部第二行：有备注时 `原名 · IP`（备注编辑仍显示备注优先），没备注时只显示 IP */
+const peerSubtitle = computed(() => {
+  const target = props.peer
+  if (!target) return ''
+  const ip = target.peer?.ip || '设备不在线'
+  return target.remark ? `${target.alias} · ${ip}` : ip
 })
 
 /** 显示名：本机备注优先，没备注才用设备名（设计 §2.3） */
@@ -124,16 +127,13 @@ const { dragging, onPaste, onDragEnter, onDragOver, onDragLeave, onDrop } = useL
               :remark="peer.remark"
               @save="emit('save-remark', peer.id, $event)"
             />
-            <span class="online-label" :class="peer.online ? 'is-online' : 'is-offline'">
-              <span class="online-dot"></span>
-              {{ peer.online ? '在线' : '离线' }}
-            </span>
+            <!-- 第二行：有备注带原名，没备注只显示 IP（不显示在线状态，左栏已有） -->
+            <span class="head-sub" :class="{ 'is-offline': !peer.online }">{{ peerSubtitle }}</span>
           </div>
-          <div class="head-addr mono" :title="peerAddress">{{ peerAddress }}</div>
         </div>
         <div class="head-actions">
           <button
-            class="btn btn-secondary btn-xs"
+            class="head-action"
             type="button"
             :disabled="!peer.online || sendingFiles"
             @click="emit('send-files')"
@@ -142,7 +142,7 @@ const { dragging, onPaste, onDragEnter, onDragOver, onDragLeave, onDrop } = useL
           </button>
           <button
             v-if="peer.hasConversation"
-            class="btn btn-danger-ghost btn-xs"
+            class="head-action is-danger"
             type="button"
             :disabled="deleting"
             @click="emit('delete-conversation')"
@@ -167,9 +167,10 @@ const { dragging, onPaste, onDragEnter, onDragOver, onDragLeave, onDrop } = useL
 
       <footer class="chat-input">
         <p v-if="!peer.online" class="input-offline">设备已离线，无法发送消息或文件</p>
-        <div class="input-row">
-          <button
-            class="attach-btn"
+        <div class="input-card">
+          <div class="input-row">
+            <button
+              class="attach-btn"
             type="button"
             title="选择文件发送"
             aria-label="选择文件发送"
@@ -201,9 +202,10 @@ const { dragging, onPaste, onDragEnter, onDragOver, onDragLeave, onDrop } = useL
             @paste="onPaste"
           ></textarea>
           <!-- 发送中禁用「发送」按钮 / Enter，但输入框保留可编辑，方便连续起草下一条 -->
-          <button class="btn btn-primary send-btn" type="button" :disabled="!canSend" @click="submit">
-            {{ sending ? '发送中…' : '发送' }}
-          </button>
+            <button class="btn btn-primary send-btn" type="button" :disabled="!canSend" @click="submit">
+              {{ sending ? '发送中…' : '发送' }}
+            </button>
+          </div>
         </div>
       </footer>
     </template>
@@ -261,16 +263,15 @@ const { dragging, onPaste, onDragEnter, onDragOver, onDragLeave, onDrop } = useL
   overflow: hidden;
 }
 
-/* 拖拽文件高亮遮罩：不接管鼠标事件，避免干扰 drop */
 .drop-mask {
   position: absolute;
-  inset: 8px;
+  inset: 10px;
   z-index: 20;
   display: flex;
   align-items: center;
   justify-content: center;
   border: 2px dashed var(--primary);
-  border-radius: 10px;
+  border-radius: 14px;
   background: rgba(59, 130, 246, 0.08);
   pointer-events: none;
 }
@@ -281,7 +282,7 @@ const { dragging, onPaste, onDragEnter, onDragOver, onDragLeave, onDrop } = useL
   padding: 10px 16px;
   border-radius: 999px;
   background: var(--bg-primary);
-  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.12);
+  box-shadow: 0 18px 45px -24px rgba(15, 23, 42, 0.35);
   color: var(--primary);
   font-size: 13px;
   font-weight: 600;
@@ -291,15 +292,12 @@ const { dragging, onPaste, onDragEnter, onDragOver, onDragLeave, onDrop } = useL
   height: 16px;
 }
 
-/* 头部：头像 / 设备名（可编辑备注）/ 在线状态 / IP:端口 + 操作按钮 */
 .chat-head {
   flex-shrink: 0;
-  height: var(--panel-header-height, 40px);
-  padding: 0 16px;
   display: flex;
   align-items: center;
   gap: 12px;
-  border-bottom: 1px solid var(--border-color);
+  padding: 14px 20px 10px;
 }
 .head-main {
   flex: 1;
@@ -312,72 +310,84 @@ const { dragging, onPaste, onDragEnter, onDragOver, onDragLeave, onDrop } = useL
   flex-shrink: 0;
 }
 .head-title {
+  flex: 1;
   display: flex;
-  align-items: center;
-  gap: 6px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
   min-width: 0;
-  flex-shrink: 1;
 }
-.online-label {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
+.head-sub {
+  max-width: 100%;
+  padding-left: 2px;
   font-size: 12px;
-  color: var(--text-muted);
-  white-space: nowrap;
-  flex-shrink: 0;
-}
-.online-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--text-muted);
-}
-.online-label.is-online {
-  color: var(--success);
-}
-.online-label.is-online .online-dot {
-  background: var(--success);
-  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.16);
-}
-.head-addr {
-  flex-shrink: 0;
-  font-size: 12px;
+  line-height: 1.4;
   color: var(--text-muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.head-sub.is-offline {
+  opacity: 0.8;
+}
 .head-actions {
   flex-shrink: 0;
   display: flex;
   align-items: center;
-  gap: 8px;
-}
-.btn.btn-xs {
-  padding: 4px 10px;
-  font-size: 12px;
+  gap: 4px;
 }
 
-/* 输入区 */
+.head-action {
+  padding: 6px 9px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.16s, color 0.16s;
+}
+.head-action:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--primary);
+}
+.head-action.is-danger:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.08);
+  color: var(--danger);
+}
+.head-action:disabled {
+  color: var(--text-muted);
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 .chat-input {
   flex-shrink: 0;
-  padding: 10px 16px 14px;
-  border-top: 1px solid var(--border-color);
-  background: var(--bg-primary);
+  padding: 8px 20px 18px;
+  background: transparent;
 }
 .input-offline {
-  margin-bottom: 8px;
-  padding: 6px 10px;
-  border-radius: 6px;
-  background: var(--bg-readonly);
+  margin: 0 0 8px;
+  padding: 6px 12px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.78);
   color: var(--text-muted);
   font-size: 12px;
+}
+.input-card {
+  padding: 8px;
+  border-radius: 14px;
+  background: #fff;
+  box-shadow:
+    0 1px 2px rgba(15, 23, 42, 0.04),
+    0 18px 45px -24px rgba(15, 23, 42, 0.35);
 }
 .input-row {
   display: flex;
   align-items: flex-end;
-  gap: 10px;
+  gap: 8px;
 }
 .attach-btn {
   display: inline-flex;
@@ -387,15 +397,15 @@ const { dragging, onPaste, onDragEnter, onDragOver, onDragLeave, onDrop } = useL
   height: 34px;
   flex-shrink: 0;
   padding: 0;
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
-  background: var(--bg-input);
-  color: var(--text-secondary);
+  border: none;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--text-muted);
   cursor: pointer;
-  transition: border-color 0.15s, color 0.15s;
+  transition: background 0.16s, color 0.16s;
 }
 .attach-btn:hover:not(:disabled) {
-  border-color: var(--primary);
+  background: var(--bg-hover);
   color: var(--primary);
 }
 .attach-btn:disabled {
@@ -411,22 +421,22 @@ const { dragging, onPaste, onDragEnter, onDragOver, onDragLeave, onDrop } = useL
   min-width: 0;
   min-height: 34px;
   max-height: 120px;
-  padding: 7px 10px;
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
-  background: var(--bg-input);
+  padding: 7px 8px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
   color: var(--text-primary);
   font-size: 13px;
   font-family: inherit;
   line-height: 1.5;
   resize: none;
   outline: none;
+  transition: background 0.16s;
 }
 .chat-textarea:focus {
-  border-color: var(--primary);
+  background: var(--bg-secondary);
 }
 .chat-textarea:disabled {
-  background: var(--bg-readonly);
   color: var(--text-muted);
   cursor: not-allowed;
 }
@@ -435,9 +445,9 @@ const { dragging, onPaste, onDragEnter, onDragOver, onDragLeave, onDrop } = useL
   height: 34px;
   padding: 0 18px;
   font-size: 13px;
+  border-radius: 10px;
 }
 
-/* 无选中设备：右栏空态 */
 .chat-empty-state {
   flex: 1;
   display: flex;
@@ -455,32 +465,35 @@ const { dragging, onPaste, onDragEnter, onDragOver, onDragLeave, onDrop } = useL
   opacity: 0.55;
 }
 .empty-title {
+  margin: 0;
   font-size: 14px;
   font-weight: 600;
   color: var(--text-secondary);
 }
 .empty-hint {
+  margin: 0;
   font-size: 12px;
   color: var(--text-muted);
   line-height: 1.6;
 }
-
-/* 窄窗口：头部按钮只留图标会太挤，允许换行到名字下面 */
 @media (max-width: 760px) {
   .chat-head {
-    height: auto;
-    min-height: var(--panel-header-height, 40px);
-    padding: 6px 12px;
+    padding: 10px 14px 6px;
     flex-wrap: wrap;
-  }
-  .head-main {
-    align-items: center;
   }
   .head-actions {
     margin-left: auto;
   }
-  .head-addr {
-    display: none;
+  .chat-input {
+    padding: 6px 14px 14px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .head-action,
+  .attach-btn,
+  .chat-textarea {
+    transition: none;
   }
 }
 </style>
