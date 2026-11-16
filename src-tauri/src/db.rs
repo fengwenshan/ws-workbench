@@ -629,6 +629,7 @@ mod tests {
                 created_at: 0,
                 dir: "/tmp".to_string(),
             }],
+            pack_include: None,
         }
     }
 

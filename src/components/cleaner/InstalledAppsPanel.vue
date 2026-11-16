@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { Input, message } from 'ant-design-vue'
 import { SearchOutlined } from '@ant-design/icons-vue'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
@@ -46,6 +46,33 @@ const sort = ref<{ by: SortBy; dir: SortDir }>({ by: 'name', dir: 'asc' })
 /** 正在打开卸载窗口的应用 id（防止重复点击） */
 const openingId = ref('')
 
+// ============================ 表头固定 ============================
+
+/**
+ * 表头移出滚动区后，行区滚动条占的宽度要补给表头：否则经典滚动条
+ * （Windows / 系统「始终显示滚动条」）会把表头列右移，和行内容错位。
+ * 滚动条宽度用 offsetWidth - clientWidth 现算，覆盖原生滚动条与自定义
+ * 6px 滚动条两种实现；macOS 的 overlay 滚动条宽度为 0，无需补偿。
+ */
+const scrollEl = ref<HTMLElement | null>(null)
+const headerGutter = ref(12)
+const headerStyle = computed(() => ({ paddingRight: `${headerGutter.value}px` }))
+let gutterObserver: ResizeObserver | null = null
+
+function syncHeaderGutter() {
+  const el = scrollEl.value
+  if (!el) return
+  headerGutter.value = 12 + Math.max(0, el.offsetWidth - el.clientWidth)
+}
+
+watch(scrollEl, (el, prev) => {
+  if (prev && gutterObserver) gutterObserver.unobserve(prev)
+  if (!el) return
+  gutterObserver = gutterObserver ?? new ResizeObserver(syncHeaderGutter)
+  gutterObserver.observe(el)
+  syncHeaderGutter()
+})
+
 const unlisteners: UnlistenFn[] = []
 
 onMounted(async () => {
@@ -80,6 +107,8 @@ onMounted(async () => {
 onUnmounted(() => {
   unlisteners.forEach((unlisten) => unlisten())
   unlisteners.length = 0
+  gutterObserver?.disconnect()
+  gutterObserver = null
 })
 
 function persistSort() {
@@ -139,6 +168,12 @@ const filteredApps = computed<InstalledApp[]>(() => {
         )
     }
   })
+})
+
+// 搜索/重新扫描会增减行数，滚动条出现或消失后补一次宽度校准
+watch(filteredApps, async () => {
+  await nextTick()
+  syncHeaderGutter()
 })
 
 const emptyText = computed(() =>
@@ -242,18 +277,18 @@ async function openUninstall(app: InstalledApp): Promise<void> {
       {{ emptyText }}
     </div>
 
-    <!-- 列表 -->
-    <div v-else class="apps-scroll">
-      <div class="apps-table">
-        <div class="apps-row apps-header">
-          <span class="col-app">应用</span>
-          <span class="col-version">版本</span>
-          <span class="col-publisher">发布者</span>
-          <span class="col-size">大小</span>
-          <span class="col-date">安装日期</span>
-          <span class="col-path">安装位置</span>
-          <span class="col-action">操作</span>
-        </div>
+    <!-- 列表：表头固定在滚动区之外，只有行内容滚动 -->
+    <div v-else class="apps-table">
+      <div class="apps-row apps-header" :style="headerStyle">
+        <span class="col-app">应用</span>
+        <span class="col-version">版本</span>
+        <span class="col-publisher">发布者</span>
+        <span class="col-size">大小</span>
+        <span class="col-date">安装日期</span>
+        <span class="col-path">安装位置</span>
+        <span class="col-action">操作</span>
+      </div>
+      <div ref="scrollEl" class="apps-scroll">
         <div
           v-for="app in filteredApps"
           :key="app.id"
@@ -455,18 +490,23 @@ async function openUninstall(app: InstalledApp): Promise<void> {
   text-align: center;
 }
 
-/* 列表 */
-.apps-scroll {
+/* 列表：外层框固定，表头不参与滚动，滚动条只出现在行区域 */
+.apps-table {
   flex: 1;
   min-height: 0;
-  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   border: 1px solid var(--border-color);
   border-radius: 8px;
   background: var(--bg-primary);
 }
-.apps-table {
-  /* 7 列 + 间距的最小宽度；窗口更窄时横向滚动，不把内容挤变形 */
-  min-width: 780px;
+.apps-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  /* 列宽自适应，最小窗口（900）下整表也放得下，不需要横向滚动 */
+  overflow-x: hidden;
 }
 .apps-row {
   display: grid;
@@ -488,9 +528,7 @@ async function openUninstall(app: InstalledApp): Promise<void> {
   background: var(--bg-hover);
 }
 .apps-header {
-  position: sticky;
-  top: 0;
-  z-index: 1;
+  flex-shrink: 0;
   height: 32px;
   background: var(--bg-secondary);
   color: var(--text-muted);

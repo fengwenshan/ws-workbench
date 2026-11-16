@@ -87,6 +87,17 @@ export function useKeepAwake() {
     }, STATUS_POLL_INTERVAL_MS)
   }
 
+  /**
+   * 外部唤醒：窗口重新获得焦点 / 面板弹出时调用。
+   * 轮询还在跑就只补一次；被「页面隐藏」暂停过的就重新接上节拍，
+   * 避免首次弹出时 visibilitychange 没触发、状态一直停在旧值。
+   */
+  function wake(): void {
+    if (!polling.value) return
+    if (timer === null) void tick()
+    else void refresh()
+  }
+
   /** 页签激活时调用；页面不可见时只置标记，等可见后补拉 */
   function startPolling(): void {
     if (polling.value) return
@@ -226,6 +237,7 @@ export function useKeepAwake() {
     setTriggerEnabled,
     startPolling,
     stopPolling,
+    wake,
     start,
     stop,
   })

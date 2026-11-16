@@ -474,6 +474,7 @@ mod tests {
             updated_at: String::new(),
             note: String::new(),
             attachments: vec![],
+            pack_include: None,
         });
         let merged = AppSettings::default().into_config(data);
         assert_eq!(merged.projects.len(), 1);

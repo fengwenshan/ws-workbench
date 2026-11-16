@@ -11,7 +11,7 @@ export function keepAwakeStatus(): Promise<KeepAwakeStatus> {
 /**
  * 开始保持唤醒。
  * @param durationSeconds 时长（秒），null 表示无限
- * @param allowDisplaySleep true 时允许屏幕关闭，只拦系统空闲睡眠
+ * @param allowDisplaySleep true 时允许显示器睡眠，只拦系统空闲睡眠
  */
 export function keepAwakeStart(
   durationSeconds: number | null,

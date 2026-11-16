@@ -222,6 +222,11 @@ pub struct ProjectConfig {
     /// 附件列表
     #[serde(default)]
     pub attachments: Vec<AttachmentMeta>,
+    /// layui 打包包含规则（白名单）。`None` 表示沿用全局默认规则
+    /// （`AppSettings::default_include`）；`Some` 为该项目自己的规则。
+    /// 不能只存空数组：空数组在打包器里等价于「不过滤、全部放行」。
+    #[serde(default)]
+    pub pack_include: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

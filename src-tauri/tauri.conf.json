@@ -46,15 +46,27 @@
     "active": true,
     "targets": "all",
     "createUpdaterArtifacts": true,
+    "copyright": "© 2026 ws-workbench",
     "windows": {
       "nsis": {
         "installMode": "currentUser",
-        "installerHooks": "./nsis/uninstall-hooks.nsh"
+        "installerHooks": "./nsis/uninstall-hooks.nsh",
+        "installerIcon": "./icons/icon.ico",
+        "uninstallerIcon": "./icons/icon.ico",
+        "headerImage": "./nsis/header.bmp",
+        "uninstallerHeaderImage": "./nsis/header.bmp",
+        "sidebarImage": "./nsis/sidebar.bmp",
+        "languages": ["SimpChinese"],
+        "customLanguageFiles": {
+          "SimpChinese": "./nsis/SimpChinese.nsh"
+        },
+        "displayLanguageSelector": false
       }
     },
     "resources": {
       "resources/zh-Hans.lproj": "zh-Hans.lproj",
-      "resources/apps": "apps"
+      "resources/apps": "apps",
+      "resources/windows/uninstall-choose-data.ps1": "resources/windows/uninstall-choose-data.ps1"
     },
     "icon": [
       "icons/32x32.png",

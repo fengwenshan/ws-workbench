@@ -39,6 +39,21 @@ pub const RULES_FILE: &str = "rules.json";
 pub const ALIVE_FILE: &str = "main.alive";
 /// 主进程 PID，worker 用来快速感知「界面进程已经没了」
 pub const GUI_PID_FILE: &str = "main.pid";
+/// 这条连接是哪个实例开的（只有它能断开 / 改规则，别的实例只能看）
+pub const OWNER_FILE: &str = "owner.json";
+
+/// 连接的归属：开它的那个主进程。
+///
+/// 两台机器无关；这里管的是**同一台机器上同时开着两个 ws-workbench**（开发版 +
+/// 安装包，或安装包 + 便携包）。会话目录是共享的，所以「谁开的」必须落盘：
+/// 只有写这个文件的那个实例能断开、能改规则；其余实例看得到状态，但按不动按钮。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SessionOwner {
+    pub pid: u32,
+    /// 实例名（`ws-workbench` / `ws-workbench-dev`），界面提示里直接用
+    #[serde(default)]
+    pub name: String,
+}
 
 /// 日志读取游标。
 ///
@@ -129,6 +144,38 @@ impl VpnSession {
             .ok()
     }
 
+    pub fn owner_path(&self) -> PathBuf {
+        self.dir.join(OWNER_FILE)
+    }
+
+    /// 记下「这条连接是哪个实例开的」：连接发起时由主进程写入。
+    pub fn write_owner(&self, owner: &SessionOwner) -> Result<(), String> {
+        self.ensure()?;
+        let json =
+            serde_json::to_string(owner).map_err(|e| format!("序列化归属信息失败: {}", e))?;
+        fs::write(self.owner_path(), json).map_err(|e| format!("写归属信息失败: {}", e))
+    }
+
+    /// 读归属信息；没写过（旧版本、或从没连过）返回 None。
+    pub fn read_owner(&self) -> Option<SessionOwner> {
+        let text = fs::read_to_string(self.owner_path()).ok()?;
+        serde_json::from_str(text.trim()).ok()
+    }
+
+    pub fn clear_owner(&self) {
+        let _ = fs::remove_file(self.owner_path());
+    }
+
+    /// 释放归属：只有记录里还是自己时才删。
+    ///
+    /// 连接没起来（用户取消提权、worker 拉不起来）时由主进程调用；不能无条件删，
+    /// 万一另一个实例已经接管了这条会话，删掉就把它的归属也弄丢了。
+    pub fn release_owner(&self, pid: u32) {
+        if self.read_owner().map(|owner| owner.pid) == Some(pid) {
+            self.clear_owner();
+        }
+    }
+
     /// 读取当前的运行标识
     pub fn run_id(&self) -> String {
         fs::read_to_string(self.dir.join(RUN_ID_FILE))
@@ -155,6 +202,8 @@ impl VpnSession {
             self.rules_path(),
             self.alive_path(),
             self.gui_pid_path(),
+            // 上一轮的归属信息必须清掉：留着会让新连接看起来还归那个实例
+            self.owner_path(),
             // 这些是上一轮提权/启动/PowerShell 的现场文件，不清理会让新会话的
             // 收集包混入旧内容，误判成「这次也执行了同样的命令」。
             self.dir.join("powershell.log"),
@@ -286,8 +335,16 @@ impl VpnSession {
     }
 
     /// 删掉运行期控制文件（断开 / 退出时调用）
+    ///
+    /// 含 `owner.json`：隧道没了就不该再有人「持有」它，否则别的窗口会一直以为
+    /// 这条连接归某个（可能已经退出的）实例。
     pub fn remove_control_files(&self) {
-        for path in [self.mode_path(), self.rules_path(), self.alive_path()] {
+        for path in [
+            self.mode_path(),
+            self.rules_path(),
+            self.alive_path(),
+            self.owner_path(),
+        ] {
             let _ = fs::remove_file(path);
         }
     }
@@ -648,6 +705,54 @@ mod tests {
         // 新会话必须把上一轮的 PID 清掉，否则 worker 会拿旧 PID 判断父进程死活
         session.prepare().unwrap();
         assert!(session.read_gui_pid().is_none());
+    }
+
+    #[test]
+    fn owner_roundtrip_and_cleared_by_prepare_and_teardown() {
+        let session = temp_session("owner");
+        session.prepare().unwrap();
+        assert!(session.read_owner().is_none());
+
+        let owner = SessionOwner {
+            pid: 4321,
+            name: "ws-workbench-dev".to_string(),
+        };
+        session.write_owner(&owner).unwrap();
+        assert_eq!(session.read_owner(), Some(owner));
+        // 归属信息坏掉时当作「没有归属」，不能因此卡死所有操作
+        std::fs::write(session.owner_path(), b"{not json").unwrap();
+        assert!(session.read_owner().is_none());
+
+        // 隧道收尾时归属必须一起清掉
+        session
+            .write_owner(&SessionOwner {
+                pid: 7,
+                name: String::new(),
+            })
+            .unwrap();
+        session.remove_control_files();
+        assert!(session.read_owner().is_none());
+
+        // 新会话开始前也要清掉
+        session
+            .write_owner(&SessionOwner {
+                pid: 8,
+                name: "ws-workbench".to_string(),
+            })
+            .unwrap();
+        session.prepare().unwrap();
+        assert!(session.read_owner().is_none());
+
+        // 释放归属只删自己的：连接没起来时用，别把另一个实例的归属删了
+        let mine = SessionOwner {
+            pid: 9,
+            name: "ws-workbench-dev".to_string(),
+        };
+        session.write_owner(&mine).unwrap();
+        session.release_owner(10);
+        assert_eq!(session.read_owner(), Some(mine.clone()));
+        session.release_owner(9);
+        assert!(session.read_owner().is_none());
     }
 
     #[test]

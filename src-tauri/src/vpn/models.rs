@@ -68,6 +68,13 @@ impl VpnPhase {
         }
     }
 
+    /// 有没有连接占着（准备中 / 连接中 / 已连接 / 断开中）。
+    ///
+    /// 关机收尾、换配置、跨实例操作都按这个判定：这些阶段动隧道会留下半套路由。
+    pub fn is_active(&self) -> bool {
+        !matches!(self, VpnPhase::Disconnected | VpnPhase::Failed)
+    }
+
     pub fn label(&self) -> &'static str {
         match self {
             VpnPhase::Disconnected => "未连接",

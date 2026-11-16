@@ -1,6 +1,6 @@
 //! macOS 的保持唤醒实现：IOKit `IOPMAssertionCreateWithName` 电源断言。
 //!
-//! 系统断言 `PreventUserIdleSystemSleep` 常建；「允许屏幕关闭」关闭时再加
+//! 系统断言 `PreventUserIdleSystemSleep` 常建；「允许显示器睡眠」关闭时再加
 //! `PreventUserIdleDisplaySleep`。断言随进程退出自动回收，不需要 root/TCC。
 //!
 //! 平台验证状态：本文件只在 macOS 上编译，macOS CI（test-macos）验证。

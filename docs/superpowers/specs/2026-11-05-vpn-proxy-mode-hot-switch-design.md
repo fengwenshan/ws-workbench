@@ -180,6 +180,21 @@ pub fn apply_mode(mode: ProxyMode, egress: Egress) -> Egress   // 纯函数
 | **Cmd+Q / 菜单退出 / 关机** | 新增 `RunEvent::ExitRequested` 钩子调同一个 `shutdown()`（幂等）并清控制文件 |
 | **主进程被强杀** | worker 父进程心跳守卫：主进程连接期间每 2s 刷 `<session>/main.alive` mtime；worker 每 1s 检查，8s 未刷新即认为父进程已死，走正常收尾后退出 |
 
+### 9.1 两个实例同开时的归属（`owner.json`）
+
+开发版和安装包的 `app_data_dir` 是同一个（identifier 都是 `com.ws.workbench`），所以会话目录**共享**：两个窗口看到的是同一条连接的真实状态，不会出现「一边显示未连接、隧道其实是另一边连着的」然后被诱导再连一次。共享之后必须回答「谁能动它」，答案落在 `owner.json`（`{ pid, name }`，`name` 是 `ws-workbench` / `ws-workbench-dev`）：
+
+| 时机 | 动作 |
+|---|---|
+| 连接 | `prepare()` 清掉旧归属，写 `request` 后写入 `owner.json`（本进程 PID + 实例名） |
+| 连接没起来（UAC 被拒 / worker 拉不起来） | `release_owner()` 只删「记录里还是自己」的归属，别把另一个实例的顺手删了 |
+| 断开 | worker 正常收尾时随控制文件一起删掉 `owner.json` |
+| 控制类操作 | `vpn_connect` / `vpn_disconnect` / `vpn_switch_profile` / `vpn_push_rules` / `vpn_set_proxy_mode` / 更新前断开，全部先过 `ensure_can_control()`：归属是另一个**还活着**的进程就拒绝，并说明是哪个窗口占着 |
+| 退出 / 关机收尾 | `shutdown()` / `shutdown_and_wait()` / `disconnect_before_exit()` 同样按归属走：不写 `stop.flag`、不删别人的控制文件 |
+| 归属进程已消失（崩溃 / 强杀） | 判定放行，任何实例都能接管收尾，不会因为残留文件卡死 |
+
+界面侧：状态（阶段、IP、路由、日志）照常显示，但连接/断开/切换/规则/代理模式按钮在「不是自己开的」时全部置灰，并在详情区顶部标注「VPN 正由「ws-workbench-dev」连接，这个窗口只能看状态」。判定放在后端而不是只靠置灰——快捷面板、旧版本前端、直接调命令都绕不过去。
+
 ## 10. 错误处理
 
 | 场景 | 行为 |

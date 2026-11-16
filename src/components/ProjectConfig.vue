@@ -8,6 +8,7 @@ import {
 import { checkDir } from '@/api/system'
 import { pickDirectory } from '@/utils/dialog'
 import { basename, joinPath } from '@/utils/path'
+import RulesEditor from '@/components/RulesEditor.vue'
 
 const sourceTextarea = ref<HTMLTextAreaElement | null>(null)
 const outputTextarea = ref<HTMLTextAreaElement | null>(null)
@@ -19,9 +20,14 @@ function autoResize(el: HTMLTextAreaElement | null) {
   el.style.height = el.scrollHeight + 'px'
 }
 
-const props = defineProps<{
-  project: ProjectConfig | null
-}>()
+const props = withDefaults(
+  defineProps<{
+    project: ProjectConfig | null
+    /** 全局默认包含规则：项目未单独配置时沿用，也是「恢复默认」的目标 */
+    defaultInclude?: string[]
+  }>(),
+  { defaultInclude: () => [] },
+)
 
 const emit = defineEmits<{
   update: [id: string, data: Partial<ProjectConfig>]
@@ -37,10 +43,12 @@ let copiedTimer: ReturnType<typeof setTimeout> | null = null
 let saveTimer: any = null
 
 watch(() => props.project, (newVal) => {
-  // 切换/删除项目时，先清除待保存的计时器，避免旧数据写入
+  // 切换/删除项目时，先把还没落盘的修改立即提交：debounce 只有 500ms，
+  // 改完名字/规则马上点另一个项目，原来的实现会直接丢掉这次编辑
   if (saveTimer) {
     clearTimeout(saveTimer)
     saveTimer = null
+    saveProjectNow()
   }
   copied.value = false
   if (newVal) {
@@ -237,21 +245,86 @@ async function copyVcsUrl() {
 
 onUnmounted(() => {
   if (copiedTimer) clearTimeout(copiedTimer)
+  // 切项目时父组件用 :key 重建本组件，卸载前把没落盘的编辑先提交，
+  // 否则改完名字/打包规则 500ms 内点走就会丢
+  if (saveTimer) {
+    clearTimeout(saveTimer)
+    saveTimer = null
+    saveProjectNow()
+  }
 })
 
 const selectedProject = computed(() => localProject.value)
+
+// ============================ 打包包含规则 ============================
+
+/**
+ * 只有 layui 项目需要打包规则；已经配置过规则的项目即使类型暂时识别失败
+ * （源目录失效等）也继续显示，避免规则「消失」后没法改回来。
+ */
+const showPackRules = computed(
+  () => projectType.value === 'layui' || !!localProject.value?.pack_include?.length,
+)
+
+/**
+ * 纯后缀自动补成通配符：输入 psd / .psd 都记成 *.psd，
+ * 让「添加特殊文件后缀」不用手写 glob。其它规则（*.html、js/**）原样保留。
+ */
+function normalizePackRule(rule: string): string {
+  const value = rule.trim()
+  if (!value) return ''
+  if (/^[A-Za-z0-9]+$/.test(value)) return `*.${value}`
+  if (/^\.[A-Za-z0-9]+$/.test(value)) return `*.${value.slice(1)}`
+  return value
+}
+
+function normalizePackRules(rules: string[]): string[] {
+  const out: string[] = []
+  for (const rule of rules) {
+    const value = normalizePackRule(rule)
+    if (value && !out.includes(value)) out.push(value)
+  }
+  return out
+}
+
+/** 编辑器的值：项目没配置时展示全局默认规则（继承），改一下就落成项目自己的规则 */
+const packRules = computed<string[]>({
+  get: () => localProject.value?.pack_include ?? props.defaultInclude ?? [],
+  set: (rules) => {
+    if (!localProject.value) return
+    const normalized = normalizePackRules(rules)
+    // 空数组在打包器里等于「全部放行」，容易误打包；清空时回到继承默认规则
+    localProject.value.pack_include = normalized.length ? normalized : null
+    debouncedSave()
+  },
+})
+
+/** 规则来源：项目自己配过就是「项目自定义」，否则沿用全局默认 */
+const packRulesInherited = computed(() => !localProject.value?.pack_include)
+
+/** 恢复默认 = 取消项目自己的规则，重新继承全局默认 */
+function resetPackRules() {
+  if (!localProject.value) return
+  localProject.value.pack_include = null
+  debouncedSave()
+}
+
+function saveProjectNow() {
+  if (!localProject.value) return
+  emit('update', localProject.value.id, {
+    name: localProject.value.name,
+    source_dir: localProject.value.source_dir,
+    output_dir: localProject.value.output_dir,
+    pack_include: localProject.value.pack_include ?? null,
+  })
+}
 
 function debouncedSave() {
   if (!localProject.value) return
   if (saveTimer) clearTimeout(saveTimer)
   saveTimer = setTimeout(() => {
-    if (localProject.value) {
-      emit('update', localProject.value.id, {
-        name: localProject.value.name,
-        source_dir: localProject.value.source_dir,
-        output_dir: localProject.value.output_dir,
-      })
-    }
+    saveTimer = null
+    saveProjectNow()
   }, 500)
 }
 
@@ -380,6 +453,32 @@ defineExpose({
         </div>
       </div>
 
+      <!-- layui 打包规则：每个项目单独配置，迁移自「设置 → layui 项目打包规则」 -->
+      <div v-if="showPackRules" class="form-row pack-rules">
+        <div class="form-row-head">
+          <div class="pack-rules-title">
+            <label>打包包含规则</label>
+            <span class="pack-rules-tag">{{ packRulesInherited ? '继承全局默认' : '项目自定义' }}</span>
+            <span class="pack-rules-count">{{ packRules.length }} 条</span>
+          </div>
+          <button
+            class="btn btn-secondary btn-xs"
+            :disabled="packRulesInherited"
+            @click="resetPackRules"
+          >
+            恢复默认
+          </button>
+        </div>
+        <RulesEditor
+          v-model="packRules"
+          placeholder="输入规则或特殊文件后缀后回车，如 *.psd、psd、js/**"
+        />
+        <p class="form-hint">
+          只打包命中的文件，每个 layui 项目可以不同；输入纯后缀（如 psd）会自动补成 *.psd。
+          未单独配置时沿用全局默认规则。点、_ 开头和含空格的路径始终跳过。
+        </p>
+      </div>
+
       <div v-if="projectType === 'unknown'" class="type-tip type-tip-unknown">
         未识别到 Layui 项目特征，打包功能不可用。请确认源目录选择正确。
       </div>
@@ -423,6 +522,40 @@ defineExpose({
   margin-bottom: 6px;
   font-size: 14px;
   color: var(--text-secondary);
+}
+/* 带右侧按钮的行头：标题和「恢复默认」同一行，label 自身不再占下边距 */
+.form-row-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+.form-row-head label {
+  margin-bottom: 0;
+}
+.pack-rules-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.pack-rules-tag {
+  padding: 0 6px;
+  border-radius: 4px;
+  background: var(--bg-tag);
+  color: var(--text-tag);
+  font-size: 11px;
+  line-height: 18px;
+}
+.pack-rules-count {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.form-hint {
+  margin: 6px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-muted);
 }
 .form-input {
   width: 100%;

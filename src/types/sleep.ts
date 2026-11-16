@@ -9,7 +9,7 @@
 export interface KeepAwakeStatus {
   /** 是否正在阻止空闲睡眠 */
   active: boolean
-  /** true 表示「允许屏幕关闭」，即只拦系统空闲睡眠 */
+  /** true 表示「允许显示器睡眠」，即只拦系统空闲睡眠 */
   allow_display_sleep: boolean
   /** 开始时刻（epoch 毫秒）；未激活为 null */
   started_at_ms: number | null

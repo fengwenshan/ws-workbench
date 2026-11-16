@@ -78,7 +78,14 @@ const connectionBusy = computed(
   () => vpn.connecting || vpn.disconnecting || vpn.phaseBusy,
 )
 
+/**
+ * 连接是另一个窗口开的（开发版 + 安装包同时开着，会话目录是共享的）：
+ * 状态照常显示，但按钮只能置灰 —— 只有开它的那个窗口能断开 / 改规则。
+ */
+const readonlyOwner = computed(() => (vpn.canControl ? null : vpn.owner))
+
 const connectLabel = computed(() => {
+  if (readonlyOwner.value) return '由另一个窗口连接'
   if (vpn.disconnecting) return '断开中…'
   if (vpn.connecting || vpn.phaseBusy) return '处理中…'
   if (!vpn.isConnected) return '连接'
@@ -163,6 +170,7 @@ const modeLocked = computed(
     vpn.connecting ||
     vpn.disconnecting ||
     vpn.modeSwitching ||
+    !vpn.canControl ||
     (vpn.isConnected && !isPolicyOwner.value),
 )
 
@@ -171,6 +179,9 @@ const modeLockText = computed(() => {
   if (vpn.modeSwitching) return ''
   if (vpn.disconnecting) return '正在断开连接，暂时不能切换代理模式。'
   if (vpn.phaseBusy || vpn.connecting) return '正在连接中，暂时不能切换代理模式。'
+  if (!vpn.canControl) {
+    return `VPN 正由「${vpn.owner?.name ?? '另一个窗口'}」连接，只有那个窗口能切换代理模式。`
+  }
   if (vpn.isConnected && !isPolicyOwner.value) {
     return '这份配置当前没有生效，切过去之后才能改它的代理模式。'
   }
@@ -244,6 +255,14 @@ function settleOptimistic(mode: VpnProxyMode) {
 
 async function handleConnect() {
   if (vpn.connecting || vpn.disconnecting) return
+  // 另一个窗口连着的：按钮已经置灰，这里再挡一道（键盘 / 旧渲染状态）
+  if (!vpn.canControl) {
+    vpn.pushLog(
+      'warn',
+      `VPN 正由「${vpn.owner?.name ?? '另一个窗口'}」连接，请到那个窗口断开`,
+    )
+    return
+  }
   // 未连接或收尾中：走原来的连接/断开逻辑
   if (!vpn.isConnected || vpn.phaseBusy) {
     await vpn.toggleConnection()
@@ -471,8 +490,9 @@ watch(
                   vpn.isConnected || vpn.phaseBusy ? 'btn-danger' : 'btn-primary',
                   { 'is-loading': connectionBusy },
                 ]"
-                :disabled="vpn.disconnecting || (!canConnect && !vpn.isConnected)"
+                :disabled="vpn.disconnecting || (!canConnect && !vpn.isConnected) || !vpn.canControl"
                 :aria-busy="connectionBusy"
+                :title="readonlyOwner ? `VPN 正由「${readonlyOwner.name}」连接，只有那个窗口能断开` : ''"
                 @click="handleConnect"
               >
                 <span v-if="connectionBusy" class="btn-spinner" aria-hidden="true" />
@@ -480,7 +500,8 @@ watch(
               </button>
               <button
                 class="btn btn-secondary"
-                :disabled="!vpn.selectedProfile || vpn.rulesApplying"
+                :disabled="!vpn.selectedProfile || vpn.rulesApplying || !vpn.canControl"
+                :title="readonlyOwner ? `VPN 正由「${readonlyOwner.name}」连接，只有那个窗口能改规则` : ''"
                 :aria-busy="vpn.rulesApplying"
                 @click="ruleDialogOpen = true"
               >
@@ -503,6 +524,15 @@ watch(
                 删除
               </button>
             </div>
+          </div>
+
+          <!-- 连接是另一个窗口开的：状态照常看，按钮全部置灰 -->
+          <div v-if="readonlyOwner" class="owner-banner" role="status">
+            <span class="owner-banner-dot" aria-hidden="true" />
+            <span>
+              VPN 正由「{{ readonlyOwner.name }}」连接，这个窗口只能看状态；
+              断开、切换配置、改规则请到那个窗口操作。
+            </span>
           </div>
 
           <!-- 只有 Linux 还允许手动指定 openconnect 才显示位置：macOS / Windows 都用安装包内置副本，
@@ -957,6 +987,27 @@ watch(
 }
 .import-hint.is-error {
   color: var(--danger);
+}
+/* 连接被另一个窗口持有：说清「只能看」，别让人以为是坏了 */
+.owner-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--warning-border, rgba(245, 158, 11, 0.35));
+  border-radius: 8px;
+  background: var(--warning-soft, rgba(245, 158, 11, 0.1));
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+.owner-banner-dot {
+  width: 7px;
+  height: 7px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: var(--warning, #f59e0b);
+  flex-shrink: 0;
 }
 /* 手动指定的 openconnect 位置：长期显示，路径再长也要能一眼看全 */
 .connector-location {
