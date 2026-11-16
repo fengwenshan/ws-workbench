@@ -1,8 +1,9 @@
 import { ref, computed } from 'vue'
 import { Channel, invoke } from '@tauri-apps/api/core'
-import { check } from '@tauri-apps/plugin-updater'
+import type { Update } from '@tauri-apps/plugin-updater'
 import { relaunch } from '@tauri-apps/plugin-process'
 import { isDevBuild } from '@/api/app'
+import { checkUpdateForChannel, type UpdateChannel } from '@/api/updater'
 import { safeGet, safeSet } from './safeStorage'
 
 export type UpdateStatus =
@@ -40,7 +41,7 @@ export interface UpdateDownloadResult {
   resumedFrom: number
 }
 
-type PendingUpdate = NonNullable<Awaited<ReturnType<typeof check>>>
+type PendingUpdate = Update
 
 /** 每日自动校验时间点（时, 分）：上午 10:00、下午 16:00 */
 export const DAILY_CHECK_TIMES: ReadonlyArray<readonly [number, number]> = [
@@ -102,7 +103,12 @@ const upToDate = ref(false)
 const devBuild = ref(false)
 const dismissedVersion = ref<string>('')
 
-/** JS 侧 check() 返回的 Update 对象；下载失败时保留，供「重试」断点续传 */
+/** 开发者模式：开着就收内测版，关着只收正式版（持久化到 config.json） */
+const developerMode = ref(false)
+/** 当前生效的更新通道：由 developerMode 直接派生，检查命令只认它 */
+const channel = computed<UpdateChannel>(() => (developerMode.value ? 'beta' : 'stable'))
+
+/** 后端 `update_check` 返回的 Update 对象（rid 对应 Rust 侧资源）；下载失败时保留，供「重试」断点续传 */
 let pending: PendingUpdate | null = null
 let scheduleTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -137,6 +143,23 @@ function dismissCurrent() {
 }
 
 /**
+ * 开关开发者模式（= 切换内测 / 正式通道）。
+ *
+ * 只有值真的变了才清状态，避免每次启动都白丢一次检查结果。
+ * 注意这里不主动检查：调用方（App.vue 启动 / 设置页切换）自己决定何时查，
+ * 否则启动时会查两遍。
+ */
+function setDeveloperMode(enabled: boolean) {
+  if (developerMode.value === enabled) return
+  developerMode.value = enabled
+  closePending()
+  reset()
+  // 换了通道，之前的「忽略此版本」不应该继续压住新通道的提示
+  dismissedVersion.value = ''
+  void safeSet(DISMISS_KEY, '')
+}
+
+/**
  * 检查更新。
  * silent 用于启动时、每日定时检查与设置页自动补查：没有新版本或检查失败都回到 idle，
  * 不把「已是最新 / 重试」这类瞬态文案留在标题栏上；设置页仍可通过 upToDate 判断结果。
@@ -151,7 +174,7 @@ async function checkUpdate(options: { silent?: boolean } = {}): Promise<UpdateIn
   percentage.value = 0
   resumedFrom.value = 0
   try {
-    const update = await check({ timeout: CHECK_TIMEOUT_MS })
+    const update = await checkUpdateForChannel(channel.value, CHECK_TIMEOUT_MS)
     if (!update) {
       closePending()
       info.value = null
@@ -323,6 +346,8 @@ const updaterApi = {
   lastCheckedAt,
   upToDate,
   devBuild,
+  developerMode,
+  setDeveloperMode,
   dismissedVersion,
   hasUpdatePrompt,
   dismissCurrent,
