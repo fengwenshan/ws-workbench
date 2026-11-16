@@ -230,10 +230,13 @@ async fn check_with_endpoints(
         .map_err(|err| format!("更新检查初始化失败：{err}"))?
         .check()
         .await
-        .map_err(|err| err.to_string())
+        .map_err(|err| format!("更新检查失败：{err}"))
 }
 
 /// 检查更新：`stable` 只看稳定清单；`beta` 同时看 beta 清单和稳定清单，取版本更高者。
+///
+/// `timeout` 是每个端点的 HTTP 请求超时，不是整个检查的总时限；beta 模式下两份
+/// 清单并发检查，总耗时不会把两个通道的端点串起来叠加。
 ///
 /// `Update` 放进 webview 的 resource table（与插件自带 `check` 命令一致），
 /// 后续 `update_download_resumed` / `update_install_resumed` 靠 rid 取回。
@@ -244,46 +247,58 @@ pub async fn update_check(
     timeout: Option<u64>,
 ) -> Result<Option<UpdateMetadata>, String> {
     let timeout = Duration::from_millis(timeout.unwrap_or(10_000));
-    let endpoints = configured_endpoints(&webview.app_handle());
+    let endpoints = configured_endpoints(webview.app_handle());
+
+    // 两个通道各自对应一份清单，互相独立：beta 模式先把 beta 检查丢到后台任务，
+    // 再查稳定清单，两份清单并发跑，耗时不会按通道叠加。
+    // （tokio 只是 dev-dependency，正式代码里用不了 tokio::join!，改用 Tauri 运行时。）
+    let beta_task = if channel == "beta" {
+        let webview = webview.clone();
+        let beta_endpoints = derive_beta_endpoints(&endpoints);
+        Some(tauri::async_runtime::spawn(async move {
+            check_with_endpoints(&webview, Some(beta_endpoints), timeout).await
+        }))
+    } else {
+        None
+    };
+    let stable_result = check_with_endpoints(&webview, None, timeout).await;
 
     // 稳定清单：网络/解析错误先记下来，只有 beta 也查不到时才把错误抛给界面
     let mut stable_error: Option<String> = None;
-    let stable_update = match check_with_endpoints(&webview, None, timeout).await {
+    let stable_update = match stable_result {
         Ok(update) => update,
         Err(err) => {
             stable_error = Some(err);
             None
         }
     };
-
-    let beta_update = if channel == "beta" {
-        let beta_endpoints = derive_beta_endpoints(&endpoints);
-        // beta 清单缺失 / 没有本平台条目 / 超时，一律当「没有 beta 更新」，不打断稳定检查
-        check_with_endpoints(&webview, Some(beta_endpoints), timeout)
-            .await
-            .unwrap_or(None)
-    } else {
-        None
+    // beta 任务出错（JoinError / 清单请求失败）/ 清单缺失 / 没有本平台条目 / 超时，
+    // 一律当「没有 beta 更新」，不打断稳定检查
+    let beta_update = match beta_task {
+        Some(task) => task.await.unwrap_or(Ok(None)).unwrap_or(None),
+        None => None,
     };
 
     let chosen = choose_channel(
         beta_update.as_ref().map(|update| update.version.as_str()),
         stable_update.as_ref().map(|update| update.version.as_str()),
     );
-    let update = match chosen {
-        Some("beta") => beta_update.expect("choose_channel 选了 beta 却没有 beta_update"),
-        Some(_) => stable_update.expect("choose_channel 选了 stable 却没有 stable_update"),
-        None => {
+    let (update, chosen_channel) = match (chosen, beta_update, stable_update) {
+        (Some("beta"), Some(update), _) => (update, "beta"),
+        (Some("stable"), _, Some(update)) => (update, "stable"),
+        (None, _, _) => {
             return match stable_error {
                 Some(err) => Err(err),
                 // beta 通道里还没有构建过任何包时，这属于正常状态
                 None => Ok(None),
             };
         }
+        // choose_channel 只会返回上面三种结果；真走到这里说明内部状态对不上，
+        // 不能 panic：async 命令里 panic 会让前端的 invoke promise 永远不落定。
+        _ => return Err("更新检查内部错误：通道与结果不一致".into()),
     };
-    let chosen_channel = chosen.expect("上面已经处理 None");
 
-    // 清单里的 pub_date 就是插件会格式化出来的同一个值，直接取字符串，避免再引 time crate
+    // 清单里本来就是 RFC3339 字符串，直接透传原值；不需要直接依赖 time。
     let date = update
         .raw_json
         .get("pub_date")
@@ -1111,6 +1126,8 @@ mod tests {
     fn choose_channel_covers_fallback_cases() {
         // beta 清单 404 / 没有本平台条目：退回稳定清单
         assert_eq!(choose_channel(None, Some("1.0.18")), Some("stable"));
+        // 只有 beta 清单有更新：走 beta
+        assert_eq!(choose_channel(Some("1.0.19-beta.1"), None), Some("beta"));
         // 两个清单都有：beta 严格更高才用 beta
         assert_eq!(
             choose_channel(Some("1.0.19-beta.1"), Some("1.0.18")),
@@ -1119,6 +1136,11 @@ mod tests {
         // 正式版追上 beta 线：beta 用户升到正式版（1.0.18 > 1.0.18-beta.14）
         assert_eq!(
             choose_channel(Some("1.0.18-beta.14"), Some("1.0.18")),
+            Some("stable")
+        );
+        // 版本相同（例如 beta 清单回落到同一个正式版）：持平取稳定版
+        assert_eq!(
+            choose_channel(Some("1.0.18"), Some("1.0.18")),
             Some("stable")
         );
         // 两个都没有：没有更新可装
