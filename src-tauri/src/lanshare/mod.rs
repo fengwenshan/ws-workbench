@@ -12,6 +12,7 @@
 //! 事件发送统一走 `Option<AppHandle>`：命令和后台线程传 `Some`，测试传 `None`，
 //! 这样测试不依赖 Tauri 运行时。
 
+pub(crate) mod chat_store;
 pub(crate) mod client;
 pub(crate) mod discovery;
 pub(crate) mod protocol;
