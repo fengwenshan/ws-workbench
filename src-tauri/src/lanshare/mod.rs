@@ -680,8 +680,12 @@ impl LanShareState {
         if peer_id.is_empty() {
             return Err("缺少设备标识".to_string());
         }
-        self.chat_store()?.mark_read(peer_id)?;
-        emit_chat(&self.inner, Some(app), peer_id, "read");
+        let changed = self.chat_store()?.mark_read(peer_id)?;
+        // 只有真的清掉了未读才推事件：否则前端「收到消息→标已读→收到 read 事件→
+        // 再标已读」会来回触发，形成事件循环
+        if changed {
+            emit_chat(&self.inner, Some(app), peer_id, "read");
+        }
         Ok(())
     }
 

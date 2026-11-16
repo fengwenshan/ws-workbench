@@ -678,14 +678,16 @@ impl ChatStore {
     }
 
     /// 清空未读
-    pub fn mark_read(&self, peer_id: &str) -> Result<(), String> {
+    /// 清空未读；返回是否真的从「有未读」变成 0（避免前端反复触发已读事件）。
+    pub fn mark_read(&self, peer_id: &str) -> Result<bool, String> {
         let conn = self.connect()?;
-        conn.execute(
-            "UPDATE lan_share_conversations SET unread = 0 WHERE id = ?1",
-            rusqlite::params![peer_id],
-        )
-        .map_err(|e| format!("清零未读失败: {}", e))?;
-        Ok(())
+        let changed = conn
+            .execute(
+                "UPDATE lan_share_conversations SET unread = 0 WHERE id = ?1 AND unread <> 0",
+                rusqlite::params![peer_id],
+            )
+            .map_err(|e| format!("清零未读失败: {}", e))?;
+        Ok(changed > 0)
     }
 
     /// 删除会话及其全部消息（仅本机）
@@ -976,7 +978,8 @@ mod tests {
             .unwrap();
         assert_eq!(store.get_conversation(PEER).unwrap().unwrap().unread, 2);
 
-        store.mark_read(PEER).unwrap();
+        assert!(store.mark_read(PEER).unwrap(), "有未读时应报告发生变化");
+        assert!(!store.mark_read(PEER).unwrap(), "已是 0 时不应再报告变化");
         assert_eq!(store.get_conversation(PEER).unwrap().unwrap().unread, 0);
         // 已读之后再收到消息，未读从 0 重新计数
         store

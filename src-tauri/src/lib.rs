@@ -861,6 +861,8 @@ fn toggle_quick_panel_with_mode<R: Runtime>(
     rect: tauri::Rect,
     messages: bool,
 ) {
+    // 先记模式再建窗口：首次创建时前端挂载后 take_mode 要能读到正确初值
+    QUICK_PANEL_MESSAGES_MODE.store(messages, std::sync::atomic::Ordering::Relaxed);
     let Some(window) = ensure_quick_panel(app) else {
         return;
     };
@@ -873,8 +875,6 @@ fn toggle_quick_panel_with_mode<R: Runtime>(
     if hidden_at != 0 && unix_millis().saturating_sub(hidden_at) < QUICK_PANEL_TOGGLE_GRACE_MS {
         return;
     }
-
-    QUICK_PANEL_MESSAGES_MODE.store(messages, std::sync::atomic::Ordering::Relaxed);
 
     let Some(placement) = quick_panel_placement(app, &window, rect)
         .or_else(|| fallback_placement(app, &window, rect))

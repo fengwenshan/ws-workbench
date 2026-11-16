@@ -363,9 +363,11 @@ export function useLanShareChat(isActive: () => boolean) {
     if (event.kind === 'message' && event.direction === 'in') playMessageSound()
     if (!isActive()) return
     if (event.peer_id !== activePeerId.value) return
+    // 已读事件只影响会话列表角标；再刷新消息/再标已读会和后端来回触发
+    if (event.kind === 'read') return
     scheduleMessagesRefresh()
-    // 只在聊天页可见时清未读：停在设置页说明用户还没看到新气泡
-    if (event.kind !== 'deleted' && pane.value === 'chat') void markRead(event.peer_id)
+    // 只在「收到新消息」且聊天页可见时清未读：停在设置页说明用户还没看到新气泡
+    if (event.kind === 'message' && pane.value === 'chat') void markRead(event.peer_id)
   }
 
   /**
