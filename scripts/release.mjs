@@ -11,7 +11,8 @@
  *   node scripts/release.mjs --target x86_64-apple-darwin     # 在 Apple Silicon 上交叉编 Intel 版
  *   node scripts/release.mjs --target aarch64-apple-darwin    # Apple Silicon 版
  *   node scripts/release.mjs --beta           # beta 通道：只发 Gitee（需要 GITEE_TOKEN）
- *   node scripts/release.mjs --beta --no-publish   # 离线只构建 beta 包，不联网发布
+ *   node scripts/release.mjs --beta --no-publish   # 只构建 beta 包，不发布；
+ *                                            # 版本解析仍可能访问 Gitee，完全离线请加 --version
  *
  * Windows 的安装包（NSIS 的 exe + MSI）必须在 Windows 主机上构建：Tauri 打 MSI
  * 依赖 WiX，跨平台交叉编译拿不到；脚本会自动把 exe 作为更新载荷、MSI 作为
@@ -40,7 +41,8 @@
  * beta 通道（--beta）是例外：只发 Gitee，完全不碰 GitHub。构建当前平台的签名包、
  * 写 release/beta-latest.json，再直接调 scripts/gitee-sync.mjs --beta 上传并合并
  * Gitee 上的 updates/beta/latest.json。发布需要 GITEE_TOKEN；加 --no-publish
- * （离线路径）时只构建、不读写远端，也不做回滚预检。
+ * 只跳过发布（不带 --version 时版本解析仍可能访问 Gitee；要完全离线请同时传
+ * --version），也不做回滚预检。
  */
 import { execFileSync } from 'node:child_process'
 import {
@@ -1063,7 +1065,7 @@ async function releaseBeta() {
   log(`平台: ${platform.key} (${platform.label})`)
 
   // 显式 --version 通常是补平台 / 补发：先比 Gitee 上的 beta 版本，别等构建完才被拦。
-  // --no-publish 是离线路径，不碰网络。
+  // --no-publish 只跳过发布；不带 --version 时解析版本仍会访问 Gitee。
   if (CLI_VERSION && !SKIP_PUBLISH) await assertBetaNotRollback(CLI_VERSION)
 
   const buildStartedAt = Date.now()

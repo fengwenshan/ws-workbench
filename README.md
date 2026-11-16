@@ -427,6 +427,7 @@ pnpm package:local -- --open              # 复制完打开所在文件夹
 | --- | --- |
 | `TAURI_SIGNING_PRIVATE_KEY` | 更新签名私钥内容，不设时回退读 `~/.tauri/ws-workbench.key` |
 | `GITHUB_TOKEN` | GitHub 令牌（CI 里由 Actions 注入），创建发行版、上传附件、推送更新清单必需 |
+| `GITEE_TOKEN` | Gitee 私人令牌（`projects` 权限），`pnpm release:beta` 读写 Gitee 清单和发行版必需；默认空（beta 必填，稳定版由 CI 提供） |
 | `TAURI_BUNDLES=app` | 只打 app、跳过 Tauri 的 dmg 打包脚本，受限环境配 `--dmg` 使用 |
 
 ### 内测（beta）通道
@@ -435,7 +436,8 @@ pnpm package:local -- --open              # 复制完打开所在文件夹
 
 - **beta 版本号**：`tauri.conf.json` 的 `version` 是 base（如 `1.0.25`），每次发布自动加成
   `1.0.25-beta.N`（N 取 Gitee 上已有的最大值 + 1），构建时用 `tauri build --config` 注入。
-- **发布 beta**：在 `beta` 分支上 `pnpm release:beta`。脚本会构建当前平台、签名、把产物和
+- **发布 beta**：在 `beta` 分支上 `GITEE_TOKEN=... pnpm release:beta`（需要一个有 `projects`
+  权限的 Gitee 令牌）。脚本会构建当前平台、签名、把产物和
   `updates/beta/latest.json` 只发到 Gitee（beta 不进 GitHub、不触发 GitHub 构建）。
   Windows 的 exe/msi、Mac 的 Intel 版在各自机器上 checkout 同一个提交，用同一个
   `--version` 再跑一次，清单会按平台补齐。
@@ -448,8 +450,9 @@ pnpm package:local -- --open              # 复制完打开所在文件夹
   生效通道只看这个开关，不按安装版本推断；手动装过 beta 包但没开开关的用户只会收到正式版。
 - **救火**：beta 清单写坏、或想临时暂停内测，直接在 Gitee 上编辑 / 删除
   `updates/beta/latest.json` 即可：beta 用户下一次检查会自动回退稳定清单，不报错也不降级。
-  正式版发坏时，修好代码和 `tauri.conf.json` 版本后 push `main`（preflight 会认为该版本已
-  发布而跳过），再用 Actions 的 `workflow_dispatch` + `force` 重建当前版本。
+  正式版发坏时，修好代码但**不改** `tauri.conf.json` 版本，push `main` 会被 preflight 判为
+  已发布而跳过，需用 Actions 的 `workflow_dispatch` + `force` 重建该版本；如果改了版本号，
+  push `main` 会正常自动发版，不需要 force。
 - **顺序要求**：每次正式版发完后，beta 分支要把 `tauri.conf.json` 的版本提到正式版之上，
   否则 beta 线会被正式版反超，内测用户提前「升级」到正式版后就再也收不到 beta。
 
@@ -483,7 +486,7 @@ macOS 两个架构都在 `macos-latest`（arm64）上跑，Intel 版用 `--targe
 
 两个构建 job 会同时改 `updates/latest.json`，脚本用「快进到远端最新 → 以远端为基线合并本平台条目 → 推送被拒就撤销重试」来避免互相覆盖。CI 自己推回 `main` 的清单提交带 `[skip ci]`，且 preflight 判断该版本已发布就跳过构建，不会自触发。
 
-三个构建 job 之后还有一个串行的 `gitee-sync` job（`needs: [macos, windows]`）：`scripts/gitee-sync.mjs` 把三份更新载荷**和手工安装包（两个 dmg + msi）**传到 Gitee 同名 tag 的发行版，再把 Gitee 仓库里和 GitHub `main` 上的两份 `updates/latest.json` 的下载地址都改成 Gitee。dmg / msi 不在更新清单里，只是给国内用户手动下载安装用，缺了只告警、不影响发版。它需要：
+三个构建 job 之后还有一个串行的 `gitee-sync` job（`needs: [preflight, macos, windows]`）：`scripts/gitee-sync.mjs` 把三份更新载荷**和手工安装包（两个 dmg + msi）**传到 Gitee 同名 tag 的发行版，再把 Gitee 仓库里和 GitHub `main` 上的两份 `updates/latest.json` 的下载地址都改成 Gitee。dmg / msi 不在更新清单里，只是给国内用户手动下载安装用，缺了只告警、不影响发版。它需要：
 
 - 仓库密钥 `GITEE_TOKEN`：Gitee → 设置 → 私人令牌，勾选 `projects`（仓库读写）权限
 - 一个**公开**的 Gitee 仓库：默认 `feng_wenshan/ws-workbench`，可用仓库变量 `GITEE_REPO` 覆盖；清单分支默认取仓库的默认分支（Gitee 新建仓库默认是 `master`），可用 `GITEE_BRANCH` 覆盖。**客户端端点里的分支名必须和它一致**

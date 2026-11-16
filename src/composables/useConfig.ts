@@ -14,7 +14,7 @@ export function useConfig() {
     vpn_rule_sets: [],
     vpn_active_profile_id: '',
     default_upload_dir: null,
-    // 先给默认值：配置还没加载完就保存时，不会把已有的 developer_mode 丢掉
+    // 给初始快照一个合法值，避免保存早于加载时缺字段
     developer_mode: false,
   })
   const selectedProjectId = ref<string | null>(null)

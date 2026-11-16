@@ -6,8 +6,8 @@
 //! 下次同版本调用接着下；下完用 minisign 校验签名，通过后落成成品文件，
 //! 再交给插件的 `Update::install` 安装。
 //!
-//! `Update` 由前端 `@tauri-apps/plugin-updater` 的 `check()` 放进 webview 的
-//! resource table，因此命令里用 rid 取回它，不重复 check。
+//! `Update` 由本文件的 `update_check`（按通道选清单，替代插件的 `check()`）放进
+//! webview 的 resource table，因此命令里用 rid 取回它，不重复检查。
 
 use std::{
     collections::hash_map::DefaultHasher,
@@ -149,7 +149,7 @@ pub async fn update_install_resumed(
         .map_err(|err| format!("安装更新失败：{err}"))
 }
 
-/// 从 webview 的 resource table 取回前端 check() 拿到的 `Update`。
+/// 从 webview 的 resource table 取回 `update_check` 放进去的 `Update`。
 fn take_update(webview: &Webview, rid: ResourceId, version: &str) -> Result<Update, String> {
     let update = webview
         .resources_table()

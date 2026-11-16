@@ -620,6 +620,11 @@ async function handleChangeDeveloperMode(enabled: boolean) {
     message.error(`保存开发者模式失败: ${err}`);
   }
   setDeveloperMode(enabled);
+  if (!enabled && isPrerelease.value) {
+    message.info(
+      "当前已安装内测版；关闭开发者模式不会降级，下一个正式版发布后会自动回到稳定版",
+    );
+  }
   if (await isDevBuild()) return;
   await checkUpdate({ silent: true });
 }
