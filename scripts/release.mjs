@@ -400,7 +400,21 @@ function build() {
     log(`已补充 PATH: ${extra.join(', ')}`)
   }
 
-  execFileSync(process.execPath, [TAURI_CLI, ...args], { cwd: ROOT, stdio: 'inherit', env })
+  try {
+    execFileSync(process.execPath, [TAURI_CLI, ...args], { cwd: ROOT, stdio: 'inherit', env })
+  } catch (err) {
+    // 签名私钥设了密码时，Tauri 会交互式要密码；密码不对只会甩一行
+    // "incorrect updater private key password"，很容易被误当成构建失败。
+    if (!NO_SIGN && !process.env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD) {
+      console.error(
+        '\n提示：如果签名私钥设了密码，Tauri 会交互式询问；密码不对就会在这里失败。\n' +
+          '  把正确密码写进 env.local（不要提交，已被 .gitignore 忽略）：\n' +
+          '    TAURI_SIGNING_PRIVATE_KEY_PASSWORD=你的密码\n' +
+          '  或者临时：TAURI_SIGNING_PRIVATE_KEY_PASSWORD=xxx pnpm release:beta\n'
+      )
+    }
+    throw err
+  }
 }
 
 function findArtifacts(platform, version) {

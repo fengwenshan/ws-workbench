@@ -426,6 +426,7 @@ pnpm package:local -- --open              # 复制完打开所在文件夹
 | 变量 | 用途 |
 | --- | --- |
 | `TAURI_SIGNING_PRIVATE_KEY` | 更新签名私钥内容，不设时回退读 `~/.tauri/ws-workbench.key` |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | 更新签名私钥的密码（私钥设了密码时必需；建议写进 `env.local`，不要提交） |
 | `GITHUB_TOKEN` | GitHub 令牌（CI 里由 Actions 注入），创建发行版、上传附件、推送更新清单必需 |
 | `GITEE_TOKEN` | Gitee 私人令牌（`projects` 权限），`pnpm release:beta` 读写 Gitee 清单和发行版必需；默认空（beta 必填，稳定版由 CI 提供） |
 | `TAURI_BUNDLES=app` | 只打 app、跳过 Tauri 的 dmg 打包脚本，受限环境配 `--dmg` 使用 |
