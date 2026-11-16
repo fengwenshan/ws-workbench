@@ -1419,7 +1419,6 @@ pub fn run() {
             commands::hosts_open_file_dir,
             // 局域网分享（2026-11-13 设计）：快照 / 启停 / 设置 / 接收确认 / 发送 / 清空记录
             commands::lan_share_snapshot,
-            commands::lan_share_set_enabled,
             commands::lan_share_set_alias,
             commands::lan_share_set_download_dir,
             commands::lan_share_respond_offer,
@@ -1436,7 +1435,6 @@ pub fn run() {
             commands::lan_share_send_dropped_files,
             // 局域网分享（2026-11-16 视觉升级）：本机备注 / 接收确认开关 / 打开文件所在目录
             commands::lan_share_set_peer_remark,
-            commands::lan_share_set_require_accept,
             commands::lan_share_open_file_dir,
             // 更新检查：按通道（stable / beta）选清单，供前端替换插件 check()
             updates::update_check,

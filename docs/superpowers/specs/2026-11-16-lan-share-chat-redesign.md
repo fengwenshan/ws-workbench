@@ -1,5 +1,7 @@
 # 局域网分享：机器列表 + 聊天式改造设计
 
+> **2026-11-16 变更（LANLink 刷新）**：`lan_share_set_enabled` 与 `lan_share_set_require_accept` 命令已移除；端口常开，「接收前确认」功能下线（始终直接接收）。以 `2026-11-16-lanlink-ui-refresh.md` 为准。
+
 - 日期：2026-11-16
 - 基线：`beta` 分支（`docs/superpowers/specs/2026-11-13-lan-share-design.md` 的后续改造）
 - 目标：把「附近设备卡片 + 待接收 + 发送进度」的工具页，改成「左侧机器列表 + 右侧聊天/文件」的会话式页面；机器身份改为物理地址（MAC）；修复两台在线设备仍显示灰点的缺陷。

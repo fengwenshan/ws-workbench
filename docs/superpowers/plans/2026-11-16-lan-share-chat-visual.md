@@ -1,5 +1,7 @@
 # 局域网分享聊天区视觉升级（钉钉式）实施计划
 
+> **2026-11-16 变更（LANLink 刷新）**：`lan_share_set_enabled` 与 `lan_share_set_require_accept` 命令已移除；端口常开，「接收前确认」功能下线（始终直接接收）。以 `2026-11-16-lanlink-ui-refresh.md` 为准。
+
 - 日期：2026-11-16
 - 设计：`docs/superpowers/specs/2026-11-16-lan-share-chat-visual.md`
 - 分支：beta

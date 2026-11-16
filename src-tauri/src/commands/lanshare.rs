@@ -18,12 +18,6 @@ pub fn lan_share_snapshot(app: AppHandle) -> Result<LanShareSnapshot, String> {
     Ok(state(&app)?.snapshot())
 }
 
-/// 开启 / 关闭功能；启动失败把原因放进快照的 `last_error`
-#[tauri::command]
-pub fn lan_share_set_enabled(app: AppHandle, enabled: bool) -> Result<LanShareSnapshot, String> {
-    Ok(state(&app)?.set_enabled(&app, enabled))
-}
-
 /// 修改设备名（空串回退主机名）
 #[tauri::command]
 pub fn lan_share_set_alias(app: AppHandle, alias: String) -> Result<LanShareSnapshot, String> {
@@ -137,15 +131,6 @@ pub fn lan_share_set_peer_remark(
     remark: String,
 ) -> Result<LanShareSnapshot, String> {
     state(&app)?.set_peer_remark(&app, &peer_id, &remark)
-}
-
-/// 接收文件前是否需要本机确认；默认 false（直接接收，不弹接受框）。
-#[tauri::command]
-pub fn lan_share_set_require_accept(
-    app: AppHandle,
-    require_accept: bool,
-) -> Result<LanShareSnapshot, String> {
-    state(&app)?.set_require_accept(&app, require_accept)
 }
 
 /// 打开文件所在目录（接收到的文件、发送的源文件都可以用）。

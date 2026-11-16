@@ -584,6 +584,12 @@ impl LanShareState {
             }
         }
 
+        // 端口常开：不再提供关闭入口；老配置里的 enabled=false / require_accept=true
+        // 一并纠正并回写（接收文件前确认功能已移除，始终直接接收）。
+        if enforce_always_on(&mut loaded) {
+            let _ = settings::save(app, &loaded);
+        }
+
         let default_dir = default_download_dir(app);
         let state = Self::with_settings(loaded, default_dir);
 
@@ -795,61 +801,17 @@ impl LanShareState {
         Ok(message)
     }
 
-    /// 启停功能。启动失败时把原因写进 `last_error` 并把开关回退到关闭；
-    /// 仅仅是「设置存不下来」不会影响功能，只记 `warning`。
-    pub fn set_enabled(&self, app: &AppHandle, enabled: bool) -> LanShareSnapshot {
-        if enabled {
-            match self.start(app) {
-                Ok(()) => {
-                    self.save_enabled(app, true);
-                }
-                Err(err) => {
-                    self.stop_runtime();
-                    {
-                        let mut inner = lock_inner(&self.inner);
-                        inner.last_error = Some(err);
-                    }
-                    self.save_enabled(app, false);
-                }
-            }
-        } else {
-            // stop_runtime 已清空待接收 / 会话，进行中的 HTTP 线程收到通道断开后返回 403
-            self.stop_runtime();
-            self.save_enabled(app, false);
-            emit_snapshot(&self.inner, Some(app));
-        }
-        self.snapshot()
-    }
-
-    /// 把「开/关」写进设置并落盘。
-    ///
-    /// 现场问题：保存瞬时被拒（`拒绝访问 os error 5`）时，原来的实现在
-    /// `mutate_settings` 里把错误写进 `last_error`，界面于是显示「启动失败」，
-    /// 而服务其实已经起来了 —— 又因为提示语固定是「请检查端口 / 防火墙」，
-    /// 排查方向直接被带偏。现在保存失败只记 `warning`，并且不影响运行状态。
-    fn save_enabled(&self, app: &AppHandle, enabled: bool) {
-        {
-            let mut inner = lock_inner(&self.inner);
-            inner.settings.enabled = enabled;
-        }
-        self.persist_with_warning(app);
-    }
-
-    /// 冷启动恢复：设置里 enabled=true 时后台启动，失败只记录原因不阻断应用启动。
+    /// 冷启动恢复：端口常开，应用启动即监听；失败只记录原因并等下次冷启动重试，
+    /// 不阻断应用启动（也没有「关闭功能」入口）。
     pub fn restore_on_startup(&self, app: &AppHandle) {
-        if !lock_inner(&self.inner).settings.enabled {
-            return;
-        }
         match self.start(app) {
             Ok(()) => {}
             Err(err) => {
                 {
                     let mut inner = lock_inner(&self.inner);
-                    // 启动失败：开关回到关闭，页面显示原因；不阻断应用启动
-                    inner.settings.enabled = false;
+                    // enabled 保持 true：下次冷启动仍会尝试监听
                     inner.last_error = Some(err);
                 }
-                self.persist_with_warning(app);
                 emit_snapshot(&self.inner, Some(app));
             }
         }
@@ -939,22 +901,6 @@ impl LanShareState {
         // 存不下来只提示，不当成失败：名字已经生效了
         self.persist_with_warning(app);
         self.request_announce();
-        emit_snapshot(&self.inner, Some(app));
-        Ok(self.snapshot())
-    }
-
-    /// 接收文件前是否需要本机确认；默认 false（直接接收，不弹接受框）。
-    ///
-    /// 先克隆设置再写盘：不持锁做 store 文件 IO；保存失败时内存保持旧值。
-    pub fn set_require_accept(
-        &self,
-        app: &AppHandle,
-        require_accept: bool,
-    ) -> Result<LanShareSnapshot, String> {
-        let mut next = lock_inner(&self.inner).settings.clone();
-        next.require_accept = require_accept;
-        settings::save(app, &next)?;
-        lock_inner(&self.inner).settings.require_accept = require_accept;
         emit_snapshot(&self.inner, Some(app));
         Ok(self.snapshot())
     }
@@ -1352,6 +1298,23 @@ fn refresh_dock_badge(inner: &InnerRef, app: &AppHandle) {
 #[cfg(not(target_os = "macos"))]
 fn refresh_dock_badge(_inner: &InnerRef, _app: &AppHandle) {}
 
+/// 端口常开策略：强制 enabled=true、require_accept=false。
+///
+/// 返回是否真的改过（调用方据此决定是否回写设置文件）。老版本可能存过
+/// enabled=false / require_accept=true；新版本没有关闭入口，启动时必须纠正。
+pub(crate) fn enforce_always_on(settings: &mut LanShareSettings) -> bool {
+    let mut corrected = false;
+    if !settings.enabled {
+        settings.enabled = true;
+        corrected = true;
+    }
+    if settings.require_accept {
+        settings.require_accept = false;
+        corrected = true;
+    }
+    corrected
+}
+
 /// 设备名清洗：去首尾空白；超过 64 个字符截断（announce 报文别太长）。
 pub(crate) fn normalize_alias(alias: &str) -> String {
     let alias = alias.trim();
@@ -1692,6 +1655,22 @@ mod tests {
         assert_eq!(snapshot.port, Some(53317));
         assert!(snapshot.last_error.is_none(), "保存失败不能算启动失败");
         assert!(snapshot.warning.is_some(), "要让用户看到「设置没存住」");
+    }
+
+    #[test]
+    fn always_on_settings_are_enforced() {
+        let mut settings = LanShareSettings::default();
+        assert!(settings.enabled);
+        assert!(!settings.require_accept);
+        assert!(!enforce_always_on(&mut settings), "默认设置无需纠正");
+
+        // 老配置：曾经关闭过 / 开过「接收前确认」→ 启动时纠正
+        settings.enabled = false;
+        settings.require_accept = true;
+        assert!(enforce_always_on(&mut settings));
+        assert!(settings.enabled);
+        assert!(!settings.require_accept);
+        assert!(!enforce_always_on(&mut settings), "纠正后幂等");
     }
 
     #[test]
