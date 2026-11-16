@@ -583,7 +583,9 @@ async function ensureGithubRelease(tag) {
         tag_name: tag,
         name: tag,
         body: buildChangelog(tag),
-        target_commitish: BRANCH,
+        // CI 由 push main 触发，显式挂到当前提交：默认分支上并发提交时，
+        // 不写这个字段可能把 tag 挂到别的提交。本地发布没有 GITHUB_SHA，退回 BRANCH。
+        target_commitish: process.env.GITHUB_SHA || BRANCH,
         prerelease: false,
       }),
     })
