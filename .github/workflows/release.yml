@@ -37,8 +37,9 @@ name: Release
 # 需要额外配一个仓库密钥 GITEE_TOKEN（Gitee 私人令牌，projects 权限），
 # 以及一个公开的 Gitee 仓库（默认 feng_wenshan/ws-workbench）。
 #
-# 关于提交回环：CI 提交更新清单时带上 [skip ci]，且本工作流只由 tag 触发，
-# 推回 main 的提交不会再次触发构建。
+# 关于提交回环：本工作流由 push main 触发，但 CI 提交清单时带上 [skip ci]；
+# 且 preflight 只在 tauri.conf.json 的版本还没有对应的 GitHub 发行版时才继续构建，
+# 所以清单提交和文档改动不会重复发版。
 #
 # 为什么是三个 job（mac 两个架构 + windows）：
 #   * macOS 的 Intel 版在 arm64 runner 上交叉编译（--target x86_64-apple-darwin），
