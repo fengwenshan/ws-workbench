@@ -861,12 +861,18 @@ fn toggle_quick_panel_with_mode<R: Runtime>(
     rect: tauri::Rect,
     messages: bool,
 ) {
+    // 面板可见且当前是普通模式、这次又要消息模式：切页签而不是收起（钉钉式）
+    let was_messages = QUICK_PANEL_MESSAGES_MODE.load(std::sync::atomic::Ordering::Relaxed);
     // 先记模式再建窗口：首次创建时前端挂载后 take_mode 要能读到正确初值
     QUICK_PANEL_MESSAGES_MODE.store(messages, std::sync::atomic::Ordering::Relaxed);
     let Some(window) = ensure_quick_panel(app) else {
         return;
     };
     if window.is_visible().unwrap_or(false) {
+        if messages && !was_messages {
+            emit_quick_panel_mode(app, true);
+            return;
+        }
         let _ = window.hide();
         return;
     }
