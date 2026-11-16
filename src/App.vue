@@ -37,7 +37,7 @@ import LanSharePanel from "@/components/lanshare/LanSharePanel.vue";
 import QuickOpenPalette from "@/components/QuickOpenPalette.vue";
 import AttachmentPreview from "@/components/AttachmentPreview.vue";
 import { detectVcsMany } from "@/api/project";
-import { getAppName, isDevBuild, isPrereleaseBuild } from "@/api/app";
+import { getAppName, getAppVersion, isDevBuild, isPrereleaseBuild } from "@/api/app";
 
 /** 标题栏上的应用名：开发构建带 -dev，发布版是 ws-workbench（由 Rust 侧按构建给出） */
 const appName = ref("ws-workbench");
@@ -51,8 +51,12 @@ void isDevBuild().then((value) => {
   devBuild.value = value;
 });
 
-/** 当前安装的是内测版：标题栏更新按钮旁边挂 beta 标签 */
+/** 当前安装的是内测版：标题栏更新按钮旁边挂 beta 标签，标签里带完整版本号 */
 const isPrerelease = ref(false);
+/** 当前安装的完整版本号（如 1.0.25-beta.2）；取不到时为空串 */
+const appVersion = ref("");
+const betaTagLabel = computed(() => (appVersion.value ? `beta v${appVersion.value}` : "beta"));
+const betaTagTitle = computed(() => (appVersion.value ? `内测版 v${appVersion.value}` : "内测版"));
 
 const {
   config,
@@ -434,6 +438,7 @@ async function initUpdater() {
   // 启动时只同步通道，不能走 setDeveloperMode：它会清掉「忽略此版本」，
   // 导致每次启动都把用户已经忽略的版本重新提示一遍。
   initDeveloperMode(config.value.developer_mode ?? false);
+  appVersion.value = await getAppVersion();
   isPrerelease.value = await isPrereleaseBuild();
   // 开发构建一律不查：裸二进制装不了更新（Windows 上会把 dev 可执行文件覆盖成发布版）
   if (await isDevBuild()) return;
@@ -740,7 +745,12 @@ async function handlePack(project: ProjectConfig, asZip: boolean = false) {
         >
           {{ updateButtonLabel }}
         </button>
-        <span v-if="isPrerelease" class="titlebar-dev-tag titlebar-beta-tag" title="内测版">beta</span>
+        <span
+          v-if="isPrerelease"
+          class="titlebar-dev-tag titlebar-beta-tag"
+          :title="betaTagTitle"
+          >{{ betaTagLabel }}</span
+        >
         <span v-if="devBuild" class="titlebar-dev-tag" title="开发构建">dev</span>
       </div>
       <div
