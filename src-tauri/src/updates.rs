@@ -26,7 +26,7 @@ use reqwest::{
 };
 use serde::Serialize;
 use tauri::{ipc::Channel, AppHandle, Manager, ResourceId, Webview};
-use tauri_plugin_updater::Update;
+use tauri_plugin_updater::{Update, UpdaterExt};
 
 /// 缓存目录里的两个文件名：`.part` 是下载中的半成品，另一个是校验通过的成品。
 const PART_NAME: &str = "update.part";
@@ -637,6 +637,44 @@ fn decode_base64_text(value: &str) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|err| err.to_string())
 }
 
+// ========== 更新通道（stable / beta） ==========
+
+/// 稳定清单在端点 URL 里的固定尾巴，beta 清单由它替换得到。
+const STABLE_MANIFEST_SUFFIX: &str = "/updates/latest.json";
+const BETA_MANIFEST_SUFFIX: &str = "/updates/beta/latest.json";
+
+/// 从配置的稳定端点派生出 beta 清单端点。
+///
+/// beta 安装包与清单只在 Gitee 发布（GitHub 只放正式版），所以这里只认 gitee.com；
+/// 以后要加别的镜像，把主机名补进这个过滤条件即可。
+fn derive_beta_endpoints(stable: &[Url]) -> Vec<Url> {
+    stable
+        .iter()
+        .filter(|url| url.host_str().map(|host| host == "gitee.com").unwrap_or(false))
+        .filter_map(|url| {
+            let text = url.as_str();
+            let prefix = text.strip_suffix(STABLE_MANIFEST_SUFFIX)?;
+            Url::parse(&format!("{prefix}{BETA_MANIFEST_SUFFIX}")).ok()
+        })
+        .collect()
+}
+
+/// 版本号比较（semver，支持 `-beta.N` 预发布）：`a > b` 返回 `Some(true)`。
+/// 解析失败返回 `None`，调用方按「不取 beta」处理。
+fn version_is_newer(a: &str, b: &str) -> Option<bool> {
+    let a = semver::Version::parse(a).ok()?;
+    let b = semver::Version::parse(b).ok()?;
+    Some(a > b)
+}
+
+/// 两个通道都查到更新时选哪个：beta 必须严格更高才用 beta，否则用稳定版。
+fn pick_channel(beta: &str, stable: &str) -> &'static str {
+    match version_is_newer(beta, stable) {
+        Some(true) => "beta",
+        _ => "stable",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -878,5 +916,55 @@ mod tests {
             let parsed = parse_content_range(value).map(|range| (range.start, range.total));
             assert_eq!(parsed, expected, "解析 {value:?} 出错");
         }
+    }
+
+    #[test]
+    fn derives_beta_endpoints_from_gitee_only() {
+        let stable: Vec<Url> = [
+            "https://gitee.com/feng_wenshan/ws-workbench/raw/master/updates/latest.json",
+            "https://gitee.com/feng_wenshan/ws-workbench/raw/main/updates/latest.json",
+            "https://raw.githubusercontent.com/fengwenshan/ws-workbench/main/updates/latest.json",
+        ]
+        .iter()
+        .map(|url| Url::parse(url).expect("测试端点"))
+        .collect();
+
+        let beta: Vec<String> = derive_beta_endpoints(&stable)
+            .iter()
+            .map(|url| url.to_string())
+            .collect();
+
+        assert_eq!(
+            beta,
+            vec![
+                "https://gitee.com/feng_wenshan/ws-workbench/raw/master/updates/beta/latest.json"
+                    .to_string(),
+                "https://gitee.com/feng_wenshan/ws-workbench/raw/main/updates/beta/latest.json"
+                    .to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn version_comparison_handles_prerelease() {
+        assert_eq!(version_is_newer("1.0.18", "1.0.18-beta.14"), Some(true));
+        assert_eq!(version_is_newer("1.0.18-beta.14", "1.0.18"), Some(false));
+        assert_eq!(
+            version_is_newer("1.0.18-beta.14", "1.0.18-beta.2"),
+            Some(true)
+        );
+        assert_eq!(
+            version_is_newer("1.0.18-beta.2", "1.0.18-beta.14"),
+            Some(false)
+        );
+        assert_eq!(version_is_newer("1.0.18", "1.0.18"), Some(false));
+        assert_eq!(version_is_newer("not-a-version", "1.0.18"), None);
+    }
+
+    #[test]
+    fn pick_channel_prefers_stable_on_tie_or_parse_error() {
+        assert_eq!(pick_channel("1.0.18-beta.14", "1.0.18"), "stable");
+        assert_eq!(pick_channel("1.0.19-beta.1", "1.0.18"), "beta");
+        assert_eq!(pick_channel("bad", "1.0.18"), "stable");
     }
 }
