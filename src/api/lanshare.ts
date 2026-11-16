@@ -208,6 +208,11 @@ export function deleteLanShareAttachments(peerId: string): Promise<number> {
   return invoke<number>('lan_share_delete_attachments', { peerId })
 }
 
+/** 删除单条聊天消息：只删本机记录，本机已收到的文件不删（后端删到空会话时连会话行一起删） */
+export function deleteLanShareMessage(peerId: string, messageId: string): Promise<void> {
+  return invoke<void>('lan_share_delete_message', { peerId, messageId })
+}
+
 /** 查询会话里本机收到的文件数量（右键菜单「删除附件」是否可用 / 删除弹窗文案） */
 export function getLanShareAttachmentCount(peerId: string): Promise<number> {
   return invoke<number>('lan_share_conversation_attachment_count', { peerId })

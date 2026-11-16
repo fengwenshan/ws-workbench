@@ -40,6 +40,8 @@ const emit = defineEmits<{
   'send-text': [text: string]
   'send-files': []
   retry: [message: ChatMessage]
+  /** 右键某条消息：转发给面板打开「删除消息」菜单 */
+  'message-menu': [message: ChatMessage, x: number, y: number]
   'accept-offer': [offer: PendingOffer]
   'reject-offer': [offer: PendingOffer]
   'delete-conversation': []
@@ -158,6 +160,7 @@ const { dragging, onPaste, onDragEnter, onDragOver, onDragLeave, onDrop } = useL
         :peer-id="peer.id"
         :peer-name="displayName"
         @retry="emit('retry', $event)"
+        @message-menu="(target, x, y) => emit('message-menu', target, x, y)"
         @accept-offer="emit('accept-offer', $event)"
         @reject-offer="emit('reject-offer', $event)"
       />

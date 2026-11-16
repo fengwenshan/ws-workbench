@@ -35,6 +35,8 @@ const emit = defineEmits<{
   retry: [message: ChatMessage]
   'accept-offer': [offer: PendingOffer]
   'reject-offer': [offer: PendingOffer]
+  /** 右键消息：只抛给上层，菜单与删除逻辑在 useLanShareMessageMenu */
+  'message-menu': [message: ChatMessage, x: number, y: number]
 }>()
 
 const scrollRef = ref<HTMLElement | null>(null)
@@ -105,6 +107,7 @@ watch(
         v-else-if="row.message"
         class="msg-row"
         :class="row.message.direction === 'out' ? 'is-out' : 'is-in'"
+        @contextmenu.prevent="emit('message-menu', row.message, $event.clientX, $event.clientY)"
       >
         <!-- 头像：自己人形、对方显示器；自己在右，对方在左 -->
         <LanAvatar class="msg-avatar" :self="row.message.direction === 'out'" />

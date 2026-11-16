@@ -4,6 +4,7 @@ import LanChatPane from './LanChatPane.vue'
 import LanShareSettings from './LanShareSettings.vue'
 import LanDeleteChatDialog from './LanDeleteChatDialog.vue'
 import LanPeerContextMenu from './LanPeerContextMenu.vue'
+import LanMessageContextMenu from './LanMessageContextMenu.vue'
 import { useLanShareChat } from './useLanShareChat'
 import { useLanShareNotify } from './useLanShareNotify'
 
@@ -53,6 +54,10 @@ const {
   deleteChatBusy,
   confirmDeleteChat,
   cancelDeleteChat,
+  messageMenu,
+  openMessageMenu,
+  closeMessageMenu,
+  requestDeleteMessage,
 } = useLanShareChat(() => props.active)
 
 // 免打扰开关与设置页共享同一份单例状态（右键菜单里的勾选态）
@@ -109,6 +114,7 @@ function toggleSettings() {
         @accept-offer="respondOffer($event, true)"
         @reject-offer="respondOffer($event, false)"
         @delete-conversation="requestDeleteChat()"
+        @message-menu="openMessageMenu"
         @save-remark="handleSavePeerRemark"
       />
     </section>
@@ -126,6 +132,16 @@ function toggleSettings() {
       @delete-attachments="requestDeleteAttachments"
       @toggle-dnd="toggleDnd"
       @close="closePeerMenu"
+    />
+
+    <!-- 消息右键菜单：只有「删除消息」（危险色） -->
+    <LanMessageContextMenu
+      v-if="messageMenu"
+      :message="messageMenu.message"
+      :x="messageMenu.x"
+      :y="messageMenu.y"
+      @delete="requestDeleteMessage"
+      @close="closeMessageMenu"
     />
 
     <!-- 删除聊天记录二次确认：有本机收到的文件时才出现「同时删除文件」复选框 -->

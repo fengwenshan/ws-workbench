@@ -21,6 +21,7 @@ import {
 } from '@/api/lanshare'
 import { playMessageSound } from './useLanShareNotify'
 import { useLanShareListMenu } from './useLanShareListMenu'
+import { useLanShareMessageMenu } from './useLanShareMessageMenu'
 import { createLanShareActions, errorText } from './useLanShareActions'
 import type { MergedPeer } from './types'
 
@@ -325,6 +326,15 @@ export function useLanShareChat(isActive: () => boolean) {
     refreshMessages,
   })
 
+  // 消息右键删除（补充需求 14）：菜单状态与删除流程单独成文件
+  const messageMenu = useLanShareMessageMenu({
+    mergedPeers,
+    activePeerId,
+    messages,
+    refreshConversations,
+    refreshMessages,
+  })
+
   function handleProgress(next: SendProgress) {
     const key = `${next.transfer_id}:${next.file_index}`
     const map = { ...progress.value, [key]: next }
@@ -452,5 +462,7 @@ export function useLanShareChat(isActive: () => boolean) {
     handleSavePeerRemark,
     // 左栏右键菜单 + 删除聊天记录 / 删除附件
     ...listMenu,
+    // 消息右键菜单 + 删除单条消息
+    ...messageMenu,
   }
 }
