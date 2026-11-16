@@ -85,6 +85,10 @@ const DIR = resolve(ROOT, argValue('--dir') || 'release-assets')
 const MANIFEST_FROM = argValue('--manifest') || ''
 const DRY_RUN = process.argv.includes('--dry-run')
 const NO_GITHUB = process.argv.includes('--no-github')
+/** beta 通道：产物和清单只发 Gitee，不碰 GitHub，也不读 GitHub 清单 */
+const BETA = process.argv.includes('--beta')
+/** beta 清单在 Gitee 仓库里的路径（相对仓库根）；稳定清单仍是 updates/latest.json */
+const BETA_MANIFEST = `${UPDATES_DIR}/beta/latest.json`
 /**
  * 补镜像时用：发行版上已有同名且大小一致的附件就跳过上传。
  * 发版流程不用它，发版要保证 Gitee 上就是这次构建的字节。
@@ -367,10 +371,46 @@ async function verifyRemote(url, size) {
   }
 }
 
+/** 读 Gitee 仓库里的清单；不存在（404/400）时返回 null。 */
+async function readGiteeManifest(branch, relPath) {
+  try {
+    const data = await gitee(`/repos/${GITEE_REPO}/contents/${relPath}`, { query: { ref: branch } })
+    if (!data || !data.content) return null
+    return JSON.parse(Buffer.from(data.content, 'base64').toString('utf8'))
+  } catch (err) {
+    if (err.status === 404 || err.status === 400) return null
+    throw err
+  }
+}
+
+/**
+ * 合并 beta 清单（与 spec 5.2 一致）：
+ * - 同版本 = 这次是「补齐平台」，保留其它平台已有条目；
+ * - 版本变了 = 只保留这次构建的平台，避免 beta.14 的清单里混进 beta.13 的签名/地址，
+ *   否则客户端会「提示 beta.14、下载 beta.13」，版本号不变又反复提示。
+ */
+function mergeBetaManifest(current, partial) {
+  const sameVersion = Boolean(current && current.version === partial.version)
+  const platforms = sameVersion
+    ? { ...(current.platforms || {}), ...(partial.platforms || {}) }
+    : { ...(partial.platforms || {}) }
+  return {
+    version: partial.version,
+    notes: partial.notes || `ws-workbench v${partial.version} (beta)`,
+    pub_date: partial.pub_date || new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
+    platforms,
+  }
+}
+
 /** 写 Gitee 仓库里的清单：有就 PUT（update，需要 sha），没有就 POST（create）。 */
-async function writeGiteeManifest(branch, manifest, label) {
+async function writeGiteeManifest(
+  branch,
+  manifest,
+  label,
+  relPath = `${UPDATES_DIR}/${ASSET_MANIFEST}`
+) {
   const content = Buffer.from(JSON.stringify(manifest, null, 2) + '\n').toString('base64')
-  const path = `/repos/${GITEE_REPO}/contents/${UPDATES_DIR}/${ASSET_MANIFEST}`
+  const path = `/repos/${GITEE_REPO}/contents/${relPath}`
   const message = `release: ${label}`
 
   let sha = ''
@@ -393,7 +433,7 @@ async function writeGiteeManifest(branch, manifest, label) {
       await gitee(path, { method: 'POST', form: { content, message } })
     }
   }
-  log(`已写入 Gitee 清单 ${UPDATES_DIR}/${ASSET_MANIFEST}（${label}）`)
+  log(`已写入 Gitee 清单 ${relPath}（${label}）`)
 }
 
 /** 把清单提交回 GitHub main：老客户端（只认 GitHub 端点）也能从 Gitee 下包。 */
@@ -479,7 +519,100 @@ function buildMirroredManifest(base, baseUrl, uploaded) {
   return { ...base, platforms }
 }
 
+/**
+ * beta 通道发布：只写 Gitee。
+ *
+ * 输入是 release.mjs 生成的「只含本平台」清单（--manifest）：签名在那边从 .sig 读好，
+ * 这里负责和 Gitee 上已有的 beta 清单按版本规则合并、上传本平台产物、写回清单。
+ * 平台补齐（Windows / Mac Intel）用同一个 --version 再跑一次即可。
+ */
+async function runBeta() {
+  if (!DRY_RUN && !GITEE_TOKEN) fail('beta 发布需要 GITEE_TOKEN（Gitee 私人令牌）')
+
+  const partial = readBaseManifest()
+  const version = (VERSION || partial.version || '').trim()
+  if (!/^\d+\.\d+\.\d+-beta\.\d+$/.test(version)) {
+    fail(`beta 版本号必须是 X.Y.Z-beta.N 形式: ${version}`)
+  }
+  if (partial.version !== version) {
+    fail(`清单版本(${partial.version})和指定版本(${version})不一致`)
+  }
+
+  const branch = await resolveBranch()
+  const tag = `v${version}`
+  const baseUrl = `${downloadBase()}/${tag}`
+  const remote = await readGiteeManifest(branch, BETA_MANIFEST)
+  const { found: assets, installers } = locateAssets(version)
+
+  if (DRY_RUN) {
+    log(`[dry-run] beta 版本 ${version}，合并后平台: ${Object.keys(partial.platforms || {}).join(', ')}`)
+    for (const [key, entry] of Object.entries(partial.platforms || {})) {
+      log(`[dry-run] ${key}: ${entry.url || '（清单里没有 url）'}`)
+    }
+    return
+  }
+
+  log(`beta 版本: ${tag}   清单分支: ${branch}`)
+  const release = await ensureRelease(branch, tag, partial)
+
+  // 1) 按清单里的平台逐个上传并用下载地址校验；失败的平台不写进清单（宁可少一个平台，
+  //    也不能让清单指向 404）
+  const platforms = {}
+  const failures = []
+  for (const [key, entry] of Object.entries(partial.platforms || {})) {
+    const platform = PLATFORMS.find((item) => item.key === key)
+    const local = assets[key]
+    if (!platform || !local) {
+      failures.push(`${key}: 缺少构建产物`)
+      continue
+    }
+    const size = statSync(local).size
+    try {
+      await uploadAttachment(release, local, platform.asset)
+      await verifyRemote(`${baseUrl}/${platform.asset}`, size)
+      platforms[key] = { ...entry, url: `${baseUrl}/${platform.asset}` }
+      log(`\x1b[32m${key} 已发布\x1b[0m → ${baseUrl}/${platform.asset}`)
+    } catch (err) {
+      failures.push(`${key}: ${err.message}`)
+      warn(`${key} 上传/校验失败: ${err.message}`)
+    }
+  }
+
+  // 2) 手工安装包：只是发行版附件，失败不影响更新清单
+  for (const installer of installers) {
+    try {
+      await uploadAttachment(release, installer.path, installer.name)
+      log(`${installer.label} 已上传: ${installer.name}`)
+    } catch (err) {
+      warn(`${installer.label} 上传失败（不影响更新清单）: ${err.message}`)
+    }
+  }
+
+  // 3) 合并并写回 Gitee 的 beta 清单
+  const merged = mergeBetaManifest(remote, { ...partial, platforms })
+  await withRetry(
+    () => writeGiteeManifest(branch, merged, `beta ${tag}`, BETA_MANIFEST),
+    '写入 Gitee beta 清单'
+  )
+  log(
+    `客户端 beta 清单: ${GITEE_WEB}/${GITEE_REPO}/raw/${branch}/${BETA_MANIFEST}` +
+      `（平台: ${Object.keys(merged.platforms).join(', ')}）`
+  )
+
+  if (failures.length > 0) {
+    console.error(
+      `\x1b[31m[gitee-sync] beta 发布有平台失败（这些平台没有写进清单）：\n  ${failures.join('\n  ')}\x1b[0m`
+    )
+    process.exitCode = 1
+  }
+}
+
 async function main() {
+  if (BETA) {
+    await runBeta()
+    return
+  }
+
   if (!DRY_RUN && !GITEE_TOKEN) fail('缺少 GITEE_TOKEN（Gitee 私人令牌）；CI 里应配置 secrets.GITEE_TOKEN')
 
   const base = readBaseManifest()
