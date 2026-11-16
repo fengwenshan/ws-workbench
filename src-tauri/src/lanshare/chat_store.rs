@@ -307,8 +307,12 @@ impl ChatStore {
         let conn = self.connect()?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, alias, last_activity_ms, last_preview_enc, unread, created_at_ms \
-                 FROM lan_share_conversations ORDER BY last_activity_ms DESC, id ASC",
+                // 只有「真正有聊天消息」的会话才进列表：备注、探测、接收文件前的
+                // 占位会话都不算聊过天（需求 14：离线且没有聊天信息的设备不显示）。
+                "SELECT c.id, c.alias, c.last_activity_ms, c.last_preview_enc, c.unread, c.created_at_ms \
+                 FROM lan_share_conversations c \
+                 WHERE EXISTS (SELECT 1 FROM lan_share_messages m WHERE m.peer_id = c.id) \
+                 ORDER BY c.last_activity_ms DESC, c.id ASC",
             )
             .map_err(|e| format!("查询会话失败: {}", e))?;
         let rows = stmt
@@ -927,6 +931,23 @@ mod tests {
         let conversation = store.get_conversation(PEER).unwrap().unwrap();
         assert_eq!(conversation.alias, "新名字");
         assert_eq!(conversation.last_activity_ms, 3_000);
+    }
+
+    #[test]
+    fn list_conversations_skips_empty_placeholder_conversations() {
+        let (_dir, store) = test_store();
+        // prepare 接收文件时会先 upsert 一个会话占位；没有消息时不能算「聊过天」
+        store.upsert_conversation(PEER, "只接收中", 1_000).unwrap();
+        assert!(store.list_conversations().unwrap().is_empty());
+        assert!(store.get_conversation(PEER).unwrap().is_some());
+
+        // 真正落一条消息后才出现在会话列表
+        store
+            .append_message(PEER, "只接收中", &ChatMessage::text("m1", PEER, "in", "你好", 2_000))
+            .unwrap();
+        let conversations = store.list_conversations().unwrap();
+        assert_eq!(conversations.len(), 1);
+        assert_eq!(conversations[0].id, PEER);
     }
 
     #[test]
