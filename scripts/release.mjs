@@ -376,6 +376,14 @@ function build() {
   // 可用 TAURI_BUNDLES=app 跳过 dmg（例如受限环境无法创建 dmg 时）；
   // 更新通道只需要 .app.tar.gz，不依赖 dmg。
   if (process.env.TAURI_BUNDLES) args.push('--bundles', process.env.TAURI_BUNDLES)
+  // Windows 的 MSI（WiX）不接受预发布版本号：`1.0.25-beta.1` 会报
+  // "optional pre-release identifier in app version must be numeric-only"，
+  // 把整个打包步骤拖挂。beta 通道的更新载荷是 NSIS 的 exe，MSI 只是可选手工安装包，
+  // 所以带预发布后缀时只打 nsis（显式给了 TAURI_BUNDLES 就以它为准）。
+  else if (process.platform === 'win32' && VERSION_OVERRIDE.includes('-')) {
+    log('预发布版本号不支持 MSI 打包，本次只出 NSIS 安装包')
+    args.push('--bundles', 'nsis')
+  }
   // 在非 Windows 主机上交叉编译 Windows：需要 cargo-xwin + nsis + llvm
   if (TARGET.includes('windows') && process.platform !== 'win32') {
     args.push('--runner', 'cargo-xwin')
