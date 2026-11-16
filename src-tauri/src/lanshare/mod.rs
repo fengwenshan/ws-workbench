@@ -173,7 +173,7 @@ pub struct LanShareConversation {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ChatEvent {
     pub peer_id: String,
-    /// `message` / `read` / `deleted`
+    /// `message` / `read` / `deleted` / `updated`（附件被删除等状态变化）
     pub kind: String,
     /// 消息方向：`in` / `out`；非消息变化（已读 / 删除 / 状态更新）为 None
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1558,15 +1558,23 @@ mod tests {
         let sub = dir.path().join("sub");
         std::fs::create_dir(&sub).unwrap();
         let missing = dir.path().join("missing.txt");
+        // 相对路径守卫：在 CWD 落一个真实文件，用相对文件名传入，断言未被删除
+        let relative_name = format!("lanshare-relative-{}.txt", std::process::id());
+        std::fs::write(&relative_name, b"x").unwrap();
         let deleted = delete_local_files(&[
             file.to_string_lossy().to_string(),
             sub.to_string_lossy().to_string(),
             missing.to_string_lossy().to_string(),
-            "relative-unsafe.txt".to_string(),
+            relative_name.clone(),
         ]);
         assert_eq!(deleted, 1);
         assert!(!file.exists());
         assert!(sub.exists());
+        assert!(
+            Path::new(&relative_name).exists(),
+            "相对路径应被跳过，不能被删除"
+        );
+        let _ = std::fs::remove_file(&relative_name);
     }
 
     #[test]

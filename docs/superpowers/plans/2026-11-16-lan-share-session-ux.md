@@ -62,7 +62,7 @@
   - `pub fn save_clipboard_image(app, img: &arboard::ImageData) -> Result<String, String>`：`image` crate 编码 PNG，文件名 `剪贴板图片_YYYYMMDD-HHmmss.png`。
   - `pub fn clipboard_paths(app) -> Result<Vec<String>, String>`：`arboard::Clipboard` 先 `get().file_list()`（过滤普通文件、目录报错），再图片；空则 Err。
 - [ ] `mod.rs` 加 `send_dropped_files(app, peer_id, files) -> Result<String, String>`：落盘后调用 `self.send_files(app, peer_id, paths)`。
-- [ ] 命令 `lan_share_import_clipboard_files() -> Vec<String>`、`lan_share_send_dropped_files(app, peer_id, files)`；注册。
+- [ ] 命令 `lan_share_import_clipboard_files() -> Result<Vec<String>, String>`、`lan_share_send_dropped_files(app, peer_id, files)`；注册。
 - [x] 测试：`encoded_size_guard_rejects_oversize_without_decoding`、`write_dropped_sanitizes_path_traversal_and_conflicts`、`save_clipboard_image_encodes_png`（用构造的 PNG）、`decode_dropped_rejects_empty_and_oversize`。
 - [ ] `cargo test -p ws-workbench --lib lanshare::outbox` 后提交。
 
