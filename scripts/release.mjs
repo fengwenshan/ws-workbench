@@ -383,11 +383,8 @@ function build() {
 
   log(`开始构建: tauri ${args.join(' ')}`)
 
-  // 空串会被打包器当成「私钥有密码」而去解密、直接失败（CI 里 secret 没配时就是空串），
-  // 所以没有密码就删掉这个变量，让 tauri 走无密码路径（带密码时走交互提示/env）。
-  if (process.env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD === '') {
-    delete process.env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD
-  }
+  // 私钥没有密码时，把 TAURI_SIGNING_PRIVATE_KEY_PASSWORD 设成空串即可：
+  // 打包器看到这个变量存在就直接用空密码，不再交互式弹 Password:；完全没设才会弹。
 
   const env = privateKey
     ? { ...process.env, TAURI_SIGNING_PRIVATE_KEY: privateKey }
