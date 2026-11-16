@@ -109,12 +109,6 @@ const vpnDotState = computed<"off" | "on" | "busy">(() => {
   if (vpn.phaseBusy || vpn.connecting) return "busy";
   return "off";
 });
-const vpnTitle = computed(() => {
-  if (vpn.isConnected) return `VPN 已连接：${vpn.status.message}`;
-  if (vpn.phaseBusy) return "VPN 连接中…";
-  return "VPN 未连接，点击进入代理";
-});
-
 // 工作台布局：工具切换、项目树尺寸与持久化
 const {
   view,
@@ -132,16 +126,6 @@ const {
 
 // Windows 使用自绘标题栏；macOS 仍用系统红绿灯，Linux 保留系统边框
 const isWindows = computed(() => platform.is_windows);
-
-const proxyTitle = computed(() => {
-  const action =
-    view.value === "proxy"
-      ? vpnMenuCollapsed.value
-        ? "展开 VPN 配置"
-        : "收起 VPN 配置"
-      : "代理";
-  return vpn.isConnected ? `${action}（VPN 已连接）` : shortcutTitle(action, "2");
-});
 
 // 分组 / 项目选中状态
 const {
@@ -825,11 +809,6 @@ async function handlePack(project: ProjectConfig, asZip: boolean = false) {
             class="rail-btn"
             :class="{ active: view === 'home' }"
             :aria-current="view === 'home' ? 'page' : undefined"
-            :title="
-              view === 'home'
-                ? shortcutTitle(treeCollapsed ? '展开项目树' : '折叠项目树', '1')
-                : shortcutTitle('项目', '1')
-            "
             :aria-label="
               view === 'home'
                 ? treeCollapsed
@@ -849,7 +828,6 @@ async function handlePack(project: ProjectConfig, asZip: boolean = false) {
             :aria-current="view === 'proxy' ? 'page' : undefined"
             :aria-expanded="view === 'proxy' ? !vpnMenuCollapsed : undefined"
             aria-controls="vpn-profile-menu"
-            :title="proxyTitle"
             :aria-label="
               view === 'proxy'
                 ? vpnMenuCollapsed
@@ -863,7 +841,7 @@ async function handlePack(project: ProjectConfig, asZip: boolean = false) {
               <path d="M12 3l7 3v5.2c0 4.5-3 7.9-7 9.8-4-1.9-7-5.3-7-9.8V6z" />
               <path d="M9.5 12.2l1.8 1.9 3.4-3.7" />
             </svg>
-            <span class="rail-vpn-badge" :title="vpnTitle">
+            <span class="rail-vpn-badge">
               <VpnStatusDot :state="vpnDotState" size="md" glow />
             </span>
           </button>
@@ -872,7 +850,6 @@ async function handlePack(project: ProjectConfig, asZip: boolean = false) {
             class="rail-btn"
             :class="{ active: view === 'cleaner' }"
             :aria-current="view === 'cleaner' ? 'page' : undefined"
-            :title="shortcutTitle('系统', '4')"
             aria-label="系统"
             @click="selectTool('cleaner')"
           >
@@ -886,7 +863,6 @@ async function handlePack(project: ProjectConfig, asZip: boolean = false) {
             class="rail-btn"
             :class="{ active: view === 'lanshare' }"
             :aria-current="view === 'lanshare' ? 'page' : undefined"
-            :title="shortcutTitle('LANLink', '5')"
             aria-label="LANLink"
             @click="selectTool('lanshare')"
           >
@@ -903,7 +879,6 @@ async function handlePack(project: ProjectConfig, asZip: boolean = false) {
             class="rail-btn"
             :class="{ active: view === 'settings' }"
             :aria-current="view === 'settings' ? 'page' : undefined"
-            :title="shortcutTitle('设置', '3')"
             aria-label="设置"
             @click="selectTool('settings')"
           >

@@ -516,7 +516,19 @@ function toggleCollapse(groupId: string) {
               class="group-default-badge"
               title="默认分组不可删除、不可重命名"
             >默认</span>
-            <template v-else>
+            <!-- 添加项目收进分组行的悬浮操作里，不再在分组下面占一整行 -->
+            <button
+              class="group-add"
+              @click.stop="emit('addProject', item.group.id)"
+              title="添加项目"
+              aria-label="添加项目"
+            >
+              <svg viewBox="64 64 896 896" aria-hidden="true">
+                <path d="M482 152h60q8 0 8 8v704q0 8-8 8h-60q-8 0-8-8V160q0-8 8-8z" />
+                <path d="M176 474h672q8 0 8 8v60q0 8-8 8H176q-8 0-8-8v-60q0-8 8-8z" />
+              </svg>
+            </button>
+            <template v-if="!item.group.is_default">
               <button
                 class="group-rename"
                 @click.stop="startRename(item.group)"
@@ -573,8 +585,6 @@ function toggleCollapse(groupId: string) {
                 </button>
               </div>
             </template>
-
-            <button class="add-project-btn" @click="emit('addProject', item.group.id)">+ 添加项目</button>
           </div>
 
         </div>
@@ -744,6 +754,7 @@ function toggleCollapse(groupId: string) {
   line-height: 16px;
   user-select: none;
 }
+.group-add,
 .group-rename,
 .group-delete {
   display: grid;
@@ -763,19 +774,26 @@ function toggleCollapse(groupId: string) {
   pointer-events: none;
   transition: opacity 0.12s, background 0.12s, color 0.12s;
 }
+.group-header:hover .group-add,
 .group-header:hover .group-rename,
 .group-header:hover .group-delete,
+.group-header:focus-within .group-add,
 .group-header:focus-within .group-rename,
 .group-header:focus-within .group-delete {
   opacity: 1;
   pointer-events: auto;
 }
+.group-add svg,
 .group-rename svg,
 .group-delete svg,
 .item-delete svg {
   width: 14px;
   height: 14px;
   fill: currentColor;
+}
+.group-add:hover {
+  background: rgba(59, 130, 246, 0.12);
+  color: var(--primary);
 }
 .group-rename:hover {
   background: var(--bg-tag);
@@ -785,6 +803,7 @@ function toggleCollapse(groupId: string) {
   background: rgba(239, 68, 68, 0.12);
   color: var(--danger);
 }
+.group-add:focus-visible,
 .group-rename:focus-visible,
 .group-delete:focus-visible {
   outline: 1px solid var(--primary);
@@ -857,29 +876,6 @@ function toggleCollapse(groupId: string) {
 }
 .item-delete:focus-visible {
   outline: 1px solid var(--primary);
-}
-.add-project-btn {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  width: 100%;
-  height: 28px;
-  margin: 2px 0;
-  padding: 0 6px;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--text-muted);
-  font-size: 12px;
-  text-align: left;
-  cursor: pointer;
-  opacity: 0.75;
-  transition: opacity 0.12s, background 0.12s, color 0.12s;
-}
-.add-project-btn:hover {
-  opacity: 1;
-  background: var(--bg-hover);
-  color: var(--primary);
 }
 .empty-tip {
   padding: 18px 12px;
