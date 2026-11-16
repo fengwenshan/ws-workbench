@@ -37,7 +37,7 @@ import LanSharePanel from "@/components/lanshare/LanSharePanel.vue";
 import QuickOpenPalette from "@/components/QuickOpenPalette.vue";
 import AttachmentPreview from "@/components/AttachmentPreview.vue";
 import { detectVcsMany } from "@/api/project";
-import { getAppName, isDevBuild } from "@/api/app";
+import { getAppName, isDevBuild, isPrereleaseBuild } from "@/api/app";
 
 /** 标题栏上的应用名：开发构建带 -dev，发布版是 ws-workbench（由 Rust 侧按构建给出） */
 const appName = ref("ws-workbench");
@@ -50,6 +50,9 @@ const devBuild = ref(false);
 void isDevBuild().then((value) => {
   devBuild.value = value;
 });
+
+/** 当前安装的是内测版：标题栏更新按钮旁边挂 beta 标签 */
+const isPrerelease = ref(false);
 
 const {
   config,
@@ -83,9 +86,11 @@ const {
   info: updateInfo,
   errorMessage: updateError,
   percentage: updatePercentage,
+  developerMode,
   checkUpdate,
   installUpdate,
   restartApp,
+  setDeveloperMode,
   startDailyCheck,
   stopDailyCheck,
 } = useUpdater();
@@ -421,16 +426,21 @@ const {
   ensureSelection,
 });
 
-// 打开应用先静默检查一次；之后每天 10:00 / 16:00 自动校验。
-// 开发构建一律不查：裸二进制装不了更新（Windows 上还会把 dev 可执行文件覆盖成发布版），
-// 而且开发版和生产版同时开着时没必要两边都去 GitHub 拉清单。
-onMounted(async () => {
+// 开发者模式来自 config，必须等配置加载完才能决定走哪条通道，
+// 所以启动检查放在 loading 由 true 变 false 之后，避免先按稳定通道查一次。
+let updaterInitialized = false;
+async function initUpdater() {
+  setDeveloperMode(config.value.developer_mode ?? false);
+  isPrerelease.value = await isPrereleaseBuild();
+  // 开发构建一律不查：裸二进制装不了更新（Windows 上会把 dev 可执行文件覆盖成发布版）
   if (await isDevBuild()) return;
   await checkUpdate({ silent: true });
-});
-onMounted(async () => {
-  if (await isDevBuild()) return;
   startDailyCheck();
+}
+watch(loading, (value) => {
+  if (value || updaterInitialized) return;
+  updaterInitialized = true;
+  void initUpdater();
 });
 onUnmounted(stopDailyCheck);
 
@@ -598,6 +608,19 @@ async function handleUpdateAction() {
   }
 }
 
+/** 设置页开关开发者模式：先落盘，再按新通道立刻检查一次 */
+async function handleChangeDeveloperMode(enabled: boolean) {
+  config.value.developer_mode = enabled;
+  try {
+    await saveConfig();
+  } catch (err) {
+    message.error(`保存开发者模式失败: ${err}`);
+  }
+  setDeveloperMode(enabled);
+  if (await isDevBuild()) return;
+  await checkUpdate({ silent: true });
+}
+
 // 重命名分组（默认分组不允许重命名）
 async function handleRenameGroup(id: string, name: string) {
   const group = config.value.groups.find((g) => g.id === id);
@@ -709,6 +732,7 @@ async function handlePack(project: ProjectConfig, asZip: boolean = false) {
         >
           {{ updateButtonLabel }}
         </button>
+        <span v-if="isPrerelease" class="titlebar-dev-tag titlebar-beta-tag" title="内测版">beta</span>
         <span v-if="devBuild" class="titlebar-dev-tag" title="开发构建">dev</span>
       </div>
       <div
@@ -952,7 +976,9 @@ async function handlePack(project: ProjectConfig, asZip: boolean = false) {
           <SettingsPanel
             :active="view === 'settings'"
             :default-upload-dir="config.default_upload_dir"
+            :developer-mode="developerMode"
             @update-default-upload-dir="handleSetDefaultUploadDir"
+            @change-developer-mode="handleChangeDeveloperMode"
           />
         </div>
 
@@ -1441,6 +1467,11 @@ async function handlePack(project: ProjectConfig, asZip: boolean = false) {
   font-weight: 600;
   letter-spacing: 0.02em;
   user-select: none;
+}
+/* 内测版标识：和 dev 标签同形，换成主色实心 */
+.titlebar-beta-tag {
+  background: var(--primary);
+  color: #fff;
 }
 
 .config-section {

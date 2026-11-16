@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
+import { Modal, Switch } from 'ant-design-vue'
 import { getConfigPath, getStorageInfo, type StorageInfo } from '@/api/config'
 import { resolveUploadDir } from '@/api/attachments'
 import { ensureDir, getNetworkInfo, openDir, type NetworkInfo } from '@/api/system'
@@ -11,12 +12,15 @@ import ResourcePanel from '@/components/settings/ResourcePanel.vue'
 
 const props = defineProps<{
   defaultUploadDir: string | null
+  /** 开发者模式开关（打开 = 接收内测版更新） */
+  developerMode: boolean
   /** 当前工具页是否激活（App.vue 的 view === 'settings'）；设置页是 v-show 常驻挂载的 */
   active: boolean
 }>()
 
 const emit = defineEmits<{
   updateDefaultUploadDir: [dir: string | null]
+  changeDeveloperMode: [enabled: boolean]
 }>()
 
 const configPath = ref('')
@@ -131,6 +135,23 @@ async function run(action: () => Promise<unknown>, failureLabel: string) {
 // ========== 检查更新 ==========
 // 与标题栏「更新」按钮共用 useUpdater 的模块级单例状态：这里看到的进度/结果就是
 // 标题栏那一份，不存在两处各查各的。
+/** 开启开发者模式（= 接收内测版更新）要确认一次：内测版可能有未回归的问题 */
+function handleDeveloperModeChange(checked: boolean) {
+  if (!checked) {
+    emit('changeDeveloperMode', false)
+    return
+  }
+  Modal.confirm({
+    title: '开启开发者模式？',
+    content:
+      '开启后会优先收到内测版更新（版本号带 -beta）：新功能会先在这里发布，但可能不稳定。' +
+      '关闭开发者模式不会降级，当前内测版会保留，等下一个正式版发布后自动回到稳定版。',
+    okText: '开启',
+    cancelText: '取消',
+    onOk: () => emit('changeDeveloperMode', true),
+  })
+}
+
 const {
   status: updateStatus,
   info: updateInfo,
@@ -167,6 +188,9 @@ const refreshBusy = computed(
 )
 
 const currentVersionLabel = computed(() => (currentVersion.value ? `v${currentVersion.value}` : '—'))
+
+/** 当前安装的是内测版：在「当前版本」后面挂内测徽标 */
+const isPrereleaseVersion = computed(() => currentVersion.value.includes('-'))
 
 /** 只有真的查到更高版本才显示「最新版本」；与当前版本相同（已是最新）时整行隐藏 */
 const latestVersionLabel = computed(() => {
@@ -326,6 +350,18 @@ function formatBytes(bytes: number): string {
         <div class="info-row">
           <span class="info-label">当前版本</span>
           <span class="info-value mono">{{ currentVersionLabel }}</span>
+          <span v-if="isPrereleaseVersion" class="channel-beta-tag">内测版</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">开发者模式</span>
+          <span class="info-value channel-value">
+            <Switch
+              :checked="developerMode"
+              size="small"
+              @change="(checked) => handleDeveloperModeChange(!!checked)"
+            />
+            <span>{{ developerMode ? '已开启，接收内测版更新' : '已关闭，只接收正式版' }}</span>
+          </span>
         </div>
         <div v-if="latestVersionLabel" class="info-row">
           <span class="info-label">最新版本</span>
@@ -702,5 +738,23 @@ function formatBytes(bytes: number): string {
   font-size: 12px;
   line-height: 1.6;
   color: var(--text-muted);
+}
+/* 开发者模式：开关 + 文字 + beta 小标签 */
+.channel-value {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.channel-beta-tag {
+  display: inline-flex;
+  align-items: center;
+  height: 16px;
+  padding: 0 6px;
+  border-radius: 8px;
+  background: var(--bg-tag);
+  color: var(--text-tag);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
 }
 </style>
