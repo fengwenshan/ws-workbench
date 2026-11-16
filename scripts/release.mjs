@@ -44,6 +44,8 @@
  * 只跳过发布（不带 --version 时版本解析仍可能访问 Gitee；要完全离线请同时传
  * --version），也不做回滚预检。
  */
+// 先加载 env / env.local（GITEE_TOKEN 等），再读下面的环境变量
+import './load-env.mjs'
 import { execFileSync } from 'node:child_process'
 import {
   existsSync,

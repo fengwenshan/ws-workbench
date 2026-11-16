@@ -34,6 +34,8 @@
  *   GITHUB_REPO   GitHub 仓库，默认 fengwenshan/ws-workbench
  *   GITHUB_BRANCH GitHub 清单分支，默认 main
  */
+// 先加载 env / env.local（GITEE_TOKEN 等），再读下面的环境变量
+import './load-env.mjs'
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { request as httpRequest } from 'node:http'

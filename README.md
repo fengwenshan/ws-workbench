@@ -430,14 +430,26 @@ pnpm package:local -- --open              # 复制完打开所在文件夹
 | `GITEE_TOKEN` | Gitee 私人令牌（`projects` 权限），`pnpm release:beta` 读写 Gitee 清单和发行版必需；默认空（beta 必填，稳定版由 CI 提供） |
 | `TAURI_BUNDLES=app` | 只打 app、跳过 Tauri 的 dmg 打包脚本，受限环境配 `--dmg` 使用 |
 
+环境变量也可以写在仓库根目录的 `env` 和 `env.local` 里：脚本启动时会自动读取，
+优先级是「命令行 / CI 显式设置 > `env.local` > `env`」。`env` 可以提交（只放空占位或
+公开默认值，例如 `GITEE_TOKEN=`），`env.local` 已被 `.gitignore` 的 `*.local` 忽略，
+用来放本机令牌：
+
+```bash
+# env.local（不要提交）
+GITEE_TOKEN=xxxxxxxx
+```
+
+这样 `pnpm release:beta` 就不用每次在命令前指定令牌。
+
 ### 内测（beta）通道
 
 功能先合到长期分支 `beta`，正式发布 = 把 `beta` 合进 `main`。
 
 - **beta 版本号**：`tauri.conf.json` 的 `version` 是 base（如 `1.0.25`），每次发布自动加成
   `1.0.25-beta.N`（N 取 Gitee 上已有的最大值 + 1），构建时用 `tauri build --config` 注入。
-- **发布 beta**：在 `beta` 分支上 `GITEE_TOKEN=... pnpm release:beta`（需要一个有 `projects`
-  权限的 Gitee 令牌）。脚本会构建当前平台、签名、把产物和
+- **发布 beta**：在 `beta` 分支上 `pnpm release:beta`（GITEE_TOKEN 放 `env.local` 里，
+  也可以临时用 `GITEE_TOKEN=... pnpm release:beta`）。脚本会构建当前平台、签名、把产物和
   `updates/beta/latest.json` 只发到 Gitee（beta 不进 GitHub、不触发 GitHub 构建）。
   Windows 的 exe/msi、Mac 的 Intel 版在各自机器上 checkout 同一个提交，用同一个
   `--version` 再跑一次，清单会按平台补齐。
