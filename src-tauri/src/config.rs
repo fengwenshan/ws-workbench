@@ -50,6 +50,7 @@ impl AppSettings {
             vpn_worker_session_dir: config.vpn_worker_session_dir.clone(),
             default_upload_dir: config.default_upload_dir.clone(),
             tree_order: config.tree_order.clone(),
+            developer_mode: config.developer_mode,
         }
     }
 
@@ -66,6 +67,7 @@ impl AppSettings {
             vpn_worker_session_dir: self.vpn_worker_session_dir,
             default_upload_dir: self.default_upload_dir,
             tree_order: self.tree_order,
+            developer_mode: self.developer_mode,
         }
     }
 }
@@ -441,6 +443,12 @@ mod tests {
     }
 
     #[test]
+    fn developer_mode_defaults_to_false() {
+        let settings: AppSettings = serde_json::from_str("{}").unwrap();
+        assert!(!settings.developer_mode);
+    }
+
+    #[test]
     fn app_settings_roundtrip_from_config() {
         let config = AppConfig {
             default_include: vec!["*.js".to_string()],
@@ -449,10 +457,13 @@ mod tests {
             vpn_worker_session_dir: "/tmp/session".to_string(),
             default_upload_dir: Some("/tmp/upload".to_string()),
             tree_order: vec!["g1".to_string(), "r1".to_string()],
+            developer_mode: true,
             ..Default::default()
         };
         let settings = AppSettings::from_config(&config);
+        assert!(settings.developer_mode);
         let merged = settings.into_config(crate::db::DbData::default());
+        assert!(merged.developer_mode);
         assert_eq!(merged.default_include, config.default_include);
         assert_eq!(merged.default_include_version, 7);
         assert_eq!(merged.vpn_active_profile_id, "p1");

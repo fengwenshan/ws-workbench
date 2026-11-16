@@ -97,6 +97,8 @@ export interface AppConfig {
   vpn_active_profile_id: string
   /** 全局默认附件上传目录 */
   default_upload_dir: string | null
+  /** 开发者模式：开启后接收内测版（beta）更新；缺省 / false = 只收正式版 */
+  developer_mode?: boolean
 }
 
 export interface PackResult {

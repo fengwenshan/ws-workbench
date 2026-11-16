@@ -139,6 +139,9 @@ pub struct AppSettings {
     /// 混排；两个数组各自的顺序表达不了交错关系，所以单独存一份 id 序列。
     #[serde(default)]
     pub tree_order: Vec<String>,
+    /// 开发者模式：开启后接收内测版（beta）更新；默认关闭，只收正式版
+    #[serde(default)]
+    pub developer_mode: bool,
 }
 
 impl Default for AppSettings {
@@ -150,6 +153,7 @@ impl Default for AppSettings {
             vpn_worker_session_dir: String::new(),
             default_upload_dir: None,
             tree_order: vec![],
+            developer_mode: false,
         }
     }
 }
@@ -187,6 +191,9 @@ pub struct AppConfig {
     /// 项目树一级顺序：分组 id 与一级项目 id 的混排顺序（详见 [`AppSettings::tree_order`]）
     #[serde(default)]
     pub tree_order: Vec<String>,
+    /// 开发者模式，见 [`AppSettings::developer_mode`]
+    #[serde(default)]
+    pub developer_mode: bool,
 }
 
 impl Default for AppConfig {
@@ -202,6 +209,7 @@ impl Default for AppConfig {
             vpn_worker_session_dir: String::new(),
             default_upload_dir: None,
             tree_order: vec![],
+            developer_mode: false,
         }
     }
 }
