@@ -19,6 +19,8 @@ name: Release
 # 1) 仓库密钥（Settings → Secrets and variables → Actions → New repository secret）
 #      TAURI_SIGNING_PRIVATE_KEY  更新签名私钥的**内容**
 #                                 （即本机 ~/.tauri/ws-workbench.key 的全文）
+#      TAURI_SIGNING_PRIVATE_KEY_PASSWORD  私钥的密码（私钥没设密码就跳过；设了必须配，
+#                                 否则 tauri build 会卡在密码提示上，构建 job 失败）
 #
 # 2) 版本号规则
 #    版本号唯一来源是 src-tauri/tauri.conf.json 的 version。push main 后 preflight
@@ -196,6 +198,7 @@ jobs:
         # 去掉 TAURI_BUNDLES 与 --dmg 两个参数即可。
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAURI_BUNDLES=app node scripts/release.mjs --dmg \
@@ -273,6 +276,7 @@ jobs:
       - name: 构建并发布 Windows（exe + msi）
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           node scripts/release.mjs --version "${{ needs.preflight.outputs.version }}"

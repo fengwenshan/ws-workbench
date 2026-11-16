@@ -507,7 +507,7 @@ git push origin main   # preflight 判断该版本没发过 → 构建 → 发�
 
 macOS 两个架构都在 `macos-latest`（arm64）上跑，Intel 版用 `--target x86_64-apple-darwin` 交叉编译；Windows 在 `windows-latest` 上原生构建（MSI 需要 WiX）。版本号由 `preflight` 从 `tauri.conf.json` 读出（必须是 `X.Y.Z` 形式，否则预检直接失败），tag 由脚本按 `v<version>` 创建。
 
-跑之前必须配一个仓库密钥：`TAURI_SIGNING_PRIVATE_KEY`（本机 `~/.tauri/ws-workbench.key` 的全文），没配会在预检步骤直接退出。
+跑之前必须配一个仓库密钥：`TAURI_SIGNING_PRIVATE_KEY`（本机 `~/.tauri/ws-workbench.key` 的全文），没配会在预检步骤直接退出。私钥有密码时再配一个 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`（workflow 里已把它注入构建 job；没配这个 secret 时变量是空串，脚本会当作「私钥无密码」处理）。
 
 两个构建 job 会同时改 `updates/latest.json`，脚本用「快进到远端最新 → 以远端为基线合并本平台条目 → 推送被拒就撤销重试」来避免互相覆盖。CI 自己推回 `main` 的清单提交带 `[skip ci]`，且 preflight 判断该版本已发布就跳过构建，不会自触发。
 
