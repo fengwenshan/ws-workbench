@@ -2,7 +2,10 @@
 import LanShareSidebar from './LanShareSidebar.vue'
 import LanChatPane from './LanChatPane.vue'
 import LanShareSettings from './LanShareSettings.vue'
+import LanDeleteChatDialog from './LanDeleteChatDialog.vue'
+import LanPeerContextMenu from './LanPeerContextMenu.vue'
 import { useLanShareChat } from './useLanShareChat'
+import { useLanShareNotify } from './useLanShareNotify'
 
 /**
  * 局域网分享页壳：左栏「设备列表」+ 右栏「聊天 / 设置」。
@@ -34,17 +37,29 @@ const {
   sendingText,
   sendingFiles,
   offerBusy,
-  deletingConversation,
   applySnapshot,
   selectPeer,
   openSettings,
   handleSendText,
   handleSendFiles,
+  handleSendPaths,
+  handleSendDroppedFiles,
   handleRetry,
   respondOffer,
-  handleDeleteConversation,
   handleSavePeerRemark,
+  peerMenu,
+  openPeerMenu,
+  closePeerMenu,
+  requestDeleteChat,
+  requestDeleteAttachments,
+  deleteChatDialog,
+  deleteChatBusy,
+  confirmDeleteChat,
+  cancelDeleteChat,
 } = useLanShareChat(() => props.active)
+
+// 免打扰开关与设置页共享同一份单例状态（右键菜单里的勾选态）
+const { dnd, toggleDnd } = useLanShareNotify()
 </script>
 
 <template>
@@ -60,7 +75,7 @@ const {
         :status-class="statusClass"
         :now="now"
         @select="selectPeer"
-        @delete="handleDeleteConversation"
+        @context-menu="openPeerMenu"
         @open-settings="openSettings"
       />
     </aside>
@@ -84,18 +99,45 @@ const {
         :sending="sendingText"
         :sending-files="sendingFiles"
         :offer-busy="offerBusy"
-        :deleting="deletingConversation"
+        :deleting="deleteChatBusy"
         :draft="draft"
         @update:draft="draft = $event"
         @send-text="handleSendText"
         @send-files="handleSendFiles"
+        @send-paths="handleSendPaths"
+        @send-dropped-files="handleSendDroppedFiles"
         @retry="handleRetry"
         @accept-offer="respondOffer($event, true)"
         @reject-offer="respondOffer($event, false)"
-        @delete-conversation="handleDeleteConversation()"
+        @delete-conversation="requestDeleteChat()"
         @save-remark="handleSavePeerRemark"
       />
     </section>
+
+    <!-- 左栏右键菜单：删除聊天记录 / 删除附件 / 免打扰 -->
+    <LanPeerContextMenu
+      v-if="peerMenu"
+      :item="peerMenu.item"
+      :x="peerMenu.x"
+      :y="peerMenu.y"
+      :attachment-count="peerMenu.attachmentCount"
+      :attachment-loading="peerMenu.attachmentLoading"
+      :dnd="dnd"
+      @delete-chat="requestDeleteChat()"
+      @delete-attachments="requestDeleteAttachments"
+      @toggle-dnd="toggleDnd"
+      @close="closePeerMenu"
+    />
+
+    <!-- 删除聊天记录二次确认：有本机收到的文件时才出现「同时删除文件」复选框 -->
+    <LanDeleteChatDialog
+      :open="!!deleteChatDialog"
+      :peer-name="deleteChatDialog?.peerName ?? ''"
+      :attachment-count="deleteChatDialog?.attachmentCount ?? 0"
+      :busy="deleteChatBusy"
+      @confirm="confirmDeleteChat"
+      @cancel="cancelDeleteChat"
+    />
   </div>
 </template>
 

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, nextTick, onMounted, onUnmounted, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { type UnlistenFn } from "@tauri-apps/api/event";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Modal, Checkbox, ConfigProvider, message, Form, FormItem, Input, Button, Segmented } from "ant-design-vue";
 import type { FormInstance } from "ant-design-vue";
@@ -370,6 +370,24 @@ onMounted(() => window.addEventListener("keydown", handleQuickKeydown));
 onUnmounted(() => window.removeEventListener("keydown", handleQuickKeydown));
 onMounted(() => window.addEventListener("ws-open-settings", onOpenSettings));
 onUnmounted(() => window.removeEventListener("ws-open-settings", onOpenSettings));
+
+// 托盘「消息」列表点了某条会话：后端发 lan-share://open-chat，主窗口切到局域网分享页。
+// 具体选中哪个会话由 useLanShareChat 监听同一事件处理（面板 v-show 常驻挂载）。
+let lanShareOpenChatUnlisten: UnlistenFn | null = null;
+onMounted(async () => {
+  try {
+    lanShareOpenChatUnlisten = await listen<{ peer_id: string }>(
+      "lan-share://open-chat",
+      () => selectTool("lanshare"),
+    );
+  } catch {
+    // 非 Tauri 环境或事件注册失败时不阻塞界面
+  }
+});
+onUnmounted(() => {
+  lanShareOpenChatUnlisten?.();
+  lanShareOpenChatUnlisten = null;
+});
 
 // 新建分组 / 添加项目弹窗都是「先选目录、后弹窗」，打开后把焦点落到名称输入框（已带出目录名，全选便于直接改写）
 const groupNameInputEl = ref<{ focus: () => void; select?: () => void } | null>(

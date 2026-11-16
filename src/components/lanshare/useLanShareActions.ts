@@ -1,13 +1,14 @@
 import { computed, type ComputedRef, type Ref } from 'vue'
-import { Modal, message } from 'ant-design-vue'
+import { message } from 'ant-design-vue'
 import {
-  deleteLanShareConversation,
   getLanShareSnapshot,
   respondLanShareOffer,
   sendLanShareChat,
+  sendLanShareDroppedFiles,
   sendLanShareFiles,
   setLanSharePeerRemark,
   type ChatMessage,
+  type DroppedFileInput,
   type LanShareSnapshot,
   type PendingOffer,
 } from '@/api/lanshare'
@@ -26,15 +27,12 @@ export interface ChatActionContext {
   activePeerId: Ref<string | null>
   /** 当前选中设备的展示信息（在线状态 / 别名） */
   activePeer: ComputedRef<MergedPeer | null>
-  /** 左栏合并列表（删除前要确认存在历史会话） */
-  mergedPeers: ComputedRef<MergedPeer[]>
   messages: Ref<ChatMessage[]>
   /** 输入框草稿（壳里持有） */
   draft: Ref<string>
   sendingText: Ref<boolean>
   sendingFiles: Ref<boolean>
   offerBusy: Ref<string | null>
-  deletingConversation: Ref<boolean>
   applySnapshot: (next: LanShareSnapshot) => void
   refreshConversations: () => Promise<void>
   refreshMessages: (peerId: string) => Promise<void>
@@ -57,13 +55,11 @@ export function createLanShareActions(ctx: ChatActionContext) {
   const {
     activePeerId,
     activePeer,
-    mergedPeers,
     messages,
     draft,
     sendingText,
     sendingFiles,
     offerBusy,
-    deletingConversation,
     applySnapshot,
     refreshConversations,
     refreshMessages,
@@ -101,6 +97,27 @@ export function createLanShareActions(ctx: ChatActionContext) {
     }
   }
 
+  /** 发送一组本机路径：选文件与「粘贴导入的剪贴板文件」共用 */
+  async function handleSendPaths(paths: string[]) {
+    const target = activePeer.value
+    if (!target || !paths.length || sendingFiles.value) return
+    if (!target.online) {
+      message.warning('设备已离线，无法发送文件')
+      return
+    }
+    sendingFiles.value = true
+    try {
+      await sendLanShareFiles(target.id, paths)
+      message.success(`已开始向「${displayName(target)}」发送 ${paths.length} 个文件`)
+      // 文件消息由后端先落库；chat 事件也会来，这里立即拉一次让气泡马上出现
+      await refreshMessages(target.id)
+    } catch (err) {
+      message.error(`发送失败：${errorText(err)}`)
+    } finally {
+      sendingFiles.value = false
+    }
+  }
+
   async function handleSendFiles() {
     const target = activePeer.value
     if (!target || sendingFiles.value) return
@@ -108,13 +125,32 @@ export function createLanShareActions(ctx: ChatActionContext) {
       message.warning('设备已离线，无法发送文件')
       return
     }
+    let paths: string[] = []
+    try {
+      paths = await pickFiles({ title: `发送文件给 ${displayName(target)}` })
+    } catch (err) {
+      message.error(`选择文件失败：${errorText(err)}`)
+      return
+    }
+    if (!paths.length) return
+    await handleSendPaths(paths)
+  }
+
+  /**
+   * 拖拽进聊天区的文件：内容已经在 ChatPane 里转成 base64，
+   * 后端先落盘到暂存目录再走 send_files（失败可重试 / 可打开）。
+   */
+  async function handleSendDroppedFiles(files: DroppedFileInput[]) {
+    const target = activePeer.value
+    if (!target || !files.length || sendingFiles.value) return
+    if (!target.online) {
+      message.warning('设备已离线，无法发送文件')
+      return
+    }
     sendingFiles.value = true
     try {
-      const paths = await pickFiles({ title: `发送文件给 ${displayName(target)}` })
-      if (!paths.length) return
-      await sendLanShareFiles(target.id, paths)
-      message.success(`已开始向「${displayName(target)}」发送 ${paths.length} 个文件`)
-      // 文件消息由后端先落库；chat 事件也会来，这里立即拉一次让气泡马上出现
+      await sendLanShareDroppedFiles(target.id, files)
+      message.success(`已开始向「${displayName(target)}」发送 ${files.length} 个文件`)
       await refreshMessages(target.id)
     } catch (err) {
       message.error(`发送失败：${errorText(err)}`)
@@ -206,39 +242,13 @@ export function createLanShareActions(ctx: ChatActionContext) {
     }
   }
 
-  function handleDeleteConversation(peerId?: string) {
-    const id = peerId ?? activePeerId.value
-    if (!id || deletingConversation.value) return
-    const target = mergedPeers.value.find((item) => item.id === id)
-    if (!target?.hasConversation) return
-    Modal.confirm({
-      title: '删除会话',
-      content: `将删除与「${displayName(target)}」的本机聊天记录（对方不受影响）。`,
-      okText: '删除',
-      okType: 'danger',
-      cancelText: '取消',
-      onOk: async () => {
-        deletingConversation.value = true
-        try {
-          await deleteLanShareConversation(id)
-          if (activePeerId.value === id) messages.value = []
-          await refreshConversations()
-          message.success('会话已删除')
-        } catch (err) {
-          message.error(`删除会话失败：${errorText(err)}`)
-        } finally {
-          deletingConversation.value = false
-        }
-      },
-    })
-  }
-
   return {
     handleSendText,
     handleSendFiles,
+    handleSendPaths,
+    handleSendDroppedFiles,
     handleRetry,
     respondOffer,
-    handleDeleteConversation,
     handleSavePeerRemark,
   }
 }

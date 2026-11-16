@@ -28,7 +28,8 @@ const { items, activeId, settingsActive, enabled, loading, statusText, statusCla
 
 const emit = defineEmits<{
   select: [id: string]
-  delete: [id: string]
+  /** 右键列表项：打开会话管理菜单（x/y 是鼠标位置，菜单用 fixed 定位跟随） */
+  'context-menu': [item: MergedPeer, x: number, y: number]
   'open-settings': []
 }>()
 
@@ -37,19 +38,14 @@ function displayName(item: MergedPeer): string {
   return item.remark || item.alias
 }
 
-/** 悬浮提示：起过备注时带上设备名，没会话的在线设备补一句「在线」 */
-function displayTitle(item: MergedPeer): string {
-  if (item.remark) return `${item.remark}（设备名：${item.alias}）`
-  return item.hasConversation ? item.alias : `${item.alias}（在线）`
-}
-
 function onSelect(item: MergedPeer) {
   emit('select', item.id)
 }
 
-function onDelete(event: MouseEvent, item: MergedPeer) {
-  event.stopPropagation()
-  emit('delete', item.id)
+/** 右键：不再用原生 title（长悬浮会弹黑色提示），删除等入口都收进自定义菜单 */
+function onContextMenu(event: MouseEvent, item: MergedPeer) {
+  event.preventDefault()
+  emit('context-menu', item, event.clientX, event.clientY)
 }
 
 function onKeydown(event: KeyboardEvent, item: MergedPeer) {
@@ -74,15 +70,11 @@ function onKeydown(event: KeyboardEvent, item: MergedPeer) {
           :class="{ active: item.id === activeId && !settingsActive }"
           role="button"
           tabindex="0"
-          :title="displayTitle(item)"
           @click="onSelect(item)"
           @keydown="onKeydown($event, item)"
+          @contextmenu.prevent="onContextMenu($event, item)"
         >
-          <span
-            class="online-dot"
-            :class="item.online ? 'is-online' : 'is-offline'"
-            :title="item.online ? '在线' : '离线'"
-          ></span>
+          <span class="online-dot" :class="item.online ? 'is-online' : 'is-offline'"></span>
           <span class="item-body">
             <span class="item-top">
               <span class="item-name">{{ displayName(item) }}</span>
@@ -100,30 +92,6 @@ function onKeydown(event: KeyboardEvent, item: MergedPeer) {
               </span>
             </span>
           </span>
-          <!-- 只给有历史会话的设备显示删除入口；hover / 键盘聚焦时露出 -->
-          <button
-            v-if="item.hasConversation"
-            class="delete-btn"
-            type="button"
-            title="删除会话"
-            aria-label="删除会话"
-            @click="onDelete($event, item)"
-          >
-            <svg
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.8"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              aria-hidden="true"
-            >
-              <path d="M3 6h18" />
-              <path d="M8 6V4h8v2" />
-              <path d="M19 6l-1 14H6L5 6" />
-              <path d="M10 11v5M14 11v5" />
-            </svg>
-          </button>
         </li>
       </ul>
 
@@ -300,7 +268,6 @@ function onKeydown(event: KeyboardEvent, item: MergedPeer) {
   color: var(--text-muted);
 }
 .item-bottom {
-  /* 给 hover 时冒出来的删除按钮留位，摘要不压到按钮下面 */
   padding-right: 2px;
 }
 .item-preview {
@@ -338,46 +305,6 @@ function onKeydown(event: KeyboardEvent, item: MergedPeer) {
   font-size: 11px;
   line-height: 15px;
   white-space: nowrap;
-}
-
-/* 删除按钮：hover / 键盘聚焦时出现 */
-.delete-btn {
-  position: absolute;
-  right: 6px;
-  top: 50%;
-  transform: translateY(-50%);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  padding: 0;
-  border: none;
-  border-radius: 6px;
-  background: rgba(255, 255, 255, 0.92);
-  color: var(--text-muted);
-  cursor: pointer;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 0.15s, color 0.15s, background 0.15s;
-}
-.peer-item:hover .delete-btn,
-.peer-item:focus-within .delete-btn {
-  opacity: 1;
-  pointer-events: auto;
-}
-.delete-btn:hover {
-  background: #fef2f2;
-  color: var(--danger);
-}
-.delete-btn svg {
-  width: 14px;
-  height: 14px;
-}
-/* 有删除按钮的行，摘要 / 时间给按钮让出宽度 */
-.peer-item:hover .item-bottom,
-.peer-item:focus-within .item-bottom {
-  padding-right: 26px;
 }
 
 /* 空态 */

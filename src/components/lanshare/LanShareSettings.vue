@@ -10,6 +10,7 @@ import { openDir } from '@/api/system'
 import { pickDirectory } from '@/utils/dialog'
 import LanAliasEditor from './LanAliasEditor.vue'
 import LanRequireAccept from './LanRequireAccept.vue'
+import LanSoundSetting from './LanSoundSetting.vue'
 
 /**
  * 右栏设置页：把改造前顶部「本机信息卡」的内容搬进来。
@@ -216,6 +217,9 @@ async function openDownloadDir() {
 
         <!-- 接收前确认：默认不勾选（直接接收），勾选后恢复「待接收」流程 -->
         <LanRequireAccept :snapshot="snapshot" @updated="emit('updated', $event)" />
+
+        <!-- 消息提示音：和左栏右键「免打扰模式」共享同一份状态 -->
+        <LanSoundSetting />
 
         <p class="settings-tip">
           设备 ID 使用主物理网卡 MAC，跨重启 / 换 IP 不变。同一局域网内打开本应用的设备会出现在左侧列表，

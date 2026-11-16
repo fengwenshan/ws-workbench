@@ -12,8 +12,10 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 export const EVENT_SNAPSHOT = 'lan-share://snapshot'
 /** 发送端进度事件：每个分块 / 文件完成 / 失败 */
 export const EVENT_SEND_PROGRESS = 'lan-share://send-progress'
-/** 聊天数据变化事件：新消息 / 已读 / 会话被删除（payload 只带 peer_id 与 kind，正文靠重新拉取） */
+/** 聊天数据变化事件：新消息 / 已读 / 会话被删除（payload 只带 peer_id/kind/direction，正文靠重新拉取） */
 export const EVENT_CHAT = 'lan-share://chat'
+/** 从托盘消息列表点某条会话：主窗口切到局域网分享并定位到该会话 */
+export const EVENT_OPEN_CHAT = 'lan-share://open-chat'
 
 /** 局域网内发现到的另一台设备 */
 export interface LanPeer {
@@ -88,8 +90,8 @@ export interface LanShareSnapshot {
 export type ChatDirection = 'in' | 'out'
 /** 聊天内容类型：文本 / 文件 */
 export type ChatKind = 'text' | 'file'
-/** 消息状态：发送中 / 已发送 / 发送失败 / 已保存（接收端落盘成功） */
-export type ChatStatus = 'sending' | 'sent' | 'failed' | 'received'
+/** 消息状态：发送中 / 已发送 / 发送失败 / 已保存（接收端落盘成功）/ 已删除（本机收到的文件被清掉） */
+export type ChatStatus = 'sending' | 'sent' | 'failed' | 'received' | 'deleted'
 
 /** 一条聊天消息（字段与后端 `ChatMessage` 同名，后端是 snake_case） */
 export interface ChatMessage {
@@ -127,6 +129,19 @@ export interface LanShareConversation {
 export interface ChatEvent {
   peer_id: string
   kind: 'message' | 'read' | 'deleted'
+  /** 新消息的方向（仅 kind='message' 时带）：用于「收到对方消息」时才响提示音 */
+  direction?: 'in' | 'out' | null
+}
+
+/** `lan-share://open-chat` 事件 payload：托盘消息列表要定位的会话 */
+export interface OpenChatEvent {
+  peer_id: string
+}
+
+/** 拖拽进来的文件：内容先在前端转 base64 交给后端落盘发送（后端 serde camelCase） */
+export interface DroppedFileInput {
+  name: string
+  dataBase64: string
 }
 
 /** 拉取当前快照（页面初始化 / 切回页面时刷新） */
@@ -182,9 +197,41 @@ export function markLanShareRead(peerId: string): Promise<void> {
   return invoke<void>('lan_share_mark_read', { peerId })
 }
 
-/** 删除本机的某个会话及其消息（对方不受影响） */
-export function deleteLanShareConversation(peerId: string): Promise<void> {
-  return invoke<void>('lan_share_delete_conversation', { peerId })
+/**
+ * 删除本机的某个会话及其消息（对方不受影响）。
+ * `deleteFiles` 为 true 时同时把本机收到的文件移入废纸篓（只删 in 文件，不删我发出去的原文件）。
+ */
+export function deleteLanShareConversation(
+  peerId: string,
+  deleteFiles: boolean,
+): Promise<void> {
+  return invoke<void>('lan_share_delete_conversation', { peerId, deleteFiles })
+}
+
+/** 删除本机收到的文件（移入废纸篓），聊天记录保留；返回实际删除数量 */
+export function deleteLanShareAttachments(peerId: string): Promise<number> {
+  return invoke<number>('lan_share_delete_attachments', { peerId })
+}
+
+/** 查询会话里本机收到的文件数量（右键菜单「删除附件」是否可用 / 删除弹窗文案） */
+export function getLanShareAttachmentCount(peerId: string): Promise<number> {
+  return invoke<number>('lan_share_conversation_attachment_count', { peerId })
+}
+
+/**
+ * 把系统剪贴板里的文件 / 图片导入到本机暂存目录，返回落盘路径。
+ * 剪贴板里没有可发送内容时后端返回错误，前端提示即可。
+ */
+export function importLanShareClipboardFiles(): Promise<string[]> {
+  return invoke<string[]>('lan_share_import_clipboard_files')
+}
+
+/** 发送拖拽进来的文件（base64 内容由后端先落盘到暂存目录再走 send_files） */
+export function sendLanShareDroppedFiles(
+  peerId: string,
+  files: DroppedFileInput[],
+): Promise<string> {
+  return invoke<string>('lan_share_send_dropped_files', { peerId, files })
 }
 
 /**
@@ -225,4 +272,9 @@ export function onLanShareSendProgress(
 /** 订阅聊天变化事件，返回取消订阅函数 */
 export function onLanShareChat(handler: (event: ChatEvent) => void): Promise<UnlistenFn> {
   return listen<ChatEvent>(EVENT_CHAT, (event) => handler(event.payload))
+}
+
+/** 订阅「托盘消息列表定位会话」事件，返回取消订阅函数 */
+export function onLanShareOpenChat(handler: (event: OpenChatEvent) => void): Promise<UnlistenFn> {
+  return listen<OpenChatEvent>(EVENT_OPEN_CHAT, (event) => handler(event.payload))
 }

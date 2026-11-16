@@ -1,4 +1,5 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { message } from 'ant-design-vue'
 import type { UnlistenFn } from '@tauri-apps/api/event'
 import {
   getLanShareConversations,
@@ -6,6 +7,7 @@ import {
   getLanShareSnapshot,
   markLanShareRead,
   onLanShareChat,
+  onLanShareOpenChat,
   onLanShareSendProgress,
   onLanShareSnapshot,
   type ChatEvent,
@@ -13,9 +15,12 @@ import {
   type LanPeer,
   type LanShareConversation,
   type LanShareSnapshot,
+  type OpenChatEvent,
   type PendingOffer,
   type SendProgress,
 } from '@/api/lanshare'
+import { playMessageSound } from './useLanShareNotify'
+import { useLanShareListMenu } from './useLanShareListMenu'
 import { createLanShareActions, errorText } from './useLanShareActions'
 import type { MergedPeer } from './types'
 
@@ -49,7 +54,6 @@ export function useLanShareChat(isActive: () => boolean) {
   const sendingText = ref(false)
   const sendingFiles = ref(false)
   const offerBusy = ref<string | null>(null)
-  const deletingConversation = ref(false)
 
   /** 1 秒一跳，给列表时间 / 待接收倒计时 / 在线判定提供刷新 */
   const now = ref(Date.now())
@@ -310,25 +314,33 @@ export function useLanShareChat(isActive: () => boolean) {
   const {
     handleSendText,
     handleSendFiles,
+    handleSendPaths,
+    handleSendDroppedFiles,
     handleRetry,
     respondOffer,
-    handleDeleteConversation,
     handleSavePeerRemark,
   } = createLanShareActions({
     activePeerId,
     activePeer,
-    mergedPeers,
     messages,
     draft,
     sendingText,
     sendingFiles,
     offerBusy,
-    deletingConversation,
     applySnapshot,
     refreshConversations,
     refreshMessages,
     scheduleConversationsRefresh,
     upsertMessage,
+  })
+
+  // 左栏右键菜单 + 删除聊天记录 / 删除附件（弹窗与删除流程单独成文件维护）
+  const listMenu = useLanShareListMenu({
+    mergedPeers,
+    activePeerId,
+    messages,
+    refreshConversations,
+    refreshMessages,
   })
 
   function handleProgress(next: SendProgress) {
@@ -346,6 +358,9 @@ export function useLanShareChat(isActive: () => boolean) {
 
   function handleChatEvent(event: ChatEvent) {
     scheduleConversationsRefresh()
+    // 只在「收到对方的新消息」时响提示音：自己发的、状态更新、已读、删除都不响；
+    // 免打扰时 playMessageSound 内部直接跳过
+    if (event.kind === 'message' && event.direction === 'in') playMessageSound()
     if (!isActive()) return
     if (event.peer_id !== activePeerId.value) return
     scheduleMessagesRefresh()
@@ -353,11 +368,28 @@ export function useLanShareChat(isActive: () => boolean) {
     if (event.kind !== 'deleted' && pane.value === 'chat') void markRead(event.peer_id)
   }
 
+  /**
+   * 托盘「消息」列表点了某条会话（设计 §7.4）：切页签、刷新后选中并标已读。
+   * 设备理论上一定有会话；万一已被删掉，只提示不选中别的会话。
+   */
+  async function handleOpenChat(event: OpenChatEvent) {
+    const peerId = event.peer_id
+    if (!peerId) return
+    pane.value = 'chat'
+    await refreshAll()
+    if (mergedPeers.value.some((item) => item.id === peerId)) {
+      await selectPeer(peerId)
+    } else {
+      message.warning('该会话不在列表中，可能已被删除')
+    }
+  }
+
   onMounted(async () => {
     // 先注册事件再拉初始数据，缩小「启动瞬间漏事件」的窗口
     unlisteners.push(await onLanShareSnapshot(handleSnapshot))
     unlisteners.push(await onLanShareSendProgress(handleProgress))
     unlisteners.push(await onLanShareChat(handleChatEvent))
+    unlisteners.push(await onLanShareOpenChat(handleOpenChat))
 
     if (disposed) {
       unlisteners.forEach((unlisten) => unlisten())
@@ -427,16 +459,18 @@ export function useLanShareChat(isActive: () => boolean) {
     sendingText,
     sendingFiles,
     offerBusy,
-    deletingConversation,
     // 动作
     applySnapshot,
     selectPeer,
     openSettings,
     handleSendText,
     handleSendFiles,
+    handleSendPaths,
+    handleSendDroppedFiles,
     handleRetry,
     respondOffer,
-    handleDeleteConversation,
     handleSavePeerRemark,
+    // 左栏右键菜单 + 删除聊天记录 / 删除附件
+    ...listMenu,
   }
 }

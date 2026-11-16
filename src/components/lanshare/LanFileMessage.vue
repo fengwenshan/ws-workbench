@@ -13,7 +13,7 @@ import { formatBytes } from '@/components/cleaner/format'
  * 聊天里的文件消息卡片（设计 §2.2，钉钉观感）。
  *
  * 头部是大图标 + 文件名 + 大小；底部分隔线左边是状态（发送中 / 已发送 / 已保存 /
- * 发送失败），右边是胶囊按钮（打开 / 打开文件夹 / 重试）。
+ * 发送失败 / 已删除），右边是胶囊按钮（打开 / 打开文件夹 / 重试）。
  * 局域网直传没有服务器，所以这里没有「查收 / 下载」这类云端语义：
  * 文件要么还在传（发送中），要么已经落盘（已发送 / 已保存）。
  *
@@ -40,6 +40,8 @@ const isSending = computed(
   () => props.message.direction === 'out' && props.message.status === 'sending',
 )
 const isFailed = computed(() => props.message.status === 'failed')
+/** 本机收到的文件被「删除附件」清掉：文件卡只显示「已删除」，不给任何打开动作 */
+const isDeleted = computed(() => props.message.status === 'deleted')
 /** 已落盘的文件才给打开动作：发出成功的是本机源文件，接收成功的是保存结果 */
 const hasPath = computed(() => !!props.message.file_path)
 const canOpen = computed(
@@ -55,6 +57,8 @@ const percent = computed(() => {
 
 const stateText = computed(() => {
   switch (props.message.status) {
+    case 'deleted':
+      return '已删除'
     case 'failed':
       // 接收失败的 in 消息后端目前不会写库；这里按方向兜底，别把接收失败写成「发送失败」
       return props.message.direction === 'in' ? '接收失败' : '发送失败'
@@ -90,7 +94,7 @@ async function openFolderAction() {
 </script>
 
 <template>
-  <div class="file-card" :class="{ 'is-failed': isFailed }">
+  <div class="file-card" :class="{ 'is-failed': isFailed, 'is-deleted': isDeleted }">
     <div class="file-card-main">
       <span class="file-icon">
         <!-- 蓝色文档图标（大号） -->
@@ -123,7 +127,10 @@ async function openFolderAction() {
     <!-- 底部分隔线：左侧状态，右侧胶囊按钮 -->
     <div class="file-foot">
       <div class="file-state">
-        <span class="state-text" :class="{ 'is-primary': isSending, 'is-danger': isFailed }">
+        <span
+          class="state-text"
+          :class="{ 'is-primary': isSending, 'is-danger': isFailed, 'is-muted': isDeleted }"
+        >
           {{ stateText }}
         </span>
         <!-- 发送中：细进度条跟在状态下面；失败时把原因压成一行，完整内容在 title 里 -->
@@ -166,6 +173,14 @@ async function openFolderAction() {
 }
 .file-card.is-failed {
   border-color: rgba(239, 68, 68, 0.35);
+}
+/* 已删除：整卡降饱和，文件内容已经不在了，只留历史记录 */
+.file-card.is-deleted {
+  background: var(--bg-readonly);
+}
+.file-card.is-deleted .file-icon {
+  background: var(--bg-tag);
+  color: var(--text-muted);
 }
 
 .file-card-main {
@@ -235,6 +250,9 @@ async function openFolderAction() {
 }
 .state-text.is-danger {
   color: var(--danger);
+}
+.state-text.is-muted {
+  color: var(--text-muted);
 }
 .state-error {
   font-size: 11px;

@@ -1,23 +1,39 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
+import type { UnlistenFn } from '@tauri-apps/api/event'
 import { useConfig } from '@/composables/useConfig'
 import { useVpn } from '@/composables/useVpn'
 import { useKeepAwake } from '@/composables/useKeepAwake'
 import { isDevBuild } from '@/api/app'
+import {
+  getLanShareConversations,
+  getLanShareSnapshot,
+  onLanShareChat,
+  type LanShareConversation,
+} from '@/api/lanshare'
+import {
+  openQuickPanelChat,
+  onQuickPanelMode,
+  takeQuickPanelMode,
+  type QuickPanelMode,
+} from '@/api/quick'
 import type { VpnProxyMode } from '@/types/vpn'
+import QuickMessages from './QuickMessages.vue'
 
 /**
  * 托盘快捷面板（独立窗口 /quick.html），布局参考腾讯柠檬的悬浮面板：
- * 顶部两个页签（VPN / 休眠），下面是紧凑卡片，点面板外部或再点一次托盘图标收起。
+ * 顶部三个页签（VPN / 休眠 / 消息），下面是紧凑卡片，点面板外部或再点一次托盘图标收起。
  *
  * 这里只做「快速查看 + 快速动作」：卸载、残留清理、规则编辑仍然回主窗口。
+ * 「消息」页签是托盘左键有未读时的入口（钉钉式消息列表），点会话调
+ * quick_panel_open_chat 由后端收起面板、显示主界面并发 lan-share://open-chat 定位。
  */
 const { config, saveConfig } = useConfig()
 const vpn = useVpn(config, saveConfig)
 const keepAwake = useKeepAwake()
 
-type Tab = 'vpn' | 'sleep'
+type Tab = 'vpn' | 'sleep' | 'messages'
 const tab = ref<Tab>('vpn')
 
 /** 开发构建时在页签右侧挂一个 dev 标记，和安装版的面板区分开 */
@@ -163,6 +179,75 @@ async function pickMode(mode: VpnProxyMode) {
   if (!ok) modeError.value = '模式切换失败，请稍后重试'
 }
 
+// ============================== 消息 ==============================
+
+const conversations = ref<LanShareConversation[]>([])
+/** 本机备注 fingerprint -> 备注（显示名备注优先，和主窗口一致） */
+const remarks = ref<Record<string, string>>({})
+const messagesLoading = ref(false)
+const messagesError = ref('')
+/** 时间基准：面板打开 / 刷新时更新，formatListTime 用它判断今天 / 昨天 */
+const messagesNow = ref(Date.now())
+
+/** 托盘红点：所有会话未读之和 */
+const unreadTotal = computed(() =>
+  conversations.value.reduce((sum, item) => sum + item.unread, 0),
+)
+
+let messagesSeq = 0
+let messagesTimer: ReturnType<typeof setTimeout> | null = null
+
+function errorText(err: unknown): string {
+  if (typeof err === 'string') return err
+  if (err instanceof Error) return err.message
+  return String(err)
+}
+
+/** 拉会话 + 备注：面板打开、窗口聚焦、收到 chat 事件、切到消息页签时刷新 */
+async function refreshMessages(): Promise<void> {
+  const seq = ++messagesSeq
+  messagesLoading.value = true
+  messagesError.value = ''
+  try {
+    const [list, snapshot] = await Promise.all([
+      getLanShareConversations(),
+      getLanShareSnapshot(),
+    ])
+    if (seq !== messagesSeq) return
+    conversations.value = list
+    remarks.value = snapshot.peer_remarks ?? {}
+    messagesNow.value = Date.now()
+  } catch (err) {
+    if (seq !== messagesSeq) return
+    messagesError.value = `读取聊天记录失败：${errorText(err)}`
+  } finally {
+    if (seq === messagesSeq) messagesLoading.value = false
+  }
+}
+
+/** chat 事件可能连发（收到多条消息）：合并 200ms 内的一次刷新 */
+function scheduleMessagesRefresh(): void {
+  if (messagesTimer) return
+  messagesTimer = setTimeout(() => {
+    messagesTimer = null
+    void refreshMessages()
+  }, 200)
+}
+
+/** 点某条会话：后端收起面板 + 显示主界面 + 发 lan-share://open-chat */
+async function openChat(peerId: string): Promise<void> {
+  try {
+    await openQuickPanelChat(peerId)
+  } catch {
+    // 面板马上就要收起，命令失败不弹错打扰
+  }
+}
+
+/** 面板模式：'messages' 切消息页签，其余回 VPN */
+function handlePanelMode(mode: QuickPanelMode): void {
+  tab.value = mode === 'messages' ? 'messages' : 'vpn'
+}
+
 // ============================== 面板高度 ==============================
 
 /** 窗口高度跟着当前页签的内容走，两个页签都不留一大片空白 */
@@ -170,7 +255,12 @@ const panelEl = ref<HTMLElement | null>(null)
 const footEl = ref<HTMLElement | null>(null)
 const vpnPaneEl = ref<HTMLElement | null>(null)
 const sleepPaneEl = ref<HTMLElement | null>(null)
-const activePaneEl = computed(() => (tab.value === 'vpn' ? vpnPaneEl.value : sleepPaneEl.value))
+const messagesPaneEl = ref<HTMLElement | null>(null)
+const activePaneEl = computed(() => {
+  if (tab.value === 'vpn') return vpnPaneEl.value
+  if (tab.value === 'sleep') return sleepPaneEl.value
+  return messagesPaneEl.value
+})
 
 let paneObserver: ResizeObserver | null = null
 let heightScheduled = false
@@ -250,12 +340,41 @@ onMounted(() => {
   window.addEventListener('focus', handlePanelFocus)
   document.addEventListener('visibilitychange', handleVisibilityChange)
   document.addEventListener('keydown', handleKeydown)
+
+  // 快捷面板模式：首次创建时后端原子量决定初始页签（托盘左键有未读 → 消息）；
+  // 已存在的面板通过 quick-panel://mode 事件切页签。
+  void (async () => {
+    try {
+      const mode = await takeQuickPanelMode()
+      tab.value = mode === 'messages' ? 'messages' : 'vpn'
+    } catch {
+      // 命令不可用（非 Tauri / 后端未就绪）时保持默认页签
+    }
+    void refreshMessages()
+    try {
+      quickModeUnlisten = await onQuickPanelMode(handlePanelMode)
+    } catch {
+      /* 注册失败只影响模式切换的即时响应，下次显示时 take_mode 仍能取到 */
+    }
+    try {
+      lanShareChatUnlisten = await onLanShareChat(() => scheduleMessagesRefresh())
+    } catch {
+      /* 收不到 chat 事件时，聚焦 / 切页签仍会刷新 */
+    }
+  })()
 })
+
+// 面板打开期间可能切换模式（托盘左键再点一次收起、右键重置），监听放在
+// onMounted 外部声明，onUnmounted 统一清理。
+let quickModeUnlisten: UnlistenFn | null = null
+let lanShareChatUnlisten: UnlistenFn | null = null
 
 /** 面板重新弹出：立刻补一次状态，避免先闪一下旧状态再等 5 秒轮询 */
 function handlePanelFocus(): void {
   schedulePanelHeightSync()
   keepAwake.wake()
+  // 面板可能是在主窗口收消息时隐藏的，重新聚焦补一次消息列表
+  if (tab.value === 'messages') void refreshMessages()
 }
 
 /** Esc 收起面板：除了点外面/再点托盘，给键盘留一条确定的关闭路径 */
@@ -272,6 +391,7 @@ function handleVisibilityChange(): void {
   schedulePanelHeightSync()
   // visibilitychange 恢复时 useKeepAwake 会自己排下一次轮询，这里再唤醒一次
   keepAwake.wake()
+  if (tab.value === 'messages') void refreshMessages()
 }
 
 watch(tab, () => {
@@ -279,6 +399,8 @@ watch(tab, () => {
   schedulePanelHeightSync()
   // 切到休眠页签时可能刚在别处开关过会话，先拉一次再展示
   if (tab.value === 'sleep') keepAwake.wake()
+  // 消息列表可能在主窗口里已经读过 / 有新消息，切过来重新拉一次
+  if (tab.value === 'messages') void refreshMessages()
 })
 
 onUnmounted(() => {
@@ -287,6 +409,14 @@ onUnmounted(() => {
   document.removeEventListener('visibilitychange', handleVisibilityChange)
   document.removeEventListener('keydown', handleKeydown)
   keepAwake.stopPolling()
+  quickModeUnlisten?.()
+  quickModeUnlisten = null
+  lanShareChatUnlisten?.()
+  lanShareChatUnlisten = null
+  if (messagesTimer) {
+    clearTimeout(messagesTimer)
+    messagesTimer = null
+  }
 })
 </script>
 
@@ -315,6 +445,20 @@ onUnmounted(() => {
         >
           休眠
           <span class="qp-dot" :class="keepAwake.active ? 'on' : 'off'" aria-hidden="true" />
+        </button>
+        <button
+          type="button"
+          class="qp-tab"
+          :class="{ active: tab === 'messages' }"
+          role="tab"
+          :aria-selected="tab === 'messages'"
+          @click="tab = 'messages'"
+        >
+          消息
+          <!-- 未读总数红点：0 时隐藏，托盘左键据此判断要不要弹消息列表 -->
+          <span v-if="unreadTotal > 0" class="qp-unread-badge">
+            {{ unreadTotal > 99 ? '99+' : unreadTotal }}
+          </span>
         </button>
       </div>
       <span v-if="devBuild" class="qp-dev-tag" title="开发构建">dev</span>
@@ -417,6 +561,18 @@ onUnmounted(() => {
 
         <p class="qp-tip">{{ sleepHint() }}</p>
       </section>
+
+      <!-- 消息：最近会话列表，点一条打开主界面并定位到该会话 -->
+      <section v-show="tab === 'messages'" ref="messagesPaneEl" class="qp-pane">
+        <QuickMessages
+          :conversations="conversations"
+          :remarks="remarks"
+          :now="messagesNow"
+          :loading="messagesLoading"
+          :error="messagesError"
+          @open="openChat"
+        />
+      </section>
     </div>
 
     <!-- 底部操作栏：右键托盘图标弹出面板后，主界面和退出都从这里走 -->
@@ -495,6 +651,18 @@ html body,
 .qp-tab.active {
   color: var(--text-primary);
   font-weight: 600;
+}
+
+.qp-unread-badge {
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--danger);
+  color: #fff;
+  font-size: 10px;
+  line-height: 16px;
+  text-align: center;
 }
 
 .qp-tab.active::after {

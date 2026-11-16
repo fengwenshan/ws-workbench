@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import type { ChatMessage, PendingOffer, SendProgress } from '@/api/lanshare'
+import type { ChatMessage, DroppedFileInput, PendingOffer, SendProgress } from '@/api/lanshare'
 import type { MergedPeer } from './types'
 import LanAvatar from './LanAvatar.vue'
 import LanChatMessageList from './LanChatMessageList.vue'
 import LanRemarkEditor from './LanRemarkEditor.vue'
+import { useLanShareFileDrop } from './useLanShareFileDrop'
 
 /**
  * 右栏聊天壳：头部设备信息 + 消息流 + 输入区。
@@ -36,6 +37,7 @@ const props = defineProps<{
   draft: string
 }>()
 
+
 const emit = defineEmits<{
   'update:draft': [value: string]
   'send-text': [text: string]
@@ -46,6 +48,10 @@ const emit = defineEmits<{
   'delete-conversation': []
   /** 保存本机备注（空串 = 删除备注） */
   'save-remark': [peerId: string, remark: string]
+  /** 粘贴导入的剪贴板文件路径（父组件走 send_files） */
+  'send-paths': [paths: string[]]
+  /** 拖拽进来的文件内容（父组件走 send_dropped_files） */
+  'send-dropped-files': [files: DroppedFileInput[]]
 }>()
 
 const peerAddress = computed(() => {
@@ -86,10 +92,26 @@ function onKeydown(event: KeyboardEvent) {
   event.preventDefault()
   submit()
 }
+
+// 粘贴 / 拖拽发送（剪贴板文件、截图、拖拽文件）拆在 useLanShareFileDrop 里，
+// 组件只负责把事件接上并转成事件抛给父组件（发送动作统一在 useLanShareActions）。
+const { dragging, onPaste, onDragEnter, onDragOver, onDragLeave, onDrop } = useLanShareFileDrop({
+  peer: () => props.peer,
+  sendingFiles: () => props.sendingFiles,
+  onSendPaths: (paths) => emit('send-paths', paths),
+  onSendDroppedFiles: (files) => emit('send-dropped-files', files),
+})
 </script>
 
 <template>
-  <section class="chat-pane">
+  <section
+    class="chat-pane"
+    :class="{ 'is-dragging': dragging }"
+    @dragenter.prevent="onDragEnter"
+    @dragover.prevent="onDragOver"
+    @dragleave="onDragLeave"
+    @drop.prevent="onDrop"
+  >
     <template v-if="peer">
       <header class="chat-head">
         <div class="head-main">
@@ -176,6 +198,7 @@ function onKeydown(event: KeyboardEvent) {
             rows="2"
             @input="onInput"
             @keydown="onKeydown"
+            @paste="onPaste"
           ></textarea>
           <!-- 发送中禁用「发送」按钮 / Enter，但输入框保留可编辑，方便连续起草下一条 -->
           <button class="btn btn-primary send-btn" type="button" :disabled="!canSend" @click="submit">
@@ -205,6 +228,26 @@ function onKeydown(event: KeyboardEvent) {
       <p class="empty-title">从左侧选择一台设备开始聊天</p>
       <p class="empty-hint">可以发送文本消息和文件；在线设备会出现在列表前面。</p>
     </div>
+
+    <!-- 拖拽文件进聊天区：高亮提示松开即发送（目录 / 超限文件由 onDrop 跳过并提示） -->
+    <div v-if="dragging && peer" class="drop-mask">
+      <div class="drop-mask-inner">
+        <svg
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.6"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <path d="M12 16V4" />
+          <path d="M6 10l6-6 6 6" />
+          <path d="M4 20h16" />
+        </svg>
+        <span>松开即可发送到当前设备</span>
+      </div>
+    </div>
   </section>
 </template>
 
@@ -212,9 +255,40 @@ function onKeydown(event: KeyboardEvent) {
 .chat-pane {
   flex: 1;
   min-height: 0;
+  position: relative;
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+
+/* 拖拽文件高亮遮罩：不接管鼠标事件，避免干扰 drop */
+.drop-mask {
+  position: absolute;
+  inset: 8px;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px dashed var(--primary);
+  border-radius: 10px;
+  background: rgba(59, 130, 246, 0.08);
+  pointer-events: none;
+}
+.drop-mask-inner {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  border-radius: 999px;
+  background: var(--bg-primary);
+  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.12);
+  color: var(--primary);
+  font-size: 13px;
+  font-weight: 600;
+}
+.drop-mask-inner svg {
+  width: 16px;
+  height: 16px;
 }
 
 /* 头部：头像 / 设备名（可编辑备注）/ 在线状态 / IP:端口 + 操作按钮 */
