@@ -429,18 +429,47 @@ pnpm package:local -- --open              # 复制完打开所在文件夹
 | `GITHUB_TOKEN` | GitHub 令牌（CI 里由 Actions 注入），创建发行版、上传附件、推送更新清单必需 |
 | `TAURI_BUNDLES=app` | 只打 app、跳过 Tauri 的 dmg 打包脚本，受限环境配 `--dmg` 使用 |
 
-发布版本的唯一来源是 git tag：CI 把 `vX.Y.Z` 里的 `X.Y.Z` 通过 `tauri build --config` 注入，不改源文件。发布流程：打 tag → 构建（含更新签名）→ 上传安装包到 GitHub 发行版（同名 tag）→ 合并生成本平台的 `updates/latest.json` 条目并提交回 `main` → 串行跑一次 Gitee 镜像（`gitee-sync` job），把三个更新载荷传到 Gitee 发行版并把清单里的下载地址换成 Gitee。客户端先从 Gitee 读清单，读不到再用 GitHub 清单兜底。
+### 内测（beta）通道
+
+功能先合到长期分支 `beta`，正式发布 = 把 `beta` 合进 `main`。
+
+- **beta 版本号**：`tauri.conf.json` 的 `version` 是 base（如 `1.0.25`），每次发布自动加成
+  `1.0.25-beta.N`（N 取 Gitee 上已有的最大值 + 1），构建时用 `tauri build --config` 注入。
+- **发布 beta**：在 `beta` 分支上 `pnpm release:beta`。脚本会构建当前平台、签名、把产物和
+  `updates/beta/latest.json` 只发到 Gitee（beta 不进 GitHub、不触发 GitHub 构建）。
+  Windows 的 exe/msi、Mac 的 Intel 版在各自机器上 checkout 同一个提交，用同一个
+  `--version` 再跑一次，清单会按平台补齐。
+- **发布正式版**：`beta` 合进 `main` 后 push。CI 的 preflight 读 `tauri.conf.json` 的版本号，
+  该版本没发过才构建（并发/重复 push 不会重复发版）；发完自动打 `v<version>` tag。
+  想强制重跑用 Actions 的 `workflow_dispatch` + `force`。
+- **客户端**：设置 →「检查更新」→「开发者模式」开关。默认关闭即只收正式版；打开后优先
+  收内测版，标题栏会挂 `beta` 标签。**关闭不降级**：当前内测版保留，下一个正式版发布后
+  自动收敛（semver 里 `1.0.25-beta.1 < 1.0.25`，所以正式版一发布就会被当成更新）。
+  生效通道只看这个开关，不按安装版本推断；手动装过 beta 包但没开开关的用户只会收到正式版。
+- **救火**：beta 清单写坏、或想临时暂停内测，直接在 Gitee 上编辑 / 删除
+  `updates/beta/latest.json` 即可：beta 用户下一次检查会自动回退稳定清单，不报错也不降级。
+  正式版发坏时，修好代码和 `tauri.conf.json` 版本后 push `main`（preflight 会认为该版本已
+  发布而跳过），再用 Actions 的 `workflow_dispatch` + `force` 重建当前版本。
+- **顺序要求**：每次正式版发完后，beta 分支要把 `tauri.conf.json` 的版本提到正式版之上，
+  否则 beta 线会被正式版反超，内测用户提前「升级」到正式版后就再也收不到 beta。
+
+发布版本的唯一来源是 `src-tauri/tauri.conf.json` 的 `version`：push `main` 后 CI 先读它，
+没有同名发行版才构建，构建时通过 `tauri build --config` 注入，不改源文件。发布流程：
+push `main` → preflight 判断 → 构建（含更新签名）→ 上传安装包到 GitHub 发行版并打
+`v<version>` tag → 合并生成本平台的 `updates/latest.json` 条目并提交回 `main`（带
+`[skip ci]`）→ 串行跑一次 Gitee 镜像（`gitee-sync` job），把三个更新载荷传到 Gitee 发行版
+并把清单里的下载地址换成 Gitee。客户端先从 Gitee 读清单，读不到再用 GitHub 清单兜底。
 
 ```bash
-git tag v1.0.16
-git push origin v1.0.16   # 只有推 tag 才会触发 GitHub 构建
+# 改 src-tauri/tauri.conf.json 的 version，提交后：
+git push origin main   # preflight 判断该版本没发过 → 构建 → 发布 → 自动打 v<version> tag
 ```
 
 ### CI
 
-`.github/workflows/ci.yml` 是常驻护栏：push 到 `main`、pull request 与手动 `workflow_dispatch` 都会跑，`test-macos` 和 `test-windows` 两个 job 分别在 `macos-latest`、`windows-latest` 上原生编译，各自 `pnpm build` + 在 `src-tauri` 下 `cargo test --lib`，防止改坏对面平台的代码合进来。两个 job 都先构建前端：tauri 的 `generate_context!` 在编译期要求 `frontendDist`（`../dist`）存在。发版仍只由 tag 触发 `release.yml`。
+`.github/workflows/ci.yml` 是常驻护栏：push 到 `main`、pull request 与手动 `workflow_dispatch` 都会跑，`test-macos` 和 `test-windows` 两个 job 分别在 `macos-latest`、`windows-latest` 上原生编译，各自 `pnpm build` + 在 `src-tauri` 下 `cargo test --lib`，防止改坏对面平台的代码合进来。两个 job 都先构建前端：tauri 的 `generate_context!` 在编译期要求 `frontendDist`（`../dist`）存在。发版由 push `main` 触发 `release.yml`，preflight 按 `tauri.conf.json` 版本判断，不受普通提交影响。
 
-`.github/workflows/release.yml` 只在推送 `v*` tag 时触发（直接 push `main` 不会构建），三个 job 并行，产出：
+`.github/workflows/release.yml` 由 push `main` 触发，先跑 `preflight` 判断该版本是否已发布，三个构建 job 再并行，产出：
 
 | 平台 | 自动更新载荷（带签名） | 手工安装包 |
 | --- | --- | --- |
@@ -448,11 +477,11 @@ git push origin v1.0.16   # 只有推 tag 才会触发 GitHub 构建
 | macOS Intel | `ws-workbench_x86_64.app.tar.gz` | `ws-workbench_<ver>_x64.dmg` |
 | Windows x64 | `ws-workbench-setup.exe`（NSIS） | `ws-workbench_<ver>_x64_en-US.msi` |
 
-macOS 两个架构都在 `macos-latest`（arm64）上跑，Intel 版用 `--target x86_64-apple-darwin` 交叉编译；Windows 在 `windows-latest` 上原生构建（MSI 需要 WiX）。版本号直接从 tag 解析，因此 tag 必须是 `vX.Y.Z` 形式，否则第一个预检步骤就会失败。
+macOS 两个架构都在 `macos-latest`（arm64）上跑，Intel 版用 `--target x86_64-apple-darwin` 交叉编译；Windows 在 `windows-latest` 上原生构建（MSI 需要 WiX）。版本号由 `preflight` 从 `tauri.conf.json` 读出（必须是 `X.Y.Z` 形式，否则预检直接失败），tag 由脚本按 `v<version>` 创建。
 
 跑之前必须配一个仓库密钥：`TAURI_SIGNING_PRIVATE_KEY`（本机 `~/.tauri/ws-workbench.key` 的全文），没配会在预检步骤直接退出。
 
-两个构建 job 会同时改 `updates/latest.json`，脚本用「快进到远端最新 → 以远端为基线合并本平台条目 → 推送被拒就撤销重试」来避免互相覆盖。CI 自己推回 `main` 的清单提交带 `[skip ci]`，且工作流只由 tag 触发，不会自触发。
+两个构建 job 会同时改 `updates/latest.json`，脚本用「快进到远端最新 → 以远端为基线合并本平台条目 → 推送被拒就撤销重试」来避免互相覆盖。CI 自己推回 `main` 的清单提交带 `[skip ci]`，且 preflight 判断该版本已发布就跳过构建，不会自触发。
 
 三个构建 job 之后还有一个串行的 `gitee-sync` job（`needs: [macos, windows]`）：`scripts/gitee-sync.mjs` 把三份更新载荷**和手工安装包（两个 dmg + msi）**传到 Gitee 同名 tag 的发行版，再把 Gitee 仓库里和 GitHub `main` 上的两份 `updates/latest.json` 的下载地址都改成 Gitee。dmg / msi 不在更新清单里，只是给国内用户手动下载安装用，缺了只告警、不影响发版。它需要：
 
