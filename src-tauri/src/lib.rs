@@ -1373,6 +1373,8 @@ pub fn run() {
             commands::lan_share_respond_offer,
             commands::lan_share_send_files,
             // 更新包断点续传：下载 / 安装（前端 useUpdater 调用）
+            // 更新检查：按通道（stable / beta）选清单，取代前端直接调插件 check()
+            updates::update_check,
             updates::update_download_resumed,
             updates::update_install_resumed,
         ])

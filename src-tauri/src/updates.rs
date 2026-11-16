@@ -167,6 +167,141 @@ fn take_update(webview: &Webview, rid: ResourceId, version: &str) -> Result<Upda
     Ok(update)
 }
 
+/// 选通道：`None` 表示该通道「没有可用更新」（beta 清单 404 / 缺本平台条目 / 解析失败）。
+/// 两个都有时按 semver 取高，相等或解析失败取稳定版。
+fn choose_channel(beta: Option<&str>, stable: Option<&str>) -> Option<&'static str> {
+    match (beta, stable) {
+        (Some(beta), Some(stable)) => Some(pick_channel(beta, stable)),
+        (Some(_), None) => Some("beta"),
+        (None, Some(_)) => Some("stable"),
+        (None, None) => None,
+    }
+}
+
+/// `update_check` 的返回元数据。字段名与前端 `src/api/updater.ts` 约定一致，勿改。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateMetadata {
+    rid: ResourceId,
+    current_version: String,
+    version: String,
+    date: Option<String>,
+    body: Option<String>,
+    raw_json: serde_json::Value,
+    /// 这次结果来自哪个通道：`stable` / `beta`（UI 用来提示）
+    channel: String,
+}
+
+/// 读取 `tauri.conf.json` 里配置的更新端点（和插件用的是同一份配置）。
+fn configured_endpoints(app: &AppHandle) -> Vec<Url> {
+    app.config()
+        .plugins
+        .0
+        .get("updater")
+        .and_then(|config| config.get("endpoints"))
+        .and_then(|endpoints| endpoints.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str())
+                .filter_map(|text| Url::parse(text).ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 用给定端点（`None` = 用配置里的默认端点）检查一次更新。
+async fn check_with_endpoints(
+    webview: &Webview,
+    endpoints: Option<Vec<Url>>,
+    timeout: Duration,
+) -> Result<Option<Update>, String> {
+    let mut builder = webview.updater_builder().timeout(timeout);
+    if let Some(endpoints) = endpoints {
+        if endpoints.is_empty() {
+            return Ok(None);
+        }
+        builder = builder
+            .endpoints(endpoints)
+            .map_err(|err| format!("更新端点无效：{err}"))?;
+    }
+    builder
+        .build()
+        .map_err(|err| format!("更新检查初始化失败：{err}"))?
+        .check()
+        .await
+        .map_err(|err| err.to_string())
+}
+
+/// 检查更新：`stable` 只看稳定清单；`beta` 同时看 beta 清单和稳定清单，取版本更高者。
+///
+/// `Update` 放进 webview 的 resource table（与插件自带 `check` 命令一致），
+/// 后续 `update_download_resumed` / `update_install_resumed` 靠 rid 取回。
+#[tauri::command]
+pub async fn update_check(
+    webview: Webview,
+    channel: String,
+    timeout: Option<u64>,
+) -> Result<Option<UpdateMetadata>, String> {
+    let timeout = Duration::from_millis(timeout.unwrap_or(10_000));
+    let endpoints = configured_endpoints(&webview.app_handle());
+
+    // 稳定清单：网络/解析错误先记下来，只有 beta 也查不到时才把错误抛给界面
+    let mut stable_error: Option<String> = None;
+    let stable_update = match check_with_endpoints(&webview, None, timeout).await {
+        Ok(update) => update,
+        Err(err) => {
+            stable_error = Some(err);
+            None
+        }
+    };
+
+    let beta_update = if channel == "beta" {
+        let beta_endpoints = derive_beta_endpoints(&endpoints);
+        // beta 清单缺失 / 没有本平台条目 / 超时，一律当「没有 beta 更新」，不打断稳定检查
+        check_with_endpoints(&webview, Some(beta_endpoints), timeout)
+            .await
+            .unwrap_or(None)
+    } else {
+        None
+    };
+
+    let chosen = choose_channel(
+        beta_update.as_ref().map(|update| update.version.as_str()),
+        stable_update.as_ref().map(|update| update.version.as_str()),
+    );
+    let update = match chosen {
+        Some("beta") => beta_update.expect("choose_channel 选了 beta 却没有 beta_update"),
+        Some(_) => stable_update.expect("choose_channel 选了 stable 却没有 stable_update"),
+        None => {
+            return match stable_error {
+                Some(err) => Err(err),
+                // beta 通道里还没有构建过任何包时，这属于正常状态
+                None => Ok(None),
+            };
+        }
+    };
+    let chosen_channel = chosen.expect("上面已经处理 None");
+
+    // 清单里的 pub_date 就是插件会格式化出来的同一个值，直接取字符串，避免再引 time crate
+    let date = update
+        .raw_json
+        .get("pub_date")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+
+    let metadata = UpdateMetadata {
+        current_version: update.current_version.clone(),
+        version: update.version.clone(),
+        date,
+        body: update.body.clone(),
+        raw_json: update.raw_json.clone(),
+        channel: chosen_channel.to_string(),
+        rid: webview.resources_table().add(update),
+    };
+    Ok(Some(metadata))
+}
+
 /// 更新公钥来自 tauri.conf.json 的 `plugins.updater.pubkey`（发布时注入），
 /// 不在代码里写死，换密钥不用改 Rust。
 fn updater_pubkey(app: &AppHandle) -> Result<String, String> {
@@ -970,5 +1105,23 @@ mod tests {
         assert_eq!(pick_channel("1.0.18-beta.14", "1.0.18"), "stable");
         assert_eq!(pick_channel("1.0.19-beta.1", "1.0.18"), "beta");
         assert_eq!(pick_channel("bad", "1.0.18"), "stable");
+    }
+
+    #[test]
+    fn choose_channel_covers_fallback_cases() {
+        // beta 清单 404 / 没有本平台条目：退回稳定清单
+        assert_eq!(choose_channel(None, Some("1.0.18")), Some("stable"));
+        // 两个清单都有：beta 严格更高才用 beta
+        assert_eq!(
+            choose_channel(Some("1.0.19-beta.1"), Some("1.0.18")),
+            Some("beta")
+        );
+        // 正式版追上 beta 线：beta 用户升到正式版（1.0.18 > 1.0.18-beta.14）
+        assert_eq!(
+            choose_channel(Some("1.0.18-beta.14"), Some("1.0.18")),
+            Some("stable")
+        );
+        // 两个都没有：没有更新可装
+        assert_eq!(choose_channel(None, None), None);
     }
 }
