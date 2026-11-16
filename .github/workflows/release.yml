@@ -83,6 +83,15 @@ jobs:
       - name: 拉取代码
         uses: actions/checkout@v4
 
+      # workflow_dispatch 可以选任意分支，而 release.mjs 最后会 push origin HEAD:main；
+      # 在 beta 上手动发版会把 beta 的构建快进到 main，所以先卡住非 main 的 ref。
+      - name: 只允许在 main 上发版
+        run: |
+          if [ "$GITHUB_REF_NAME" != "main" ]; then
+            echo "::error::只允许在 main 上发版（workflow_dispatch 的 branch 请选 main）"
+            exit 1
+          fi
+
       - name: 读版本并判断是否需要发版
         id: check
         env:

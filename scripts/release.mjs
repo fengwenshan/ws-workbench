@@ -24,7 +24,7 @@
  *   GITHUB_TOKEN               GitHub 令牌（CI 里用 Actions 自动注入的那个），
  *                              创建发行版、上传附件、推送更新清单都需要
  *   GITEE_TOKEN                Gitee 私人令牌：beta 通道读写 Gitee 发行版和清单需要
- *   GITEE_BRANCH               Gitee 清单所在分支；不设时按 main 读
+ *   GITEE_BRANCH               Gitee 清单所在分支；不设时用仓库的默认分支（解析失败才回退 main）
  *
  * 两个平台分别在各自可用的环境里执行即可：脚本会把本平台条目「合并」进
  * updates/latest.json，不会覆盖另一个平台。
@@ -92,8 +92,8 @@ const GITEE_REPO = process.env.GITEE_REPO || 'feng_wenshan/ws-workbench'
 const GITEE_TOKEN = process.env.GITEE_TOKEN || ''
 const GITEE_API = process.env.GITEE_API_BASE || 'https://gitee.com/api/v5'
 const GITEE_WEB = process.env.GITEE_WEB_BASE || 'https://gitee.com'
-/** Gitee 清单分支：沿用 gitee-sync 的约定（GITEE_BRANCH，未设置时是 main） */
-const GITEE_BRANCH = process.env.GITEE_BRANCH || 'main'
+/** Gitee 清单分支：显式设置优先；不设时用仓库默认分支（见 resolveGiteeBranch） */
+const GITEE_BRANCH_ENV = process.env.GITEE_BRANCH || ''
 /** beta 通道：构建当前平台 → 写 Gitee beta 清单；完全不碰 GitHub */
 const BETA = process.argv.includes('--beta')
 /**
@@ -797,13 +797,45 @@ async function giteeApi(path, query = {}) {
 }
 
 /**
+ * 解析 Gitee 清单分支（懒解析、结果缓存）：
+ *   - 设了 GITEE_BRANCH 就直接用，不联网；
+ *   - 否则读仓库的 default_branch：Gitee 新建仓库默认是 master，写死 main
+ *     会让所有清单读取落到不存在的分支上，回滚预检和过期镜像守卫全部失效；
+ *   - 读不到就告警并按 main 兜底，不让读清单的调用整个崩掉。
+ *
+ * 只在真正要读清单时调用，--version 等离线路径不会触发这次网络请求。
+ */
+let giteeBranchPromise = null
+async function resolveGiteeBranch() {
+  if (GITEE_BRANCH_ENV) return GITEE_BRANCH_ENV
+  if (!giteeBranchPromise) {
+    giteeBranchPromise = (async () => {
+      try {
+        const repo = await giteeApi(`/repos/${GITEE_REPO}`)
+        const branch = repo?.default_branch
+        if (branch) {
+          log(`Gitee 清单分支: ${branch}（仓库默认分支）`)
+          return branch
+        }
+        log('Gitee 仓库没有 default_branch，回退按 main 读清单')
+      } catch (err) {
+        log(`读取 Gitee 仓库默认分支失败，回退按 main 读清单: ${err.message}`)
+      }
+      return 'main'
+    })()
+  }
+  return giteeBranchPromise
+}
+
+/**
  * 读 Gitee 仓库里的一个清单文件（只读，不碰 GitHub）。
  * 文件或分支不存在时返回 null；其它错误（网络 / 非法 JSON）抛给调用方决定是否降级。
  */
 async function readGiteeManifest(relPath) {
+  const branch = await resolveGiteeBranch()
   let data
   try {
-    data = await giteeApi(`/repos/${GITEE_REPO}/contents/${relPath}`, { ref: GITEE_BRANCH })
+    data = await giteeApi(`/repos/${GITEE_REPO}/contents/${relPath}`, { ref: branch })
   } catch (err) {
     // 空仓库 / 分支不存在时 Gitee 也可能回 400（gitee-sync 同样按「没有清单」处理）
     if (err.status === 404 || err.status === 400) return null
