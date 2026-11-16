@@ -445,9 +445,9 @@ fn attach_session(
     peer_alias: String,
 ) -> Result<(String, Vec<FileToken>), (u16, String)> {
     // 接受与建会话之间运行时可能被重启（stop_runtime 已清空会话），这里再确认一次，
-    // 避免在已关闭状态下留下一个没人管理的会话。
+    // 避免在运行时未就绪时留下一个没人管理的会话。
     if !lock_inner(inner).running {
-        return Err((403, "局域网分享已关闭".to_string()));
+        return Err((403, "LANLink 服务尚未就绪".to_string()));
     }
     let dir = { lock_inner(inner).download_dir.clone() };
     if let Err(err) = std::fs::create_dir_all(&dir) {

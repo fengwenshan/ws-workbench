@@ -9,11 +9,7 @@ import { useLanShareFileDrop } from './useLanShareFileDrop'
 
 /**
  * 右栏聊天壳：头部设备信息 + 消息流 + 输入区（Glass Deck 视觉，刷新 §2）。
- *
- * 头部无下边框：头像 + 显示名（备注优先于设备名）+ 第二行「原名 · IP」；
- * 名字旁的铅笔就地起备注（LanRemarkEditor，保存仍走父组件统一调 API）。
- * 输入区是浮在底部的白色圆角卡，不再用上边框切分。
- * 消息流拆在 LanChatMessageList 里；这里只做输入框交互与把事件转给 LanSharePanel。
+ * 头部无下边框，输入区是浮在底部的白色圆角卡；消息流拆在 LanChatMessageList。
  */
 const props = defineProps<{
   /** 当前选中的设备（null 显示空态） */
@@ -55,10 +51,7 @@ const emit = defineEmits<{
   'send-dropped-files': [files: DroppedFileInput[]]
 }>()
 
-/**
- * 头部第二行：有备注时 `原名 · IP`（备注编辑仍显示备注优先），没备注时只显示 IP。
- * 不显示「在线/离线」文字（左栏已有状态点）；离线且没有 IP 时整行隐藏，避免同一状态说两遍。
- */
+/** 头部第二行：备注时 `原名 · IP`，无备注只 IP；不显示在线文字，无 IP 时整行隐藏。 */
 const peerSubtitle = computed(() => {
   const target = props.peer
   if (!target) return ''
