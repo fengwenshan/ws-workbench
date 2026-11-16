@@ -56,18 +56,21 @@ function ensureAudio(): HTMLAudioElement | null {
   return audio
 }
 
-/** 首次用户手势时静默播一下再暂停：解锁 WebView 的自动播放限制 */
+/** 首次用户手势时静音播一下再暂停：解锁 WebView 的自动播放限制，且不发声 */
 function unlockAudio() {
   const player = ensureAudio()
   if (!player) return
+  player.muted = true
   void player
     .play()
     .then(() => {
       player.pause()
       player.currentTime = 0
+      player.muted = false
     })
     .catch(() => {
       /* 还没有用户手势时 play 会被拒绝，等下一次手势再试 */
+      player.muted = false
     })
 }
 

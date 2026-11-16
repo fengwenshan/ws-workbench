@@ -1417,7 +1417,7 @@ pub fn run() {
             commands::hosts_backups,
             commands::hosts_restore,
             commands::hosts_open_file_dir,
-            // 局域网分享（2026-11-13 设计）：快照 / 启停 / 设置 / 接收确认 / 发送 / 清空记录
+            // 局域网分享（2026-11-13 设计）：快照 / 设置 / 发送 / 清空记录（端口常开，无启停）
             commands::lan_share_snapshot,
             commands::lan_share_set_alias,
             commands::lan_share_set_download_dir,
@@ -1433,7 +1433,7 @@ pub fn run() {
             commands::lan_share_delete_attachments,
             commands::lan_share_import_clipboard_files,
             commands::lan_share_send_dropped_files,
-            // 局域网分享（2026-11-16 视觉升级）：本机备注 / 接收确认开关 / 打开文件所在目录
+            // 局域网分享（2026-11-16 视觉升级）：本机备注 / 打开文件所在目录
             commands::lan_share_set_peer_remark,
             commands::lan_share_open_file_dir,
             // 更新检查：按通道（stable / beta）选清单，供前端替换插件 check()
@@ -1518,7 +1518,7 @@ pub fn run() {
             // 轮询会话目录里的状态文件，把 VPN 状态与日志推给前端
             vpn::commands::start_status_poller(app.handle().clone());
 
-            // 局域网分享：运行期状态（启停 / peer 表 / 待接收请求 / 接收会话）。
+            // 局域网分享：运行期状态（peer 表 / 待接收请求 / 接收会话）。
             // 冷启动时按设置恢复监听；启动失败只记录原因，不阻断应用启动。
             app.manage(lanshare::LanShareState::from_app(app.handle()));
             {

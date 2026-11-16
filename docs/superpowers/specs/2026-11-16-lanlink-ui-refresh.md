@@ -13,7 +13,7 @@
 6. 监听端口 53317 显示在设备名后面，不再单独一行。
 7. 聊天头部不显示绿色在线状态（左侧列表已有）。
 8. 聊天头部 IP 不显示对方端口号。
-9. 消息提示音改成 DeepSeek Harness `dsh-chime` 插件「任务完成」音效（`bip-bop-01.mp3`）。
+9. 消息提示音改成 DeepSeek Harness `dsh-chime` 插件「任务完成」音效（`src/assets/sounds/chime-done.mp3`，源文件为插件内的 `bip-bop-01.mp3`，MIT）。
 10. 标题「LANLink」右侧放设置按钮；去掉左栏底部「设置 + 运行状态」。
 11. 「局域网分享」更名为 **LANLink**（所有用户可见处）。
 12. 模块整体现代化：背景、层次、阴影；右侧头部与聊天内容不用分割线，用悬浮阴影；提升整体档次。
@@ -78,7 +78,7 @@
 - 设备名：编辑后立即 announce；对端未备注时更新显示名，对端备注优先于原名（本地备注表 `peer_remarks` 不广播）。
 - 端口显示：`snapshot.port`（运行中才有值）；设备名后紧跟 `· 端口`。
 - 聊天头部：不显示在线/离线文字与绿点；IP 只显示 `peer.ip`，不显示端口；备注存在时 `原名 · IP`，否则 `IP`。
-- 提示音：播放 `src/assets/sounds/chime-done.mp3`（从本机 `dsh-chime` 插件提取，MIT）；仍只对 `kind==='message' && direction==='in'` 播放；免打扰共享开关不变；首次用户手势后 `Audio.play()` 解锁。
+- 提示音：播放 `src/assets/sounds/chime-done.mp3`（从本机 `dsh-chime` 插件完整提取，4574B / 0.68s / 26 帧，`afinfo` 可解码；MIT）；仍只对 `kind==='message' && direction==='in'` 播放；免打扰共享开关不变；首次用户手势后 `Audio.play()` 解锁。
 - 「接收文件前需要确认」：后端不再提供设置命令，`require_accept` 固定 false，始终直接接收；前端删掉设置项组件。
 - 删除/右键/托盘/未读/加密等上一轮行为不回退。
 

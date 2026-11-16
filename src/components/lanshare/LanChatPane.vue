@@ -55,11 +55,15 @@ const emit = defineEmits<{
   'send-dropped-files': [files: DroppedFileInput[]]
 }>()
 
-/** 头部第二行：有备注时 `原名 · IP`（备注编辑仍显示备注优先），没备注时只显示 IP */
+/**
+ * 头部第二行：有备注时 `原名 · IP`（备注编辑仍显示备注优先），没备注时只显示 IP。
+ * 不显示「在线/离线」文字（左栏已有状态点）；离线且没有 IP 时整行隐藏，避免同一状态说两遍。
+ */
 const peerSubtitle = computed(() => {
   const target = props.peer
   if (!target) return ''
-  const ip = target.peer?.ip || '设备不在线'
+  const ip = target.peer?.ip ?? ''
+  if (!ip) return target.remark ? target.alias : ''
   return target.remark ? `${target.alias} · ${ip}` : ip
 })
 
@@ -128,7 +132,7 @@ const { dragging, onPaste, onDragEnter, onDragOver, onDragLeave, onDrop } = useL
               @save="emit('save-remark', peer.id, $event)"
             />
             <!-- 第二行：有备注带原名，没备注只显示 IP（不显示在线状态，左栏已有） -->
-            <span class="head-sub" :class="{ 'is-offline': !peer.online }">{{ peerSubtitle }}</span>
+            <span v-if="peerSubtitle" class="head-sub" :class="{ 'is-offline': !peer.online }">{{ peerSubtitle }}</span>
           </div>
         </div>
         <div class="head-actions">
@@ -171,12 +175,12 @@ const { dragging, onPaste, onDragEnter, onDragOver, onDragLeave, onDrop } = useL
           <div class="input-row">
             <button
               class="attach-btn"
-            type="button"
-            title="选择文件发送"
-            aria-label="选择文件发送"
-            :disabled="!peer.online || sendingFiles"
-            @click="emit('send-files')"
-          >
+              type="button"
+              title="选择文件发送"
+              aria-label="选择文件发送"
+              :disabled="!peer.online || sendingFiles"
+              @click="emit('send-files')"
+            >
             <svg
               viewBox="0 0 24 24"
               fill="none"
@@ -377,7 +381,7 @@ const { dragging, onPaste, onDragEnter, onDragOver, onDragLeave, onDrop } = useL
   font-size: 12px;
 }
 .input-card {
-  padding: 8px;
+  padding: 10px;
   border-radius: 14px;
   background: #fff;
   box-shadow:

@@ -586,12 +586,19 @@ impl LanShareState {
 
         // 端口常开：不再提供关闭入口；老配置里的 enabled=false / require_accept=true
         // 一并纠正并回写（接收文件前确认功能已移除，始终直接接收）。
+        let mut save_warning: Option<String> = None;
         if enforce_always_on(&mut loaded) {
-            let _ = settings::save(app, &loaded);
+            if let Err(err) = settings::save(app, &loaded) {
+                // 纠正没能落盘不影响本次运行（内存里已是常开），但要提示用户
+                save_warning = Some(format!("常开设置没能写入磁盘：{err}"));
+            }
         }
 
         let default_dir = default_download_dir(app);
         let state = Self::with_settings(loaded, default_dir);
+        if let Some(message) = save_warning {
+            lock_inner(&state.inner).warning = Some(message);
+        }
 
         // 聊天记录存储打不开不影响文件收发：只提示，命令层返回明确错误
         match ChatStore::open(app) {
@@ -1671,6 +1678,13 @@ mod tests {
         assert!(settings.enabled);
         assert!(!settings.require_accept);
         assert!(!enforce_always_on(&mut settings), "纠正后幂等");
+
+        // 纠正后的设置进入状态机，快照也应恒为开启
+        let dir = tempfile::tempdir().unwrap();
+        let state = LanShareState::with_settings(settings, dir.path().join("recv"));
+        let snapshot = state.snapshot();
+        assert!(snapshot.enabled);
+        assert!(!snapshot.require_accept);
     }
 
     #[test]
