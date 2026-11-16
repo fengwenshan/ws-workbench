@@ -443,6 +443,18 @@ GITEE_TOKEN=xxxxxxxx
 
 这样 `pnpm release:beta` 就不用每次在命令前指定令牌。
 
+### 多平台发布：同一把签名密钥
+
+更新签名密钥和操作系统无关（minisign 密钥对，只跟 `tauri.conf.json` 里的 `updater.pubkey`
+配对），所有平台共用同一把，不要给不同平台生成不同密钥对：
+
+- 另一台机器（Windows / Intel Mac）上把 `~/.tauri/ws-workbench.key` 和同目录的 `.pub`
+  复制到对应位置（Windows 是 `%USERPROFILE%\.tauri\ws-workbench.key`），或者在 `env.local`
+  里写 `TAURI_SIGNING_PRIVATE_KEY=<密钥内容>`；
+- 私钥有密码时再在 `env.local` 里写 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD=...`；
+- 构建时脚本用这把密钥签名，各平台产物都由同一个公钥验签；换密钥 = 所有已装客户端
+  自动更新失效，只能手动重装，所以宁可找回密码也不要轻易重新生成。
+
 ### 内测（beta）通道
 
 功能先合到长期分支 `beta`，正式发布 = 把 `beta` 合进 `main`。
