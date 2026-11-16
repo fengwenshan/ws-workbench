@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 给 ws-workbench 加「正式 / 内测」双更新通道：内测版本号 `<base>-beta.<N>`，Gitee 上单独发 beta 清单，客户端设置里一个开关切换，关闭不降级、下个正式版自然收敛。
+**Goal:** 给 ws-workbench 加「正式 / 内测」双更新通道：内测版本号 `<base>-beta.<N>`，Gitee 上单独发 beta 清单，客户端设置里一个「开发者模式」开关切换，关闭不降级、下个正式版自然收敛。
 
 **Architecture:** Rust 新增 `update_check(channel)` 命令，按通道选清单、取版本更高者（稳定清单不动，beta 清单只在 Gitee）；前端用这个命令替换插件 `check()`，把通道持久化到 `config.json`；发布侧 beta 走本地 `release.mjs --beta` → Gitee，正式版改由 push `main` 触发 GitHub Actions（preflight 按 `tauri.conf.json` 版本号判断是否需要发版）。
 
@@ -416,7 +416,7 @@ git commit -m "feat(update): update_check 按通道检查更新"
 
 ---
 
-### Task 3: 配置字段 `update_channel`（Rust + TS）
+### Task 3: 配置字段 `developer_mode`（Rust + TS）
 
 **Files:**
 - Modify: `src-tauri/src/models.rs`（`AppSettings`、`AppConfig`）
@@ -431,9 +431,9 @@ git commit -m "feat(update): update_check 按通道检查更新"
 
 ```rust
     #[test]
-    fn update_channel_defaults_to_empty() {
+    fn developer_mode_defaults_to_false() {
         let settings: AppSettings = serde_json::from_str("{}").unwrap();
-        assert_eq!(settings.update_channel, "");
+        assert!(!settings.developer_mode);
     }
 ```
 
@@ -449,13 +449,13 @@ git commit -m "feat(update): update_check 按通道检查更新"
             vpn_worker_session_dir: "/tmp/session".to_string(),
             default_upload_dir: Some("/tmp/upload".to_string()),
             tree_order: vec!["g1".to_string(), "r1".to_string()],
-            update_channel: "beta".to_string(),
+            developer_mode: true,
             ..Default::default()
         };
         let settings = AppSettings::from_config(&config);
-        assert_eq!(settings.update_channel, "beta");
+        assert!(settings.developer_mode);
         let merged = settings.into_config(crate::db::DbData::default());
-        assert_eq!(merged.update_channel, "beta");
+        assert!(merged.developer_mode);
         assert_eq!(merged.default_include, config.default_include);
         assert_eq!(merged.default_include_version, 7);
         assert_eq!(merged.vpn_active_profile_id, "p1");
@@ -469,57 +469,57 @@ git commit -m "feat(update): update_check 按通道检查更新"
 - [ ] **Step 2: 跑测试确认失败**
 
 ```bash
-cd src-tauri && cargo test --quiet update_channel_defaults_to_empty 2>&1 | tail -10
+cd src-tauri && cargo test --quiet developer_mode_defaults_to_false 2>&1 | tail -10
 ```
 
-Expected：编译失败，报 `no field update_channel`。
+Expected：编译失败，报 `no field developer_mode`。
 
 - [ ] **Step 3: 加 Rust 字段与映射**
 
 `src-tauri/src/models.rs` 的 `AppSettings` 结构体里（`tree_order` 之后）加：
 
 ```rust
-    /// 更新通道：空串 = 跟随安装版本（预发布版按 beta）；"stable" / "beta" 是用户显式选择
+    /// 开发者模式：开启后接收内测版（beta）更新；默认关闭，只收正式版
     #[serde(default)]
-    pub update_channel: String,
+    pub developer_mode: bool,
 ```
 
 `AppSettings::default()` 里加：
 
 ```rust
-            update_channel: String::new(),
+            developer_mode: false,
 ```
 
 `AppConfig` 结构体里（`tree_order` 之后）加：
 
 ```rust
-    /// 更新通道，见 [`AppSettings::update_channel`]
+    /// 开发者模式，见 [`AppSettings::developer_mode`]
     #[serde(default)]
-    pub update_channel: String,
+    pub developer_mode: bool,
 ```
 
 `AppConfig::default()` 里加：
 
 ```rust
-            update_channel: String::new(),
+            developer_mode: false,
 ```
 
 `src-tauri/src/config.rs` 的 `AppSettings::from_config` 里加：
 
 ```rust
-            update_channel: config.update_channel.clone(),
+            developer_mode: config.developer_mode,
 ```
 
 `into_config` 里加：
 
 ```rust
-            update_channel: self.update_channel,
+            developer_mode: self.developer_mode,
 ```
 
 - [ ] **Step 4: 跑测试确认通过**
 
 ```bash
-cd src-tauri && cargo test --quiet app_settings_roundtrip_from_config update_channel_defaults_to_empty 2>&1 | tail -10
+cd src-tauri && cargo test --quiet app_settings_roundtrip_from_config developer_mode_defaults_to_false 2>&1 | tail -10
 ```
 
 Expected：PASS。
@@ -529,8 +529,8 @@ Expected：PASS。
 `src/types/index.ts` 的 `AppConfig` 里加：
 
 ```ts
-  /** 更新通道：'' / 缺省 = 跟随安装版本（预发布版按 beta）；'stable' / 'beta' 为用户显式选择 */
-  update_channel?: 'stable' | 'beta' | ''
+  /** 开发者模式：开启后接收内测版（beta）更新；缺省 / false = 只收正式版 */
+  developer_mode?: boolean''
 ```
 
 `src/composables/useConfig.ts` 的 `loadConfig` 里，把
@@ -543,7 +543,7 @@ Expected：PASS。
 
 ```ts
         default_upload_dir: loaded.default_upload_dir ?? null,
-        update_channel: loaded.update_channel ?? '',
+        developer_mode: loaded.developer_mode ?? false,
 ```
 
 - [ ] **Step 6: 前端类型检查**
@@ -558,7 +558,7 @@ Expected：退出码 0。
 
 ```bash
 git add src-tauri/src/models.rs src-tauri/src/config.rs src/types/index.ts src/composables/useConfig.ts
-git commit -m "feat(config): 持久化更新通道 update_channel"
+git commit -m "feat(config): 持久化开发者模式 developer_mode"
 ```
 
 ---
@@ -568,7 +568,7 @@ git commit -m "feat(config): 持久化更新通道 update_channel"
 **Files:**
 - Create: `src/api/updater.ts`
 - Modify: `src/api/app.ts`（新增 `isPrereleaseBuild`）
-- Modify: `src/composables/useUpdater.ts`（通道状态、改用后端命令、`setChannel`）
+- Modify: `src/composables/useUpdater.ts`（开发者模式、改用后端命令、`setDeveloperMode`）
 
 - [ ] **Step 1: 新增 `src/api/updater.ts`**
 
@@ -652,7 +652,7 @@ import { ref, computed } from 'vue'
 import { Channel, invoke } from '@tauri-apps/api/core'
 import type { Update } from '@tauri-apps/plugin-updater'
 import { relaunch } from '@tauri-apps/plugin-process'
-import { isDevBuild, isPrereleaseBuild } from '@/api/app'
+import { isDevBuild } from '@/api/app'
 import { checkUpdateForChannel, type UpdateChannel } from '@/api/updater'
 import { safeGet, safeSet } from './safeStorage'
 ```
@@ -676,10 +676,10 @@ type PendingUpdate = Update
 找到 `const dismissedVersion = ref(safeGet(DISMISS_KEY) ?? '')`，在它后面加：
 
 ```ts
-/** 当前生效的更新通道：由 setChannel 按「配置偏好 / 安装版本」算出来 */
-const channel = ref<UpdateChannel>('stable')
-/** 配置里的通道偏好：'' = 跟随安装版本（预发布版按 beta）；'stable' / 'beta' = 用户显式选择 */
-const channelPreference = ref<'' | UpdateChannel>('')
+/** 开发者模式：开着就收内测版，关着只收正式版（持久化到 config.json） */
+const developerMode = ref(false)
+/** 当前生效的更新通道：由 developerMode 直接派生，检查命令只认它 */
+const channel = computed<UpdateChannel>(() => (developerMode.value ? 'beta' : 'stable'))
 ```
 
 - [ ] **Step 6: `checkUpdate` 改走新命令**
@@ -696,26 +696,21 @@ const channelPreference = ref<'' | UpdateChannel>('')
     const update = await checkUpdateForChannel(channel.value, CHECK_TIMEOUT_MS)
 ```
 
-- [ ] **Step 7: 加 `setChannel`**
+- [ ] **Step 7: 加 `setDeveloperMode`**
 
 在 `dismissCurrent` 之后、`checkUpdate` 之前加：
 
 ```ts
 /**
- * 设置通道偏好并计算生效通道。
+ * 开关开发者模式（= 切换内测 / 正式通道）。
  *
- * 空串 = 跟随安装版本：内测版（版本号带 `-`）自动按 beta，正式版按 stable。
- * 只有生效通道真的变了才清状态，避免每次启动都白丢一次检查结果。
+ * 只有值真的变了才清状态，避免每次启动都白丢一次检查结果。
  * 注意这里不主动检查：调用方（App.vue 启动 / 设置页切换）自己决定何时查，
  * 否则启动时会查两遍。
  */
-async function setChannel(preference: '' | UpdateChannel) {
-  channelPreference.value = preference
-  const effective: UpdateChannel =
-    preference === '' ? ((await isPrereleaseBuild()) ? 'beta' : 'stable') : preference
-  const changed = effective !== channel.value
-  channel.value = effective
-  if (!changed) return
+function setDeveloperMode(enabled: boolean) {
+  if (developerMode.value === enabled) return
+  developerMode.value = enabled
   closePending()
   reset()
   // 换了通道，之前的「忽略此版本」不应该继续压住新通道的提示
@@ -729,9 +724,8 @@ async function setChannel(preference: '' | UpdateChannel) {
 在靠近文件末尾的 `const updaterApi = {` 对象里，`devBuild,` 之后加：
 
 ```ts
-  channel,
-  channelPreference,
-  setChannel,
+  developerMode,
+  setDeveloperMode,
 ```
 
 - [ ] **Step 9: 类型检查 + 构建**
@@ -791,15 +785,15 @@ const emit = defineEmits<{
 ```ts
 const props = defineProps<{
   defaultUploadDir: string | null
-  /** 当前生效的更新通道（App.vue 从 useUpdater 拿）；开关只反映它 */
-  updateChannel: 'stable' | 'beta'
+  /** 开发者模式开关（打开 = 接收内测版更新） */
+  developerMode: boolean
   /** 当前工具页是否激活（App.vue 的 view === 'settings'）；设置页是 v-show 常驻挂载的 */
   active: boolean
 }>()
 
 const emit = defineEmits<{
   updateDefaultUploadDir: [dir: string | null]
-  changeUpdateChannel: [channel: 'stable' | 'beta']
+  changeDeveloperMode: [enabled: boolean]
 }>()
 ```
 
@@ -808,39 +802,64 @@ const emit = defineEmits<{
 在「检查更新」那一节的计算属性之前（`// ========== 检查更新 ==========` 注释之后、`const { status: updateStatus ...` 之前）加：
 
 ```ts
-/** 切到内测通道要确认一次：内测版是给新功能抢先体验的，可能不稳定 */
-function handleChannelChange(checked: boolean) {
+/** 开启开发者模式（= 接收内测版更新）要确认一次：内测版可能有未回归的问题 */
+function handleDeveloperModeChange(checked: boolean) {
   if (!checked) {
-    emit('changeUpdateChannel', 'stable')
+    emit('changeDeveloperMode', false)
     return
   }
   Modal.confirm({
-    title: '开启内测通道？',
+    title: '开启开发者模式？',
     content:
-      '开启后优先收到内测版（版本号带 -beta）：新功能会先在內测通道发布，但可能不稳定。' +
-      '关闭内测不会降级，当前内测版会保留，等下一个正式版发布后自动回到稳定版。',
-    okText: '开启内测',
+      '开启后会优先收到内测版更新（版本号带 -beta）：新功能会先在这里发布，但可能不稳定。' +
+      '关闭开发者模式不会降级，当前内测版会保留，等下一个正式版发布后自动回到稳定版。',
+    okText: '开启',
     cancelText: '取消',
-    onOk: () => emit('changeUpdateChannel', 'beta'),
+    onOk: () => emit('changeDeveloperMode', true),
   })
 }
 ```
 
-- [ ] **Step 3: SettingsPanel 模板加「更新通道」行**
+- [ ] **Step 3: SettingsPanel 模板：当前版本徽标 +「开发者模式」行**
 
-在「检查更新」卡片里，`当前版本` 那一行之后加：
+在 `currentVersionLabel` 计算属性之后加：
+
+```ts
+/** 当前安装的是内测版：在「当前版本」后面挂内测徽标 */
+const isPrereleaseVersion = computed(() => currentVersion.value.includes('-'))
+```
+
+把「当前版本」那一行
 
 ```html
         <div class="info-row">
-          <span class="info-label">更新通道</span>
+          <span class="info-label">当前版本</span>
+          <span class="info-value mono">{{ currentVersionLabel }}</span>
+        </div>
+```
+
+改成：
+
+```html
+        <div class="info-row">
+          <span class="info-label">当前版本</span>
+          <span class="info-value mono">{{ currentVersionLabel }}</span>
+          <span v-if="isPrereleaseVersion" class="channel-beta-tag">内测版</span>
+        </div>
+```
+
+然后把「开发者模式」行加在这一行之后：
+
+```html
+        <div class="info-row">
+          <span class="info-label">开发者模式</span>
           <span class="info-value channel-value">
             <Switch
-              :checked="updateChannel === 'beta'"
+              :checked="developerMode"
               size="small"
-              @change="(checked) => handleChannelChange(!!checked)"
+              @change="(checked) => handleDeveloperModeChange(!!checked)"
             />
-            <span>{{ updateChannel === 'beta' ? '内测版' : '稳定版' }}</span>
-            <span v-if="updateChannel === 'beta'" class="channel-beta-tag">beta</span>
+            <span>{{ developerMode ? '已开启，接收内测版更新' : '已关闭，只接收正式版' }}</span>
           </span>
         </div>
 ```
@@ -853,7 +872,7 @@ function handleChannelChange(checked: boolean) {
 在文件末尾的 `<style scoped>` 里加：
 
 ```css
-/* 更新通道：开关 + 文字 + beta 小标签 */
+/* 开发者模式：开关 + 文字 + beta 小标签 */
 .channel-value {
   display: flex;
   align-items: center;
@@ -920,11 +939,11 @@ const {
   info: updateInfo,
   errorMessage: updateError,
   percentage: updatePercentage,
-  channel: updateChannel,
+  developerMode,
   checkUpdate,
   installUpdate,
   restartApp,
-  setChannel,
+  setDeveloperMode,
   startDailyCheck,
   stopDailyCheck,
 } = useUpdater();
@@ -952,11 +971,11 @@ onUnmounted(stopDailyCheck);
 改成：
 
 ```ts
-// 更新通道来自 config，必须等配置加载完才能决定（空值时要看安装版本是不是 beta），
-// 所以启动检查放在 loading 由 true 变 false 之后；否则预发布版可能先按稳定通道查一次。
+// 开发者模式来自 config，必须等配置加载完才能决定走哪条通道，
+// 所以启动检查放在 loading 由 true 变 false 之后，避免先按稳定通道查一次。
 let updaterInitialized = false;
 async function initUpdater() {
-  await setChannel(config.value.update_channel ?? "");
+  setDeveloperMode(config.value.developer_mode ?? false);
   isPrerelease.value = await isPrereleaseBuild();
   // 开发构建一律不查：裸二进制装不了更新（Windows 上会把 dev 可执行文件覆盖成发布版）
   if (await isDevBuild()) return;
@@ -971,20 +990,20 @@ watch(loading, (value) => {
 onUnmounted(stopDailyCheck);
 ```
 
-- [ ] **Step 8: App.vue 加通道切换处理**
+- [ ] **Step 8: App.vue 加开发者模式切换处理**
 
 在 `handleUpdateAction` 函数之后加：
 
 ```ts
-/** 设置页切通道：先落盘，再按新通道立刻检查一次 */
-async function handleChangeUpdateChannel(next: "stable" | "beta") {
-  config.value.update_channel = next;
+/** 设置页开关开发者模式：先落盘，再按新通道立刻检查一次 */
+async function handleChangeDeveloperMode(enabled: boolean) {
+  config.value.developer_mode = enabled;
   try {
     await saveConfig();
   } catch (err) {
-    message.error(`保存更新通道失败: ${err}`);
+    message.error(`保存开发者模式失败: ${err}`);
   }
-  await setChannel(next);
+  setDeveloperMode(enabled);
   if (await isDevBuild()) return;
   await checkUpdate({ silent: true });
 }
@@ -1008,9 +1027,9 @@ async function handleChangeUpdateChannel(next: "stable" | "beta") {
           <SettingsPanel
             :active="view === 'settings'"
             :default-upload-dir="config.default_upload_dir"
-            :update-channel="updateChannel"
+            :developer-mode="developerMode"
             @update-default-upload-dir="handleSetDefaultUploadDir"
-            @change-update-channel="handleChangeUpdateChannel"
+            @change-developer-mode="handleChangeDeveloperMode"
           />
 ```
 
@@ -1051,7 +1070,7 @@ Expected：退出码 0；`vue-tsc` 没有报类型错误。
 
 ```bash
 git add src/components/settings/SettingsPanel.vue src/App.vue
-git commit -m "feat(settings): 内测通道开关与标题栏 beta 标识"
+git commit -m "feat(settings): 开发者模式开关与标题栏 beta 标识"
 ```
 
 ---
@@ -1837,10 +1856,10 @@ node scripts/release.mjs --beta --version 1.0.25-beta.3   # 补齐平台：同�
 - **发布正式版**：`beta` 合进 `main` 后 push。CI 的 preflight 读 `tauri.conf.json` 的版本号，
   该版本没发过才构建（并发/重复 push 不会重复发版）；发完自动打 `v<version>` tag。
   想强制重跑用 Actions 的 `workflow_dispatch` + `force`。
-- **客户端**：设置 →「检查更新」→「更新通道」开关。默认关闭即稳定版；打开后收到 beta 版，
-  标题栏会挂 `beta` 标签。**关闭不降级**：当前内测版保留，下一个正式版发布后自动收敛
-  （semver 里 `1.0.25-beta.1 < 1.0.25`，所以正式版一发布就会被当成更新）。
-  内测版（版本号带 `-`）默认就走 beta 通道，`update_channel` 为空时按安装版本自动判断。
+- **客户端**：设置 →「检查更新」→「开发者模式」开关。默认关闭即只收正式版；打开后优先
+  收内测版，标题栏会挂 `beta` 标签。**关闭不降级**：当前内测版保留，下一个正式版发布后
+  自动收敛（semver 里 `1.0.25-beta.1 < 1.0.25`，所以正式版一发布就会被当成更新）。
+  生效通道只看这个开关，不按安装版本推断；手动装过 beta 包但没开开关的用户只会收到正式版。
 - **救火**：beta 清单写坏、或想临时暂停内测，直接在 Gitee 上编辑 / 删除
   `updates/beta/latest.json` 即可：beta 用户下一次检查会自动回退稳定清单，不报错也不降级。
   正式版发坏时，修好代码和 `tauri.conf.json` 版本后 push `main`（preflight 会认为该版本已
@@ -1904,12 +1923,12 @@ Expected 输出（关键行）：
 把 `release/` 里的 dmg / exe 装到测试机（覆盖安装正式版），逐项确认：
 
 1. 版本显示 `v1.0.25-beta.1`，标题栏有 `beta` 标签。
-2. 设置 → 检查更新 →「更新通道」开关是「内测版」；当前版本 = 最新版本（不提示更新）。
-3. 关掉开关 → 再检查：**不降级**，显示已是最新（正式版 1.0.24 比当前低）。
+2. 设置 → 检查更新 →「开发者模式」开关显示「已开启，接收内测版更新」；当前版本 = 最新版本（不提示更新）。
+3. 关掉开发者模式 → 再检查：**不降级**，显示已是最新（正式版 1.0.24 比当前低）。
 4. 在 beta 上做一个提交（比如 `git commit --allow-empty -m "test: beta.2"`）再
    `pnpm release:beta`，测试机点「检查更新」→ 收到 `1.0.25-beta.2` → 下载/安装成功
    （断点续传、VPN 断开流程照旧）。
-5. 打开通道时点开关会弹确认框；取消则开关回到原状态。
+5. 打开开发者模式时点开关会弹确认框；取消则开关回到原状态。
 
 - [ ] **Step 6: 模拟 beta 清单缺失（回退稳定清单）**
 
@@ -1929,7 +1948,7 @@ git push origin main
 Expected：Actions 跑 release.yml，preflight 输出 `本次发布版本：1.0.25`，三个构建 job 通过，
 GitHub 发行版 `v1.0.25` 有资产，`updates/latest.json` 版本变成 1.0.25，Gitee 镜像 job 成功。
 
-然后在测试机（当前 `1.0.25-beta.2`、通道仍开着）点「检查更新」：
+然后在测试机（当前 `1.0.25-beta.2`、开发者模式仍开着）点「检查更新」：
 Expected：收到 `v1.0.25` 正式版（不再是 beta），安装后版本 `1.0.25`、beta 标签消失。
 
 - [ ] **Step 8: 给下一轮 beta 提 base**
@@ -1961,7 +1980,7 @@ Expected：全绿；`git status` 干净。
 
 ```bash
 git add README.md docs/superpowers/plans/2026-11-16-beta-update-channel.md
-git commit -m "docs: 内测通道使用与发版说明"
+git commit -m "docs: 开发者模式与内测通道使用说明"
 ```
 
 ---
@@ -1976,7 +1995,7 @@ git commit -m "docs: 内测通道使用与发版说明"
 | 5.2 清单与平台补齐规则 | Task 6（`mergeBetaManifest`）、Task 9 Step 5/7 |
 | 5.3 客户端通道检查 | Task 1、Task 2（`choose_channel`）、Task 4 |
 | 5.4 设置/UI | Task 5（开关 + 确认 + beta 标签） |
-| 5.5 持久化与通道推断 | Task 3（`update_channel`）、Task 5（`setChannel`） |
+| 5.5 持久化 | Task 3（`developer_mode`）、Task 5（`setDeveloperMode`） |
 | 5.6 发布脚本与 CI | Task 6、Task 7、Task 8 |
 | 5.7 救火 | Task 8（`workflow_dispatch force`）、README 说明 |
 | 5.8 迁移 | 前置 0.2（beta base 1.0.25）、Task 9 Step 7/8 |
@@ -1991,10 +2010,10 @@ git commit -m "docs: 内测通道使用与发版说明"
 
 - Rust `UpdateMetadata` 的 `camelCase` 输出 ↔ `src/api/updater.ts` 的 `UpdateCheckResult` 字段一一对应
   （`rid/currentVersion/version/date/body/rawJson/channel`）。
-- `UpdateChannel = 'stable' | 'beta'` ↔ `AppConfig.update_channel?: 'stable' | 'beta' | ''`；
-  Rust 侧 `update_channel: String`（空串 = 跟随安装版本）。
-- `setChannel('')` 用 `isPrereleaseBuild()`（版本号含 `-`）推断；Rust 侧不参与推断，
-  只按传入的 `channel` 选清单，避免两处规则不一致。
+- `AppConfig.developer_mode?: boolean` ↔ Rust `developer_mode: bool`（serde default false）；
+  前端 `useUpdater` 用 `developerMode` computed 出 `UpdateChannel = 'stable' | 'beta'` 传给命令，
+  Rust 侧只按传入的 `channel` 选清单，语义唯一。
+- `isPrereleaseBuild()` 只用于标题栏 / 设置页的内测徽标，不再参与通道推断。
 - `pick_channel` 在 Task 1 定义、Task 2 的 `choose_channel` 复用；不要重复实现。
 - `writeGiteeManifest` 第四参数默认值保持原稳定清单路径，老调用点不用改。
 - gitee-sync 的 beta 清单路径常量 `BETA_MANIFEST = 'updates/beta/latest.json'`，

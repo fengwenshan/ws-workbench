@@ -28,9 +28,9 @@
 ## 2. 目标
 
 - 正式（stable）与内测（beta）两条通道；内测版本号 `<base>-beta.<N>`，`N` 递增。
-- 设置页一个开关「接收内测版更新」，默认关，开启需二次确认；开启后启动检查、每日
-  10:00 / 16:00 检查、手动检查都走内测通道。
-- 内测用户同时能收到正式版更新；关闭开关不降级，停留在当前版本，等下一个正式版
+- 设置页一个「开发者模式」开关，默认关，开启需二次确认；开启后启动检查、每日
+  10:00 / 16:00 检查、手动检查都优先走内测通道（beta 清单没有包时回退正式清单）。
+- 内测用户同时能收到正式版更新；关闭开发者模式不降级，停留在当前版本，等下一个正式版
   自然收敛。
 - beta 产物只落 Gitee；GitHub 只发正式版；已安装的老客户端行为完全不变。
 
@@ -142,26 +142,28 @@
 
 ### 5.4 设置与 UI
 
-- 「设置 → 检查更新」卡片新增一行「更新通道」：
-  - 开关「接收内测版更新（Beta）」，默认关；
-  - 开启时弹确认，文案要点：内测版更新更频繁、可能不稳定；版本号形如
-    `1.0.18-beta.14`；关闭后**不会降级**；下一个正式版发布后自动回归。
+- 「设置 → 检查更新」卡片新增一行「开发者模式」：
+  - 开关「开发者模式」，默认关；
+  - 开启时弹确认，文案要点：开启后会优先收到内测版更新（版本号形如
+    `1.0.18-beta.14`），更新更频繁、可能不稳定；关闭后**不会降级**；下一个正式版
+    发布后自动回归。
 - 当前版本号包含 `-`（如 `1.0.18-beta.14`）时，设置页与标题栏显示「内测版」徽标。
-- 关闭通道：立即按稳定通道重查；若当前版本高于稳定版，提示「当前已安装内测版，
+- 关闭开发者模式：立即按稳定通道重查；若当前版本高于稳定版，提示「当前已安装内测版，
   不会再收到内测更新；下一个正式版发布后自动回归」。
 - 启动静默检查、每日 10:00 / 16:00 检查、手动「检查更新」都使用当前通道。
 - 开发构建保持现状：可以检查，不能安装。
 
-### 5.5 持久化与通道推断
+### 5.5 持久化
 
-- `AppSettings` / `AppConfig` 新增 `update_channel: String`（serde default 空串），
+- `AppSettings` / `AppConfig` 新增 `developer_mode: bool`（serde default `false`），
   存 `config.json`；`from_config` / `into_config` 同步映射；前端
-  `AppConfig.update_channel?: 'stable' | 'beta'`。
-- 空串表示「跟随安装版本」：当前版本是预发布（含 `-`）时按 `beta` 处理，否则按
-  `stable`。这样手动装了 beta 安装包、还没动过开关的用户不会「卡住收不到更新」。
-  用户拨动开关后写入显式 `stable` / `beta`。
-- 前端类型为 `update_channel?: 'stable' | 'beta' | ''`（`''` / 缺省 = 跟随安装版本）。
-- `App.vue` 加载配置后调用 `setChannel`；开关变化时先 `saveConfig`，再切通道并重查。
+  `AppConfig.developer_mode?: boolean`。
+- 生效通道由开关唯一决定：`developer_mode ? 'beta' : 'stable'`。**不按安装版本推断**：
+  手动装过 beta 包但没开开发者模式的用户只收稳定版，等下一个正式版自然收敛。
+- `App.vue` 加载配置后调用 `setDeveloperMode(config.developer_mode ?? false)`；
+  开关变化时先 `saveConfig`，再切通道并重查。
+- `useUpdater` 暴露 `developerMode` 与 `setDeveloperMode`，内部用 computed 派生
+  `channel` 供检查命令使用。
 
 ### 5.6 发版脚本与 CI
 
@@ -214,7 +216,7 @@
 2. `beta` 分支的 `tauri.conf.json` 版本改成下一个正式号（`1.0.25`），作为第一条 beta
    线的 base。
 3. 先发一个包含本功能的正式版（走现有 tag 流程或新流程均可），这样老用户升级后才
-   有「内测通道」开关；之后 beta 才有人能收。
+   有「开发者模式」开关；之后 beta 才有人能收。
 
 ## 6. 边界与异常
 
@@ -251,10 +253,10 @@
 **真包演练**
 
 1. `beta` 分支把 base 提到 `1.0.19`，`pnpm release:beta` 出 `1.0.19-beta.1`；
-2. 手动装 beta 包 → 设置里开启内测通道 → 能收到 `1.0.19-beta.2`；
+2. 手动装 beta 包 → 设置里开启「开发者模式」→ 能收到 `1.0.19-beta.2`；
 3. 合 `beta` → `main`、push `main` 发 `1.0.19` → beta 用户收到正式版；
 4. 继续发 `1.0.20-beta.1` → 已开启通道的用户收到；
-5. 关闭开关 → 不再收 beta；`1.0.20` 正式版发布后自动回归。
+5. 关闭「开发者模式」→ 不再收 beta；`1.0.20` 正式版发布后自动回归。
 
 **CI 守卫**
 
@@ -283,7 +285,7 @@
 
 - Rust：`src-tauri/src/updates.rs`（新命令、端点派生、取高、测试）、`src-tauri/src/lib.rs`
   （注册命令）、`src-tauri/Cargo.toml`（`semver`）、`src-tauri/src/models.rs`、
-  `src-tauri/src/config.rs`（`update_channel`）
+  `src-tauri/src/config.rs`（`developer_mode`）
 - 前端：`src/types/index.ts`、`src/composables/useUpdater.ts`、新增 `src/api/updater.ts`、
   `src/components/settings/SettingsPanel.vue`、`src/App.vue`、`src/composables/useConfig.ts`
 - 脚本：`scripts/release.mjs`（`--beta`）、`scripts/gitee-sync.mjs`（`--beta`）
