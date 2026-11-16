@@ -563,6 +563,120 @@ impl ChatStore {
         tx.commit().map_err(|e| format!("提交事务失败: {}", e))
     }
 
+    /// 全部会话的未读总数（托盘角标用）
+    pub fn total_unread(&self) -> Result<u32, String> {
+        let conn = self.connect()?;
+        let total: i64 = conn
+            .query_row(
+                "SELECT COALESCE(SUM(unread), 0) FROM lan_share_conversations",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("统计未读失败: {}", e))?;
+        Ok(total.max(0) as u32)
+    }
+
+    /// 该会话里「本机收到的、还带落盘路径」的文件消息数
+    pub fn attachment_count(&self, peer_id: &str) -> Result<u32, String> {
+        Ok(self.received_file_paths(peer_id)?.len() as u32)
+    }
+
+    /// 该会话里收到的文件路径（只读，删除会话前收集用）
+    pub fn received_file_paths(&self, peer_id: &str) -> Result<Vec<String>, String> {
+        let rows = self.incoming_file_rows(peer_id)?;
+        let mut paths = Vec::new();
+        for (id, payload_enc) in rows {
+            let payload = match self.decrypt_file_payload(&id, &payload_enc) {
+                Some(payload) => payload,
+                None => continue,
+            };
+            if let Some(path) = payload.file_path.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+                paths.push(path.to_string());
+            }
+        }
+        Ok(paths)
+    }
+
+    /// 把收到的文件的落盘路径从库里清掉，并标记 `status = deleted`。
+    ///
+    /// 返回被清掉的路径；文件本身由调用方删除（先清库、再删文件）。
+    pub fn clear_received_file_paths(&self, peer_id: &str) -> Result<Vec<String>, String> {
+        let rows = self.incoming_file_rows(peer_id)?;
+        let mut conn = self.connect()?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| format!("开启事务失败: {}", e))?;
+        let mut paths = Vec::new();
+        for (id, payload_enc) in rows {
+            let Some(mut payload) = self.decrypt_file_payload(&id, &payload_enc) else {
+                continue;
+            };
+            let Some(path) = payload
+                .file_path
+                .as_deref()
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .map(str::to_string)
+            else {
+                continue;
+            };
+            payload.file_path = None;
+            payload.status = "deleted".to_string();
+            payload.error = None;
+            let json = serde_json::to_string(&payload)
+                .map_err(|e| format!("序列化消息载荷失败: {}", e))?;
+            let enc = self.seal(&json)?;
+            tx.execute(
+                "UPDATE lan_share_messages SET payload_enc = ?1 WHERE peer_id = ?2 AND id = ?3",
+                rusqlite::params![enc, peer_id, id],
+            )
+            .map_err(|e| format!("更新消息载荷失败: {}", e))?;
+            paths.push(path);
+        }
+        tx.commit().map_err(|e| format!("提交事务失败: {}", e))?;
+        Ok(paths)
+    }
+
+    /// 收到的文件消息原始行（未解密）
+    fn incoming_file_rows(&self, peer_id: &str) -> Result<Vec<(String, String)>, String> {
+        let conn = self.connect()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, payload_enc FROM lan_share_messages \
+                 WHERE peer_id = ?1 AND direction = 'in' AND kind = 'file' \
+                 ORDER BY created_at_ms ASC, id ASC",
+            )
+            .map_err(|e| format!("查询文件消息失败: {}", e))?;
+        let rows = stmt
+            .query_map(rusqlite::params![peer_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| format!("查询文件消息失败: {}", e))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(|e| format!("读取文件消息失败: {}", e))?);
+        }
+        Ok(out)
+    }
+
+    /// 解密单条文件消息载荷；坏数据只告警并跳过
+    fn decrypt_file_payload(&self, id: &str, payload_enc: &str) -> Option<MessagePayload> {
+        let json = match self.unseal(payload_enc) {
+            Ok(json) => json,
+            Err(err) => {
+                eprintln!("[lanshare] 文件消息 {} 解密失败，跳过: {}", id, err);
+                return None;
+            }
+        };
+        match serde_json::from_str(&json) {
+            Ok(payload) => Some(payload),
+            Err(err) => {
+                eprintln!("[lanshare] 文件消息 {} 载荷解析失败，跳过: {}", id, err);
+                None
+            }
+        }
+    }
+
     /// 清空未读
     pub fn mark_read(&self, peer_id: &str) -> Result<(), String> {
         let conn = self.connect()?;
@@ -965,6 +1079,160 @@ mod tests {
             )
             .unwrap();
         assert_eq!(alias, "机密设备");
+    }
+
+    #[test]
+    fn total_unread_sums_all_conversations() {
+        let (_dir, store) = test_store();
+        let peer_b = "AA:BB:CC:DD:EE:FF";
+        store
+            .append_message(PEER, "A", &ChatMessage::text("a1", PEER, "in", "1", 1_000))
+            .unwrap();
+        store
+            .append_message(PEER, "A", &ChatMessage::text("a2", PEER, "in", "2", 2_000))
+            .unwrap();
+        store
+            .append_message(peer_b, "B", &ChatMessage::text("b1", peer_b, "in", "3", 3_000))
+            .unwrap();
+        assert_eq!(store.total_unread().unwrap(), 3);
+        store.mark_read(PEER).unwrap();
+        assert_eq!(store.total_unread().unwrap(), 1);
+        store.delete_conversation(peer_b).unwrap();
+        assert_eq!(store.total_unread().unwrap(), 0);
+    }
+
+    #[test]
+    fn attachment_count_only_counts_incoming_with_path() {
+        let (_dir, store) = test_store();
+        store
+            .append_message(
+                PEER,
+                "A",
+                &ChatMessage::file("in1", PEER, "in", "收到.pdf", 10, "received", 1_000),
+            )
+            .unwrap();
+        store
+            .update_message_status(PEER, "in1", "received", None, Some("/tmp/收到.pdf"))
+            .unwrap();
+        store
+            .append_message(
+                PEER,
+                "A",
+                &ChatMessage::file("out1", PEER, "out", "发出.pdf", 10, "sent", 2_000),
+            )
+            .unwrap();
+        store
+            .update_message_status(PEER, "out1", "sent", None, Some("/tmp/发出.pdf"))
+            .unwrap();
+        // 收到的文件但还没落盘路径（旧数据）不计
+        store
+            .append_message(
+                PEER,
+                "A",
+                &ChatMessage::file("in2", PEER, "in", "无路径.pdf", 10, "received", 3_000),
+            )
+            .unwrap();
+
+        let peer_b = "AA:BB:CC:DD:EE:FF";
+        store
+            .append_message(
+                peer_b,
+                "B",
+                &ChatMessage::file("b1", peer_b, "in", "b.pdf", 10, "received", 4_000),
+            )
+            .unwrap();
+        store
+            .update_message_status(peer_b, "b1", "received", None, Some("/tmp/b.pdf"))
+            .unwrap();
+
+        assert_eq!(store.attachment_count(PEER).unwrap(), 1);
+        assert_eq!(
+            store.received_file_paths(PEER).unwrap(),
+            vec!["/tmp/收到.pdf".to_string()]
+        );
+        assert_eq!(store.attachment_count(peer_b).unwrap(), 1);
+    }
+
+    #[test]
+    fn clear_received_file_paths_marks_deleted_and_keeps_other_peer() {
+        let (_dir, store) = test_store();
+        store
+            .append_message(
+                PEER,
+                "A",
+                &ChatMessage::file("in1", PEER, "in", "收到.pdf", 10, "received", 1_000),
+            )
+            .unwrap();
+        store
+            .update_message_status(PEER, "in1", "received", None, Some("/tmp/收到.pdf"))
+            .unwrap();
+        store
+            .append_message(
+                PEER,
+                "A",
+                &ChatMessage::file("out1", PEER, "out", "发出.pdf", 10, "sent", 2_000),
+            )
+            .unwrap();
+        store
+            .update_message_status(PEER, "out1", "sent", None, Some("/tmp/发出.pdf"))
+            .unwrap();
+        let peer_b = "AA:BB:CC:DD:EE:FF";
+        store
+            .append_message(
+                peer_b,
+                "B",
+                &ChatMessage::file("b1", peer_b, "in", "b.pdf", 10, "received", 3_000),
+            )
+            .unwrap();
+        store
+            .update_message_status(peer_b, "b1", "received", None, Some("/tmp/b.pdf"))
+            .unwrap();
+
+        let cleared = store.clear_received_file_paths(PEER).unwrap();
+        assert_eq!(cleared, vec!["/tmp/收到.pdf".to_string()]);
+        let messages = store.list_messages(PEER, 10).unwrap();
+        let incoming = messages.iter().find(|m| m.id == "in1").unwrap();
+        assert_eq!(incoming.status, "deleted");
+        assert_eq!(incoming.file_path, None);
+        let outgoing = messages.iter().find(|m| m.id == "out1").unwrap();
+        assert_eq!(outgoing.status, "sent");
+        assert_eq!(outgoing.file_path.as_deref(), Some("/tmp/发出.pdf"));
+        assert_eq!(store.attachment_count(PEER).unwrap(), 0);
+        assert_eq!(store.attachment_count(peer_b).unwrap(), 1);
+        // 再清一次是空操作
+        assert!(store.clear_received_file_paths(PEER).unwrap().is_empty());
+    }
+
+    #[test]
+    fn file_path_is_encrypted_at_rest() {
+        let (_dir, store) = test_store();
+        let secret_path = "/Users/secret/机密目录/合同.pdf";
+        store
+            .append_message(
+                PEER,
+                "A",
+                &ChatMessage::file("f1", PEER, "in", "合同.pdf", 10, "received", 1_000),
+            )
+            .unwrap();
+        store
+            .update_message_status(PEER, "f1", "received", None, Some(secret_path))
+            .unwrap();
+
+        let conn = Connection::open(&store.path).unwrap();
+        let payload: String = conn
+            .query_row(
+                "SELECT payload_enc FROM lan_share_messages WHERE id = 'f1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(payload.starts_with("v1."));
+        assert!(!payload.contains("合同.pdf"));
+        assert!(!payload.contains("机密目录"));
+        assert!(!payload.contains(secret_path));
+        // 解密后路径仍在
+        let messages = store.list_messages(PEER, 10).unwrap();
+        assert_eq!(messages[0].file_path.as_deref(), Some(secret_path));
     }
 
     #[test]

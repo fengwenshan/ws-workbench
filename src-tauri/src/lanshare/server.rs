@@ -27,7 +27,8 @@ use super::protocol::{
     UploadResponse,
 };
 use super::{
-    emit_chat, emit_snapshot, lock_inner, unix_millis, ChatMessage, InnerRef, OfferFile,
+    emit_chat, emit_chat_with_direction, emit_snapshot, lock_inner, unix_millis, ChatMessage, InnerRef,
+    OfferFile,
     PendingEntry, PendingOffer, Session, SessionFile, MAX_CHAT_BODY, MAX_CHAT_CHARS, MAX_FILES,
     MAX_FILE_SIZE, MAX_PREPARE_BODY, PORT_BASE, PROTOCOL_VERSION,
 };
@@ -261,7 +262,7 @@ fn handle_chat(
         store
             .append_message(&sender.fingerprint, &alias, &message)
             .map_err(|err| (500, format!("保存消息失败：{err}")))?;
-        emit_chat(inner, app, &sender.fingerprint, "message");
+        emit_chat_with_direction(inner, app, &sender.fingerprint, "in");
     }
 
     write_json(reader.get_mut(), 200, &ChatResponse { ok: true })
@@ -596,7 +597,7 @@ fn handle_upload(
         );
         message.file_path = Some(path.clone());
         match store.append_message(&peer_id, &peer_alias, &message) {
-            Ok(()) => emit_chat(inner, app, &peer_id, "message"),
+            Ok(()) => emit_chat_with_direction(inner, app, &peer_id, "in"),
             Err(err) => eprintln!("写入接收文件消息失败：{err}"),
         }
     }

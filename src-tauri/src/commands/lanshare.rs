@@ -87,10 +87,45 @@ pub fn lan_share_mark_read(app: AppHandle, peer_id: String) -> Result<(), String
     state(&app)?.mark_read(&app, &peer_id)
 }
 
-/// 删除本机会话与聊天记录（对方不受影响）
+/// 删除本机会话与聊天记录（对方不受影响）；`delete_files` 时同时删除本机收到的文件。
 #[tauri::command]
-pub fn lan_share_delete_conversation(app: AppHandle, peer_id: String) -> Result<(), String> {
-    state(&app)?.delete_conversation(&app, &peer_id)
+pub fn lan_share_delete_conversation(
+    app: AppHandle,
+    peer_id: String,
+    delete_files: bool,
+) -> Result<(), String> {
+    state(&app)?.delete_conversation(&app, &peer_id, delete_files)
+}
+
+/// 该会话里本机收到的、还带落盘路径的文件数量
+#[tauri::command]
+pub fn lan_share_conversation_attachment_count(
+    app: AppHandle,
+    peer_id: String,
+) -> Result<u32, String> {
+    state(&app)?.attachment_count(&peer_id)
+}
+
+/// 删除本机收到的文件但保留聊天记录；返回实际删除的文件数。
+#[tauri::command]
+pub fn lan_share_delete_attachments(app: AppHandle, peer_id: String) -> Result<u32, String> {
+    state(&app)?.delete_attachments(&app, &peer_id)
+}
+
+/// 读系统剪贴板：文件列表优先，其次图片；返回暂存后的本地路径。
+#[tauri::command]
+pub fn lan_share_import_clipboard_files(app: AppHandle) -> Result<Vec<String>, String> {
+    crate::lanshare::outbox::clipboard_paths(&app)
+}
+
+/// 拖拽文件（只有字节没有路径）：落暂存目录后走常规文件发送。
+#[tauri::command]
+pub fn lan_share_send_dropped_files(
+    app: AppHandle,
+    peer_id: String,
+    files: Vec<crate::lanshare::outbox::DroppedFileInput>,
+) -> Result<String, String> {
+    state(&app)?.send_dropped_files(&app, &peer_id, &files)
 }
 
 /// 设置 / 清除本机给某台设备起的备注（只在本机显示，不广播给对端）。

@@ -16,6 +16,7 @@ pub(crate) mod chat_store;
 pub(crate) mod client;
 pub(crate) mod discovery;
 pub(crate) mod identity;
+pub(crate) mod outbox;
 pub(crate) mod protocol;
 pub(crate) mod server;
 pub(crate) mod settings;
@@ -68,6 +69,8 @@ pub const EVENT_SNAPSHOT: &str = "lan-share://snapshot";
 pub const EVENT_SEND_PROGRESS: &str = "lan-share://send-progress";
 /// 聊天相关变化：新消息 / 已读 / 会话删除。前端收到后按需重拉会话与消息。
 pub const EVENT_CHAT: &str = "lan-share://chat";
+/// 托盘消息列表点了某条会话：主窗口切到局域网分享并定位该会话。
+pub const EVENT_OPEN_CHAT: &str = "lan-share://open-chat";
 
 /// `/chat` 请求体上限与正文长度上限（防误发 / 防大报文）
 pub const MAX_CHAT_BODY: usize = 16 * 1024;
@@ -172,6 +175,15 @@ pub struct ChatEvent {
     pub peer_id: String,
     /// `message` / `read` / `deleted`
     pub kind: String,
+    /// 消息方向：`in` / `out`；非消息变化（已读 / 删除 / 状态更新）为 None
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direction: Option<String>,
+}
+
+/// 托盘消息列表点选会话事件载荷
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OpenChatEvent {
+    pub peer_id: String,
 }
 
 /// 发送方提交的单个文件清单项
@@ -663,23 +675,68 @@ impl LanShareState {
     }
 
     /// 清空某个会话的未读
-    pub fn mark_read(&self, _app: &AppHandle, peer_id: &str) -> Result<(), String> {
+    pub fn mark_read(&self, app: &AppHandle, peer_id: &str) -> Result<(), String> {
         let peer_id = peer_id.trim();
         if peer_id.is_empty() {
             return Err("缺少设备标识".to_string());
         }
-        self.chat_store()?.mark_read(peer_id)
+        self.chat_store()?.mark_read(peer_id)?;
+        emit_chat(&self.inner, Some(app), peer_id, "read");
+        Ok(())
+    }
+
+    /// 全部会话未读总数（托盘左键判定 + Dock 角标）
+    pub fn total_unread(&self) -> u32 {
+        let store = lock_inner(&self.inner).chat.clone();
+        let Some(store) = store else {
+            return 0;
+        };
+        store.total_unread().unwrap_or(0)
+    }
+
+    /// 启动时按历史未读刷一次 Dock 角标（macOS）
+    pub fn sync_dock_badge(&self, app: &AppHandle) {
+        refresh_dock_badge(&self.inner, app);
     }
 
     /// 删除本机会话与消息；对方不受影响，之后再来消息会重新建会话。
-    pub fn delete_conversation(&self, app: &AppHandle, peer_id: &str) -> Result<(), String> {
+    ///
+    /// `delete_files` 为 true 时，同时把本机收到的文件移入废纸篓（失败回退直接删除）。
+    pub fn delete_conversation(
+        &self,
+        app: &AppHandle,
+        peer_id: &str,
+        delete_files: bool,
+    ) -> Result<(), String> {
         let peer_id = peer_id.trim();
         if peer_id.is_empty() {
             return Err("缺少设备标识".to_string());
         }
-        self.chat_store()?.delete_conversation(peer_id)?;
+        let store = self.chat_store()?;
+        delete_conversation_rows(&store, peer_id, delete_files)?;
         emit_chat(&self.inner, Some(app), peer_id, "deleted");
         Ok(())
+    }
+
+    /// 该会话里本机收到的、带落盘路径的文件数
+    pub fn attachment_count(&self, peer_id: &str) -> Result<u32, String> {
+        let peer_id = peer_id.trim();
+        if peer_id.is_empty() {
+            return Err("缺少设备标识".to_string());
+        }
+        self.chat_store()?.attachment_count(peer_id)
+    }
+
+    /// 删除本机收到的文件但保留聊天记录；返回实际删除的文件数。
+    pub fn delete_attachments(&self, app: &AppHandle, peer_id: &str) -> Result<u32, String> {
+        let peer_id = peer_id.trim();
+        if peer_id.is_empty() {
+            return Err("缺少设备标识".to_string());
+        }
+        let store = self.chat_store()?;
+        let deleted = delete_attachment_rows(&store, peer_id)?;
+        emit_chat(&self.inner, Some(app), peer_id, "message");
+        Ok(deleted)
     }
 
     /// 发送一条文本消息：本地先落库（sending）并返回，投递在后台线程里做。
@@ -712,7 +769,7 @@ impl LanShareState {
         let mut message = ChatMessage::text(&message_id, peer_id, "out", text, unix_millis());
         message.status = "sending".to_string();
         store.append_message(peer_id, &peer.alias, &message)?;
-        emit_chat(&self.inner, Some(app), peer_id, "message");
+        emit_chat_with_direction(&self.inner, Some(app), peer_id, "out");
 
         let send_peer = client::SendPeer {
             fingerprint: peer.fingerprint.clone(),
@@ -1038,7 +1095,7 @@ impl LanShareState {
                     eprintln!("写入发送文件消息失败：{err}");
                 }
             }
-            emit_chat(&self.inner, Some(app), peer_fingerprint, "message");
+            emit_chat_with_direction(&self.inner, Some(app), peer_fingerprint, "out");
         }
         let send_peer = client::SendPeer {
             fingerprint: peer.fingerprint.clone(),
@@ -1061,6 +1118,17 @@ impl LanShareState {
             );
         });
         Ok(transfer_id)
+    }
+
+    /// 拖拽文件：先把字节落到暂存目录，再走常规文件发送（返回 transfer_id）。
+    pub fn send_dropped_files(
+        &self,
+        app: &AppHandle,
+        peer_fingerprint: &str,
+        files: &[outbox::DroppedFileInput],
+    ) -> Result<String, String> {
+        let paths = outbox::save_dropped_files(app, files)?;
+        self.send_files(app, peer_fingerprint, paths)
     }
 
     /// 落盘并处理失败：重试几次，仍失败只记 `warning`。
@@ -1156,7 +1224,91 @@ pub(crate) fn emit_progress(inner: &InnerRef, app: Option<&AppHandle>, progress:
 }
 
 /// 推送聊天变化事件；测试里 app 为 None 时不做任何事。
-pub(crate) fn emit_chat(_inner: &InnerRef, app: Option<&AppHandle>, peer_id: &str, kind: &str) {
+/// 删除本机文件：优先移入废纸篓，失败回退直接删除；只处理普通文件，跳过目录/符号链接。
+///
+/// 返回真正删掉的文件数。单个文件失败只记日志，不阻断整体流程。
+fn delete_local_files(paths: &[String]) -> usize {
+    let mut deleted = 0;
+    for raw in paths {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            continue;
+        }
+        let path = Path::new(raw);
+        let meta = match std::fs::symlink_metadata(path) {
+            Ok(meta) => meta,
+            Err(_) => continue,
+        };
+        let file_type = meta.file_type();
+        if file_type.is_dir() || file_type.is_symlink() || !meta.is_file() {
+            continue;
+        }
+        let ok = match trash::delete(path) {
+            Ok(()) => true,
+            Err(err) => {
+                eprintln!(
+                    "[lanshare] 附件移入废纸篓失败，改为直接删除: {} ({})",
+                    path.display(),
+                    err
+                );
+                std::fs::remove_file(path).is_ok()
+            }
+        };
+        if ok {
+            deleted += 1;
+        } else {
+            eprintln!("[lanshare] 删除附件失败: {}", path.display());
+        }
+    }
+    deleted
+}
+
+/// 删会话（可选删本机收到的文件）的纯存储流程，便于单测。
+fn delete_conversation_rows(
+    store: &ChatStore,
+    peer_id: &str,
+    delete_files: bool,
+) -> Result<usize, String> {
+    let paths = if delete_files {
+        store.received_file_paths(peer_id)?
+    } else {
+        Vec::new()
+    };
+    store.delete_conversation(peer_id)?;
+    Ok(if delete_files {
+        delete_local_files(&paths)
+    } else {
+        0
+    })
+}
+
+/// 删本机收到的文件但保留聊天记录的纯存储流程，便于单测。
+fn delete_attachment_rows(store: &ChatStore, peer_id: &str) -> Result<u32, String> {
+    let paths = store.clear_received_file_paths(peer_id)?;
+    Ok(delete_local_files(&paths) as u32)
+}
+
+pub(crate) fn emit_chat(inner: &InnerRef, app: Option<&AppHandle>, peer_id: &str, kind: &str) {
+    emit_chat_with_direction_opt(inner, app, peer_id, kind, None);
+}
+
+/// 新消息事件：带 direction，前端据此只对「收到」播放提示音。
+pub(crate) fn emit_chat_with_direction(
+    inner: &InnerRef,
+    app: Option<&AppHandle>,
+    peer_id: &str,
+    direction: &str,
+) {
+    emit_chat_with_direction_opt(inner, app, peer_id, "message", Some(direction));
+}
+
+fn emit_chat_with_direction_opt(
+    inner: &InnerRef,
+    app: Option<&AppHandle>,
+    peer_id: &str,
+    kind: &str,
+    direction: Option<&str>,
+) {
     let Some(app) = app else {
         return;
     };
@@ -1165,9 +1317,31 @@ pub(crate) fn emit_chat(_inner: &InnerRef, app: Option<&AppHandle>, peer_id: &st
         ChatEvent {
             peer_id: peer_id.to_string(),
             kind: kind.to_string(),
+            direction: direction.map(str::to_string),
         },
     );
+    // 任何会话变化（新消息 / 已读 / 删除）后刷新 Dock 角标
+    refresh_dock_badge(inner, app);
 }
+
+/// 全部会话未读总数 → macOS Dock 角标；0 时清掉，失败忽略。
+///
+/// 注意：先把 store 从 LAN 锁里 clone 出来再查询，禁止持锁做 SQLite IO。
+#[cfg(target_os = "macos")]
+fn refresh_dock_badge(inner: &InnerRef, app: &AppHandle) {
+    let store = lock_inner(inner).chat.clone();
+    let Some(store) = store else {
+        return;
+    };
+    let total = store.total_unread().unwrap_or(0);
+    let count = if total > 0 { Some(total as i64) } else { None };
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.set_badge_count(count);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn refresh_dock_badge(_inner: &InnerRef, _app: &AppHandle) {}
 
 /// 设备名清洗：去首尾空白；超过 64 个字符截断（announce 报文别太长）。
 pub(crate) fn normalize_alias(alias: &str) -> String {
@@ -1336,6 +1510,118 @@ mod tests {
         let store = ChatStore::new(path.to_path_buf(), test_keys());
         lock_inner(&state.inner).chat = Some(store.clone());
         store
+    }
+
+    const DELETE_PEER: &str = "A4:83:E7:12:34:56";
+
+    /// 建一个带收到文件消息的临时库；返回 (目录, store, 收到文件路径)
+    fn store_with_received_file() -> (tempfile::TempDir, ChatStore, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("chat.db");
+        crate::db::open(&db).unwrap();
+        let store = ChatStore::new(db, test_keys());
+        store
+            .append_message(
+                DELETE_PEER,
+                "对端",
+                &ChatMessage::file("in1", DELETE_PEER, "in", "收到.pdf", 10, "received", 1_000),
+            )
+            .unwrap();
+        let received = dir.path().join("收到.pdf");
+        std::fs::write(&received, b"recv").unwrap();
+        store
+            .update_message_status(
+                DELETE_PEER,
+                "in1",
+                "received",
+                None,
+                Some(received.to_string_lossy().as_ref()),
+            )
+            .unwrap();
+        (dir, store, received.to_string_lossy().to_string())
+    }
+
+    #[test]
+    fn delete_local_files_skips_directories_and_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.txt");
+        std::fs::write(&file, b"x").unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let missing = dir.path().join("missing.txt");
+        let deleted = delete_local_files(&[
+            file.to_string_lossy().to_string(),
+            sub.to_string_lossy().to_string(),
+            missing.to_string_lossy().to_string(),
+        ]);
+        assert_eq!(deleted, 1);
+        assert!(!file.exists());
+        assert!(sub.exists());
+    }
+
+    #[test]
+    fn delete_conversation_rows_with_files_removes_received_file() {
+        let (_dir, store, received) = store_with_received_file();
+        let sent = Path::new(&received).with_file_name("发出.pdf");
+        std::fs::write(&sent, b"sent").unwrap();
+        store
+            .append_message(
+                DELETE_PEER,
+                "对端",
+                &ChatMessage::file("out1", DELETE_PEER, "out", "发出.pdf", 10, "sent", 2_000),
+            )
+            .unwrap();
+        store
+            .update_message_status(DELETE_PEER, "out1", "sent", None, Some(sent.to_string_lossy().as_ref()))
+            .unwrap();
+
+        delete_conversation_rows(&store, DELETE_PEER, true).unwrap();
+        assert!(store.get_conversation(DELETE_PEER).unwrap().is_none());
+        assert!(!Path::new(&received).exists(), "收到的文件应被删除");
+        assert!(sent.exists(), "自己发出的源文件不应被删除");
+    }
+
+    #[test]
+    fn delete_conversation_rows_without_files_keeps_files() {
+        let (_dir, store, received) = store_with_received_file();
+        delete_conversation_rows(&store, DELETE_PEER, false).unwrap();
+        assert!(store.get_conversation(DELETE_PEER).unwrap().is_none());
+        assert!(Path::new(&received).exists(), "未勾选时不应删除文件");
+    }
+
+    #[test]
+    fn delete_attachment_rows_marks_deleted_and_removes_file() {
+        let (_dir, store, received) = store_with_received_file();
+        let deleted = delete_attachment_rows(&store, DELETE_PEER).unwrap();
+        assert_eq!(deleted, 1);
+        assert!(!Path::new(&received).exists());
+        let messages = store.list_messages(DELETE_PEER, 10).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].status, "deleted");
+        assert_eq!(messages[0].file_path, None);
+        assert_eq!(store.attachment_count(DELETE_PEER).unwrap(), 0);
+    }
+
+    #[test]
+    fn chat_event_direction_is_optional() {
+        let with = ChatEvent {
+            peer_id: "peer".into(),
+            kind: "message".into(),
+            direction: Some("in".into()),
+        };
+        let json = serde_json::to_value(&with).unwrap();
+        assert_eq!(json["direction"], "in");
+        let without = ChatEvent {
+            peer_id: "peer".into(),
+            kind: "read".into(),
+            direction: None,
+        };
+        let json = serde_json::to_value(&without).unwrap();
+        assert!(json.get("direction").is_none());
+        // 老版本事件（没有 direction）也能反序列化
+        let parsed: ChatEvent =
+            serde_json::from_value(serde_json::json!({"peer_id":"p","kind":"message"})).unwrap();
+        assert!(parsed.direction.is_none());
     }
 
     #[test]

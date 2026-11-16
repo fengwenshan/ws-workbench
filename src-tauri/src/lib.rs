@@ -34,7 +34,7 @@ pub mod vpn;
 
 use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager, Runtime, WindowEvent,
+    AppHandle, Emitter, Manager, Runtime, WindowEvent,
 };
 
 /// 应用基础名（发布版显示名）
@@ -84,6 +84,13 @@ const QUICK_PANEL_MAX_HEIGHT: f64 = 480.0;
 /// 还不可见，只可能是用户自己把窗口收进了托盘，再强制显示就成了「点了关闭，
 /// 过几秒窗口又自己弹出来」。
 static MAIN_WINDOW_SHOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 快捷面板当前模式：true = 「消息」页签（托盘左键有未读时），false = VPN/休眠。
+///
+/// 首次创建面板时前端挂载后调 `quick_panel_take_mode()` 取初值；已打开的面板
+/// 由 `quick-panel://mode` 事件通知切换。
+static QUICK_PANEL_MESSAGES_MODE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// Windows 上只允许一个 GUI 实例。
 ///
@@ -836,11 +843,24 @@ fn unix_millis() -> u64 {
         .unwrap_or(0)
 }
 
-/// 右键点托盘图标：已显示就收起，否则贴着图标弹出。
+/// 右键点托盘图标：已显示就收起，否则贴着图标弹出（VPN/休眠快捷面板）。
 ///
 /// 面板窗口是懒创建的：启动时不再创建，主窗口显示后预热；用户如果在预热前
 /// 就点了托盘图标，这里现场建一个再弹。
 fn toggle_quick_panel<R: Runtime>(app: &AppHandle<R>, rect: tauri::Rect) {
+    toggle_quick_panel_with_mode(app, rect, false);
+}
+
+/// 左键点托盘图标且有未读：贴着图标弹出「消息」页签。
+fn toggle_quick_panel_messages<R: Runtime>(app: &AppHandle<R>, rect: tauri::Rect) {
+    toggle_quick_panel_with_mode(app, rect, true);
+}
+
+fn toggle_quick_panel_with_mode<R: Runtime>(
+    app: &AppHandle<R>,
+    rect: tauri::Rect,
+    messages: bool,
+) {
     let Some(window) = ensure_quick_panel(app) else {
         return;
     };
@@ -854,12 +874,15 @@ fn toggle_quick_panel<R: Runtime>(app: &AppHandle<R>, rect: tauri::Rect) {
         return;
     }
 
+    QUICK_PANEL_MESSAGES_MODE.store(messages, std::sync::atomic::Ordering::Relaxed);
+
     let Some(placement) = quick_panel_placement(app, &window, rect)
         .or_else(|| fallback_placement(app, &window, rect))
     else {
         // 连兜底都拿不到屏幕信息：保持窗口原位置直接弹，至少不会卡住交互
         let _ = window.show();
         let _ = window.set_focus();
+        emit_quick_panel_mode(app, messages);
         return;
     };
     let (x, y) = panel_origin_at(placement.anchor, placement.panel, placement.screen);
@@ -870,8 +893,12 @@ fn toggle_quick_panel<R: Runtime>(app: &AppHandle<R>, rect: tauri::Rect) {
 
     #[cfg(debug_assertions)]
     eprintln!(
-        "[quick-panel] logical={} anchor={:?} screen={:?} panel={:?} origin=({x},{y})",
-        placement.logical, placement.anchor, placement.screen, placement.panel
+        "[quick-panel] logical={} anchor={:?} screen={:?} panel={:?} origin=({x},{y}) mode={}",
+        placement.logical,
+        placement.anchor,
+        placement.screen,
+        placement.panel,
+        if messages { "messages" } else { "quick" }
     );
 
     if placement.logical {
@@ -882,6 +909,22 @@ fn toggle_quick_panel<R: Runtime>(app: &AppHandle<R>, rect: tauri::Rect) {
     }
     let _ = window.show();
     let _ = window.set_focus();
+    emit_quick_panel_mode(app, messages);
+}
+
+/// 快捷面板模式事件：已打开的窗口收到后切到对应页签。
+#[derive(Clone, serde::Serialize)]
+struct QuickPanelModeEvent {
+    mode: &'static str,
+}
+
+fn emit_quick_panel_mode<R: Runtime>(app: &AppHandle<R>, messages: bool) {
+    let _ = app.emit(
+        "quick-panel://mode",
+        QuickPanelModeEvent {
+            mode: if messages { "messages" } else { "quick" },
+        },
+    );
 }
 
 /// 面板落点：锚点 + 显示器范围 + 面板尺寸，三者单位一致（由 `logical` 说明）。
@@ -1346,6 +1389,8 @@ pub fn run() {
             commands::quick_panel_resize,
             commands::quick_panel_show_main,
             commands::quick_panel_quit,
+            commands::quick_panel_take_mode,
+            commands::quick_panel_open_chat,
             // 剪贴板历史（macOS / Windows；其它平台不启用）
             commands::clipboard_page,
             commands::clipboard_search,
@@ -1378,6 +1423,10 @@ pub fn run() {
             commands::lan_share_send_chat,
             commands::lan_share_mark_read,
             commands::lan_share_delete_conversation,
+            commands::lan_share_conversation_attachment_count,
+            commands::lan_share_delete_attachments,
+            commands::lan_share_import_clipboard_files,
+            commands::lan_share_send_dropped_files,
             // 局域网分享（2026-11-16 视觉升级）：本机备注 / 接收确认开关 / 打开文件所在目录
             commands::lan_share_set_peer_remark,
             commands::lan_share_set_require_accept,
@@ -1469,6 +1518,11 @@ pub fn run() {
             app.manage(lanshare::LanShareState::from_app(app.handle()));
             {
                 let handle = app.handle().clone();
+                // 启动时按历史未读刷一次 Dock 角标；放到后台线程，别拖慢首屏
+                let badge_handle = app.handle().clone();
+                if let Some(state) = badge_handle.try_state::<lanshare::LanShareState>() {
+                    state.sync_dock_badge(&badge_handle);
+                }
                 std::thread::spawn(move || {
                     if let Some(state) = handle.try_state::<lanshare::LanShareState>() {
                         state.restore_on_startup(&handle);
@@ -1495,14 +1549,23 @@ pub fn run() {
                     };
                     match button {
                         MouseButton::Left => {
-                            // 面板开着时左键优先回主界面：先把面板收起来，
-                            // 否则 always_on_top 的面板会一直悬在主窗口上面
-                            if let Some(window) =
-                                tray.app_handle().get_webview_window(QUICK_PANEL_LABEL)
-                            {
-                                let _ = window.hide();
+                            let unread = tray
+                                .app_handle()
+                                .try_state::<lanshare::LanShareState>()
+                                .map(|state| state.total_unread())
+                                .unwrap_or(0);
+                            if unread > 0 {
+                                // 有未读：弹「消息」页签（钉钉/微信式），点一条定位会话
+                                toggle_quick_panel_messages(tray.app_handle(), rect);
+                            } else {
+                                // 无未读：保持原行为，面板收起、打开主界面
+                                if let Some(window) =
+                                    tray.app_handle().get_webview_window(QUICK_PANEL_LABEL)
+                                {
+                                    let _ = window.hide();
+                                }
+                                show_main_window(tray.app_handle());
                             }
-                            show_main_window(tray.app_handle());
                         }
                         MouseButton::Right => toggle_quick_panel(tray.app_handle(), rect),
                         _ => {}
@@ -1673,6 +1736,14 @@ mod quick_panel_tests {
     const GAP: i32 = 8;
     /// 居中时面板左边 = 图标中心 - 半个面板宽
     const HALF_PANEL: i32 = QUICK_PANEL_WIDTH as i32 / 2;
+
+    #[test]
+    fn take_mode_returns_and_resets() {
+        crate::QUICK_PANEL_MESSAGES_MODE.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(crate::commands::quick_panel_take_mode(), "messages");
+        assert_eq!(crate::commands::quick_panel_take_mode(), "quick");
+        assert!(!crate::QUICK_PANEL_MESSAGES_MODE.load(std::sync::atomic::Ordering::Relaxed));
+    }
 
     /// macOS 菜单栏图标：面板挂在图标下方，水平居中于图标
     #[test]
