@@ -1396,6 +1396,7 @@ pub fn run() {
             commands::quick_panel_show_main,
             commands::quick_panel_quit,
             commands::quick_panel_take_mode,
+            commands::quick_panel_set_mode,
             commands::quick_panel_open_chat,
             // 剪贴板历史（macOS / Windows；其它平台不启用）
             commands::clipboard_page,
@@ -1524,7 +1525,7 @@ pub fn run() {
             app.manage(lanshare::LanShareState::from_app(app.handle()));
             {
                 let handle = app.handle().clone();
-                // 启动时按历史未读刷一次 Dock 角标；放到后台线程，别拖慢首屏
+                // 启动时按历史未读刷一次 Dock 角标（主线程，窗口已创建好）
                 let badge_handle = app.handle().clone();
                 if let Some(state) = badge_handle.try_state::<lanshare::LanShareState>() {
                     state.sync_dock_badge(&badge_handle);
@@ -1744,11 +1745,12 @@ mod quick_panel_tests {
     const HALF_PANEL: i32 = QUICK_PANEL_WIDTH as i32 / 2;
 
     #[test]
-    fn take_mode_returns_and_resets() {
+    fn take_mode_reads_without_reset() {
         crate::QUICK_PANEL_MESSAGES_MODE.store(true, std::sync::atomic::Ordering::Relaxed);
         assert_eq!(crate::commands::quick_panel_take_mode(), "messages");
+        assert_eq!(crate::commands::quick_panel_take_mode(), "messages");
+        crate::commands::quick_panel_set_mode("quick".into());
         assert_eq!(crate::commands::quick_panel_take_mode(), "quick");
-        assert!(!crate::QUICK_PANEL_MESSAGES_MODE.load(std::sync::atomic::Ordering::Relaxed));
     }
 
     /// macOS 菜单栏图标：面板挂在图标下方，水平居中于图标

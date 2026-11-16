@@ -677,7 +677,6 @@ impl ChatStore {
         }
     }
 
-    /// 清空未读
     /// 清空未读；返回是否真的从「有未读」变成 0（避免前端反复触发已读事件）。
     pub fn mark_read(&self, peer_id: &str) -> Result<bool, String> {
         let conn = self.connect()?;

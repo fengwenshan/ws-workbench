@@ -26,6 +26,11 @@ export function takeQuickPanelMode(): Promise<QuickPanelMode> {
   return invoke<QuickPanelMode>('quick_panel_take_mode')
 }
 
+/** 手动切换页签后回报模式，保证托盘左键「普通模式 → 切消息页签」判断准确 */
+export function setQuickPanelMode(mode: QuickPanelMode): Promise<void> {
+  return invoke<void>('quick_panel_set_mode', { mode })
+}
+
 /** 点消息列表里的会话：后端收起面板、显示主界面并通知主窗口定位 */
 export function openQuickPanelChat(peerId: string): Promise<void> {
   return invoke<void>('quick_panel_open_chat', { peerId })

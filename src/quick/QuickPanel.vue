@@ -15,6 +15,7 @@ import {
 import {
   openQuickPanelChat,
   onQuickPanelMode,
+  setQuickPanelMode,
   takeQuickPanelMode,
   type QuickPanelMode,
 } from '@/api/quick'
@@ -395,6 +396,8 @@ function handleVisibilityChange(): void {
 }
 
 watch(tab, () => {
+  // 手动切页签后回报模式：托盘左键据此决定「切消息页签」还是「收起」
+  void setQuickPanelMode(tab.value === 'messages' ? 'messages' : 'quick').catch(() => {})
   observeActivePane()
   schedulePanelHeightSync()
   // 切到休眠页签时可能刚在别处开关过会话，先拉一次再展示

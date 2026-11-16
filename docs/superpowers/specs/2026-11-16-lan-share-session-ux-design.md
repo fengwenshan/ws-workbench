@@ -39,7 +39,7 @@
 | 菜单项 | 出现条件 | 行为 |
 | --- | --- | --- |
 | 删除聊天记录 | 该设备有会话 | 打开二次确认弹窗 |
-| 删除附件 | 该设备有会话（无收到的文件时点击提示） | 二次确认后删除本机收到的文件 |
+| 删除附件 | 该设备有会话（附件数量查询中 / 为 0 时置灰） | 二次确认后删除本机收到的文件 |
 | 免打扰模式 | 始终 | 勾选态 = 免打扰开启，点击切换并持久化 |
 
 - 点击菜单外部 / Esc / 滚动列表时关闭。
@@ -74,7 +74,7 @@
 - 触发：`lan-share://chat` 事件 `kind === 'message' && direction === 'in'` 时播放；DND 开启时跳过。
 - 自己发送、状态更新、历史刷新、删除/已读事件不响。
 - 设置页 `LanShareSettings.vue` 增加「消息提示音」开关（默认开）；和右键「免打扰模式」共享同一状态（勾选=免打扰=关闭声音）。
-- 文案：开关标题「消息提示音」，描述「收到对方消息时播放提示音」。
+- 文案：开关标题「消息提示音」，描述「收到对方消息时播放提示音（关闭即免打扰）」。
 
 ## 5. 粘贴与拖拽发送
 
@@ -104,7 +104,8 @@
   - 拖入时显示高亮遮罩「松开即可发送到当前设备」；离开/放下后消失。
   - `drop` 时跳过目录（`webkitGetAsEntry().isDirectory`），单文件 >100MB 跳过并提示「文件超过 100MB，请用「发送文件」选择」。
   - File → base64（去掉 data URL 前缀）→ `lan_share_send_dropped_files`；成功后刷新由聊天事件驱动。
-- 设备离线 / 发送中：拖拽与粘贴发送置灰或直接提示「设备已离线」。
+- 设备离线：提示「设备已离线，无法发送文件」；未选设备 / 未开启：提示「请先开启局域网分享并选择一台设备」。
+- 发送中：拖拽直接忽略，粘贴提示「正在发送文件，请稍后再粘贴」（不静默吞剪贴板）。
 - 输入框、发送按钮的现有行为不变。
 
 ## 6. 数据库加密核查
@@ -144,8 +145,9 @@
 
 ### 7.5 快捷面板模式传递
 
-- 后端静态 `QUICK_PANEL_MODE: AtomicBool`（true=消息模式）。
-- `quick_panel_take_mode() -> String`（`"messages"` / `"quick"`）：返回当前模式并重置为 `quick`。
+- 后端静态 `QUICK_PANEL_MESSAGES_MODE: AtomicBool`（true=消息模式）。
+- `quick_panel_take_mode() -> String`（`"messages"` / `"quick"`）：只读取当前模式（不重置，避免首次创建那次点击之后多走一次切页签分支）。
+- `quick_panel_set_mode(mode)`：前端手动切页签时回报，保证「面板可见且普通模式 → 左键切消息页签」判断准确。
 - 已创建的面板通过事件 `quick-panel://mode` 通知切换；首次创建时前端挂载后调用 `take_mode` 取初值。
 
 ## 8. 接口契约
@@ -159,21 +161,22 @@
 | `lan_share_conversation_attachment_count` | `{ peerId: string }` | `number` |
 | `lan_share_import_clipboard_files` | 无 | `string[]`（本地路径） |
 | `lan_share_send_dropped_files` | `{ peerId: string, files: { name: string, dataBase64: string }[] }` | `string`（transfer id） |
-| `quick_panel_take_mode` | 无 | `'messages' \| 'quick'` |
+| `quick_panel_take_mode` | 无 | `'messages' \| 'quick'`（首次挂载取初值，不重置） |
+| `quick_panel_set_mode` | `{ mode: 'messages' \| 'quick' }` | `void` |
 | `quick_panel_open_chat` | `{ peerId: string }` | `void` |
 
 ### 8.2 事件
 
 | 事件 | 载荷 |
 | --- | --- |
-| `lan-share://chat` | `{ peer_id, kind: 'message'\|'read'\|'deleted', direction: 'in'\|'out'\|null }` |
+| `lan-share://chat` | `{ peer_id, kind: 'message'\|'read'\|'deleted'\|'updated', direction?: 'in'\|'out' }` |
 | `lan-share://open-chat` | `{ peer_id: string }` |
 | `quick-panel://mode` | `{ mode: 'messages' \| 'quick' }` |
 
 ### 8.3 类型
 
 - `ChatMessage.status` 增加 `'deleted'`。
-- `ChatEvent.direction?: 'in' | 'out' | null`。
+- `ChatEvent.direction?: 'in' | 'out'`（无方向时后端省略该字段）。
 - `DroppedFileInput`（后端）：`{ name: String, data_base64: String }`，serde camelCase。
 
 ## 9. 错误处理
@@ -181,7 +184,7 @@
 - 剪贴板为空 / 只有文件夹：`message.warning` 提示，不发送。
 - 拖拽超过 100MB / 目录：跳过并汇总提示。
 - 删除文件失败：记录日志、仍然删除数据库记录；toast 显示实际删除数量。
-- 离线 / 未开启：发送动作前检查，提示「设备已离线」/「请先开启局域网分享」。
+- 离线 / 未开启：发送动作前检查，提示「设备已离线，无法发送文件」/「请先开启局域网分享并选择一台设备」。
 - Dock 角标设置失败：忽略（部分平台不支持），不影响主流程。
 
 ## 10. 测试与验收

@@ -739,7 +739,8 @@ impl LanShareState {
         }
         let store = self.chat_store()?;
         let deleted = delete_attachment_rows(&store, peer_id)?;
-        emit_chat(&self.inner, Some(app), peer_id, "message");
+        // 附件状态变了但会话还在：用 updated，前端只刷新、不标已读、不响提示音
+        emit_chat(&self.inner, Some(app), peer_id, "updated");
         Ok(deleted)
     }
 
@@ -1239,6 +1240,10 @@ fn delete_local_files(paths: &[String]) -> usize {
             continue;
         }
         let path = Path::new(raw);
+        // 只接受绝对路径：路径来自本应用写入的 DB，这里再防一层被篡改的值
+        if !path.is_absolute() {
+            continue;
+        }
         let meta = match std::fs::symlink_metadata(path) {
             Ok(meta) => meta,
             Err(_) => continue,
@@ -1557,6 +1562,7 @@ mod tests {
             file.to_string_lossy().to_string(),
             sub.to_string_lossy().to_string(),
             missing.to_string_lossy().to_string(),
+            "relative-unsafe.txt".to_string(),
         ]);
         assert_eq!(deleted, 1);
         assert!(!file.exists());
@@ -1626,6 +1632,17 @@ mod tests {
         let parsed: ChatEvent =
             serde_json::from_value(serde_json::json!({"peer_id":"p","kind":"message"})).unwrap();
         assert!(parsed.direction.is_none());
+    }
+
+    #[test]
+    fn open_chat_event_serializes_peer_id() {
+        let json = serde_json::to_value(OpenChatEvent {
+            peer_id: "peer".into(),
+        })
+        .unwrap();
+        assert_eq!(json["peer_id"], "peer");
+        let parsed: OpenChatEvent = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.peer_id, "peer");
     }
 
     #[test]

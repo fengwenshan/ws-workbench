@@ -89,7 +89,7 @@ export function useLanShareFileDrop(ctx: FileDropContext) {
     if (!data) return
     const target = ctx.peer()
     if (!target) {
-      antMessage.warning('请先选择一台设备')
+      antMessage.warning('请先开启局域网分享并选择一台设备')
       return
     }
     if (!target.online) {
@@ -148,12 +148,18 @@ export function useLanShareFileDrop(ctx: FileDropContext) {
     if (!hasFiles && hasText) return
     event.preventDefault()
     const target = ctx.peer()
-    if (!target) return
+    if (!target) {
+      antMessage.warning('请先开启局域网分享并选择一台设备')
+      return
+    }
     if (!target.online) {
       antMessage.warning('设备已离线，无法发送文件')
       return
     }
-    if (ctx.sendingFiles()) return
+    if (ctx.sendingFiles()) {
+      antMessage.warning('正在发送文件，请稍后再粘贴')
+      return
+    }
     try {
       const paths = await importLanShareClipboardFiles()
       if (!paths.length) return

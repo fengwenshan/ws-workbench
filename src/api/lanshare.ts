@@ -128,7 +128,7 @@ export interface LanShareConversation {
 /** `lan-share://chat` 事件 payload：kind 决定要不要额外刷新消息 */
 export interface ChatEvent {
   peer_id: string
-  kind: 'message' | 'read' | 'deleted'
+  kind: 'message' | 'read' | 'deleted' | 'updated'
   /** 新消息的方向（仅 kind='message' 时带）：用于「收到对方消息」时才响提示音 */
   direction?: 'in' | 'out' | null
 }

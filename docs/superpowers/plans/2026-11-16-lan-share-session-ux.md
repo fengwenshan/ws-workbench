@@ -24,9 +24,9 @@
 - [ ] 加 `pub fn clear_received_file_paths(&self, peer_id: &str) -> Result<Vec<String>, String>`：事务内把命中的 `file_path` 置空、`status='deleted'`、重写 `payload_enc`，返回路径。
 - [ ] 新增测试：
   - `attachment_count_only_counts_incoming_with_path`
-  - `received_file_paths_filters_direction_and_kind`
+  - `total_unread_sums_all_conversations`
   - `clear_received_file_paths_marks_deleted_and_keeps_other_peer`
-  - `single_file_message_payload_is_encrypted_at_rest`（文件名/路径明文不出现在 payload_enc）
+  - `file_path_is_encrypted_at_rest`（文件名/路径明文不出现在 payload_enc）
 - [ ] 运行：`cargo test -p ws-workbench --lib lanshare::chat_store`，全绿后提交。
 
 ## Task 2: 删除会话 / 删除附件（后端）
@@ -56,14 +56,14 @@
 - Test: `outbox.rs` 单测
 
 - [ ] `outbox.rs`：
-  - `pub const DROPPED_MAX_FILE_BYTES: u64 = 100 * 1024 * 1024;`
+  - `pub const MAX_DROPPED_FILE_BYTES: u64 = 100 * 1024 * 1024;`、`MAX_DROPPED_FILES: usize = 20`
   - `pub fn staging_dir(app: &AppHandle) -> Result<PathBuf, String>`（`crate::db::storage_dir(app)?/lan_share_outbox`，自动创建）。
-  - `pub fn save_dropped_files(app, files: &[DroppedFileInput]) -> Result<Vec<String>, String>`：校验数量/大小、base64 解码、`sanitize_file_name`、uuid 前缀防重名。
+  - `pub fn save_dropped_files(app, files: &[DroppedFileInput]) -> Result<Vec<String>, String>`：校验数量/大小、base64 解码、`sanitize_name`、重名加 `-1` 后缀。
   - `pub fn save_clipboard_image(app, img: &arboard::ImageData) -> Result<String, String>`：`image` crate 编码 PNG，文件名 `剪贴板图片_YYYYMMDD-HHmmss.png`。
   - `pub fn clipboard_paths(app) -> Result<Vec<String>, String>`：`arboard::Clipboard` 先 `get().file_list()`（过滤普通文件、目录报错），再图片；空则 Err。
 - [ ] `mod.rs` 加 `send_dropped_files(app, peer_id, files) -> Result<String, String>`：落盘后调用 `self.send_files(app, peer_id, paths)`。
 - [ ] 命令 `lan_share_import_clipboard_files() -> Vec<String>`、`lan_share_send_dropped_files(app, peer_id, files)`；注册。
-- [ ] 测试：`save_dropped_files_rejects_oversize`、`save_dropped_files_sanitizes_name`、`save_clipboard_image_writes_png`（用构造的 RGBA）、`base64_roundtrip`。
+- [x] 测试：`encoded_size_guard_rejects_oversize_without_decoding`、`write_dropped_sanitizes_path_traversal_and_conflicts`、`save_clipboard_image_encodes_png`（用构造的 PNG）、`decode_dropped_rejects_empty_and_oversize`。
 - [ ] `cargo test -p ws-workbench --lib lanshare::outbox` 后提交。
 
 ## Task 4: 事件 direction、Dock 角标、快捷面板模式与托盘左键
@@ -79,10 +79,10 @@
 - [ ] 收到的消息（server handle_chat / handle_upload）用 `"in"`；本地发送消息（send_chat / send_files 初始插入）用 `"out"`；状态更新/删除/已读保持 None。
 - [ ] `emit_chat` 内更新 Dock 角标：总量来自 chat_store（先 clone store 出锁再查询，禁止持锁做 IO）；仅 macOS 调 `main window.set_badge_count`；忽略错误。
 - [ ] 启动时（lanshare state 初始化后）计算一次角标；`mark_read` / 删除命令后也刷新（可复用 emit 或单独函数）。
-- [ ] 快捷面板模式：`static QUICK_PANEL_MODE: AtomicBool`；`quick_panel_take_mode() -> &'static str` 返回并重置；显示面板后发 `quick-panel://mode`。
+- [x] 快捷面板模式：`static QUICK_PANEL_MESSAGES_MODE: AtomicBool`；`quick_panel_take_mode() -> String` 只读取；新增 `quick_panel_set_mode` 供前端切页签回报；显示面板后发 `quick-panel://mode`。
 - [ ] 托盘左键：`total_unread > 0` → 消息模式显示/收起面板；否则原逻辑 `show_main_window`。右键：重置 quick 模式并 toggle。
 - [ ] `quick_panel_open_chat(app, peer_id)`：hide 面板 → `show_main_window` → emit `lan-share://open-chat`。
-- [ ] 测试：模式原子量 take 后重置、open-chat 事件载荷序列化（可直接测构造 + serde）。
+- [x] 测试：`take_mode_reads_without_reset`（含 set_mode）、`open_chat_event_serializes_peer_id`。
 - [ ] `cargo test -p ws-workbench --lib` 后提交。
 
 ## Task 5: 前端 API 类型与封装
@@ -154,6 +154,8 @@
 - [ ] `npx vue-tsc --noEmit`、`npx vite build` 后提交。
 
 ## Task 10: 全量验证与文档
+
+> 已完成（2026-11-16）：spec 的右键菜单/提示音文案、direction 省略语义、`quick_panel_set_mode` 契约已同步；plan 中的测试名/常量与实现对齐。
 
 - [ ] `cargo test`（全部）、`npx vue-tsc --noEmit`、`npx vite build` 全绿。
 - [ ] 自查 spec §10 手动清单，逐项标注可由代码/测试覆盖或需人工验证。
