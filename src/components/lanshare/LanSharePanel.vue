@@ -43,6 +43,7 @@ const {
   handleRetry,
   respondOffer,
   handleDeleteConversation,
+  handleSavePeerRemark,
 } = useLanShareChat(() => props.active)
 </script>
 
@@ -92,6 +93,7 @@ const {
         @accept-offer="respondOffer($event, true)"
         @reject-offer="respondOffer($event, false)"
         @delete-conversation="handleDeleteConversation()"
+        @save-remark="handleSavePeerRemark"
       />
     </section>
   </div>

@@ -65,17 +65,17 @@ pub peer_remarks: std::collections::HashMap<String, String>,
 
 1. `LanShareSettings` 加 `require_accept` / `peer_remarks` 字段（含 serde default）。
 2. `LanShareSnapshot` 加对应两个字段，`snapshot()` 组装。
-3. `LanShareState::set_peer_remark(&self, peer_id, remark) -> Result<(), String>`：
-   - trim、按字符截断 32；空串从 map 删除；
-   - 写 `Inner.settings.peer_remarks` 同步内存；
-   - 调 `settings::save` 持久化（失败返回错误，内存保持已更新？与现有 set_alias 行为对齐：先改内存再存，失败返回错误但内存已是新值——**按现有 set_alias 的既有约定**）。
-4. `LanShareState::set_require_accept(&self, value) -> Result<(), String>`：同上。
-5. 备注修改后是否需要事件：不新增；命令返回快照由前端 apply。
+3. `LanShareState::set_peer_remark(&self, peer_id, remark) -> Result<LanShareSnapshot, String>`：
+   - `peer_id` 空串直接拒绝；备注 trim、按字符截断 32；空串从 map 删除；
+   - 先克隆设置、在克隆上改备注，**锁外** `settings::save`；
+   - 保存成功后再取锁只改内存对应字段；失败返回错误且内存保持旧值（与设计 §7 一致，不做乐观更新）。
+4. `LanShareState::set_require_accept(&self, value) -> Result<LanShareSnapshot, String>`：同上（锁外保存，失败不改内存）。
+5. 备注修改后不新增事件：命令返回最新快照给前端 apply；后端同时 emit 一次 snapshot。
 
 ### 3.2 `server.rs` `handle_prepare`
 
 - 在「登记 pending + 等确认」前读取 `require_accept`：
-  - `false`：跳过 pending 与 `recv_timeout`，直接走「建目录 + 建 session + token + 返回 200」。把现有接受后逻辑抽成 `fn attach_session(inner, app, offer_files, chat_peer_id, chat_alias) -> Result<PrepareUploadResponse, (u16, String)>`（不移动 `offer` 结构）。
+  - `false`：跳过 pending 与 `recv_timeout`，直接走「建目录 + 建 session + token + 返回 200」。把接受后逻辑抽成 `fn attach_session(inner, files, peer_id, peer_alias) -> Result<(String, Vec<FileToken>), (u16, String)>`；内部在插入 session 的同一把锁里先 `prune_sessions()`（免确认路径不经过 pending 那段），事件由调用方 emit。
   - `true`：现有待接收流程不变。
 - 自动接收路径不产生 `pending`、不推「待接收」相关快照（会话 upsert 与 chat 事件保留）。
 - 注意锁：不得在 `lock_inner` 内做 DB IO（沿用上一轮修复的写法）。
@@ -89,10 +89,10 @@ pub peer_remarks: std::collections::HashMap<String, String>,
 ### 3.4 后端测试
 
 - settings serde：空 JSON / 旧字段 JSON → `require_accept=false`、`peer_remarks` 空。
-- 备注：设置 / 覆盖 / 清空、trim 截断、快照带出、键校验。
-- `prepare` 自动接收：临时 state（`require_accept=false`）→ 200 且返回 token、`pending` 为空、上传后落盘 + received 消息；`require_accept=true` 走 pending（现有测试改设置或保留）。
-- e2e 文件测试：A 默认自动接收即可，移除「等待 pending + 接受」步骤，或在测试里显式开启确认保留原路径；两种路径都要有覆盖。
-- `open_file_dir`：临时目录内文件 → Ok；不存在路径 → Err（不实际弹窗，成功路径可在测试中跳过系统调用？——若会真的打开 Finder，测试改成只测「父目录解析」：抽出 `parent_dir(path) -> Result<PathBuf, String>` 纯函数并单测）。
+- 备注：设置 / 覆盖 / 清空、trim 截断、快照带出（normalize/apply 纯函数单测；peer_id 空串拒绝由方法内校验，因依赖 AppHandle 无单测）。
+- `prepare` 自动接收：临时 state（`require_accept=false`）→ 200 且返回 token、`pending` 为空、上传后落盘并清掉过期 session；`require_accept=true` 走 pending（现有测试显式开启确认）。server 单测的 state 不接 chat store，`received` 消息由 e2e 确认路径覆盖（upload 两条路径共用）。
+- e2e 文件测试：显式开启确认，保留原「等待 pending + 接受」路径；免确认路径由 server 单测覆盖。
+- `open_file_dir`：只单测 `parent_dir(path)` 纯函数（绝对 / 相对 / 空路径），真实「打开文件夹」不纳入单测（会拉起 Finder）。
 
 ## 4. 前端任务（frontend-chat-ui）
 

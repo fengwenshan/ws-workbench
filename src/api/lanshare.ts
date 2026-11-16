@@ -74,6 +74,10 @@ export interface LanShareSnapshot {
   local_addresses: string[]
   peers: LanPeer[]
   pending_offers: PendingOffer[]
+  /** 接收文件前是否需要本机确认（默认 false：直接接收落盘，不产生待接收请求） */
+  require_accept: boolean
+  /** 本机给其它设备起的备注：fingerprint -> 备注（只在本机显示，不广播给对端） */
+  peer_remarks: Record<string, string>
   /** 致命错误：服务没起来，界面显示「启动失败」 */
   last_error: string | null
   /** 非致命问题：服务在跑，只是设置没能存住（重启后可能回退） */
@@ -84,7 +88,7 @@ export interface LanShareSnapshot {
 export type ChatDirection = 'in' | 'out'
 /** 聊天内容类型：文本 / 文件 */
 export type ChatKind = 'text' | 'file'
-/** 消息状态：发送中 / 已发送 / 失败 / 已接收 */
+/** 消息状态：发送中 / 已发送 / 发送失败 / 已保存（接收端落盘成功） */
 export type ChatStatus = 'sending' | 'sent' | 'failed' | 'received'
 
 /** 一条聊天消息（字段与后端 `ChatMessage` 同名，后端是 snake_case） */
@@ -181,6 +185,27 @@ export function markLanShareRead(peerId: string): Promise<void> {
 /** 删除本机的某个会话及其消息（对方不受影响） */
 export function deleteLanShareConversation(peerId: string): Promise<void> {
   return invoke<void>('lan_share_delete_conversation', { peerId })
+}
+
+/**
+ * 保存本机给某台设备起的备注（空串表示删除并恢复设备名），返回最新快照。
+ * 备注只存在本机 lan_share.json 里，不会写进 announce / chat，对端看不到。
+ */
+export function setLanSharePeerRemark(
+  peerId: string,
+  remark: string,
+): Promise<LanShareSnapshot> {
+  return invoke<LanShareSnapshot>('lan_share_set_peer_remark', { peerId, remark })
+}
+
+/** 设置「接收文件前是否需要确认」（默认 false：直接接收），返回最新快照 */
+export function setLanShareRequireAccept(requireAccept: boolean): Promise<LanShareSnapshot> {
+  return invoke<LanShareSnapshot>('lan_share_set_require_accept', { requireAccept })
+}
+
+/** 打开文件所在目录（目录不存在时后端退到最近存在的上级） */
+export function openLanShareFileDir(path: string): Promise<void> {
+  return invoke<void>('lan_share_open_file_dir', { path })
 }
 
 /** 订阅整份快照事件，返回取消订阅函数 */

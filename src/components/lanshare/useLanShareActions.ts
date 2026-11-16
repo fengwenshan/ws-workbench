@@ -6,6 +6,7 @@ import {
   respondLanShareOffer,
   sendLanShareChat,
   sendLanShareFiles,
+  setLanSharePeerRemark,
   type ChatMessage,
   type LanShareSnapshot,
   type PendingOffer,
@@ -39,6 +40,11 @@ export interface ChatActionContext {
   refreshMessages: (peerId: string) => Promise<void>
   scheduleConversationsRefresh: () => void
   upsertMessage: (next: ChatMessage) => void
+}
+
+/** 列表里的展示名：本机备注优先于设备名（与左栏 / 聊天头部一致） */
+function displayName(peer: MergedPeer): string {
+  return peer.remark || peer.alias
 }
 
 export function errorText(err: unknown): string {
@@ -104,10 +110,10 @@ export function createLanShareActions(ctx: ChatActionContext) {
     }
     sendingFiles.value = true
     try {
-      const paths = await pickFiles({ title: `发送文件给 ${target.alias}` })
+      const paths = await pickFiles({ title: `发送文件给 ${displayName(target)}` })
       if (!paths.length) return
       await sendLanShareFiles(target.id, paths)
-      message.success(`已开始向「${target.alias}」发送 ${paths.length} 个文件`)
+      message.success(`已开始向「${displayName(target)}」发送 ${paths.length} 个文件`)
       // 文件消息由后端先落库；chat 事件也会来，这里立即拉一次让气泡马上出现
       await refreshMessages(target.id)
     } catch (err) {
@@ -185,6 +191,21 @@ export function createLanShareActions(ctx: ChatActionContext) {
     }
   }
 
+  /**
+   * 保存本机给某台设备起的备注（空串 = 删除并恢复设备名）。
+   * 命令返回最新快照，apply 后左栏 / 聊天头部立即按备注显示。
+   */
+  async function handleSavePeerRemark(peerId: string, remark: string) {
+    // 与后端一致：trim + 最多 32 个字符（emoji 按 1 个算）
+    const text = [...remark.trim()].slice(0, 32).join('')
+    try {
+      applySnapshot(await setLanSharePeerRemark(peerId, text))
+      message.success(text ? '备注已保存' : '已删除备注')
+    } catch (err) {
+      message.error(`保存备注失败：${errorText(err)}`)
+    }
+  }
+
   function handleDeleteConversation(peerId?: string) {
     const id = peerId ?? activePeerId.value
     if (!id || deletingConversation.value) return
@@ -192,7 +213,7 @@ export function createLanShareActions(ctx: ChatActionContext) {
     if (!target?.hasConversation) return
     Modal.confirm({
       title: '删除会话',
-      content: `将删除与「${target.alias}」的本机聊天记录（对方不受影响）。`,
+      content: `将删除与「${displayName(target)}」的本机聊天记录（对方不受影响）。`,
       okText: '删除',
       okType: 'danger',
       cancelText: '取消',
@@ -218,5 +239,6 @@ export function createLanShareActions(ctx: ChatActionContext) {
     handleRetry,
     respondOffer,
     handleDeleteConversation,
+    handleSavePeerRemark,
   }
 }

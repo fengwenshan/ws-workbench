@@ -32,6 +32,17 @@ const emit = defineEmits<{
   'open-settings': []
 }>()
 
+/** 显示名：本机备注优先于设备名（设计 §2.3），备注只在本机显示 */
+function displayName(item: MergedPeer): string {
+  return item.remark || item.alias
+}
+
+/** 悬浮提示：起过备注时带上设备名，没会话的在线设备补一句「在线」 */
+function displayTitle(item: MergedPeer): string {
+  if (item.remark) return `${item.remark}（设备名：${item.alias}）`
+  return item.hasConversation ? item.alias : `${item.alias}（在线）`
+}
+
 function onSelect(item: MergedPeer) {
   emit('select', item.id)
 }
@@ -63,7 +74,7 @@ function onKeydown(event: KeyboardEvent, item: MergedPeer) {
           :class="{ active: item.id === activeId && !settingsActive }"
           role="button"
           tabindex="0"
-          :title="`${item.alias}${item.hasConversation ? '' : '（在线）'}`"
+          :title="displayTitle(item)"
           @click="onSelect(item)"
           @keydown="onKeydown($event, item)"
         >
@@ -74,7 +85,7 @@ function onKeydown(event: KeyboardEvent, item: MergedPeer) {
           ></span>
           <span class="item-body">
             <span class="item-top">
-              <span class="item-name">{{ item.alias }}</span>
+              <span class="item-name">{{ displayName(item) }}</span>
               <span class="item-time">{{ formatListTime(item.sortTimeMs, now) }}</span>
             </span>
             <span class="item-bottom">

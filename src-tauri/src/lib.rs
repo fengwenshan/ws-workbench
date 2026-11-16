@@ -1378,6 +1378,10 @@ pub fn run() {
             commands::lan_share_send_chat,
             commands::lan_share_mark_read,
             commands::lan_share_delete_conversation,
+            // 局域网分享（2026-11-16 视觉升级）：本机备注 / 接收确认开关 / 打开文件所在目录
+            commands::lan_share_set_peer_remark,
+            commands::lan_share_set_require_accept,
+            commands::lan_share_open_file_dir,
             // 更新检查：按通道（stable / beta）选清单，供前端替换插件 check()
             updates::update_check,
             // 更新包断点续传：下载 / 安装（前端 useUpdater 调用）

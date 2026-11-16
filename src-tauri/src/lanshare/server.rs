@@ -350,7 +350,32 @@ fn handle_prepare(
         }
     };
 
-    // 先建好通道再登记，命令层拿到的一定是能送回决定的那一半；
+    // 文件请求到达就先落一个会话：左侧列表要立刻能看到这台设备；写失败只打日志。
+    // 先取 store 再写库：MutexGuard 不能跨 if-let body 存活（否则等于持锁做 DB IO）。
+    let chat_store = lock_inner(inner).chat.clone();
+    if let Some(store) = chat_store {
+        match store.upsert_conversation(&chat_peer_id, &chat_alias, unix_millis()) {
+            // kind 沿用契约里的 "message"：前端对聊天数据统一按「重拉会话 / 消息」处理
+            Ok(()) => emit_chat(inner, app, &chat_peer_id, "message"),
+            Err(err) => eprintln!("写入文件会话失败：{err}"),
+        }
+    }
+
+    // 默认直接接收：不等用户点「接受」，直接建 session 回 token，发送方立即开始上传。
+    let require_accept = lock_inner(inner).settings.require_accept;
+    if !require_accept {
+        let (session_id, response_files) =
+            attach_session(inner, &offer_files, chat_peer_id, chat_alias)?;
+        emit_snapshot(inner, app);
+        let response = PrepareUploadResponse {
+            session_id,
+            files: response_files,
+        };
+        return write_json(reader.get_mut(), 200, &response)
+            .map_err(|err| (500, format!("写响应失败：{err}")));
+    }
+
+    // 需要确认：先建好通道再登记，命令层拿到的一定是能送回决定的那一半；
     // 通道断开（功能被关闭 / 请求被清理）按取消处理。
     let (tx, rx) = mpsc::channel::<bool>();
     let timeout = {
@@ -367,16 +392,6 @@ fn handle_prepare(
         timeout
     };
     emit_snapshot(inner, app);
-    // 文件请求到达就先落一个会话：左侧列表要立刻能看到这台设备；写失败只打日志
-    // 先取 store 再写库：MutexGuard 不能跨 if-let body 存活（否则等于持锁做 DB IO）
-    let chat_store = lock_inner(inner).chat.clone();
-    if let Some(store) = chat_store {
-        match store.upsert_conversation(&chat_peer_id, &chat_alias, unix_millis()) {
-            // kind 沿用契约里的 "message"：前端对聊天数据统一按「重拉会话 / 消息」处理
-            Ok(()) => emit_chat(inner, app, &chat_peer_id, "message"),
-            Err(err) => eprintln!("写入文件会话失败：{err}"),
-        }
-    }
 
     let decision = rx.recv_timeout(timeout);
     match decision {
@@ -398,25 +413,49 @@ fn handle_prepare(
         }
     }
 
-    // 用户接受：建目录、生成会话与每个文件的一次性 token
-    //
+    // 用户接受：建目录、生成会话与每个文件的一次性 token。
+    // 接受与建会话之间功能可能被关闭，attach_session 内部会再确认一次。
+    let (session_id, response_files) = match attach_session(inner, &offer_files, chat_peer_id, chat_alias)
+    {
+        Ok(result) => result,
+        Err(err) => {
+            remove_pending(inner, &offer_id);
+            emit_snapshot(inner, app);
+            return Err(err);
+        }
+    };
+    remove_pending(inner, &offer_id);
+    emit_snapshot(inner, app);
+
+    let response = PrepareUploadResponse {
+        session_id,
+        files: response_files,
+    };
+    write_json(reader.get_mut(), 200, &response).map_err(|err| (500, format!("写响应失败：{err}")))
+}
+
+/// 建接收目录 + 会话 + 每个文件的一次性 token，并登记到 `inner.sessions`。
+///
+/// 免确认（自动接收）与用户点接受两条路径共用，避免复制出错。
+fn attach_session(
+    inner: &InnerRef,
+    files: &[OfferFile],
+    peer_id: String,
+    peer_alias: String,
+) -> Result<(String, Vec<FileToken>), (u16, String)> {
     // 接受与建会话之间功能可能被关闭（stop_runtime 已清空会话），这里再确认一次，
     // 避免在已关闭状态下留下一个没人管理的会话。
     if !lock_inner(inner).running {
-        remove_pending(inner, &offer_id);
-        emit_snapshot(inner, app);
         return Err((403, "局域网分享已关闭".to_string()));
     }
     let dir = { lock_inner(inner).download_dir.clone() };
     if let Err(err) = std::fs::create_dir_all(&dir) {
-        remove_pending(inner, &offer_id);
-        emit_snapshot(inner, app);
         return Err((500, format!("无法创建接收目录 {}：{err}", dir.display())));
     }
     let session_id = uuid::Uuid::new_v4().to_string();
-    let mut session_files = Vec::with_capacity(offer_files.len());
-    let mut response_files = Vec::with_capacity(offer_files.len());
-    for file in &offer_files {
+    let mut session_files = Vec::with_capacity(files.len());
+    let mut response_files = Vec::with_capacity(files.len());
+    for file in files {
         let token = uuid::Uuid::new_v4().to_string();
         session_files.push(SessionFile {
             id: file.id.clone(),
@@ -433,25 +472,21 @@ fn handle_prepare(
     }
     {
         let mut guard = lock_inner(inner);
-        guard.take_pending(&offer_id);
+        // 免确认路径不经过「登记 pending」那段，这里也要顺手清掉过期会话，
+        // 否则中断上传遗留的 .part 只能等下一次 upload 才被回收。
+        guard.prune_sessions();
         guard.sessions.insert(
             session_id.clone(),
             Session {
                 dir,
                 files: session_files,
                 created: Instant::now(),
-                peer_id: chat_peer_id,
-                peer_alias: chat_alias,
+                peer_id,
+                peer_alias,
             },
         );
     }
-    emit_snapshot(inner, app);
-
-    let response = PrepareUploadResponse {
-        session_id,
-        files: response_files,
-    };
-    write_json(reader.get_mut(), 200, &response).map_err(|err| (500, format!("写响应失败：{err}")))
+    Ok((session_id, response_files))
 }
 
 fn handle_upload(
@@ -734,9 +769,30 @@ mod tests {
     };
     use crate::lanshare::{LanShareState, OfferFile};
 
+    /// 默认（require_accept=true）测试状态：文件请求会进「待接收」等待前端确认。
     fn start_state() -> (tempfile::TempDir, LanShareState, HttpServer) {
+        let (dir, state) = base_state();
+        // 本文件里的用例大多覆盖「待接收」流程，显式打开确认；
+        // 免确认自动接收由 auto_accept_* 用例覆盖。
+        state.inner.lock().unwrap().settings.require_accept = true;
+        let server = HttpServer::start(state.inner.clone(), None, 0, 1).unwrap();
+        {
+            let mut guard = state.inner.lock().unwrap();
+            guard.running = true;
+            guard.port = Some(server.port);
+        }
+        (dir, state, server)
+    }
+
+    fn base_state() -> (tempfile::TempDir, LanShareState) {
         let dir = tempfile::tempdir().unwrap();
         let state = LanShareState::new(dir.path().join("recv"));
+        (dir, state)
+    }
+
+    /// 免确认（默认设置）测试状态：文件请求直接接收，不产生 pending。
+    fn start_state_auto() -> (tempfile::TempDir, LanShareState, HttpServer) {
+        let (dir, state) = base_state();
         let server = HttpServer::start(state.inner.clone(), None, 0, 1).unwrap();
         {
             let mut guard = state.inner.lock().unwrap();
@@ -919,6 +975,84 @@ mod tests {
 
         // 全部文件完成后会话被移除
         assert!(state.inner.lock().unwrap().sessions.is_empty());
+    }
+
+    /// 默认设置（require_accept=false）：prepare 直接返回 token，不产生待接收请求，
+    /// 随后 upload 正常落盘。
+    #[test]
+    fn auto_accept_prepare_returns_tokens_without_pending() {
+        let (dir, state, server) = start_state_auto();
+        assert!(
+            !state.snapshot().require_accept,
+            "新状态默认免确认，设置页勾选默认不勾"
+        );
+        let body = prepare_body(&[("f0", "auto.txt", 5)]);
+        let (status, text) = test_request(server.port, "POST", PREPARE_PATH, &body);
+        assert_eq!(status, 200, "响应体：{text}");
+        let response: PrepareUploadResponse = serde_json::from_str(&text).unwrap();
+        assert_eq!(response.files.len(), 1);
+        assert_eq!(response.files[0].id, "f0");
+        assert!(!response.files[0].token.is_empty());
+        // 不产生待接收请求：左栏不会出现「待接收」
+        assert!(state.snapshot().pending_offers.is_empty());
+        // 会话已登记，可以直接上传
+        assert_eq!(state.inner.lock().unwrap().sessions.len(), 1);
+
+        let (status, text) =
+            test_request(server.port, "POST", &upload_path(&response, 0), b"hello");
+        assert_eq!(status, 200, "响应体：{text}");
+        let saved = dir.path().join("recv").join("auto.txt");
+        assert_eq!(std::fs::read(&saved).unwrap(), b"hello");
+        assert!(state.inner.lock().unwrap().sessions.is_empty());
+    }
+
+    /// 免确认路径不经过 pending 登记，也要顺手清理过期会话（否则中断上传的
+    /// `.part` 要等下一次 upload 才回收）。
+    #[test]
+    fn auto_accept_prunes_expired_sessions() {
+        let (dir, state, server) = start_state_auto();
+        {
+            let mut guard = state.inner.lock().unwrap();
+            // 把 TTL 调到 1ms 再注入一个「建完就过期」的会话。不用
+            // `Instant::now() - ttl`：机器刚启动不到 TTL 时长时减法会溢出 panic。
+            guard.session_ttl = Duration::from_millis(1);
+            guard.sessions.insert(
+                "stale".to_string(),
+                Session {
+                    dir: dir.path().join("stale"),
+                    files: Vec::new(),
+                    created: Instant::now(),
+                    peer_id: "peer".to_string(),
+                    peer_alias: "peer".to_string(),
+                },
+            );
+        }
+        std::thread::sleep(Duration::from_millis(10));
+        let body = prepare_body(&[("f0", "prune.txt", 1)]);
+        let (status, text) = test_request(server.port, "POST", PREPARE_PATH, &body);
+        assert_eq!(status, 200, "响应体：{text}");
+        let guard = state.inner.lock().unwrap();
+        assert!(
+            !guard.sessions.contains_key("stale"),
+            "自动接收也要清掉过期会话"
+        );
+        assert_eq!(guard.sessions.len(), 1, "只留下本次新建的会话");
+    }
+
+    /// 开启确认后仍走原来的待接收流程（此处只验证 403 拒绝路径没被改坏）。
+    #[test]
+    fn require_accept_keeps_pending_flow() {
+        let (_dir, state, server) = start_state();
+        assert!(state.snapshot().require_accept);
+        let body = prepare_body(&[("f0", "confirm.txt", 1)]);
+        let port = server.port;
+        let handle = std::thread::spawn(move || test_request(port, "POST", PREPARE_PATH, &body));
+        let offer_id = wait_for_offer(&state);
+        state.respond_offer_inner(&offer_id, false).unwrap();
+        let (status, text) = handle.join().unwrap();
+        assert_eq!(status, 403);
+        assert!(text.contains("拒绝"), "响应体：{text}");
+        assert!(state.snapshot().pending_offers.is_empty());
     }
 
     #[test]

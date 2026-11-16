@@ -168,7 +168,7 @@ pub peer_remarks: HashMap<String, String>,
 ## 7. 错误与边界
 
 - 备注命令：peer_id 空 / 备注超长截断；保存设置失败返回错误、内存不更新。
-- 打开文件夹：`file_path` 为空或目录不存在 → 返回明确错误，前端 `message.error`。
+- 打开文件夹：`file_path` 为空 → 返回明确错误（前端也会隐藏按钮）；目录不存在时由 `open_dir` 退到最近存在的上级，不报错。
 - 自动接收：建目录失败 / 超过 20GB / 分享已关闭 → 返回 4xx/5xx，发送方标记失败，不产生半截会话。
 - 接收方忙（多文件并发）沿用现有 session 上限与清理逻辑。
 - 聊天库不可用：与上一轮一致，降级为 snapshot warning，不影响文件接收。
@@ -178,10 +178,10 @@ pub peer_remarks: HashMap<String, String>,
 后端：
 
 - `require_accept` 缺省为 false（旧 settings JSON 反序列化）。
-- `require_accept == false` 时 `handle_prepare` 直接 200 + token、无 pending；上传成功后落盘 + `received` 消息。
+- `require_accept == false` 时 `handle_prepare` 直接 200 + token、无 pending；上传成功后落盘 + `received` 消息（server 单测未接 chat store，消息写入由 e2e 确认路径覆盖）。
 - `require_accept == true` 时保留现有 pending 流程测试（403 / 408 / 接受）。
-- 备注设置/清除：快照 `peer_remarks` 正确、trim/截断、非法 peer_id。
-- 打开文件夹命令：构造临时文件，返回 `Ok`；不存在的路径返回 `Err`（不真正拉起 GUI 时可用 `nearest_existing_dir` 覆盖）。
+- 备注设置/清除：快照 `peer_remarks` 正确、trim/截断；peer_id 为空串时方法内拒绝（依赖 AppHandle，无单测）。
+- 打开文件夹命令：只对 `parent_dir(path)` 纯函数做单测（绝对路径 / 相对路径 / 空路径），真实打开动作不纳入单测（会拉起 Finder）。
 - 现有 e2e 文件测试改为开启确认或走自动接收路径，保持全绿。
 
 前端：

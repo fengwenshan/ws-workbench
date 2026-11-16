@@ -2,13 +2,16 @@
 import { computed } from 'vue'
 import type { ChatMessage, PendingOffer, SendProgress } from '@/api/lanshare'
 import type { MergedPeer } from './types'
+import LanAvatar from './LanAvatar.vue'
 import LanChatMessageList from './LanChatMessageList.vue'
+import LanRemarkEditor from './LanRemarkEditor.vue'
 
 /**
  * 右栏聊天壳：头部设备信息 + 消息流 + 输入区。
  *
- * 消息流拆在 LanChatMessageList 里（气泡 / 文件卡 / 待接收卡）；
- * 这里只做输入框交互与把事件转给 LanSharePanel 统一调 API。
+ * 头部按钉钉观感放头像 + 显示名（备注优先于设备名），名字旁的铅笔就地起备注
+ * （LanRemarkEditor，保存仍走父组件统一调 API）。
+ * 消息流拆在 LanChatMessageList 里；这里只做输入框交互与把事件转给 LanSharePanel。
  */
 const props = defineProps<{
   /** 当前选中的设备（null 显示空态） */
@@ -41,12 +44,21 @@ const emit = defineEmits<{
   'accept-offer': [offer: PendingOffer]
   'reject-offer': [offer: PendingOffer]
   'delete-conversation': []
+  /** 保存本机备注（空串 = 删除备注） */
+  'save-remark': [peerId: string, remark: string]
 }>()
 
 const peerAddress = computed(() => {
   const runtime = props.peer?.peer
   if (!runtime) return '设备不在线'
   return `${runtime.ip}:${runtime.port}`
+})
+
+/** 显示名：本机备注优先，没备注才用设备名（设计 §2.3） */
+const displayName = computed(() => {
+  const target = props.peer
+  if (!target) return ''
+  return target.remark || target.alias
 })
 
 const textareaPlaceholder = computed(() => {
@@ -81,8 +93,15 @@ function onKeydown(event: KeyboardEvent) {
     <template v-if="peer">
       <header class="chat-head">
         <div class="head-main">
+          <LanAvatar class="head-avatar" :self="false" />
           <div class="head-title">
-            <span class="head-name" :title="peer.alias">{{ peer.alias }}</span>
+            <!-- 显示名（备注 || 设备名）+ 铅笔就地编辑备注 -->
+            <LanRemarkEditor
+              :peer-id="peer.id"
+              :alias="peer.alias"
+              :remark="peer.remark"
+              @save="emit('save-remark', peer.id, $event)"
+            />
             <span class="online-label" :class="peer.online ? 'is-online' : 'is-offline'">
               <span class="online-dot"></span>
               {{ peer.online ? '在线' : '离线' }}
@@ -118,6 +137,7 @@ function onKeydown(event: KeyboardEvent) {
         :offer-busy="offerBusy"
         :now="now"
         :peer-id="peer.id"
+        :peer-name="displayName"
         @retry="emit('retry', $event)"
         @accept-offer="emit('accept-offer', $event)"
         @reject-offer="emit('reject-offer', $event)"
@@ -197,7 +217,7 @@ function onKeydown(event: KeyboardEvent) {
   overflow: hidden;
 }
 
-/* 头部：设备名 / 在线状态 / IP:端口 + 操作按钮 */
+/* 头部：头像 / 设备名（可编辑备注）/ 在线状态 / IP:端口 + 操作按钮 */
 .chat-head {
   flex-shrink: 0;
   height: var(--panel-header-height, 40px);
@@ -211,22 +231,18 @@ function onKeydown(event: KeyboardEvent) {
   flex: 1;
   min-width: 0;
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 10px;
+}
+.head-avatar {
+  flex-shrink: 0;
 }
 .head-title {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   min-width: 0;
-}
-.head-name {
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--text-primary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  flex-shrink: 1;
 }
 .online-label {
   display: inline-flex;
@@ -251,6 +267,7 @@ function onKeydown(event: KeyboardEvent) {
   box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.16);
 }
 .head-addr {
+  flex-shrink: 0;
   font-size: 12px;
   color: var(--text-muted);
   overflow: hidden;
@@ -383,12 +400,13 @@ function onKeydown(event: KeyboardEvent) {
     flex-wrap: wrap;
   }
   .head-main {
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 2px;
+    align-items: center;
   }
   .head-actions {
     margin-left: auto;
+  }
+  .head-addr {
+    display: none;
   }
 }
 </style>

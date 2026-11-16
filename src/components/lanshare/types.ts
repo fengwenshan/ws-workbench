@@ -12,7 +12,10 @@ import type { LanPeer } from '@/api/lanshare'
 export interface MergedPeer {
   /** 会话 id = peer 的 fingerprint（主网卡 MAC，取不到时为回退 UUID） */
   id: string
+  /** 设备名：最新 announce 别名 / 会话别名 / 「未知设备」 */
   alias: string
+  /** 本机备注（snapshot.peer_remarks[id]，空串表示没起备注）；展示时优先于 alias */
+  remark: string
   online: boolean
   /** 有持久化会话：决定是否显示「删除会话」、空态文案等 */
   hasConversation: boolean

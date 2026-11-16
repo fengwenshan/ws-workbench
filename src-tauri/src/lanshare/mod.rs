@@ -98,6 +98,12 @@ pub struct LanShareSettings {
     /// 稳定指纹：首次开启时生成，之后一直复用
     #[serde(default)]
     pub fingerprint: String,
+    /// 接收文件前是否需要本机确认；默认 false：直接接收，不弹接受框
+    #[serde(default)]
+    pub require_accept: bool,
+    /// 本机给其它设备起的备注：fingerprint -> 备注（只在本机显示，不广播给对端）
+    #[serde(default)]
+    pub peer_remarks: HashMap<String, String>,
 }
 
 impl LanShareSettings {
@@ -109,6 +115,8 @@ impl LanShareSettings {
             alias: String::new(),
             download_dir: None,
             fingerprint: uuid::Uuid::new_v4().to_string(),
+            require_accept: false,
+            peer_remarks: HashMap::new(),
         }
     }
 
@@ -221,6 +229,12 @@ pub struct LanShareSnapshot {
     /// （现场：保存设置瞬时被拒，功能明明已经起来了，界面却红字报启动失败）。
     #[serde(default)]
     pub warning: Option<String>,
+    /// 接收文件前是否需要本机确认（默认 false：直接接收）
+    #[serde(default)]
+    pub require_accept: bool,
+    /// 本机给设备起的备注（fingerprint -> 备注），只影响本机显示
+    #[serde(default)]
+    pub peer_remarks: HashMap<String, String>,
 }
 
 /// peer 表条目：展示字段 + 连接地址 + 过期判断用的本地时钟
@@ -867,6 +881,47 @@ impl LanShareState {
         Ok(self.snapshot())
     }
 
+    /// 接收文件前是否需要本机确认；默认 false（直接接收，不弹接受框）。
+    ///
+    /// 先克隆设置再写盘：不持锁做 store 文件 IO；保存失败时内存保持旧值。
+    pub fn set_require_accept(
+        &self,
+        app: &AppHandle,
+        require_accept: bool,
+    ) -> Result<LanShareSnapshot, String> {
+        let mut next = lock_inner(&self.inner).settings.clone();
+        next.require_accept = require_accept;
+        settings::save(app, &next)?;
+        lock_inner(&self.inner).settings.require_accept = require_accept;
+        emit_snapshot(&self.inner, Some(app));
+        Ok(self.snapshot())
+    }
+
+    /// 设置 / 清除本机给某台设备起的备注（只在本机显示，不广播给对端）。
+    ///
+    /// `remark` 会 trim 并截断到 32 字符；空串表示删除该备注。
+    pub fn set_peer_remark(
+        &self,
+        app: &AppHandle,
+        peer_id: &str,
+        remark: &str,
+    ) -> Result<LanShareSnapshot, String> {
+        let peer_id = peer_id.trim();
+        if peer_id.is_empty() {
+            return Err("缺少设备标识".to_string());
+        }
+        let remark = normalize_remark(remark);
+        let mut next = lock_inner(&self.inner).settings.clone();
+        apply_peer_remark(&mut next, peer_id, &remark);
+        settings::save(app, &next)?;
+        {
+            let mut inner = lock_inner(&self.inner);
+            apply_peer_remark(&mut inner.settings, peer_id, &remark);
+        }
+        emit_snapshot(&self.inner, Some(app));
+        Ok(self.snapshot())
+    }
+
     /// 指定接收目录；`None` / 空串回退默认目录。目录不存在时自动创建并做写探测。
     pub fn set_download_dir(
         &self,
@@ -1070,6 +1125,8 @@ pub(crate) fn snapshot_of(inner: &Inner) -> LanShareSnapshot {
         pending_offers: inner.pending_offers(),
         last_error: inner.last_error.clone(),
         warning: inner.warning.clone(),
+        require_accept: inner.settings.require_accept,
+        peer_remarks: inner.settings.peer_remarks.clone(),
     }
 }
 
@@ -1119,6 +1176,27 @@ pub(crate) fn normalize_alias(alias: &str) -> String {
         alias.chars().take(64).collect()
     } else {
         alias.to_string()
+    }
+}
+
+/// 本机备注：trim + 最多 32 个字符；空串表示删除
+pub(crate) fn normalize_remark(remark: &str) -> String {
+    let remark = remark.trim();
+    if remark.chars().count() > 32 {
+        remark.chars().take(32).collect()
+    } else {
+        remark.to_string()
+    }
+}
+
+/// 把（已 normalize 的）备注写到设置里；空串删除。纯函数，方便单测。
+pub(crate) fn apply_peer_remark(settings: &mut LanShareSettings, peer_id: &str, remark: &str) {
+    if remark.is_empty() {
+        settings.peer_remarks.remove(peer_id);
+    } else {
+        settings
+            .peer_remarks
+            .insert(peer_id.to_string(), remark.to_string());
     }
 }
 
@@ -1277,6 +1355,9 @@ mod tests {
         // 测试里默认目录传的是临时目录下的 recv，未指定接收目录时应回退到它
         assert!(snapshot.download_dir.ends_with("recv"));
         assert!(!snapshot.download_dir_custom);
+        // 默认直接接收，不要求对方确认；备注表为空
+        assert!(!snapshot.require_accept);
+        assert!(snapshot.peer_remarks.is_empty());
     }
 
     /// 现场问题回归：保存设置瞬时被拒时，界面曾把「保存失败」当成「启动失败」，
@@ -1436,6 +1517,38 @@ mod tests {
         assert_eq!(normalize_alias(&multibyte).chars().count(), 64);
     }
 
+    /// 旧版本 `lan_share.json` 没有新增字段，反序列化必须照常走默认值。
+    #[test]
+    fn old_settings_json_gets_new_defaults() {
+        let old =
+            r#"{"enabled":true,"alias":"办公室 Mac","download_dir":null,"fingerprint":"fp-old"}"#;
+        let settings: LanShareSettings = serde_json::from_str(old).unwrap();
+        assert!(!settings.require_accept, "默认免确认直接接收");
+        assert!(settings.peer_remarks.is_empty());
+
+        let empty: LanShareSettings = serde_json::from_str("{}").unwrap();
+        assert!(!empty.require_accept);
+        assert!(empty.peer_remarks.is_empty());
+    }
+
+    #[test]
+    fn peer_remark_trim_truncates_and_clears() {
+        let mut settings = LanShareSettings::default();
+        apply_peer_remark(&mut settings, "AA:BB", &normalize_remark("  书房 Mac  "));
+        assert_eq!(settings.peer_remarks.get("AA:BB").unwrap(), "书房 Mac");
+
+        let long = normalize_remark(&"设".repeat(60));
+        assert_eq!(long.chars().count(), 32);
+        apply_peer_remark(&mut settings, "AA:BB", &long);
+        assert_eq!(
+            settings.peer_remarks.get("AA:BB").unwrap().chars().count(),
+            32
+        );
+
+        apply_peer_remark(&mut settings, "AA:BB", "");
+        assert!(settings.peer_remarks.is_empty());
+    }
+
     #[test]
     fn download_dir_resolution() {
         let dir = tempfile::tempdir().unwrap();
@@ -1487,8 +1600,9 @@ mod tests {
     /// 同时覆盖聊天接线：B 的两条 outgoing 文件消息变 sent，A 收到两条 received。
     #[test]
     fn end_to_end_two_runtime_instances() {
-        // A：接收端
+        // A：接收端（这个用例覆盖「需要确认」路径，先打开确认开关）
         let (dir_a, state_a) = state_with_temp_dir();
+        lock_inner(&state_a.inner).settings.require_accept = true;
         let store_a = attach_chat(&state_a, &dir_a.path().join("chat-a.db"));
         let server = server::HttpServer::start(state_a.inner.clone(), None, 0, 1).unwrap();
         {

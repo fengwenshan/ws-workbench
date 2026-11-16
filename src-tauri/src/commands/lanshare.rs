@@ -92,3 +92,65 @@ pub fn lan_share_mark_read(app: AppHandle, peer_id: String) -> Result<(), String
 pub fn lan_share_delete_conversation(app: AppHandle, peer_id: String) -> Result<(), String> {
     state(&app)?.delete_conversation(&app, &peer_id)
 }
+
+/// 设置 / 清除本机给某台设备起的备注（只在本机显示，不广播给对端）。
+/// `remark` 传空串表示删除备注。
+#[tauri::command]
+pub fn lan_share_set_peer_remark(
+    app: AppHandle,
+    peer_id: String,
+    remark: String,
+) -> Result<LanShareSnapshot, String> {
+    state(&app)?.set_peer_remark(&app, &peer_id, &remark)
+}
+
+/// 接收文件前是否需要本机确认；默认 false（直接接收，不弹接受框）。
+#[tauri::command]
+pub fn lan_share_set_require_accept(
+    app: AppHandle,
+    require_accept: bool,
+) -> Result<LanShareSnapshot, String> {
+    state(&app)?.set_require_accept(&app, require_accept)
+}
+
+/// 打开文件所在目录（接收到的文件、发送的源文件都可以用）。
+#[tauri::command]
+pub fn lan_share_open_file_dir(path: String) -> Result<(), String> {
+    let parent = parent_dir(&path)?;
+    super::system::open_dir(parent.to_string_lossy().to_string())?;
+    Ok(())
+}
+
+/// 取文件所在目录；相对路径没有父目录时回退到当前目录。
+fn parent_dir(path: &str) -> Result<std::path::PathBuf, String> {
+    let path = path.trim();
+    if path.is_empty() {
+        return Err("缺少文件路径".to_string());
+    }
+    let parent = std::path::Path::new(path)
+        .parent()
+        .ok_or_else(|| format!("无法定位文件所在目录：{path}"))?;
+    if parent.as_os_str().is_empty() {
+        Ok(std::path::PathBuf::from("."))
+    } else {
+        Ok(parent.to_path_buf())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parent_dir_resolves_absolute_and_relative() {
+        assert_eq!(
+            parent_dir("/tmp/a/b.txt").unwrap(),
+            std::path::PathBuf::from("/tmp/a")
+        );
+        assert_eq!(
+            parent_dir("relative.txt").unwrap(),
+            std::path::PathBuf::from(".")
+        );
+        assert!(parent_dir("   ").is_err());
+    }
+}

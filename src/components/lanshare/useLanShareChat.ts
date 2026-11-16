@@ -116,6 +116,11 @@ export function useLanShareChat(isActive: () => boolean) {
     if (changed) scheduleConversationsRefresh()
   }
 
+  /** 本机备注（只在本机生效）：有备注时优先于设备名展示 */
+  function remarkFor(peerId: string): string {
+    return snapshot.value?.peer_remarks?.[peerId]?.trim() ?? ''
+  }
+
   /**
    * 左栏列表 = 会话 ∪ 在线 peer（按 id 去重，在线 peer 的最新别名优先）。
    * 排序：online 在前；组内按最近活动时间降序（会话用 last_activity_ms，
@@ -128,6 +133,7 @@ export function useLanShareChat(isActive: () => boolean) {
       byId.set(conversation.id, {
         id: conversation.id,
         alias: conversation.alias?.trim() || '未知设备',
+        remark: remarkFor(conversation.id),
         online: false,
         hasConversation: true,
         sortTimeMs: conversation.last_activity_ms,
@@ -154,6 +160,7 @@ export function useLanShareChat(isActive: () => boolean) {
       byId.set(peer.fingerprint, {
         id: peer.fingerprint,
         alias: peer.alias?.trim() || '未知设备',
+        remark: remarkFor(peer.fingerprint),
         online: true,
         hasConversation: false,
         sortTimeMs: peer.last_seen_ms,
@@ -306,6 +313,7 @@ export function useLanShareChat(isActive: () => boolean) {
     handleRetry,
     respondOffer,
     handleDeleteConversation,
+    handleSavePeerRemark,
   } = createLanShareActions({
     activePeerId,
     activePeer,
@@ -429,5 +437,6 @@ export function useLanShareChat(isActive: () => boolean) {
     handleRetry,
     respondOffer,
     handleDeleteConversation,
+    handleSavePeerRemark,
   }
 }
