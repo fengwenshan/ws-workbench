@@ -650,7 +650,11 @@ const BETA_MANIFEST_SUFFIX: &str = "/updates/beta/latest.json";
 fn derive_beta_endpoints(stable: &[Url]) -> Vec<Url> {
     stable
         .iter()
-        .filter(|url| url.host_str().map(|host| host == "gitee.com").unwrap_or(false))
+        .filter(|url| {
+            url.host_str()
+                .map(|host| host == "gitee.com")
+                .unwrap_or(false)
+        })
         .filter_map(|url| {
             let text = url.as_str();
             let prefix = text.strip_suffix(STABLE_MANIFEST_SUFFIX)?;
