@@ -689,6 +689,92 @@ impl ChatStore {
         Ok(changed > 0)
     }
 
+    /// 删除单条消息（仅本机记录），返回是否真的删掉一条。
+    ///
+    /// - 消息不存在 → `Ok(false)`（幂等，不报错；发送线程晚回写的竞态也算这种）；
+    /// - 入站消息删掉后未读近似减 1（没有按条的已读标记，只能 `MAX(unread - 1, 0)`）；
+    /// - 删的是会话最新一条时，把会话的 `last_activity_ms` / 预览回退到剩下的最新一条；
+    ///   一条不剩就删掉会话行 —— 等价于「清除聊天记录」，离线对端不再出现在列表里；
+    /// - 本机已收到的文件不删除（只删消息记录，物理文件保留）。
+    pub fn delete_message(&self, peer_id: &str, message_id: &str) -> Result<bool, String> {
+        let mut conn = self.connect()?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| format!("开启事务失败: {}", e))?;
+        let direction: Option<String> = tx
+            .query_row(
+                "SELECT direction FROM lan_share_messages WHERE peer_id = ?1 AND id = ?2",
+                rusqlite::params![peer_id, message_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| format!("查询消息失败: {}", e))?;
+        let Some(direction) = direction else {
+            return Ok(false);
+        };
+        tx.execute(
+            "DELETE FROM lan_share_messages WHERE peer_id = ?1 AND id = ?2",
+            rusqlite::params![peer_id, message_id],
+        )
+        .map_err(|e| format!("删除消息失败: {}", e))?;
+        if direction == "in" {
+            tx.execute(
+                "UPDATE lan_share_conversations SET unread = MAX(unread - 1, 0) WHERE id = ?1",
+                rusqlite::params![peer_id],
+            )
+            .map_err(|e| format!("更新未读失败: {}", e))?;
+        }
+        // 剩下最新一条：刷新会话活动时间 / 预览；一条不剩就删会话行
+        let latest: Option<(String, i64, String)> = tx
+            .query_row(
+                "SELECT kind, created_at_ms, payload_enc FROM lan_share_messages \
+                 WHERE peer_id = ?1 ORDER BY created_at_ms DESC, id DESC LIMIT 1",
+                rusqlite::params![peer_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(|e| format!("查询最新消息失败: {}", e))?;
+        match latest {
+            Some((kind, created_at_ms, payload_enc)) => {
+                let preview = self.preview_of_encrypted(&kind, &payload_enc);
+                let preview_enc = self.seal(&preview)?;
+                tx.execute(
+                    "UPDATE lan_share_conversations \
+                     SET last_activity_ms = ?1, last_preview_enc = ?2 WHERE id = ?3",
+                    rusqlite::params![created_at_ms, preview_enc, peer_id],
+                )
+                .map_err(|e| format!("更新会话预览失败: {}", e))?;
+            }
+            None => {
+                tx.execute(
+                    "DELETE FROM lan_share_conversations WHERE id = ?1",
+                    rusqlite::params![peer_id],
+                )
+                .map_err(|e| format!("删除空会话失败: {}", e))?;
+            }
+        }
+        tx.commit().map_err(|e| format!("提交事务失败: {}", e))?;
+        Ok(true)
+    }
+
+    /// 解密一条消息载荷后拼会话预览；单条坏数据只告警并用占位（文本空 / 文件只显示 `[文件]`）
+    fn preview_of_encrypted(&self, kind: &str, payload_enc: &str) -> String {
+        let payload = self
+            .unseal(payload_enc)
+            .map_err(|e| format!("解密消息失败: {}", e))
+            .and_then(|json| {
+                serde_json::from_str::<MessagePayload>(&json)
+                    .map_err(|e| format!("解析消息载荷失败: {}", e))
+            });
+        match payload {
+            Ok(payload) => preview_of(kind, &payload.text, payload.file_name.as_deref()),
+            Err(err) => {
+                eprintln!("[lanshare] 剩余最新一条消息解密失败，预览用占位: {}", err);
+                preview_of(kind, "", None)
+            }
+        }
+    }
+
     /// 删除会话及其全部消息（仅本机）
     pub fn delete_conversation(&self, peer_id: &str) -> Result<(), String> {
         let mut conn = self.connect()?;
@@ -1273,5 +1359,173 @@ mod tests {
         store
             .update_message_status(PEER, "m1", "sent", None, None)
             .unwrap();
+        // 删除后要重算预览时，坏载荷只让预览变占位，不会让删除失败
+        assert!(store.delete_message(PEER, "m2").unwrap());
+        let conversations = store.list_conversations().unwrap();
+        assert_eq!(conversations.len(), 1);
+        assert_eq!(conversations[0].last_preview, "");
+    }
+
+    #[test]
+    fn delete_middle_message_keeps_others_and_preview() {
+        let (_dir, store) = test_store();
+        store
+            .append_message(PEER, "A", &ChatMessage::text("m1", PEER, "in", "一", 1_000))
+            .unwrap();
+        store
+            .append_message(PEER, "A", &ChatMessage::text("m2", PEER, "in", "二", 2_000))
+            .unwrap();
+        store
+            .append_message(PEER, "A", &ChatMessage::text("m3", PEER, "out", "三", 3_000))
+            .unwrap();
+        assert_eq!(store.get_conversation(PEER).unwrap().unwrap().unread, 2);
+
+        assert!(store.delete_message(PEER, "m2").unwrap());
+
+        let ids: Vec<String> = store
+            .list_messages(PEER, 10)
+            .unwrap()
+            .into_iter()
+            .map(|message| message.id)
+            .collect();
+        assert_eq!(ids, vec!["m1", "m3"], "只删中间那条，其它消息保留");
+        let conversation = store.get_conversation(PEER).unwrap().unwrap();
+        assert_eq!(conversation.last_preview, "三", "预览仍是最新一条");
+        assert_eq!(conversation.last_activity_ms, 3_000);
+        assert_eq!(conversation.unread, 1, "删入站消息未读减 1");
+
+        // 删 out 消息不动未读；预览回退到剩下最新一条
+        assert!(store.delete_message(PEER, "m3").unwrap());
+        let conversation = store.get_conversation(PEER).unwrap().unwrap();
+        assert_eq!(conversation.unread, 1);
+        assert_eq!(conversation.last_preview, "一");
+    }
+
+    #[test]
+    fn delete_last_message_removes_empty_conversation() {
+        let (_dir, store) = test_store();
+        store
+            .append_message(PEER, "A", &ChatMessage::text("m1", PEER, "in", "旧", 1_000))
+            .unwrap();
+        store
+            .append_message(PEER, "A", &ChatMessage::text("m2", PEER, "in", "新", 2_000))
+            .unwrap();
+
+        // 删最后一条：会话保留，活动时间 / 预览回退到剩下的最新一条
+        assert!(store.delete_message(PEER, "m2").unwrap());
+        let conversation = store.get_conversation(PEER).unwrap().unwrap();
+        assert_eq!(conversation.last_preview, "旧");
+        assert_eq!(conversation.last_activity_ms, 1_000);
+        assert_eq!(conversation.unread, 1);
+
+        // 再删最后一条：会话行也删掉（离线对端从列表消失），消息清空
+        assert!(store.delete_message(PEER, "m1").unwrap());
+        assert!(store.get_conversation(PEER).unwrap().is_none());
+        assert!(store.list_messages(PEER, 10).unwrap().is_empty());
+        assert!(store.list_conversations().unwrap().is_empty());
+        assert_eq!(
+            raw_count(
+                &store,
+                "SELECT COUNT(*) FROM lan_share_messages WHERE peer_id = ?1",
+                PEER
+            ),
+            0
+        );
+        assert_eq!(
+            raw_count(
+                &store,
+                "SELECT COUNT(*) FROM lan_share_conversations WHERE id = ?1",
+                PEER
+            ),
+            0
+        );
+    }
+
+    #[test]
+    fn delete_inbound_message_never_makes_unread_negative() {
+        let (_dir, store) = test_store();
+        store
+            .append_message(PEER, "A", &ChatMessage::text("m1", PEER, "in", "一", 1_000))
+            .unwrap();
+        store
+            .append_message(PEER, "A", &ChatMessage::text("m2", PEER, "in", "二", 2_000))
+            .unwrap();
+        assert!(store.mark_read(PEER).unwrap());
+        assert_eq!(store.get_conversation(PEER).unwrap().unwrap().unread, 0);
+
+        // 已读（unread=0）后再删入站消息：MAX(unread-1, 0) 兜底，不会变负
+        assert!(store.delete_message(PEER, "m1").unwrap());
+        let conversation = store.get_conversation(PEER).unwrap().unwrap();
+        assert_eq!(conversation.unread, 0);
+        assert_eq!(store.list_messages(PEER, 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn delete_missing_message_is_idempotent() {
+        let (_dir, store) = test_store();
+        store
+            .append_message(PEER, "A", &ChatMessage::text("m1", PEER, "in", "hi", 1_000))
+            .unwrap();
+
+        // 不存在 / 别的 peer 下的 id → false，且不动已有数据
+        assert!(!store.delete_message(PEER, "missing").unwrap());
+        assert!(!store.delete_message("unknown-peer", "m1").unwrap());
+        assert!(store.get_conversation(PEER).unwrap().is_some());
+        assert_eq!(store.list_messages(PEER, 10).unwrap().len(), 1);
+
+        // 重复删同一条：第一次 true，第二次 false
+        assert!(store.delete_message(PEER, "m1").unwrap());
+        assert!(!store.delete_message(PEER, "m1").unwrap());
+    }
+
+    #[test]
+    fn delete_message_is_isolated_per_peer() {
+        let (_dir, store) = test_store();
+        let peer_b = "AA:BB:CC:DD:EE:FF";
+        store
+            .append_message(PEER, "A", &ChatMessage::text("a1", PEER, "in", "a", 1_000))
+            .unwrap();
+        store
+            .append_message(peer_b, "B", &ChatMessage::text("b1", peer_b, "in", "b", 2_000))
+            .unwrap();
+
+        assert!(store.delete_message(PEER, "a1").unwrap());
+        assert!(store.get_conversation(PEER).unwrap().is_none());
+        let conversations = store.list_conversations().unwrap();
+        assert_eq!(conversations.len(), 1);
+        assert_eq!(conversations[0].id, peer_b);
+        assert_eq!(conversations[0].last_preview, "b");
+        assert_eq!(store.list_messages(peer_b, 10).unwrap().len(), 1);
+        // 归属不串：B 会话下没有 a1
+        assert!(!store.delete_message(peer_b, "a1").unwrap());
+    }
+
+    #[test]
+    fn delete_file_message_keeps_file_on_disk_and_restores_previous_preview() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("chat.db");
+        crate::db::open(&path).unwrap();
+        let store = ChatStore::new(path, test_keys());
+
+        // 收到的文件：落盘路径在加密载荷里；删消息不能删物理文件
+        let file_path = dir.path().join("收到的报告.pdf");
+        std::fs::write(&file_path, b"data").unwrap();
+        store
+            .append_message(PEER, "A", &ChatMessage::text("t1", PEER, "in", "看这个", 1_000))
+            .unwrap();
+        let mut file = ChatMessage::file("f1", PEER, "in", "收到的报告.pdf", 4, "received", 2_000);
+        file.file_path = Some(file_path.to_string_lossy().to_string());
+        store.append_message(PEER, "A", &file).unwrap();
+        assert_eq!(
+            store.get_conversation(PEER).unwrap().unwrap().last_preview,
+            "[文件] 收到的报告.pdf"
+        );
+
+        assert!(store.delete_message(PEER, "f1").unwrap());
+        assert!(file_path.exists(), "删除消息不应删除本机已收到的文件");
+        let conversation = store.get_conversation(PEER).unwrap().unwrap();
+        assert_eq!(conversation.last_preview, "看这个", "预览回退到上一条文本");
+        assert_eq!(conversation.last_activity_ms, 1_000);
+        assert_eq!(conversation.unread, 1, "原未读 2，删一条入站文件消息后减 1");
     }
 }

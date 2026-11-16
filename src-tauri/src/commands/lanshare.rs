@@ -91,6 +91,16 @@ pub fn lan_share_delete_conversation(
     state(&app)?.delete_conversation(&app, &peer_id, delete_files)
 }
 
+/// 删除单条消息（仅本机聊天记录；对方设备不受影响，本机已收到的文件不删除）。
+#[tauri::command]
+pub fn lan_share_delete_message(
+    app: AppHandle,
+    peer_id: String,
+    message_id: String,
+) -> Result<(), String> {
+    state(&app)?.delete_message(&app, &peer_id, &message_id)
+}
+
 /// 该会话里本机收到的、还带落盘路径的文件数量
 #[tauri::command]
 pub fn lan_share_conversation_attachment_count(

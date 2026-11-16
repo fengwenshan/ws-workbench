@@ -735,6 +735,31 @@ impl LanShareState {
         Ok(())
     }
 
+    /// 删除单条消息（仅本机聊天记录；对方不受影响，本机已收到的文件保留）。
+    ///
+    /// 删掉会话最后一条时后端会连带删掉空会话（等价「清除聊天记录」），
+    /// 推 `updated` 事件让前端刷新消息和会话列表（不响提示音、不标已读）。
+    pub fn delete_message(
+        &self,
+        app: &AppHandle,
+        peer_id: &str,
+        message_id: &str,
+    ) -> Result<(), String> {
+        let peer_id = peer_id.trim();
+        if peer_id.is_empty() {
+            return Err("缺少设备标识".to_string());
+        }
+        let message_id = message_id.trim();
+        if message_id.is_empty() {
+            return Err("缺少消息标识".to_string());
+        }
+        // 锁里只取 store 克隆，DB IO 都在锁外做
+        let store = self.chat_store()?;
+        store.delete_message(peer_id, message_id)?;
+        emit_chat(&self.inner, Some(app), peer_id, "updated");
+        Ok(())
+    }
+
     /// 该会话里本机收到的、带落盘路径的文件数
     pub fn attachment_count(&self, peer_id: &str) -> Result<u32, String> {
         let peer_id = peer_id.trim();

@@ -1429,6 +1429,7 @@ pub fn run() {
             commands::lan_share_send_chat,
             commands::lan_share_mark_read,
             commands::lan_share_delete_conversation,
+            commands::lan_share_delete_message,
             commands::lan_share_conversation_attachment_count,
             commands::lan_share_delete_attachments,
             commands::lan_share_import_clipboard_files,
