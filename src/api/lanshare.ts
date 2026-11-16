@@ -12,6 +12,8 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 export const EVENT_SNAPSHOT = 'lan-share://snapshot'
 /** 发送端进度事件：每个分块 / 文件完成 / 失败 */
 export const EVENT_SEND_PROGRESS = 'lan-share://send-progress'
+/** 聊天数据变化事件：新消息 / 已读 / 会话被删除（payload 只带 peer_id 与 kind，正文靠重新拉取） */
+export const EVENT_CHAT = 'lan-share://chat'
 
 /** 局域网内发现到的另一台设备 */
 export interface LanPeer {
@@ -78,6 +80,51 @@ export interface LanShareSnapshot {
   warning: string | null
 }
 
+/** 聊天方向：`in` 收到 / `out` 发出 */
+export type ChatDirection = 'in' | 'out'
+/** 聊天内容类型：文本 / 文件 */
+export type ChatKind = 'text' | 'file'
+/** 消息状态：发送中 / 已发送 / 失败 / 已接收 */
+export type ChatStatus = 'sending' | 'sent' | 'failed' | 'received'
+
+/** 一条聊天消息（字段与后端 `ChatMessage` 同名，后端是 snake_case） */
+export interface ChatMessage {
+  id: string
+  peer_id: string
+  direction: ChatDirection
+  kind: ChatKind
+  /** 文本正文；文件消息为空串 */
+  text: string
+  file_name: string | null
+  file_size: number | null
+  /** 落盘路径：接收方是保存位置；发送方是本机源路径（失败重试用） */
+  file_path: string | null
+  status: ChatStatus
+  error: string | null
+  /** 文件消息与 `lan-share://send-progress` 事件对应 */
+  transfer_id: string | null
+  file_index: number | null
+  file_total: number | null
+  created_at_ms: number
+}
+
+/** 持久化的一个会话（后端已合并运行期 peer 的在线状态与最新别名） */
+export interface LanShareConversation {
+  id: string
+  alias: string
+  online: boolean
+  last_activity_ms: number
+  last_preview: string
+  unread: number
+  created_at_ms: number
+}
+
+/** `lan-share://chat` 事件 payload：kind 决定要不要额外刷新消息 */
+export interface ChatEvent {
+  peer_id: string
+  kind: 'message' | 'read' | 'deleted'
+}
+
 /** 拉取当前快照（页面初始化 / 切回页面时刷新） */
 export function getLanShareSnapshot(): Promise<LanShareSnapshot> {
   return invoke<LanShareSnapshot>('lan_share_snapshot')
@@ -108,6 +155,34 @@ export function sendLanShareFiles(peerFingerprint: string, paths: string[]): Pro
   return invoke<string>('lan_share_send_files', { peerFingerprint, paths })
 }
 
+/** 拉取会话列表（后端已按最近活动排好序，前端仍会再做一次合并排序） */
+export function getLanShareConversations(): Promise<LanShareConversation[]> {
+  return invoke<LanShareConversation[]>('lan_share_conversations')
+}
+
+/** 拉取某个会话最近的消息（时间正序） */
+export function getLanShareMessages(peerId: string): Promise<ChatMessage[]> {
+  return invoke<ChatMessage[]>('lan_share_messages', { peerId })
+}
+
+/**
+ * 发送一条文本消息：后端先本地落库（status=sending）再后台投递，
+ * 返回的消息可直接插进列表，最终的 sent / failed 由 `lan-share://chat` 事件刷新。
+ */
+export function sendLanShareChat(peerId: string, text: string): Promise<ChatMessage> {
+  return invoke<ChatMessage>('lan_share_send_chat', { peerId, text })
+}
+
+/** 把某个会话的未读清零 */
+export function markLanShareRead(peerId: string): Promise<void> {
+  return invoke<void>('lan_share_mark_read', { peerId })
+}
+
+/** 删除本机的某个会话及其消息（对方不受影响） */
+export function deleteLanShareConversation(peerId: string): Promise<void> {
+  return invoke<void>('lan_share_delete_conversation', { peerId })
+}
+
 /** 订阅整份快照事件，返回取消订阅函数 */
 export function onLanShareSnapshot(
   handler: (snapshot: LanShareSnapshot) => void,
@@ -120,4 +195,9 @@ export function onLanShareSendProgress(
   handler: (progress: SendProgress) => void,
 ): Promise<UnlistenFn> {
   return listen<SendProgress>(EVENT_SEND_PROGRESS, (event) => handler(event.payload))
+}
+
+/** 订阅聊天变化事件，返回取消订阅函数 */
+export function onLanShareChat(handler: (event: ChatEvent) => void): Promise<UnlistenFn> {
+  return listen<ChatEvent>(EVENT_CHAT, (event) => handler(event.payload))
 }

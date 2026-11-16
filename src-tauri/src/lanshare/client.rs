@@ -16,11 +16,12 @@ use serde::de::DeserializeOwned;
 use tauri::AppHandle;
 
 use super::protocol::{
-    encode_query, ErrorResponse, FileToken, InfoResponse, PrepareUploadRequest,
+    encode_query, ChatRequest, ErrorResponse, FileToken, InfoResponse, PrepareUploadRequest,
     PrepareUploadResponse, SenderInfo,
 };
 use super::{
-    emit_progress, emit_snapshot, lock_inner, InnerRef, OfferFile, SendProgress, MAX_FILE_SIZE,
+    emit_chat, emit_progress, emit_snapshot, lock_inner, unix_millis, InnerRef, OfferFile,
+    SendProgress, MAX_FILE_SIZE,
 };
 
 /// 上传分块大小：每块推一次进度
@@ -30,6 +31,8 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const PREPARE_TIMEOUT: Duration = Duration::from_secs(90);
 const UPLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 const CANCEL_TIMEOUT: Duration = Duration::from_secs(5);
+/// 发一条聊天消息的等待上限（局域网内应该毫秒级返回）
+const CHAT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// 发送目标（从 peer 快照里取）
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,23 +45,36 @@ pub(crate) struct SendPeer {
     pub addresses: Vec<String>,
 }
 
-/// 一个待发送的本地文件
+/// 一个待发送的本地文件（`send_files` 也要用它来生成聊天里的文件消息）
 #[derive(Debug, Clone)]
-struct LocalFile {
-    path: PathBuf,
-    name: String,
-    size: u64,
+pub(crate) struct LocalFile {
+    pub path: PathBuf,
+    pub name: String,
+    pub size: u64,
 }
 
 /// 发送入口：`send_files` 命令在后台线程里调用它。
+///
+/// `message_ids` 与文件一一对应，用来把发送结果写回聊天里的文件消息；
+/// 测试 / 不关心聊天记录时传空切片即可。
 pub(crate) fn run_send(
     inner: &InnerRef,
     app: Option<&AppHandle>,
     peer: &SendPeer,
     paths: &[String],
     transfer_id: &str,
+    message_ids: &[String],
 ) -> Result<(), String> {
-    let files = collect_files(paths)?;
+    let files = match collect_files(paths) {
+        Ok(files) => files,
+        Err(message) => {
+            // 极窄竞态：send_files 收集后、后台线程收集前文件被删/改名。
+            // 这时还没有任何网络请求，但聊天消息已经落库，必须回写 failed，
+            // 否则气泡会永久停在「发送中」。
+            fail_messages(inner, app, peer, message_ids, 0, &message);
+            return Err(message);
+        }
+    };
     let file_total = files.len();
     let (sender_alias, sender_fingerprint) = {
         let guard = lock_inner(inner);
@@ -69,6 +85,7 @@ pub(crate) fn run_send(
     let peer = match probe_peer(peer, inner, app) {
         Ok(peer) => peer,
         Err(message) => {
+            fail_messages(inner, app, peer, message_ids, 0, &message);
             emit_failure(inner, app, peer, transfer_id, &files, 0, &message);
             return Err(message);
         }
@@ -103,6 +120,7 @@ pub(crate) fn run_send(
         Ok(response) => response,
         Err(err) => {
             let message = format!("对方未接收：{err}");
+            fail_messages(inner, app, peer, message_ids, 0, &message);
             emit_failure(inner, app, peer, transfer_id, &files, 0, &message);
             return Err(message);
         }
@@ -115,6 +133,7 @@ pub(crate) fn run_send(
             Some(token) => token.clone(),
             None => {
                 let message = format!("对方没有返回「{}」的上传凭证", file.name);
+                fail_messages(inner, app, peer, message_ids, index, &message);
                 emit_failure(inner, app, peer, transfer_id, &files, index, &message);
                 cancel_session(peer, &prepared.session_id);
                 return Err(message);
@@ -143,12 +162,14 @@ pub(crate) fn run_send(
                 progress.sent_bytes = file.size;
                 progress.done = true;
                 emit_progress(inner, app, progress);
+                update_file_message(inner, app, peer, message_ids, index, "sent", None);
             }
             Err(err) => {
                 let message = format!("发送「{}」失败：{err}", file.name);
                 progress.done = true;
                 progress.error = Some(message.clone());
                 emit_progress(inner, app, progress);
+                fail_messages(inner, app, peer, message_ids, index, &message);
                 cancel_session(peer, &prepared.session_id);
                 return Err(message);
             }
@@ -168,7 +189,115 @@ fn upload_path(session_id: &str, file_id: &str, token: &FileToken) -> String {
     )
 }
 
-fn collect_files(paths: &[String]) -> Result<Vec<LocalFile>, String> {
+/// 把单个文件的发送结果写回聊天里的文件消息（测试 / 无聊天记录时 `message_ids` 为空）。
+fn update_file_message(
+    inner: &InnerRef,
+    app: Option<&AppHandle>,
+    peer: &SendPeer,
+    message_ids: &[String],
+    index: usize,
+    status: &str,
+    error: Option<&str>,
+) {
+    let Some(message_id) = message_ids.get(index).map(String::as_str) else {
+        return;
+    };
+    if message_id.is_empty() {
+        return;
+    }
+    let Some(store) = lock_inner(inner).chat.clone() else {
+        return;
+    };
+    if let Err(err) =
+        store.update_message_status(&peer.fingerprint, message_id, status, error, None)
+    {
+        eprintln!("更新文件消息状态失败：{err}");
+        return;
+    }
+    emit_chat(inner, app, &peer.fingerprint, "message");
+}
+
+/// 从 `from_index` 起把还没发出去的文件消息标成失败。
+fn fail_messages(
+    inner: &InnerRef,
+    app: Option<&AppHandle>,
+    peer: &SendPeer,
+    message_ids: &[String],
+    from_index: usize,
+    message: &str,
+) {
+    for index in from_index..message_ids.len() {
+        update_file_message(inner, app, peer, message_ids, index, "failed", Some(message));
+    }
+}
+
+/// 发送一条聊天消息：逐个候选地址 POST `/chat`，结束后把消息状态写回并推事件。
+pub(crate) fn run_send_chat(
+    inner: &InnerRef,
+    app: Option<&AppHandle>,
+    peer: &SendPeer,
+    message_id: &str,
+    text: &str,
+) -> Result<(), String> {
+    let (sender_alias, sender_fingerprint) = {
+        let guard = lock_inner(inner);
+        (guard.effective_alias(), guard.settings.fingerprint.clone())
+    };
+    let request = ChatRequest {
+        sender: SenderInfo {
+            alias: sender_alias,
+            fingerprint: sender_fingerprint,
+        },
+        message_id: message_id.to_string(),
+        text: text.to_string(),
+        sent_at_ms: unix_millis(),
+    };
+    let body = serde_json::to_vec(&request).map_err(|err| format!("整理消息失败：{err}"))?;
+    let outcome = post_chat(peer, &body);
+    let (status, error) = match outcome {
+        Ok((code, _payload)) if (200..300).contains(&code) => ("sent", None),
+        Ok((code, payload)) => ("failed", Some(response_error(code, &payload))),
+        Err(err) => ("failed", Some(err)),
+    };
+    let chat_store = lock_inner(inner).chat.clone();
+    if let Some(store) = chat_store {
+        if let Err(err) = store.update_message_status(
+            &peer.fingerprint,
+            message_id,
+            status,
+            error.as_deref(),
+            None,
+        ) {
+            eprintln!("更新消息状态失败：{err}");
+        }
+        emit_chat(inner, app, &peer.fingerprint, "message");
+    }
+    match error {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
+}
+
+fn post_chat(peer: &SendPeer, body: &[u8]) -> Result<(u16, Vec<u8>), String> {
+    let mut last_error = String::new();
+    for ip in candidate_ips(peer) {
+        let mut candidate = peer.clone();
+        candidate.ip = ip;
+        match request_raw(
+            &candidate,
+            "POST",
+            "/api/lanshare/v1/chat",
+            Some(body),
+            CHAT_TIMEOUT,
+        ) {
+            Ok(response) => return Ok(response),
+            Err(err) => last_error = err,
+        }
+    }
+    Err(last_error)
+}
+
+pub(crate) fn collect_files(paths: &[String]) -> Result<Vec<LocalFile>, String> {
     if paths.is_empty() {
         return Err("请先选择要发送的文件".to_string());
     }
@@ -627,6 +756,7 @@ mod tests {
             &peer(port),
             &[first.clone(), second.clone()],
             "transfer-1",
+            &[],
         );
         mock.join().unwrap();
         assert!(result.is_ok(), "发送失败：{result:?}");
@@ -706,7 +836,7 @@ mod tests {
         let (port, _captured, mock) = start_mock(2, 403, r#"{"error":"对方拒绝了本次接收"}"#);
         let files_dir = tempfile::tempdir().unwrap();
         let file = write_file(files_dir.path(), "a.txt", b"hi");
-        let result = run_send(&state.inner, None, &peer(port), &[file], "transfer-2");
+        let result = run_send(&state.inner, None, &peer(port), &[file], "transfer-2", &[]);
         mock.join().unwrap();
         assert!(result.is_err());
         let message = result.unwrap_err();
@@ -733,7 +863,7 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         drop(listener);
         let started = Instant::now();
-        let result = run_send(&state.inner, None, &peer(port), &[file], "transfer-3");
+        let result = run_send(&state.inner, None, &peer(port), &[file], "transfer-3", &[]);
         assert!(result.is_err());
         assert!(started.elapsed() < Duration::from_secs(10));
         let progress = state.inner.lock().unwrap().recorded_progress.clone();
@@ -755,6 +885,7 @@ mod tests {
             &peer(53317),
             &["/definitely/not/here.txt".to_string()],
             "transfer-4",
+            &[],
         );
         assert!(result.is_err());
         let progress = state.inner.lock().unwrap().recorded_progress.clone();

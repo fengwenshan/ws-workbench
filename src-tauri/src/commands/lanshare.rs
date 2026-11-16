@@ -5,7 +5,7 @@
 
 use tauri::{AppHandle, Manager};
 
-use crate::lanshare::{LanShareSnapshot, LanShareState};
+use crate::lanshare::{ChatMessage, LanShareConversation, LanShareSnapshot, LanShareState};
 
 fn state(app: &AppHandle) -> Result<tauri::State<'_, LanShareState>, String> {
     app.try_state::<LanShareState>()
@@ -57,4 +57,38 @@ pub fn lan_share_send_files(
     paths: Vec<String>,
 ) -> Result<String, String> {
     state(&app)?.send_files(&app, &peer_fingerprint, paths)
+}
+
+/// 聊天列表：持久化会话 + 运行期在线状态（左侧机器列表）
+#[tauri::command]
+pub fn lan_share_conversations(app: AppHandle) -> Result<Vec<LanShareConversation>, String> {
+    state(&app)?.conversations()
+}
+
+/// 某个会话的历史消息（时间正序，最多 200 条）
+#[tauri::command]
+pub fn lan_share_messages(app: AppHandle, peer_id: String) -> Result<Vec<ChatMessage>, String> {
+    state(&app)?.messages(&peer_id)
+}
+
+/// 发送一条文本消息：本地先落库并返回，投递在后台线程，结果由事件推送
+#[tauri::command]
+pub fn lan_share_send_chat(
+    app: AppHandle,
+    peer_id: String,
+    text: String,
+) -> Result<ChatMessage, String> {
+    state(&app)?.send_chat(&app, &peer_id, &text)
+}
+
+/// 清空某个会话的未读
+#[tauri::command]
+pub fn lan_share_mark_read(app: AppHandle, peer_id: String) -> Result<(), String> {
+    state(&app)?.mark_read(&app, &peer_id)
+}
+
+/// 删除本机会话与聊天记录（对方不受影响）
+#[tauri::command]
+pub fn lan_share_delete_conversation(app: AppHandle, peer_id: String) -> Result<(), String> {
+    state(&app)?.delete_conversation(&app, &peer_id)
 }

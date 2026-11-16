@@ -1372,6 +1372,12 @@ pub fn run() {
             commands::lan_share_set_download_dir,
             commands::lan_share_respond_offer,
             commands::lan_share_send_files,
+            // 局域网分享（2026-11-16 聊天化改造）：会话 / 消息 / 发消息 / 已读 / 删除会话
+            commands::lan_share_conversations,
+            commands::lan_share_messages,
+            commands::lan_share_send_chat,
+            commands::lan_share_mark_read,
+            commands::lan_share_delete_conversation,
             // 更新检查：按通道（stable / beta）选清单，供前端替换插件 check()
             updates::update_check,
             // 更新包断点续传：下载 / 安装（前端 useUpdater 调用）

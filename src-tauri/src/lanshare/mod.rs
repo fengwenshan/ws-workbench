@@ -15,6 +15,7 @@
 pub(crate) mod chat_store;
 pub(crate) mod client;
 pub(crate) mod discovery;
+pub(crate) mod identity;
 pub(crate) mod protocol;
 pub(crate) mod server;
 pub(crate) mod settings;
@@ -29,7 +30,10 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 
+use chat_store::ChatStore;
 use protocol::Announce;
+
+pub use chat_store::ChatMessage;
 
 /// 组播报文里的应用标识：只认真实本应用，别的进程发的一律忽略。
 pub const APP_TAG: &str = "ws-workbench-lanshare";
@@ -62,6 +66,16 @@ pub const MAX_PREPARE_BODY: usize = 2 * 1024 * 1024;
 /// 事件名
 pub const EVENT_SNAPSHOT: &str = "lan-share://snapshot";
 pub const EVENT_SEND_PROGRESS: &str = "lan-share://send-progress";
+/// 聊天相关变化：新消息 / 已读 / 会话删除。前端收到后按需重拉会话与消息。
+pub const EVENT_CHAT: &str = "lan-share://chat";
+
+/// `/chat` 请求体上限与正文长度上限（防误发 / 防大报文）
+pub const MAX_CHAT_BODY: usize = 16 * 1024;
+pub const MAX_CHAT_CHARS: usize = 4000;
+/// 打开会话时最多返回多少条历史消息
+pub const CHAT_MESSAGE_LIMIT: usize = 200;
+/// 在线判定窗口：announce / 心跳 3 秒一次，10 秒没续上就算离线（前端据此把点判灰）
+pub const PEER_ONLINE_WINDOW: Duration = Duration::from_secs(10);
 
 /// 设置持久化的 store 文件与键
 pub(crate) const STORE_FILE: &str = "lan_share.json";
@@ -131,6 +145,27 @@ pub struct LanPeer {
     pub last_seen_ms: i64,
 }
 
+/// 聊天列表里的一行：持久化会话 + 运行期在线状态
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LanShareConversation {
+    /// 对端设备身份（`fingerprint`，即主网卡 MAC）
+    pub id: String,
+    pub alias: String,
+    pub online: bool,
+    pub last_activity_ms: i64,
+    pub last_preview: String,
+    pub unread: i64,
+    pub created_at_ms: i64,
+}
+
+/// 聊天变化事件：前端收到后重拉会话列表，正在看的会话再拉消息。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChatEvent {
+    pub peer_id: String,
+    /// `message` / `read` / `deleted`
+    pub kind: String,
+}
+
 /// 发送方提交的单个文件清单项
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OfferFile {
@@ -196,6 +231,17 @@ pub(crate) struct PeerEntry {
     pub last_seen: Instant,
 }
 
+/// `upsert_peer` 的结果：
+/// - `changed`：设备名 / 地址 / 端口等展示信息变了，需要探测地址并立即回包；
+/// - `seen`：只是心跳把 `last_seen` 续上了。它也要推快照，否则面板里的
+///   `last_seen_ms` 永远停在首次发现那一刻，10 秒后在线点就会变灰
+///   （现场问题：两台机器都在线，附近设备却一直是灰点）。
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct PeerUpdate {
+    pub changed: bool,
+    pub seen: bool,
+}
+
 /// 待确认请求 + 把用户决定送回 HTTP 线程的通道
 pub(crate) struct PendingEntry {
     pub offer: PendingOffer,
@@ -220,6 +266,9 @@ pub(crate) struct Session {
     pub dir: PathBuf,
     pub files: Vec<SessionFile>,
     pub created: Instant,
+    /// 发送方身份：接收完成后要按这个给聊天记录补一条「收到的文件」消息
+    pub peer_id: String,
+    pub peer_alias: String,
 }
 
 impl Session {
@@ -245,6 +294,8 @@ pub(crate) struct Inner {
     pub peers: HashMap<String, PeerEntry>,
     pub pending: Vec<PendingEntry>,
     pub sessions: HashMap<String, Session>,
+    /// 聊天记录存储；钥匙串 / 数据库打不开时是 None，功能其余部分照常运行
+    pub chat: Option<ChatStore>,
     /// 测试用：app 为 None 时把进度事件记在这里，测试断言事件内容
     pub recorded_progress: Vec<SendProgress>,
     pub offer_timeout: Duration,
@@ -282,6 +333,7 @@ impl Inner {
             peers: HashMap::new(),
             pending: Vec::new(),
             sessions: HashMap::new(),
+            chat: None,
             recorded_progress: Vec::new(),
             offer_timeout: OFFER_TIMEOUT,
             session_ttl: SESSION_TTL,
@@ -298,17 +350,20 @@ impl Inner {
         }
     }
 
-    /// 更新 / 插入 peer；返回「列表是否发生变化」。
+    /// 更新 / 插入 peer，告诉调用方「展示信息是否变化」以及「心跳是否续上」。
+    ///
+    /// 两个标记分开的原因：`changed` 会触发地址探测和立即回包（重操作，必须限速）；
+    /// `seen` 只是时间推进，但也要推快照，否则面板 `last_seen_ms` 不刷新、在线点变灰。
     pub(crate) fn upsert_peer(
         &mut self,
         announce: &Announce,
         addr: SocketAddr,
         now: Instant,
         now_ms: i64,
-    ) -> bool {
+    ) -> PeerUpdate {
         let fingerprint = announce.fingerprint.trim().to_string();
         if fingerprint.is_empty() {
-            return false;
+            return PeerUpdate::default();
         }
         let addresses = peer_addresses(addr, &announce.addresses);
         // 已经是探测过的地址（比如 VPN 地址）就不要被下一条 announce 盖回 LAN 地址，
@@ -345,7 +400,10 @@ impl Inner {
                 entry.peer = peer;
                 entry.addr = peer_addr;
                 entry.last_seen = now;
-                changed
+                PeerUpdate {
+                    changed,
+                    seen: true,
+                }
             }
             None => {
                 self.peers.insert(
@@ -356,7 +414,10 @@ impl Inner {
                         last_seen: now,
                     },
                 );
-                true
+                PeerUpdate {
+                    changed: true,
+                    seen: true,
+                }
             }
         }
     }
@@ -388,6 +449,14 @@ impl Inner {
 
     pub(crate) fn peer_by_fingerprint(&self, fingerprint: &str) -> Option<LanPeer> {
         self.peers.get(fingerprint).map(|entry| entry.peer.clone())
+    }
+
+    /// 设备现在是否在线（在线点用）：10 秒内收到过 announce / 心跳。
+    pub(crate) fn is_peer_online(&self, fingerprint: &str, now: Instant) -> bool {
+        self.peers
+            .get(fingerprint)
+            .map(|entry| now.duration_since(entry.last_seen) < PEER_ONLINE_WINDOW)
+            .unwrap_or(false)
     }
 
     /// 待确认请求列表（按创建时间倒序，最新在前）
@@ -479,8 +548,32 @@ impl LanShareState {
             // 老配置没有指纹：补一个并回写，保证重启后设备身份不变
             let _ = settings::save(app, &loaded);
         }
+
+        // 身份优先用主物理网卡 MAC：换 IP / 重启都不会变。
+        // 取不到 MAC（没有物理网卡、受限权限）时沿用持久化指纹，身份不会变成空串。
+        if let Some(mac) = identity::primary_mac() {
+            if loaded.fingerprint != mac {
+                loaded.fingerprint = mac;
+                let _ = settings::save(app, &loaded);
+            }
+        }
+
         let default_dir = default_download_dir(app);
         let state = Self::with_settings(loaded, default_dir);
+
+        // 聊天记录存储打不开不影响文件收发：只提示，命令层返回明确错误
+        match ChatStore::open(app) {
+            Ok(store) => lock_inner(&state.inner).chat = Some(store),
+            Err(err) => {
+                let mut inner = lock_inner(&state.inner);
+                let message = format!("聊天记录不可用：{err}");
+                inner.warning = Some(match inner.warning.take() {
+                    Some(prev) => format!("{prev}；{message}"),
+                    None => message,
+                });
+            }
+        }
+
         if let Some(err) = note {
             lock_inner(&state.inner).last_error = Some(err);
         }
@@ -496,6 +589,134 @@ impl LanShareState {
 
     pub fn snapshot(&self) -> LanShareSnapshot {
         snapshot_of(&lock_inner(&self.inner))
+    }
+
+    /// 聊天存储句柄；不可用时给出能直接展示给用户的错误。
+    fn chat_store(&self) -> Result<ChatStore, String> {
+        lock_inner(&self.inner)
+            .chat
+            .clone()
+            .ok_or_else(|| "聊天记录不可用（本地数据库或密钥无法访问）".to_string())
+    }
+
+    /// 聊天列表：持久化会话 + 运行期在线状态 / 最新设备名。
+    ///
+    /// 在线判定用 `last_seen_ms`（本地时钟生成）而不是 `Instant`：
+    /// 返回值要给前端排序和画在线点，时间戳更直观。
+    pub fn conversations(&self) -> Result<Vec<LanShareConversation>, String> {
+        let store = self.chat_store()?;
+        let rows = store.list_conversations()?;
+        let (aliases, online_flags) = {
+            let inner = lock_inner(&self.inner);
+            let now = Instant::now();
+            let mut aliases: HashMap<String, String> = HashMap::new();
+            let mut online_flags: HashMap<String, bool> = HashMap::new();
+            for (id, entry) in &inner.peers {
+                aliases.insert(id.clone(), entry.peer.alias.trim().to_string());
+                online_flags.insert(id.clone(), inner.is_peer_online(id, now));
+            }
+            (aliases, online_flags)
+        };
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                let alias = aliases
+                    .get(&row.id)
+                    .filter(|alias| !alias.is_empty())
+                    .cloned()
+                    .unwrap_or(row.alias);
+                let online = online_flags.get(&row.id).copied().unwrap_or(false);
+                LanShareConversation {
+                    id: row.id,
+                    alias,
+                    online,
+                    last_activity_ms: row.last_activity_ms,
+                    last_preview: row.last_preview,
+                    unread: row.unread,
+                    created_at_ms: row.created_at_ms,
+                }
+            })
+            .collect())
+    }
+
+    /// 某个会话的历史消息（时间正序，最多 `CHAT_MESSAGE_LIMIT` 条）
+    pub fn messages(&self, peer_id: &str) -> Result<Vec<ChatMessage>, String> {
+        let peer_id = peer_id.trim();
+        if peer_id.is_empty() {
+            return Err("缺少设备标识".to_string());
+        }
+        self.chat_store()?.list_messages(peer_id, CHAT_MESSAGE_LIMIT)
+    }
+
+    /// 清空某个会话的未读
+    pub fn mark_read(&self, _app: &AppHandle, peer_id: &str) -> Result<(), String> {
+        let peer_id = peer_id.trim();
+        if peer_id.is_empty() {
+            return Err("缺少设备标识".to_string());
+        }
+        self.chat_store()?.mark_read(peer_id)
+    }
+
+    /// 删除本机会话与消息；对方不受影响，之后再来消息会重新建会话。
+    pub fn delete_conversation(&self, app: &AppHandle, peer_id: &str) -> Result<(), String> {
+        let peer_id = peer_id.trim();
+        if peer_id.is_empty() {
+            return Err("缺少设备标识".to_string());
+        }
+        self.chat_store()?.delete_conversation(peer_id)?;
+        emit_chat(&self.inner, Some(app), peer_id, "deleted");
+        Ok(())
+    }
+
+    /// 发送一条文本消息：本地先落库（sending）并返回，投递在后台线程里做。
+    pub fn send_chat(
+        &self,
+        app: &AppHandle,
+        peer_id: &str,
+        text: &str,
+    ) -> Result<ChatMessage, String> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Err("消息不能为空".to_string());
+        }
+        if text.chars().count() > MAX_CHAT_CHARS {
+            return Err(format!("消息太长（最多 {MAX_CHAT_CHARS} 个字符）"));
+        }
+        let peer_id = peer_id.trim();
+        if peer_id.is_empty() {
+            return Err("缺少设备标识".to_string());
+        }
+        let store = self.chat_store()?;
+        let peer = {
+            let inner = lock_inner(&self.inner);
+            inner
+                .peer_by_fingerprint(peer_id)
+                .ok_or_else(|| "设备不在线或已离线".to_string())?
+        };
+
+        let message_id = uuid::Uuid::new_v4().to_string();
+        let mut message = ChatMessage::text(&message_id, peer_id, "out", text, unix_millis());
+        message.status = "sending".to_string();
+        store.append_message(peer_id, &peer.alias, &message)?;
+        emit_chat(&self.inner, Some(app), peer_id, "message");
+
+        let send_peer = client::SendPeer {
+            fingerprint: peer.fingerprint.clone(),
+            alias: peer.alias.clone(),
+            ip: peer.ip.clone(),
+            port: peer.port,
+            addresses: peer.addresses.clone(),
+        };
+        let inner = self.inner.clone();
+        let app_handle = app.clone();
+        let text = text.to_string();
+        std::thread::spawn(move || {
+            // 失败 / 成功都由 run_send_chat 写回消息状态并推事件
+            if let Err(err) = client::run_send_chat(&inner, Some(&app_handle), &send_peer, &message_id, &text) {
+                eprintln!("局域网消息投递失败：{err}");
+            }
+        });
+        Ok(message)
     }
 
     /// 启停功能。启动失败时把原因写进 `last_error` 并把开关回退到关闭；
@@ -709,6 +930,9 @@ impl LanShareState {
     }
 
     /// 立即返回 transfer_id，实际发送在线程里跑，进度走事件。
+    ///
+    /// 每个文件在会话里先生成一条 `sending` 文件消息，发送线程按文件结果更新状态；
+    /// 聊天记录写失败只打日志，不影响真正的文件传输。
     pub fn send_files(
         &self,
         app: &AppHandle,
@@ -721,6 +945,8 @@ impl LanShareState {
         if paths.len() > MAX_FILES {
             return Err(format!("一次最多发送 {} 个文件", MAX_FILES));
         }
+        // 先校验本地文件（失败就不建会话消息）
+        let files = client::collect_files(&paths)?;
         let peer = {
             let inner = lock_inner(&self.inner);
             inner
@@ -728,6 +954,37 @@ impl LanShareState {
                 .ok_or_else(|| "设备不在线或已离线".to_string())?
         };
         let transfer_id = uuid::Uuid::new_v4().to_string();
+        let now = unix_millis();
+        let message_ids: Vec<String> = files
+            .iter()
+            .map(|_| uuid::Uuid::new_v4().to_string())
+            .collect();
+        // 注意：先把 store 从锁里取出来，再在锁外写库。edition 2021 的
+        // `if let Some(store) = inner.lock().chat.clone()` 会把 MutexGuard 的临时量
+        // 延长到整个 if-let 结束，等于持锁做 DB IO，会卡住心跳/快照。
+        let chat_store = lock_inner(&self.inner).chat.clone();
+        if let Some(store) = chat_store {
+            for (index, file) in files.iter().enumerate() {
+                let mut message = ChatMessage::file(
+                    &message_ids[index],
+                    peer_fingerprint,
+                    "out",
+                    &file.name,
+                    file.size,
+                    "sending",
+                    now,
+                );
+                message.transfer_id = Some(transfer_id.clone());
+                message.file_index = Some(index);
+                message.file_total = Some(files.len());
+                // 回填本机源路径：失败气泡「重试」时不用再让用户重新选文件
+                message.file_path = Some(file.path.to_string_lossy().to_string());
+                if let Err(err) = store.append_message(peer_fingerprint, &peer.alias, &message) {
+                    eprintln!("写入发送文件消息失败：{err}");
+                }
+            }
+            emit_chat(&self.inner, Some(app), peer_fingerprint, "message");
+        }
         let send_peer = client::SendPeer {
             fingerprint: peer.fingerprint.clone(),
             alias: peer.alias.clone(),
@@ -739,7 +996,14 @@ impl LanShareState {
         let app_handle = app.clone();
         let task_id = transfer_id.clone();
         std::thread::spawn(move || {
-            let _ = client::run_send(&inner, Some(&app_handle), &send_peer, &paths, &task_id);
+            let _ = client::run_send(
+                &inner,
+                Some(&app_handle),
+                &send_peer,
+                &paths,
+                &task_id,
+                &message_ids,
+            );
         });
         Ok(transfer_id)
     }
@@ -832,6 +1096,20 @@ pub(crate) fn emit_progress(inner: &InnerRef, app: Option<&AppHandle>, progress:
             }
         }
     }
+}
+
+/// 推送聊天变化事件；测试里 app 为 None 时不做任何事。
+pub(crate) fn emit_chat(_inner: &InnerRef, app: Option<&AppHandle>, peer_id: &str, kind: &str) {
+    let Some(app) = app else {
+        return;
+    };
+    let _ = app.emit(
+        EVENT_CHAT,
+        ChatEvent {
+            peer_id: peer_id.to_string(),
+            kind: kind.to_string(),
+        },
+    );
 }
 
 /// 设备名清洗：去首尾空白；超过 64 个字符截断（announce 报文别太长）。
@@ -966,6 +1244,22 @@ mod tests {
         (dir, state)
     }
 
+    /// 测试用固定密钥（不碰钥匙串 / DPAPI）
+    fn test_keys() -> crate::crypto::VaultKeys {
+        crate::crypto::VaultKeys {
+            enc_key: [0x11; 32],
+            mac_key: [0x22; 32],
+        }
+    }
+
+    /// 给运行时挂一个临时聊天库（同时触发 schema 迁移），返回 store 供断言
+    fn attach_chat(state: &LanShareState, path: &Path) -> ChatStore {
+        crate::db::open(path).expect("创建聊天测试库失败");
+        let store = ChatStore::new(path.to_path_buf(), test_keys());
+        lock_inner(&state.inner).chat = Some(store.clone());
+        store
+    }
+
     #[test]
     fn snapshot_defaults() {
         let (_dir, state) = state_with_temp_dir();
@@ -1021,13 +1315,19 @@ mod tests {
         let (_dir, state) = state_with_temp_dir();
         let now = Instant::now();
         let mut inner = lock_inner(&state.inner);
-        assert!(inner.upsert_peer(&announce("A", "fp-a", 53317), addr(), now, 1000));
-        assert!(!inner.upsert_peer(&announce("A", "fp-a", 53317), addr(), now, 1000));
+        let update = inner.upsert_peer(&announce("A", "fp-a", 53317), addr(), now, 1000);
+        assert!(update.changed && update.seen);
+        // 心跳续期：展示信息没变（changed=false），但 seen 必须为真，
+        // 否则快照不刷新、前端 10 秒后把在线设备画成灰点。
+        let update = inner.upsert_peer(&announce("A", "fp-a", 53317), addr(), now, 1000);
+        assert!(!update.changed);
+        assert!(update.seen);
         assert_eq!(inner.peers.len(), 1);
         assert_eq!(inner.peer_by_fingerprint("fp-a").unwrap().alias, "A");
 
         // 改名算变化
-        assert!(inner.upsert_peer(&announce("B", "fp-a", 53317), addr(), now, 2000));
+        let update = inner.upsert_peer(&announce("B", "fp-a", 53317), addr(), now, 2000);
+        assert!(update.changed && update.seen);
         assert_eq!(inner.peer_by_fingerprint("fp-a").unwrap().alias, "B");
 
         // 15 秒内还在
@@ -1035,6 +1335,32 @@ mod tests {
         // 超过 15 秒被移除
         assert!(inner.prune_peers(now + PEER_TIMEOUT + Duration::from_secs(1)));
         assert!(inner.peers.is_empty());
+    }
+
+    /// 现场回归：两台设备都在线，附近设备的点却一直是灰的。
+    /// 根因是快照只在「peer 展示信息变化」时推，last_seen_ms 停在首次发现；
+    /// 现在心跳也会推快照，且在线判定按 last_seen 推进。
+    #[test]
+    fn heartbeat_refreshes_last_seen_in_snapshot() {
+        let (_dir, state) = state_with_temp_dir();
+        let now = Instant::now();
+        let mut inner = lock_inner(&state.inner);
+        inner.upsert_peer(&announce("Mac", "fp-mac", 53317), addr(), now, 1_000);
+        assert_eq!(snapshot_of(&inner).peers[0].last_seen_ms, 1_000);
+
+        let update = inner.upsert_peer(&announce("Mac", "fp-mac", 53317), addr(), now, 4_000);
+        assert!(!update.changed);
+        assert!(update.seen);
+        assert_eq!(
+            snapshot_of(&inner).peers[0].last_seen_ms,
+            4_000,
+            "心跳后快照里的 last_seen_ms 必须跟着刷新"
+        );
+        assert!(inner.is_peer_online("fp-mac", now));
+        assert!(!inner.is_peer_online(
+            "fp-mac",
+            now + PEER_ONLINE_WINDOW + Duration::from_secs(1)
+        ));
     }
 
     /// 现场问题回归：两台机器都在 192.168.3.0/24 又都开着 VPN，announce 从 LAN 网卡发出，
@@ -1049,7 +1375,8 @@ mod tests {
         announce.addresses = vec!["192.168.3.11".to_string(), "192.168.136.98".to_string()];
 
         let mut inner = lock_inner(&state.inner);
-        assert!(inner.upsert_peer(&announce, lan, now, 1000));
+        let update = inner.upsert_peer(&announce, lan, now, 1000);
+        assert!(update.changed);
         let peer = inner.peer_by_fingerprint("fp-mac").unwrap();
         assert_eq!(peer.ip, "192.168.3.11", "首选还是 announce 的来源地址");
         assert_eq!(peer.addresses.len(), 2);
@@ -1062,7 +1389,9 @@ mod tests {
         );
 
         // 下一条 announce 仍然从 LAN 网卡来：地址不翻回去，也不算「有变化」
-        assert!(!inner.upsert_peer(&announce, lan, now, 4000));
+        let update = inner.upsert_peer(&announce, lan, now, 4000);
+        assert!(!update.changed);
+        assert!(update.seen);
         assert_eq!(
             inner.peer_by_fingerprint("fp-mac").unwrap().ip,
             "192.168.136.98"
@@ -1155,10 +1484,12 @@ mod tests {
     }
 
     /// 单进程双运行时端到端：A 启动 HTTP 接收服务，B 用 client 发两个文件。
+    /// 同时覆盖聊天接线：B 的两条 outgoing 文件消息变 sent，A 收到两条 received。
     #[test]
     fn end_to_end_two_runtime_instances() {
         // A：接收端
         let (dir_a, state_a) = state_with_temp_dir();
+        let store_a = attach_chat(&state_a, &dir_a.path().join("chat-a.db"));
         let server = server::HttpServer::start(state_a.inner.clone(), None, 0, 1).unwrap();
         {
             let mut guard = lock_inner(&state_a.inner);
@@ -1167,7 +1498,8 @@ mod tests {
         }
 
         // B：发送端（只需要 client，不启动网络服务）
-        let (_dir_b, state_b) = state_with_temp_dir();
+        let (dir_b, state_b) = state_with_temp_dir();
+        let store_b = attach_chat(&state_b, &dir_b.path().join("chat-b.db"));
         let files_dir = tempfile::tempdir().unwrap();
         let first = files_dir.path().join("报告.txt");
         std::fs::write(&first, b"first file body").unwrap();
@@ -1182,13 +1514,41 @@ mod tests {
             port: server.port,
             addresses: vec!["127.0.0.1".to_string()],
         };
+        // 发送端先落两条 sending 文件消息（生产路径在 send_files 里做）
+        let message_ids = vec!["file-msg-0".to_string(), "file-msg-1".to_string()];
+        for (index, name) in ["报告.txt", "second.bin"].iter().enumerate() {
+            let mut message = ChatMessage::file(
+                &message_ids[index],
+                &peer.fingerprint,
+                "out",
+                *name,
+                if index == 0 { 15 } else { 1024 },
+                "sending",
+                1_000,
+            );
+            message.transfer_id = Some("e2e-transfer".to_string());
+            message.file_index = Some(index);
+            message.file_total = Some(2);
+            store_b
+                .append_message(&peer.fingerprint, &peer.alias, &message)
+                .unwrap();
+        }
+
         let inner_b = state_b.inner.clone();
         let paths = vec![
             first.to_string_lossy().to_string(),
             second.to_string_lossy().to_string(),
         ];
+        let send_peer = peer.clone();
         let send_handle = std::thread::spawn(move || {
-            client::run_send(&inner_b, None, &peer, &paths, "e2e-transfer")
+            client::run_send(
+                &inner_b,
+                None,
+                &send_peer,
+                &paths,
+                "e2e-transfer",
+                &message_ids,
+            )
         });
 
         // 等 A 的待接收请求出现后接受
@@ -1228,5 +1588,133 @@ mod tests {
             .collect();
         assert_eq!(done.len(), 2, "进度事件：{progress:?}");
         assert!(done.iter().all(|item| item.sent_bytes == item.total_bytes));
+
+        // 发送端文件消息都变成 sent
+        let outgoing = store_b.list_messages(&peer.fingerprint, 10).unwrap();
+        assert_eq!(outgoing.len(), 2);
+        assert!(outgoing
+            .iter()
+            .all(|message| message.kind == "file" && message.status == "sent"));
+
+        // 接收端：两条 received 文件消息，且会话已建立
+        let sender_id = state_b.snapshot().fingerprint;
+        let incoming = store_a.list_messages(&sender_id, 10).unwrap();
+        assert_eq!(incoming.len(), 2, "接收端文件消息：{incoming:?}");
+        assert!(incoming.iter().all(|message| {
+            message.kind == "file"
+                && message.direction == "in"
+                && message.status == "received"
+                && message.file_path.is_some()
+        }));
+        let conversations = store_a.list_conversations().unwrap();
+        assert_eq!(conversations.len(), 1);
+        assert_eq!(conversations[0].id, sender_id);
+        assert_eq!(conversations[0].unread, 2);
+    }
+
+    /// 端到端聊天：B POST `/chat` → A 落库；B 的消息状态变 sent。
+    #[test]
+    fn end_to_end_chat_between_two_instances() {
+        let (dir_a, state_a) = state_with_temp_dir();
+        let store_a = attach_chat(&state_a, &dir_a.path().join("chat-a.db"));
+        let server = server::HttpServer::start(state_a.inner.clone(), None, 0, 1).unwrap();
+        {
+            let mut guard = lock_inner(&state_a.inner);
+            guard.running = true;
+            guard.port = Some(server.port);
+        }
+
+        let (dir_b, state_b) = state_with_temp_dir();
+        let store_b = attach_chat(&state_b, &dir_b.path().join("chat-b.db"));
+        let sender_id = state_b.snapshot().fingerprint;
+        let receiver_id = state_a.snapshot().fingerprint;
+        let peer = client::SendPeer {
+            fingerprint: receiver_id.clone(),
+            alias: "接收端".to_string(),
+            ip: "127.0.0.1".to_string(),
+            port: server.port,
+            addresses: vec!["127.0.0.1".to_string()],
+        };
+
+        let message_id = "chat-msg-1".to_string();
+        let mut message =
+            ChatMessage::text(&message_id, &receiver_id, "out", "你好", 1_000);
+        message.status = "sending".to_string();
+        store_b
+            .append_message(&receiver_id, &peer.alias, &message)
+            .unwrap();
+
+        client::run_send_chat(&state_b.inner, None, &peer, &message_id, "你好")
+            .expect("投递聊天消息失败");
+
+        let incoming = store_a.list_messages(&sender_id, 10).unwrap();
+        assert_eq!(incoming.len(), 1);
+        assert_eq!(incoming[0].text, "你好");
+        assert_eq!(incoming[0].direction, "in");
+        assert_eq!(incoming[0].status, "received");
+
+        let outgoing = store_b.list_messages(&receiver_id, 10).unwrap();
+        assert_eq!(outgoing.len(), 1);
+        assert_eq!(outgoing[0].status, "sent");
+
+        let conversations = store_a.list_conversations().unwrap();
+        assert_eq!(conversations.len(), 1);
+        assert_eq!(conversations[0].id, sender_id);
+        assert_eq!(conversations[0].unread, 1);
+        assert_eq!(conversations[0].last_preview, "你好");
+    }
+
+    /// 回归：文件在 send_files 建好消息之后、后台线程收集文件之前消失时，
+    /// 文件消息必须回写 failed，不能永远停在「发送中」。
+    #[test]
+    fn send_collect_failure_marks_file_messages_failed() {
+        let (dir, state) = state_with_temp_dir();
+        let store = attach_chat(&state, &dir.path().join("chat.db"));
+        let peer = client::SendPeer {
+            fingerprint: "peer-1".to_string(),
+            alias: "对端".to_string(),
+            ip: "127.0.0.1".to_string(),
+            port: 53317,
+            addresses: vec!["127.0.0.1".to_string()],
+        };
+        let message_id = "file-msg-x".to_string();
+        let mut message = ChatMessage::file(
+            &message_id,
+            &peer.fingerprint,
+            "out",
+            "gone.txt",
+            3,
+            "sending",
+            1_000,
+        );
+        message.transfer_id = Some("transfer-x".to_string());
+        message.file_index = Some(0);
+        message.file_total = Some(1);
+        store
+            .append_message(&peer.fingerprint, &peer.alias, &message)
+            .unwrap();
+
+        let result = client::run_send(
+            &state.inner,
+            None,
+            &peer,
+            &["/definitely/not/here.txt".to_string()],
+            "transfer-x",
+            &[message_id],
+        );
+        assert!(result.is_err());
+
+        let stored = store.list_messages(&peer.fingerprint, 10).unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].status, "failed", "不能永久停在 sending");
+        assert!(
+            stored[0]
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("无法读取文件"),
+            "错误信息：{:?}",
+            stored[0].error
+        );
     }
 }

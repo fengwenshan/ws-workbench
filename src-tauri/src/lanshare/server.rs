@@ -22,18 +22,21 @@ use serde::Serialize;
 use tauri::AppHandle;
 
 use super::protocol::{
-    self, read_json_body, read_request_head, ErrorResponse, FileToken, InfoResponse,
-    PrepareUploadRequest, PrepareUploadResponse, RequestHead, SenderInfo, UploadResponse,
+    self, read_json_body, read_request_head, ChatRequest, ChatResponse, ErrorResponse, FileToken,
+    InfoResponse, PrepareUploadRequest, PrepareUploadResponse, RequestHead, SenderInfo,
+    UploadResponse,
 };
 use super::{
-    emit_snapshot, lock_inner, unix_millis, InnerRef, OfferFile, PendingEntry, PendingOffer,
-    Session, SessionFile, MAX_FILES, MAX_FILE_SIZE, MAX_PREPARE_BODY, PORT_BASE, PROTOCOL_VERSION,
+    emit_chat, emit_snapshot, lock_inner, unix_millis, ChatMessage, InnerRef, OfferFile,
+    PendingEntry, PendingOffer, Session, SessionFile, MAX_CHAT_BODY, MAX_CHAT_CHARS, MAX_FILES,
+    MAX_FILE_SIZE, MAX_PREPARE_BODY, PORT_BASE, PROTOCOL_VERSION,
 };
 
 const INFO_PATH: &str = "/api/lanshare/v1/info";
 const PREPARE_PATH: &str = "/api/lanshare/v1/prepare-upload";
 const UPLOAD_PATH: &str = "/api/lanshare/v1/upload";
 const CANCEL_PATH: &str = "/api/lanshare/v1/cancel";
+const CHAT_PATH: &str = "/api/lanshare/v1/chat";
 
 /// 收上传正文时允许的单次读等待。请求头仍然只给 30 秒（正常客户端都是秒回），
 /// 但正文要跟发送端的写超时（120 秒）对齐：现场发大文件到 24% 就报
@@ -169,11 +172,13 @@ fn handle_connection(
         ("POST", PREPARE_PATH) => handle_prepare(&inner, app.as_ref(), &mut reader, &head, source),
         ("POST", UPLOAD_PATH) => handle_upload(&inner, app.as_ref(), &mut reader, &head),
         ("POST", CANCEL_PATH) => handle_cancel(&inner, app.as_ref(), &head, &mut reader),
+        ("POST", CHAT_PATH) => handle_chat(&inner, app.as_ref(), &mut reader, &head),
         (_, path)
             if path == INFO_PATH
                 || path == PREPARE_PATH
                 || path == UPLOAD_PATH
-                || path == CANCEL_PATH =>
+                || path == CANCEL_PATH
+                || path == CHAT_PATH =>
         {
             Err((405, "请求方法不支持".to_string()))
         }
@@ -201,6 +206,66 @@ fn handle_info(inner: &InnerRef, reader: &mut BufReader<TcpStream>) -> Result<()
         version: PROTOCOL_VERSION,
     };
     write_json(reader.get_mut(), 200, &response).map_err(|err| (500, format!("写响应失败：{err}")))
+}
+
+/// 接收一条聊天消息：校验 → 落库（同时更新会话 / 未读）→ 推事件。
+fn handle_chat(
+    inner: &InnerRef,
+    app: Option<&AppHandle>,
+    reader: &mut BufReader<TcpStream>,
+    head: &RequestHead,
+) -> Result<(), (u16, String)> {
+    if head.content_length == 0 || head.content_length > MAX_CHAT_BODY {
+        return Err((400, "消息体为空或过大".to_string()));
+    }
+    let request: ChatRequest =
+        read_json_body(reader, head.content_length).map_err(|err| (400, err))?;
+
+    let sender = SenderInfo {
+        alias: request.sender.alias.trim().to_string(),
+        fingerprint: request.sender.fingerprint.trim().to_string(),
+    };
+    if sender.fingerprint.is_empty() {
+        return Err((400, "发送方设备标识为空".to_string()));
+    }
+    let text = request.text.trim().to_string();
+    if text.is_empty() {
+        return Err((400, "消息不能为空".to_string()));
+    }
+    if text.chars().count() > MAX_CHAT_CHARS {
+        return Err((400, format!("消息太长（最多 {MAX_CHAT_CHARS} 个字符）")));
+    }
+    let message_id = if request.message_id.trim().is_empty() {
+        uuid::Uuid::new_v4().to_string()
+    } else {
+        request.message_id.trim().to_string()
+    };
+    // alias 统一按会话展示规则收敛（trim + 最长 64 字符），避免对端塞超长明文
+    let alias = super::normalize_alias(&sender.alias);
+    let alias = if alias.is_empty() {
+        "未知设备".to_string()
+    } else {
+        alias
+    };
+    // 先取 store 再写库：避免 MutexGuard 临时量被 if-let 延长成「持锁做 DB IO」
+    let chat_store = lock_inner(inner).chat.clone();
+    if let Some(store) = chat_store {
+        let mut message = ChatMessage::text(
+            message_id,
+            &sender.fingerprint,
+            "in",
+            text,
+            unix_millis(),
+        );
+        message.status = "received".to_string();
+        store
+            .append_message(&sender.fingerprint, &alias, &message)
+            .map_err(|err| (500, format!("保存消息失败：{err}")))?;
+        emit_chat(inner, app, &sender.fingerprint, "message");
+    }
+
+    write_json(reader.get_mut(), 200, &ChatResponse { ok: true })
+        .map_err(|err| (500, format!("写响应失败：{err}")))
 }
 
 fn handle_prepare(
@@ -257,10 +322,13 @@ fn handle_prepare(
 
     let offer = PendingOffer {
         id: uuid::Uuid::new_v4().to_string(),
-        sender_alias: if sender.alias.is_empty() {
-            "未知设备".to_string()
-        } else {
-            sender.alias.clone()
+        sender_alias: {
+            let alias = super::normalize_alias(&sender.alias);
+            if alias.is_empty() {
+                "未知设备".to_string()
+            } else {
+                alias
+            }
         },
         sender_fingerprint: sender.fingerprint.clone(),
         sender_ip: source.ip().to_string(),
@@ -271,6 +339,16 @@ fn handle_prepare(
     };
     let offer_id = offer.id.clone();
     let offer_files = offer.files.clone();
+    // 会话侧身份：有人发文件过来也算「交互过」，先把会话建出来
+    let chat_peer_id = sender.fingerprint.clone();
+    let chat_alias = {
+        let alias = super::normalize_alias(&sender.alias);
+        if alias.is_empty() {
+            "未知设备".to_string()
+        } else {
+            alias
+        }
+    };
 
     // 先建好通道再登记，命令层拿到的一定是能送回决定的那一半；
     // 通道断开（功能被关闭 / 请求被清理）按取消处理。
@@ -289,6 +367,16 @@ fn handle_prepare(
         timeout
     };
     emit_snapshot(inner, app);
+    // 文件请求到达就先落一个会话：左侧列表要立刻能看到这台设备；写失败只打日志
+    // 先取 store 再写库：MutexGuard 不能跨 if-let body 存活（否则等于持锁做 DB IO）
+    let chat_store = lock_inner(inner).chat.clone();
+    if let Some(store) = chat_store {
+        match store.upsert_conversation(&chat_peer_id, &chat_alias, unix_millis()) {
+            // kind 沿用契约里的 "message"：前端对聊天数据统一按「重拉会话 / 消息」处理
+            Ok(()) => emit_chat(inner, app, &chat_peer_id, "message"),
+            Err(err) => eprintln!("写入文件会话失败：{err}"),
+        }
+    }
 
     let decision = rx.recv_timeout(timeout);
     match decision {
@@ -352,6 +440,8 @@ fn handle_prepare(
                 dir,
                 files: session_files,
                 created: Instant::now(),
+                peer_id: chat_peer_id,
+                peer_alias: chat_alias,
             },
         );
     }
@@ -450,6 +540,31 @@ fn handle_upload(
     }
 
     let path = target.to_string_lossy().to_string();
+    // 落盘成功 → 聊天里记一条「收到的文件」；写失败只打日志，不影响文件本身
+    let peer_info = {
+        let guard = lock_inner(inner);
+        guard
+            .sessions
+            .get(&session_id)
+            .map(|session| (session.peer_id.clone(), session.peer_alias.clone()))
+    };
+    let chat_store = lock_inner(inner).chat.clone();
+    if let (Some(store), Some((peer_id, peer_alias))) = (chat_store, peer_info) {
+        let mut message = ChatMessage::file(
+            uuid::Uuid::new_v4().to_string(),
+            &peer_id,
+            "in",
+            file_name.clone(),
+            size,
+            "received",
+            unix_millis(),
+        );
+        message.file_path = Some(path.clone());
+        match store.append_message(&peer_id, &peer_alias, &message) {
+            Ok(()) => emit_chat(inner, app, &peer_id, "message"),
+            Err(err) => eprintln!("写入接收文件消息失败：{err}"),
+        }
+    }
     {
         let mut guard = lock_inner(inner);
         let complete = if let Some(session) = guard.sessions.get_mut(&session_id) {
@@ -713,6 +828,47 @@ mod tests {
         let (_dir, _state, server) = start_state();
         assert_eq!(test_request(server.port, "GET", "/nothing", b"").0, 404);
         assert_eq!(test_request(server.port, "GET", PREPARE_PATH, b"").0, 405);
+        assert_eq!(test_request(server.port, "GET", CHAT_PATH, b"").0, 405);
+    }
+
+    /// `/chat` 校验：空消息 / 超长消息返回 400，消息体为空也返回 400
+    #[test]
+    fn chat_request_validation() {
+        let (_dir, _state, server) = start_state();
+        let empty = br#"{"sender":{"alias":"B","fingerprint":"fp-b"},"message_id":"m","text":"   "}"#;
+        let (status, body) = test_request(server.port, "POST", CHAT_PATH, empty);
+        assert_eq!(status, 400, "响应：{body}");
+        assert!(body.contains("不能为空"), "响应：{body}");
+
+        let too_long = "a".repeat(crate::lanshare::MAX_CHAT_CHARS + 1);
+        let request = crate::lanshare::protocol::ChatRequest {
+            sender: SenderInfo {
+                alias: "B".to_string(),
+                fingerprint: "fp-b".to_string(),
+            },
+            message_id: "m".to_string(),
+            text: too_long,
+            sent_at_ms: 1,
+        };
+        let body = serde_json::to_vec(&request).unwrap();
+        let (status, body) = test_request(server.port, "POST", CHAT_PATH, &body);
+        assert_eq!(status, 400, "响应：{body}");
+        assert!(body.contains("太长"), "响应：{body}");
+
+        let missing_sender =
+            br#"{"sender":{"alias":"B","fingerprint":""},"message_id":"m","text":"hi"}"#;
+        let (status, body) = test_request(server.port, "POST", CHAT_PATH, missing_sender);
+        assert_eq!(status, 400, "响应：{body}");
+    }
+
+    /// 聊天库不可用（测试默认 None）时 `/chat` 仍返回 ok：文件通道不能因为聊天记录挂掉
+    #[test]
+    fn chat_without_store_still_returns_ok() {
+        let (_dir, _state, server) = start_state();
+        let body = br#"{"sender":{"alias":"B","fingerprint":"fp-b"},"text":"hi","sent_at_ms":1}"#;
+        let (status, response) = test_request(server.port, "POST", CHAT_PATH, body);
+        assert_eq!(status, 200, "响应：{response}");
+        assert!(response.contains("\"ok\":true"), "响应：{response}");
     }
 
     #[test]

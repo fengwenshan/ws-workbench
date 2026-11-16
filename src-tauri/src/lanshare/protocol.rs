@@ -96,6 +96,27 @@ pub struct SenderInfo {
     pub fingerprint: String,
 }
 
+/// `POST /api/lanshare/v1/chat` 请求体。
+///
+/// `fingerprint` 现在是发送方主网卡 MAC（旧版本是随机 UUID），接收端只把它当
+/// 设备身份用，不校验格式；`message_id` 由发送方生成，缺失时服务端补一个。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChatRequest {
+    pub sender: SenderInfo,
+    #[serde(default)]
+    pub message_id: String,
+    pub text: String,
+    #[serde(default)]
+    pub sent_at_ms: i64,
+}
+
+/// `/chat` 成功响应
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChatResponse {
+    pub ok: bool,
+}
+
+
 /// `POST /api/lanshare/v1/prepare-upload` 请求体
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PrepareUploadRequest {

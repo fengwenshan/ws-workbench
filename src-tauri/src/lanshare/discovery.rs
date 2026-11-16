@@ -159,18 +159,21 @@ fn run(
                 }
                 let now = Instant::now();
                 let peer_addr = SocketAddr::new(source.ip(), announce.port);
-                let changed = {
+                let update = {
                     let mut guard = lock_inner(&inner);
                     guard.upsert_peer(&announce, peer_addr, now, unix_millis())
                 };
-                dirty |= changed;
+                // 心跳续期也算「列表有变化」：快照里的 last_seen_ms 必须跟着走，
+                // 否则前端 10 秒后会把明明在线的设备画成灰点。
+                // 但地址探测 / 立即回包只在展示信息变化时做（重操作，有 1 秒限速）。
+                dirty |= update.changed || update.seen;
 
                 // 新设备或信息变化时立刻回一次，加速互相发现；同一设备 1 秒内只回一次
                 let may_reply = last_reply
                     .get(&announce.fingerprint)
                     .map(|at| at.elapsed() >= Duration::from_secs(1))
                     .unwrap_or(true);
-                if changed {
+                if update.changed {
                     // 挨个探测它的地址，把连得上的那个写进 peer 表（开 VPN 时来源地址常常连不上）
                     let resolved =
                         resolve_peer_address(&inner, app.as_ref(), &announce.fingerprint);
