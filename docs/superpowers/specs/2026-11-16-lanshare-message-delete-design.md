@@ -57,9 +57,9 @@
 
 - 新增 `useLanShareMessageMenu.ts`：菜单状态（message / x / y）、`openMessageMenu`、`closeMessageMenu`、`requestDeleteMessage`（Modal.confirm + 调 API + 刷新）。
 - 新增 `LanMessageContextMenu.vue`：fixed 定位 + Teleport，样式复用左栏右键菜单的观感（危险色「删除消息」）。
-- `LanChatMessageList.vue`：`.msg-row` 上 `@contextmenu.prevent`，emit `(message, x, y)`；不做删除逻辑。
-- `LanChatPane.vue`：转发 `message-context-menu` 事件 + 渲染菜单。
-- `LanSharePanel.vue`：接 `useLanShareMessageMenu`，把菜单 props/事件接到 ChatPane。
+- `LanChatMessageList.vue`：`.msg-row` 上 `@contextmenu.prevent`，emit `message-menu(message, x, y)`；不做删除逻辑。
+- `LanChatPane.vue`：只转发 `message-menu` 事件（不渲染菜单）。
+- `LanSharePanel.vue`：接 `useLanShareMessageMenu`，在 Panel 层渲染 `<LanMessageContextMenu>`（Teleport 到 body，避免被消息流 overflow 裁切）。
 - 删除后若 `activePeerId` 已不在 `mergedPeers` 中（离线对端最后一条被删），清空选中回到空态。
 
 ## 5. 验收
