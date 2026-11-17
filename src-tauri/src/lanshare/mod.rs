@@ -1330,7 +1330,8 @@ fn emit_unread(inner: &InnerRef, app: &AppHandle) {
     };
     let total = store.total_unread().unwrap_or(0);
     let _ = app.emit(EVENT_UNREAD, UnreadPayload { total });
-    crate::refresh_tray_badge(app);
+    // 复用刚查到的 total，托盘不再重复查一次 SQLite
+    crate::refresh_tray_badge_with_total(app, total);
 }
 
 /// 全部会话未读总数 → macOS Dock 角标；0 时清掉，失败忽略。

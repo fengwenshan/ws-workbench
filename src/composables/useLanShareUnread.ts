@@ -25,18 +25,30 @@ export function useLanShareUnread() {
   }
 
   onMounted(async () => {
+    // 先订阅再补初始值：避免「拉取完成 → 订阅建立」之间发生的未读变化丢失。
+    // revision 用来丢弃过期的初始值：订阅后已经收到更新，就不再用旧快照覆盖。
+    let revision = 0
     try {
-      applyTotal(await getLanShareUnreadTotal())
-    } catch (err) {
-      console.warn('[lanshare] 读取未读总数失败', err)
-    }
-    if (disposed) return
-    try {
-      const stop = await onLanShareUnread((payload) => applyTotal(payload?.total))
-      if (disposed) stop()
-      else unlisten = stop
+      const stop = await onLanShareUnread((payload) => {
+        revision += 1
+        applyTotal(payload?.total)
+      })
+      if (disposed) {
+        stop()
+        return
+      }
+      unlisten = stop
     } catch (err) {
       console.warn('[lanshare] 订阅未读数失败', err)
+    }
+
+    if (disposed) return
+    const beforeFetch = revision
+    try {
+      const total = await getLanShareUnreadTotal()
+      if (revision === beforeFetch) applyTotal(total)
+    } catch (err) {
+      console.warn('[lanshare] 读取未读总数失败', err)
     }
   })
 

@@ -33,7 +33,7 @@ SQLite（唯一事实源：lan_share_conversations.unread）
   - `LanShareState::total_unread()` 已存在（保持）。
   - 命令 `lan_share_unread_total`。
 - `lib.rs`：
-  - 托盘图标按 unread 生成带红点变体（macOS 模板图路径叠加不透明圆点，Windows 红色圆点；36/32px 原图左上留白，点画在右上角）。
+  - 托盘图标按 unread 生成带红点变体（macOS 模板图叠加不透明圆点，Windows 红色圆点；36/32px 原图右上角叠加，不改变图尺寸）。
   - `pub(crate) fn refresh_tray_badge(app: &AppHandle)`：读 `total_unread`，在主线程 `tray_by_id("main").set_icon(...)`；启动时托盘 build 后调用一次。
   - 不新增托盘 tooltip（保持「不显示应用名」的既有决定）。
 - VPN 不在本轮合并进事件；其状态继续沿用 `vpn` 状态轮询 + 前端订阅（QuickPanel / rail 已这样工作）。

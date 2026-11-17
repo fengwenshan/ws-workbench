@@ -440,17 +440,28 @@ pub(crate) fn refresh_tray_badge(app: &AppHandle) {
         .try_state::<lanshare::LanShareState>()
         .map(|state| state.total_unread())
         .unwrap_or(0);
+    refresh_tray_badge_with_total(app, unread);
+}
+
+/// 已算好未读总数时的入口：`emit_unread` 刚查过 DB，别为托盘再查一遍。
+pub(crate) fn refresh_tray_badge_with_total(app: &AppHandle, unread: u32) {
     let wanted = u8::from(unread > 0);
-    if TRAY_BADGE_STATE.swap(wanted, std::sync::atomic::Ordering::Relaxed) == wanted {
+    if TRAY_BADGE_STATE.load(std::sync::atomic::Ordering::Relaxed) == wanted {
         return;
     }
     let app_handle = app.clone();
     let _ = app.run_on_main_thread(move || {
         let Some(tray) = app_handle.tray_by_id("main") else {
+            // 托盘还没建好：不落状态，等下一次未读变化或启动对齐再刷
             return;
         };
-        if let Some(icon) = tray_icon_image().and_then(|icon| tray_icon_with_badge(icon, unread > 0)) {
-            let _ = tray.set_icon(Some(icon));
+        let Some(icon) = tray_icon_image().and_then(|icon| tray_icon_with_badge(icon, wanted == 1))
+        else {
+            return;
+        };
+        // set_icon 成功后再记状态；失败时下次事件仍会重试
+        if tray.set_icon(Some(icon)).is_ok() {
+            TRAY_BADGE_STATE.store(wanted, std::sync::atomic::Ordering::Relaxed);
         }
     });
 }
