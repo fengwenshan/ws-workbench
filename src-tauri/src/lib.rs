@@ -446,24 +446,40 @@ pub(crate) fn refresh_tray_badge(app: &AppHandle) {
 /// 已算好未读总数时的入口：`emit_unread` 刚查过 DB，别为托盘再查一遍。
 pub(crate) fn refresh_tray_badge_with_total(app: &AppHandle, unread: u32) {
     let wanted = u8::from(unread > 0);
-    if TRAY_BADGE_STATE.load(std::sync::atomic::Ordering::Relaxed) == wanted {
+    // 先 swap 占住目标状态：两个线程几乎同时以相反状态进来时，后到的那个也会排队
+    // 刷一次，不会被 load 提前 return 吞掉（否则可能留下旧红点直到下次事件）。
+    let previous = TRAY_BADGE_STATE.swap(wanted, std::sync::atomic::Ordering::Relaxed);
+    if previous == wanted {
         return;
     }
     let app_handle = app.clone();
     let _ = app.run_on_main_thread(move || {
         let Some(tray) = app_handle.tray_by_id("main") else {
-            // 托盘还没建好：不落状态，等下一次未读变化或启动对齐再刷
+            // 托盘还没建好：回滚状态，等下一次未读变化或启动对齐再刷
+            rollback_tray_badge_state(wanted, previous);
             return;
         };
         let Some(icon) = tray_icon_image().and_then(|icon| tray_icon_with_badge(icon, wanted == 1))
         else {
+            rollback_tray_badge_state(wanted, previous);
             return;
         };
-        // set_icon 成功后再记状态；失败时下次事件仍会重试
-        if tray.set_icon(Some(icon)).is_ok() {
-            TRAY_BADGE_STATE.store(wanted, std::sync::atomic::Ordering::Relaxed);
+        if tray.set_icon(Some(icon)).is_err() {
+            // set_icon 失败：回滚成旧状态，下次事件仍会重试
+            rollback_tray_badge_state(wanted, previous);
         }
     });
+}
+
+/// 把被 swap 占住的状态回滚到 previous；只有当前仍是 wanted 才回滚，
+/// 避免覆盖期间其它线程已经写入的更新状态。
+fn rollback_tray_badge_state(wanted: u8, previous: u8) {
+    let _ = TRAY_BADGE_STATE.compare_exchange(
+        wanted,
+        previous,
+        std::sync::atomic::Ordering::Relaxed,
+        std::sync::atomic::Ordering::Relaxed,
+    );
 }
 
 // ===== 托盘自检（**只在 Windows 编入**，macOS 的托盘路径保持原样）=====
