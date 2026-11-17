@@ -10,8 +10,8 @@ import LanAliasEditor from './LanAliasEditor.vue'
  * 右栏设置页（LANLink 刷新 §1 / §2.2）。
  *
  * 不再有标题和「返回聊天」：设置由左栏齿轮进入、再点一次齿轮或选设备返回。
- * 内容是一张白色悬浮卡片，本机设备名（端口跟在名字后）、接收目录、
- * 本机地址、设备 ID 合在同一块里，用细分隔线分行；启动失败 / 设置未存住仍用顶部告警展示。
+ * 内容以白色为主：一张带细边框的设置卡，设备名/接收目录/本机地址/设备 ID
+ * 用「左标签 + 右值」的同一套行结构，靠分隔线分行；启动失败 / 设置未存住仍用顶部告警展示。
  *
  * 设备名编辑拆在 LanAliasEditor（只有 ✓ / Enter 才保存）；命令返回最新快照，
  * 这里 apply 后上抛给壳，保证左右栏状态一致。
@@ -96,62 +96,73 @@ async function openDownloadDir() {
       <p v-if="!snapshot" class="settings-empty">正在读取 LANLink 状态…</p>
 
       <template v-else>
-        <p v-if="snapshot.last_error" class="alert is-error">
-          启动失败：{{ snapshot.last_error }}
-          <span class="alert-hint">请检查端口 / 防火墙设置后重启应用。</span>
-        </p>
-        <!-- 服务在跑、只是设置有改动没存住：跟「启动失败」分开显示，别吓人 -->
-        <p v-if="snapshot.warning" class="alert is-warn">{{ snapshot.warning }}</p>
+        <div class="settings-content">
+          <p v-if="snapshot.last_error" class="alert is-error">
+            启动失败：{{ snapshot.last_error }}
+            <span class="alert-hint">请检查端口 / 防火墙设置后重启应用。</span>
+          </p>
+          <!-- 服务在跑、只是设置有改动没存住：跟「启动失败」分开显示，别吓人 -->
+          <p v-if="snapshot.warning" class="alert is-warn">{{ snapshot.warning }}</p>
 
-        <!-- 所有设置收在同一张卡片里，行间用细分隔线，避免一块一块浮起 -->
-        <div class="card settings-card">
-          <!-- 本机设备名 + 监听端口（端口不可关闭，跟在名字后面） -->
-          <div class="setting-block alias-block">
-            <LanAliasEditor :alias="snapshot.alias" @updated="emit('updated', $event)" />
-            <span class="port-tag" title="应用启动即监听，不可单独关闭">
-              · {{ snapshot.port ?? '—' }}
-            </span>
-          </div>
+          <header class="settings-head">
+            <h2 class="settings-title">本机设置</h2>
+            <p class="settings-sub">设备身份、接收位置与网络信息</p>
+          </header>
 
-          <!-- 接收目录：路径 + 轻量文字按钮 -->
-          <div class="setting-block">
-            <span class="card-title">接收目录</span>
-            <p class="dir-value">
-              <span class="dir-path mono" :title="snapshot.download_dir || ''">
-                {{ snapshot.download_dir || '—' }}
+          <!-- 所有设置收在同一张白色卡片里，统一「左标签 + 右值」的行结构 -->
+          <div class="settings-card">
+            <!-- 本机设备名 + 监听端口（端口不可关闭，跟在名字后面） -->
+            <div class="setting-row alias-row">
+              <LanAliasEditor :alias="snapshot.alias" @updated="emit('updated', $event)" />
+              <span class="port-tag" title="应用启动即监听，不可单独关闭">
+                · {{ snapshot.port ?? '—' }}
               </span>
-              <span class="dir-actions">
-                <button
-                  class="text-btn"
-                  type="button"
-                  :disabled="savingDir"
-                  @click="chooseDownloadDir"
-                >
-                  选择目录
-                </button>
-                <button class="text-btn" type="button" @click="openDownloadDir">打开目录</button>
-                <button
-                  v-if="snapshot.download_dir_custom"
-                  class="text-btn"
-                  type="button"
-                  :disabled="savingDir"
-                  @click="resetDownloadDir"
-                >
-                  恢复默认
-                </button>
-              </span>
-            </p>
-          </div>
+            </div>
 
-          <div class="setting-block">
-            <span class="card-title">本机地址</span>
-            <p class="card-value mono">{{ localAddresses || '未获取到可用网卡地址' }}</p>
-          </div>
+            <!-- 接收目录：路径 + 轻量文字按钮 -->
+            <div class="setting-row">
+              <span class="setting-label">接收目录</span>
+              <div class="setting-value">
+                <div class="dir-line">
+                  <span class="dir-path mono" :title="snapshot.download_dir || ''">
+                    {{ snapshot.download_dir || '—' }}
+                  </span>
+                  <span class="dir-actions">
+                    <button
+                      class="text-btn"
+                      type="button"
+                      :disabled="savingDir"
+                      @click="chooseDownloadDir"
+                    >
+                      选择目录
+                    </button>
+                    <button class="text-btn" type="button" @click="openDownloadDir">
+                      打开目录
+                    </button>
+                    <button
+                      v-if="snapshot.download_dir_custom"
+                      class="text-btn"
+                      type="button"
+                      :disabled="savingDir"
+                      @click="resetDownloadDir"
+                    >
+                      恢复默认
+                    </button>
+                  </span>
+                </div>
+              </div>
+            </div>
 
-          <div class="setting-block">
-            <span class="card-title">设备 ID</span>
-            <!-- MAC 完整展示；回退 UUID 时短指纹 + 悬浮看全量 -->
-            <p class="card-value mono" :title="deviceIdFull">{{ deviceIdText }}</p>
+            <div class="setting-row">
+              <span class="setting-label">本机地址</span>
+              <p class="setting-value mono">{{ localAddresses || '未获取到可用网卡地址' }}</p>
+            </div>
+
+            <div class="setting-row">
+              <span class="setting-label">设备 ID</span>
+              <!-- MAC 完整展示；回退 UUID 时短指纹 + 悬浮看全量 -->
+              <p class="setting-value mono" :title="deviceIdFull">{{ deviceIdText }}</p>
+            </div>
           </div>
         </div>
       </template>
@@ -166,17 +177,19 @@ async function openDownloadDir() {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  background: #fff;
 }
 
-/* 无标题、无返回：内容直接铺开滚动 */
 .settings-body {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 18px 20px 24px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
+  padding: 24px 28px 32px;
+}
+.settings-content {
+  width: 100%;
+  max-width: 860px;
+  margin: 0 auto;
 }
 .settings-empty {
   margin: 0;
@@ -185,9 +198,9 @@ async function openDownloadDir() {
   line-height: 1.6;
 }
 
-/* 告警：只做提示，不抢卡片层次 */
+/* 告警：只做提示，不抢设置卡的层次 */
 .alert {
-  margin: 0;
+  margin: 0 0 12px;
   padding: 10px 14px;
   border-radius: 12px;
   font-size: 12px;
@@ -205,39 +218,50 @@ async function openDownloadDir() {
   color: var(--text-muted);
 }
 
-/* 悬浮卡片：唯一 elevation 体系里的低/中阴影，不用边框 */
-.card {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 16px 18px;
-  border-radius: 14px;
-  background: #fff;
-  box-shadow:
-    0 1px 2px rgba(15, 23, 42, 0.04),
-    0 10px 30px -18px rgba(15, 23, 42, 0.28);
+.settings-head {
+  padding: 2px 4px 14px;
+}
+.settings-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.settings-sub {
+  margin: 4px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-muted);
 }
 
-/* 所有设置共用一张卡片：行内不再各自留白，靠分隔线区分 */
+/* 白底设置卡：细边框 + 很轻的阴影，和纯白页面的层次拉开一点即可 */
 .settings-card {
-  gap: 0;
-  padding: 2px 18px;
+  padding: 4px 20px;
+  border: 1px solid #eef0f4;
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.03);
 }
-.setting-block {
+.setting-row {
   display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 14px 0;
+  align-items: flex-start;
+  gap: 16px;
+  padding: 15px 0;
 }
-.setting-block + .setting-block {
-  border-top: 1px solid var(--border-color);
+.setting-row + .setting-row {
+  border-top: 1px solid #f0f2f5;
 }
-.card-title {
-  font-size: 12px;
+.setting-label {
+  flex-shrink: 0;
+  width: 92px;
+  padding-top: 1px;
+  font-size: 13px;
+  line-height: 1.6;
   color: var(--text-muted);
-  letter-spacing: 0.02em;
 }
-.card-value {
+.setting-value {
+  flex: 1;
+  min-width: 0;
   margin: 0;
   font-size: 13px;
   line-height: 1.6;
@@ -245,11 +269,22 @@ async function openDownloadDir() {
   word-break: break-all;
 }
 
-/* 设备名 + 端口同一行 */
-.alias-block {
-  flex-direction: row;
+/* 设备名行：LanAliasEditor 自带标签，用 :deep 对齐其它行的标签列 */
+.alias-row {
   align-items: center;
-  gap: 10px;
+}
+.alias-row :deep(.alias-editor) {
+  flex: 1;
+  gap: 16px;
+}
+.alias-row :deep(.alias-label) {
+  width: 92px;
+  flex-shrink: 0;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.alias-row :deep(.alias-name) {
+  font-size: 14px;
 }
 .port-tag {
   flex-shrink: 0;
@@ -258,18 +293,20 @@ async function openDownloadDir() {
   white-space: nowrap;
 }
 
-/* 接收目录：路径太长时省略，按钮不换行 */
-.dir-value {
+/* 接收目录：路径优先占宽，按钮不换行 */
+.dir-line {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin: 0;
+  gap: 10px;
   min-width: 0;
+  flex-wrap: wrap;
+  row-gap: 4px;
 }
 .dir-path {
-  flex: 0 1 auto;
+  flex: 1 1 160px;
   min-width: 0;
   font-size: 12px;
+  line-height: 1.6;
   color: var(--text-secondary);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -305,10 +342,19 @@ async function openDownloadDir() {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
-/* 窄窗口：设备名行允许端口换到下一行 */
 @media (max-width: 760px) {
-  .alias-block {
-    flex-wrap: wrap;
+  .settings-body {
+    padding: 18px 16px 24px;
+  }
+  .settings-card {
+    padding: 2px 16px;
+  }
+  .setting-label,
+  .alias-row :deep(.alias-label) {
+    width: 76px;
+  }
+  .dir-path {
+    flex-basis: 120px;
   }
 }
 </style>
