@@ -508,7 +508,7 @@ TAURI_SIGNING_PRIVATE_KEY_PASSWORD=
        ```bash
        pnpm release:beta -- --no-publish --version <base>-beta.<N>
        ```
-  4. 推送代码到 Gitee `beta` 分支。Gitee 发行版的 tag 必须挂在这个提交上，所以**正式上传放在 push 之后**；`--no-publish` 只用于推送前确认产物能打出来。
+  4. 推送代码到 `beta` 分支（当前 `origin` 是 GitHub）。Gitee 仓库只有 `master`，发行版和 tag 建在 `master` 上，tag 不会指向 beta 提交；产物对应的是构建时的 beta HEAD，清单写在 Gitee `master` 的 `updates/beta/latest.json`。`--no-publish` 只用于推送前确认产物能打出来，**正式上传放在 push 之后**。
   5. 推送后正式发布（去掉 `--no-publish`）：macOS 用 `--target aarch64-apple-darwin --dmg` 与 `--target x86_64-apple-darwin --dmg` 各跑一次，Windows 跑一次；补平台时用同一个 `--version <base>-beta.<N>`，保证所有产物挂在同一个 Gitee 发行版上。`GITEE_TOKEN` 放 `env.local`（beta 必填）。脚本会创建 `v<base>-beta.<N>` 发行版、上传 exe / msi / dmg，并把 `updates/beta/latest.json` 合并写回 Gitee（三个平台条目按平台合并，不覆盖另一个平台）。
   6. 完成检查：Gitee 发行版列表里能看到 `v<base>-beta.<N>`，附件包含 macOS 两个 dmg（Intel + Apple Silicon）和 Windows exe + msi；`updates/beta/latest.json` 平台条目不缺；版本号与这次推送的提交一致。
 
