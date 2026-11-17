@@ -7,7 +7,7 @@
 | VPN 提权 | 计划任务免 UAC，失败回退 UAC 弹窗 | 系统授权框 |
 | 虚拟网卡 | Wintun 驱动 | 系统 utun |
 | 分流实现 | 路由注入：NRPT 按域名解析 + 隧道路由（不抓包） | 路由注入：`/etc/resolver` + 本机转发器 + 隧道路由（不抓包） |
-| 按域名解析 | NRPT（`Add-DnsClientNrptRule`） | `/etc/resolver` + 本机转发器（53 优先，被占用则随机高位端口 + `port` 字段） |
+| 按域名解析 | NRPT（`Add-DnsClientNrptRule`）指向 VPN DNS，**不用本机转发器、不占 53** | `/etc/resolver` + 本机转发器（`127.0.0.1` 随机高位端口 + `port` 字段，不占 53） |
 | 路由查询 | PowerShell JSON（`Get-NetRoute` 等） | `route` / `ifconfig` / `netstat` |
 
 其余已知限制：
@@ -17,7 +17,8 @@
 - 相对路径含空格的文件会被跳过
 - 分流只处理 IPv4：域名解析可能返回 AAAA，IPv6 目标不进隧道、仍走系统默认路由
 - 域名分流只覆盖系统解析器（getaddrinfo）：自带 DoH/DoT 的应用不受控
-- Windows 上按域名解析出来的 `/32` 由本机转发器在回包前注入；NRPT 退回旧路径时最多晚约 3~15 秒生效。服务端下发的内网范围（默认域名 / split-include）只展示、不参与分流，所以不会再有「服务端一推就接管」的隐式路由
+- Windows 上按域名解析直接走 NRPT：Windows DNS Client 不会把指向回环地址的 NRPT 查询送出来（`127.0.0.1` / `127.0.0.2` 实机各试一次，探针 2.5 秒零查询），所以本机转发器在 Windows 上不启用、也不占 53；子域路由靠扫系统 DNS 缓存 + 每 15 秒主动解析补齐，首个请求可能失败一次、约 3 秒后重试即通。macOS 的 `/etc/resolver` 支持 `port`，转发器绑随机高位端口，53 留给 Clash / dnsmasq。服务端下发的内网范围（默认域名 / split-include）只展示、不参与分流，所以不会再有「服务端一推就接管」的隐式路由
+- 系统代理（Clash / Surge / 公司代理）开着且规则域名不在绕过列表里时，浏览器会把域名交给代理自己解析，按域名分流对它不起作用；连接后会在代理页顶部提示并写进 worker 日志，把 `*.域名` 加进代理绕过（或停用系统代理）再重连即可。macOS 的随机端口转发器写法仍需真机验收，见 `src-tauri/src/vpn/local_dns/macos.rs` 的 `TODO(platform-verify:macos)`
 - 规则与代理模式的改动都会热生效（worker 轮询 `rules.json` / `mode` 后重新布线），不需要断开重连
 - 系统清理的 Windows 运行时行为已补实机冒烟：注册表三视图枚举、MSI/exe 卸载退出码映射、残留扫描与回收站删除、硬拒名单与 HKCU 键删除都有对应用例（`src-tauri/src/cleaner/windows_smoke.rs`，与 `macos_smoke.rs` 对称），2026-11-13 在 Windows 11 全绿；用法见下面「实机冒烟」。仍需人工验收的只剩需要点 UAC 的路径（提权批量删除、HKLM 键删除）与真实 MSI 应用卸载，按项目规则保留 `TODO(platform-verify:windows)` 并写明了验证步骤；安装包的 NSIS 卸载钩子已实现并通过 `makensis` 编译检查（含新的 PowerShell 三类勾选界面），进程未退出则中止、勾选删除/保留数据、自定义附件目录提示仍需在 Windows 实机走一遍（计划见 `docs/superpowers/plans/2026-11-10-installer-uninstall.md` 的 Phase W）
 - `~/.Trash` 内容受 TCC 保护，删除结果以「原路径消失 + trash API 成功」为准
