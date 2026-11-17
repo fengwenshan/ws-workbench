@@ -464,7 +464,13 @@ pub(crate) fn refresh_tray_badge_with_total(app: &AppHandle, unread: u32) {
             rollback_tray_badge_state(wanted, previous);
             return;
         };
-        if tray.set_icon(Some(icon)).is_err() {
+        // macOS 必须带 is_template 一起换图：tray-icon 的 set_icon 固定按
+        // is_template=false 处理，会把菜单栏模板图变成普通黑图（深色栏不可读）。
+        // Windows/Linux 传 false，与 set_icon 等价。
+        if tray
+            .set_icon_with_as_template(Some(icon), cfg!(target_os = "macos"))
+            .is_err()
+        {
             // set_icon 失败：回滚成旧状态，下次事件仍会重试
             rollback_tray_badge_state(wanted, previous);
         }
