@@ -112,30 +112,18 @@ CREATE INDEX IF NOT EXISTS idx_lan_share_messages_peer_created
   ON lan_share_messages(peer_id, created_at_ms);
 "#;
 
-/// 解析出可写的存储目录，优先创建 app_data_dir 等候选目录
-fn resolve_storage_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    for (_, dir) in crate::config::storage_candidates(app) {
-        if !dir.exists() && crate::util::fs::create_dir_all(&dir).is_err() {
-            continue;
-        }
-        if crate::util::fs::is_writable_dir(&dir) {
-            return Ok(dir);
-        }
-    }
-    Err("没有可写的本地存储目录".to_string())
-}
-
 /// 数据文件目录（数据库、剪贴板图片附件等都放这里）。
 ///
 /// 不能直接用 `app_data_dir()`：目录不可写时会回退到别的候选目录，附件必须跟着数据库走，
-/// 否则数据库写成功、图片写失败，图文条目就会被整条跳过。
+/// 否则数据库写成功、图片写失败，图文条目就会被整条跳过。回退顺序由
+/// [`crate::config::data_dir`] 统一决定 —— 主密钥也按同一个目录解析，两者不能分开算。
 pub(crate) fn storage_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    resolve_storage_dir(app)
+    crate::config::data_dir(app)
 }
 
 /// 数据库文件的绝对路径
 pub fn db_path(app: &AppHandle) -> Result<PathBuf, String> {
-    Ok(resolve_storage_dir(app)?.join(DB_FILE))
+    Ok(storage_dir(app)?.join(DB_FILE))
 }
 
 /// 打开（必要时创建）数据库并确保表结构就绪
@@ -180,10 +168,16 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
-/// 校验数据库可打开并返回路径（供 `storage_info` 使用）
+/// 校验数据库可打开、内容能解开，并返回路径（供 `storage_info` 使用）。
+///
+/// 只 `open` 不够：主密钥和数据目录对不上时表结构照样能读，但每一行 payload
+/// 都会「数据已被篡改」。设置页必须看到这种状态，否则界面只是安静地空掉，
+/// 用户根本不知道数据还在、只是解不开。
 pub fn check(app: &AppHandle) -> Result<PathBuf, String> {
     let path = db_path(app)?;
-    open(&path)?;
+    let keys = crate::crypto::vault_keys(app)?;
+    let conn = open(&path)?;
+    load_all(&conn, &keys)?;
     Ok(path)
 }
 

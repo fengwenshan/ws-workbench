@@ -3,6 +3,15 @@
 //! 信封格式：`v1.<b64(iv)>.<b64(ct)>.<b64(mac)>`，以 `v1.` 前缀识别密文。
 //! 主密钥（32 字节随机数）由系统钥匙串（macOS）/ DPAPI（Windows）托管，
 //! 派生出加密密钥 `SM3(master‖"enc")` 与认证密钥 `SM3(master‖"mac")`。
+//!
+//! 平台差异只有「主密钥放哪、怎么托管」，按 `vpn/platform/` 的规矩拆在
+//! `macos.rs` / `windows.rs` 里；本文件只放信封算法、子密钥派生与对外入口。
+//!
+//! 一条硬约束：**主密钥必须和它加密的数据待在同一个目录**。数据目录在用户
+//! 目录不可写（沙箱、企业策略、杀软）时会回退到别的候选目录，密钥要是还留在
+//! 原处，读出来全是「数据已被篡改」、写盘又全部失败，界面表现为「新建配置
+//! 成功但弹窗不关、重启后配置不见」。Windows 侧按数据目录取密钥，见
+//! `crypto/windows.rs`。
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use cbc::cipher::{block_padding::Pkcs7, BlockDecryptMut, BlockEncryptMut, KeyIvInit};
@@ -10,18 +19,22 @@ use hmac::{Hmac, Mac};
 use sm3::{Digest, Sm3};
 use tauri::AppHandle;
 
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+mod unsupported;
+#[cfg(target_os = "windows")]
+mod windows;
+
+#[cfg(target_os = "macos")]
+use macos as platform;
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+use unsupported as platform;
+#[cfg(target_os = "windows")]
+use windows as platform;
+
 /// 密文信封前缀，同时用作版本号
 const PREFIX: &str = "v1.";
-
-/// macOS 钥匙串服务名 / 账号
-#[cfg(target_os = "macos")]
-const VAULT_SERVICE: &str = "ws-workbench-vault";
-#[cfg(target_os = "macos")]
-const VAULT_ACCOUNT: &str = "ws-workbench";
-
-/// Windows 主密钥落盘文件名（内容为 `dpapi:<hex>`）
-#[cfg(target_os = "windows")]
-const KEY_FILE: &str = ".vault_key";
 
 type Sm4CbcEnc = cbc::Encryptor<sm4::Sm4>;
 type Sm4CbcDec = cbc::Decryptor<sm4::Sm4>;
@@ -55,6 +68,14 @@ fn sm3_of(parts: &[&[u8]]) -> [u8; 32] {
     let mut key = [0u8; 32];
     key.copy_from_slice(&out);
     key
+}
+
+/// 由主密钥派生出加解密用的两把子密钥
+fn keys_from_master(master: &[u8; 32]) -> VaultKeys {
+    VaultKeys {
+        enc_key: sm3_of(&[master, b"enc"]),
+        mac_key: sm3_of(&[master, b"mac"]),
+    }
 }
 
 /// 生成 32 字节随机数
@@ -154,11 +175,8 @@ pub(crate) fn vault_keys(app: &AppHandle) -> Result<VaultKeys, String> {
     if let Some(keys) = guard.as_ref() {
         return Ok(*keys);
     }
-    let master = load_or_create_master_key(app)?;
-    let keys = VaultKeys {
-        enc_key: sm3_of(&[&master, b"enc"]),
-        mac_key: sm3_of(&[&master, b"mac"]),
-    };
+    let master = platform::load_or_create_master_key(app)?;
+    let keys = keys_from_master(&master);
     *guard = Some(keys);
     Ok(keys)
 }
@@ -173,166 +191,6 @@ pub fn encrypt_str(app: &AppHandle, plain: &str) -> Result<String, String> {
 pub fn decrypt_str(app: &AppHandle, envelope: &str) -> Result<String, String> {
     let k = vault_keys(app)?;
     decrypt_with_keys(&k, envelope)
-}
-
-/// 加载或创建主密钥
-fn load_or_create_master_key(app: &AppHandle) -> Result<[u8; 32], String> {
-    #[cfg(target_os = "macos")]
-    {
-        let _ = app;
-        macos_master_key()
-    }
-    #[cfg(target_os = "windows")]
-    {
-        windows_master_key(app)
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        let _ = app;
-        Err("当前平台不支持加密存储".to_string())
-    }
-}
-
-/// 读取指定服务名 / 账号下的钥匙串条目；不存在时返回 None
-#[cfg(target_os = "macos")]
-fn keychain_read(service: &str, account: &str) -> Option<String> {
-    let output = std::process::Command::new("security")
-        .args(["find-generic-password", "-a", account, "-s", service, "-w"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
-/// 写入（覆盖）钥匙串条目
-#[cfg(target_os = "macos")]
-fn keychain_write(service: &str, account: &str, value: &str) -> Result<(), String> {
-    let output = std::process::Command::new("security")
-        .args([
-            "add-generic-password",
-            "-U",
-            "-a",
-            account,
-            "-s",
-            service,
-            "-w",
-            value,
-        ])
-        .output()
-        .map_err(|e| format!("调用 security 失败: {}", e))?;
-    if !output.status.success() {
-        return Err(format!(
-            "写入钥匙串失败: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    Ok(())
-}
-
-/// macOS：主密钥存系统钥匙串（明文为十六进制）
-#[cfg(target_os = "macos")]
-fn macos_master_key() -> Result<[u8; 32], String> {
-    if let Some(hex) = keychain_read(VAULT_SERVICE, VAULT_ACCOUNT) {
-        return decode_master_hex(&hex);
-    }
-
-    let master = random_key();
-    let hex = crate::vpn::credential::to_hex(&master);
-    keychain_write(VAULT_SERVICE, VAULT_ACCOUNT, &hex)?;
-    Ok(master)
-}
-
-/// 解析主密钥文件；文件不存在时返回 None（由调用方决定是否新建）
-#[cfg(target_os = "windows")]
-fn parse_master_key_file(path: &std::path::Path) -> Result<Option<[u8; 32]>, String> {
-    match std::fs::read_to_string(path) {
-        Ok(text) => {
-            let text = text.trim();
-            if let Some(hex) = text.strip_prefix("dpapi:") {
-                let cipher = crate::vpn::credential::from_hex(hex)?;
-                let plain = crate::vpn::credential::dpapi::unprotect(&cipher)?;
-                return Ok(Some(to_master(&plain)?));
-            }
-            if let Ok(master) = decode_master_hex(text) {
-                return Ok(Some(master));
-            }
-            // 文件存在但内容无法解析：绝不能覆盖既有密钥
-            Err("主密钥文件内容无法解析".to_string())
-        }
-        // 文件不存在时才允许新建
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        // 其它 IO 错误（权限/占用等）绝不能覆盖既有密钥，直接报错
-        Err(e) => Err(format!("读取主密钥文件失败: {}", e)),
-    }
-}
-
-/// 主密钥可能落盘的目录，和配置/数据库使用同一组候选。
-///
-/// 正常环境第一项就是 `app_data_dir`；开发沙箱、企业策略或杀毒软件把用户目录
-/// 锁死时，后面的项目 `.config` 仍然可写，配置加密不会因此整体失败。
-#[cfg(target_os = "windows")]
-fn master_key_candidates(app: &AppHandle) -> Vec<std::path::PathBuf> {
-    use tauri::Manager;
-
-    let mut dirs = Vec::new();
-    if let Ok(dir) = app.path().app_data_dir() {
-        dirs.push(dir);
-    }
-    for (_, dir) in crate::config::storage_candidates(app) {
-        if !dirs.contains(&dir) {
-            dirs.push(dir);
-        }
-    }
-    dirs
-}
-
-/// Windows：主密钥经 DPAPI 保护后写入可用的候选目录。
-///
-/// 先在所有候选里找已经存在的 `.vault_key`，避免用户目录恢复可写后又在别处
-/// 新建一把密钥、把旧配置解不开；只有全都不存在时才新建。
-#[cfg(target_os = "windows")]
-fn windows_master_key(app: &AppHandle) -> Result<[u8; 32], String> {
-    use tauri::Manager;
-
-    if let Err(err) = app.path().app_data_dir() {
-        // 只影响诊断信息，后面的候选目录仍可继续使用
-        eprintln!("[vault] 获取应用数据目录失败: {}", err);
-    }
-    let dirs = master_key_candidates(app);
-    for dir in &dirs {
-        let path = dir.join(KEY_FILE);
-        match parse_master_key_file(&path) {
-            Ok(Some(master)) => return Ok(master),
-            Ok(None) => {}
-            // 已有密钥读不出来时绝不能换地方新建，否则旧数据永久解不开
-            Err(err) => return Err(format!("{}（{}）", err, path.display())),
-        }
-    }
-
-    let mut failures: Vec<String> = Vec::new();
-    for dir in &dirs {
-        if let Err(err) = std::fs::create_dir_all(dir) {
-            failures.push(format!("{}（{}）", dir.display(), err));
-            continue;
-        }
-        let path = dir.join(KEY_FILE);
-        let master = random_key();
-        let cipher = crate::vpn::credential::dpapi::protect(&master)?;
-        match std::fs::write(
-            &path,
-            format!("dpapi:{}", crate::vpn::credential::to_hex(&cipher)),
-        ) {
-            Ok(()) => return Ok(master),
-            Err(err) => failures.push(format!("{}（{}）", path.display(), err)),
-        }
-    }
-
-    Err(format!(
-        "没有可写的主密钥目录，已依次尝试：{}",
-        failures.join("、")
-    ))
 }
 
 #[cfg(test)]
