@@ -20,7 +20,7 @@ const props = defineProps<{
   attachmentCount: number | null
   /** 是否正在查询附件数量（「删除附件」置灰） */
   attachmentLoading: boolean
-  /** 当前是否开启免打扰（勾选态，与设置页开关同步） */
+  /** 当前是否开启免打扰（勾选态） */
   dnd: boolean
 }>()
 

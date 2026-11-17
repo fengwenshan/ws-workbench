@@ -60,7 +60,7 @@ const {
   requestDeleteMessage,
 } = useLanShareChat(() => props.active)
 
-// 免打扰开关与设置页共享同一份单例状态（右键菜单里的勾选态）
+// 右键菜单里的「免打扰模式」勾选态（全应用共享同一份单例）
 const { dnd, toggleDnd } = useLanShareNotify()
 
 /** 齿轮：设置页没有「返回聊天」按钮了，已在该页时再点一次回到聊天 */

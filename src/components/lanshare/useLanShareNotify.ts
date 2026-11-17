@@ -5,8 +5,8 @@ import chimeUrl from '@/assets/sounds/chime-done.mp3'
  * 局域网分享「消息提示音 + 免打扰」单例（设计 §4 / LANLink 刷新 §3）。
  *
  * 提示音用 dsh-chime 插件的「任务完成」音效 `chime-done.mp3`（MIT，732B），
- * 由 Vite 处理成资源 URL，不引第三方依赖。左侧右键菜单和设置页开关共享同一份
- * `dnd`（localStorage），只在「收到对方的新消息」时播放；浏览器要求音频在用户
+ * 由 Vite 处理成资源 URL，不引第三方依赖。左侧右键菜单的「免打扰模式」维护
+ * 同一份 `dnd`（localStorage），只在「收到对方的新消息」时播放；浏览器要求音频在用户
  * 手势后才能出声，所以首次 pointerdown / keydown 时静默 play 一次解锁。
  */
 

@@ -5,14 +5,13 @@ import { setLanShareDownloadDir, type LanShareSnapshot } from '@/api/lanshare'
 import { openDir } from '@/api/system'
 import { pickDirectory } from '@/utils/dialog'
 import LanAliasEditor from './LanAliasEditor.vue'
-import LanSoundSetting from './LanSoundSetting.vue'
 
 /**
  * 右栏设置页（LANLink 刷新 §1 / §2.2）。
  *
  * 不再有标题和「返回聊天」：设置由左栏齿轮进入、再点一次齿轮或选设备返回。
- * 内容直接是白色悬浮卡片：本机设备名（端口跟在名字后）、接收目录、消息提示音、
- * 本机地址、设备 ID；启动失败 / 设置未存住仍用顶部告警展示。
+ * 内容是一张白色悬浮卡片，本机设备名（端口跟在名字后）、接收目录、
+ * 本机地址、设备 ID 合在同一块里，用细分隔线分行；启动失败 / 设置未存住仍用顶部告警展示。
  *
  * 设备名编辑拆在 LanAliasEditor（只有 ✓ / Enter 才保存）；命令返回最新快照，
  * 这里 apply 后上抛给壳，保证左右栏状态一致。
@@ -104,51 +103,56 @@ async function openDownloadDir() {
         <!-- 服务在跑、只是设置有改动没存住：跟「启动失败」分开显示，别吓人 -->
         <p v-if="snapshot.warning" class="alert is-warn">{{ snapshot.warning }}</p>
 
-        <!-- 本机设备名 + 监听端口（端口不可关闭，跟在名字后面） -->
-        <div class="card alias-card">
-          <LanAliasEditor :alias="snapshot.alias" @updated="emit('updated', $event)" />
-          <span class="port-tag" title="应用启动即监听，不可单独关闭">
-            · {{ snapshot.port ?? '—' }}
-          </span>
-        </div>
-
-        <!-- 接收目录：路径 + 轻量文字按钮 -->
-        <div class="card">
-          <span class="card-title">接收目录</span>
-          <p class="dir-value">
-            <span class="dir-path mono" :title="snapshot.download_dir || ''">
-              {{ snapshot.download_dir || '—' }}
+        <!-- 所有设置收在同一张卡片里，行间用细分隔线，避免一块一块浮起 -->
+        <div class="card settings-card">
+          <!-- 本机设备名 + 监听端口（端口不可关闭，跟在名字后面） -->
+          <div class="setting-block alias-block">
+            <LanAliasEditor :alias="snapshot.alias" @updated="emit('updated', $event)" />
+            <span class="port-tag" title="应用启动即监听，不可单独关闭">
+              · {{ snapshot.port ?? '—' }}
             </span>
-            <span class="dir-actions">
-              <button class="text-btn" type="button" :disabled="savingDir" @click="chooseDownloadDir">
-                选择目录
-              </button>
-              <button class="text-btn" type="button" @click="openDownloadDir">打开目录</button>
-              <button
-                v-if="snapshot.download_dir_custom"
-                class="text-btn"
-                type="button"
-                :disabled="savingDir"
-                @click="resetDownloadDir"
-              >
-                恢复默认
-              </button>
-            </span>
-          </p>
-        </div>
+          </div>
 
-        <!-- 消息提示音：和左栏右键「免打扰模式」共享同一份状态 -->
-        <LanSoundSetting />
+          <!-- 接收目录：路径 + 轻量文字按钮 -->
+          <div class="setting-block">
+            <span class="card-title">接收目录</span>
+            <p class="dir-value">
+              <span class="dir-path mono" :title="snapshot.download_dir || ''">
+                {{ snapshot.download_dir || '—' }}
+              </span>
+              <span class="dir-actions">
+                <button
+                  class="text-btn"
+                  type="button"
+                  :disabled="savingDir"
+                  @click="chooseDownloadDir"
+                >
+                  选择目录
+                </button>
+                <button class="text-btn" type="button" @click="openDownloadDir">打开目录</button>
+                <button
+                  v-if="snapshot.download_dir_custom"
+                  class="text-btn"
+                  type="button"
+                  :disabled="savingDir"
+                  @click="resetDownloadDir"
+                >
+                  恢复默认
+                </button>
+              </span>
+            </p>
+          </div>
 
-        <div class="card">
-          <span class="card-title">本机地址</span>
-          <p class="card-value mono">{{ localAddresses || '未获取到可用网卡地址' }}</p>
-        </div>
+          <div class="setting-block">
+            <span class="card-title">本机地址</span>
+            <p class="card-value mono">{{ localAddresses || '未获取到可用网卡地址' }}</p>
+          </div>
 
-        <div class="card">
-          <span class="card-title">设备 ID</span>
-          <!-- MAC 完整展示；回退 UUID 时短指纹 + 悬浮看全量 -->
-          <p class="card-value mono" :title="deviceIdFull">{{ deviceIdText }}</p>
+          <div class="setting-block">
+            <span class="card-title">设备 ID</span>
+            <!-- MAC 完整展示；回退 UUID 时短指纹 + 悬浮看全量 -->
+            <p class="card-value mono" :title="deviceIdFull">{{ deviceIdText }}</p>
+          </div>
         </div>
       </template>
     </div>
@@ -213,6 +217,21 @@ async function openDownloadDir() {
     0 1px 2px rgba(15, 23, 42, 0.04),
     0 10px 30px -18px rgba(15, 23, 42, 0.28);
 }
+
+/* 所有设置共用一张卡片：行内不再各自留白，靠分隔线区分 */
+.settings-card {
+  gap: 0;
+  padding: 2px 18px;
+}
+.setting-block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 0;
+}
+.setting-block + .setting-block {
+  border-top: 1px solid var(--border-color);
+}
 .card-title {
   font-size: 12px;
   color: var(--text-muted);
@@ -227,7 +246,7 @@ async function openDownloadDir() {
 }
 
 /* 设备名 + 端口同一行 */
-.alias-card {
+.alias-block {
   flex-direction: row;
   align-items: center;
   gap: 10px;
@@ -288,7 +307,7 @@ async function openDownloadDir() {
 
 /* 窄窗口：设备名行允许端口换到下一行 */
 @media (max-width: 760px) {
-  .alias-card {
+  .alias-block {
     flex-wrap: wrap;
   }
 }
