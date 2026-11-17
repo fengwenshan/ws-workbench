@@ -93,6 +93,8 @@ const canPack = computed(() => projectType.value === 'layui')
 
 底层只调 openconnect，不依赖 Cisco AnyConnect 客户端或 OpenConnect GUI。
 
+左栏是配置列表，可以存多份配置（服务器、账号、协议、规则各自独立）；删除只拦「正在用这份配置连接」的那一份——连着 A 也能删 B，删完 A 的隧道照常跑（worker 启动时已经把参数拿到手）。
+
 连接器来源按平台区分：
 
 - **Windows 只认安装包内置的 openconnect**（`src-tauri/resources/apps/openconnect/openconnect.exe` + 同目录 `wintun.dll`）。不扫描注册表、常见安装目录或 PATH，也不提供「指定外部 openconnect」入口，避免把来源不明的二进制拉进提权进程。内置副本缺失时直接报错并提示重装。

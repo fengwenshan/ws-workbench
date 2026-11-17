@@ -464,6 +464,11 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
   async function deleteProfile(id: string) {
     const profile = profiles.value.find((p) => p.id === id)
     if (!profile) return
+    // 只有「正在用这份配置连接」时才拦：连着 A 想删 B 是正常操作，
+    // 删掉之后 A 的隧道不受影响（worker 用的参数已经拿到手了）
+    if (isConnected.value && status.value.profile_id === id) {
+      throw new Error('这份配置正在连接中，先断开再删除')
+    }
     config.value.vpn_profiles = profiles.value.filter((p) => p.id !== id)
     if (config.value.vpn_active_profile_id === id) {
       config.value.vpn_active_profile_id = config.value.vpn_profiles[0]?.id ?? ''

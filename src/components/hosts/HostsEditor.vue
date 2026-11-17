@@ -198,10 +198,6 @@ onUnmounted(() => {
   <div class="hosts-editor">
     <!-- 操作栏 -->
     <div class="hosts-toolbar">
-      <div class="hosts-hint">
-        <template v-if="hosts.status?.hint">{{ hosts.status.hint }}</template>
-        <template v-else>保存会弹一次系统授权框；取消授权不会改动文件。</template>
-      </div>
       <div class="hosts-actions">
         <button class="btn btn-secondary" :disabled="hosts.loading" @click="handleRefresh">
           {{ hosts.loading ? '刷新中…' : '刷新' }}
@@ -300,15 +296,8 @@ onUnmounted(() => {
   flex-shrink: 0;
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   gap: 16px;
-}
-
-.hosts-hint {
-  min-width: 0;
-  color: var(--text-muted);
-  font-size: 12px;
-  line-height: 1.6;
 }
 
 .hosts-actions {

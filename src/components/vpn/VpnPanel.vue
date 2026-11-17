@@ -84,6 +84,18 @@ const connectionBusy = computed(
  */
 const readonlyOwner = computed(() => (vpn.canControl ? null : vpn.owner))
 
+/**
+ * 删除按钮的禁用条件：只有「选中的这份正在用它连接」才需要先断开，
+ * 连着 A 去删 B 是正常操作（隧道参数 worker 已经拿到手，删配置不影响连接）。
+ */
+const deleteBlockedReason = computed(() => {
+  if (vpn.phaseBusy) return '连接状态正在切换，稍后再试'
+  if (vpn.isConnected && vpn.status.profile_id === vpn.selectedProfile?.id) {
+    return '这份配置正在连接中，先断开再删除'
+  }
+  return ''
+})
+
 const connectLabel = computed(() => {
   if (readonlyOwner.value) return '由另一个窗口连接'
   if (vpn.disconnecting) return '断开中…'
@@ -383,8 +395,15 @@ function askDelete(profile: VpnProfile) {
 
 async function confirmDeleteProfile() {
   if (!confirmDelete.value) return
-  await vpn.deleteProfile(confirmDelete.value.id)
+  const target = confirmDelete.value
   confirmDelete.value = null
+  try {
+    await vpn.deleteProfile(target.id)
+  } catch (err: any) {
+    const text = err instanceof Error ? err.message : String(err)
+    vpn.pushLog('error', `删除 VPN 配置失败: ${text}`)
+    Modal.error({ title: '删除配置失败', content: text })
+  }
 }
 
 /** 切回 VPN 页时刷新连接器与快照，保证看到的是当前机器状态 */
@@ -548,7 +567,8 @@ watch(
               <button class="btn btn-secondary" @click="logDrawerOpen = true">日志</button>
               <button
                 class="btn btn-danger-ghost"
-                :disabled="vpn.isConnected || vpn.phaseBusy"
+                :disabled="!!deleteBlockedReason"
+                :title="deleteBlockedReason || undefined"
                 @click="askDelete(vpn.selectedProfile!)"
               >
                 删除

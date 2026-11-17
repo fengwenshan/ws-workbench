@@ -139,18 +139,6 @@ defineExpose({ recheck, rechecking: loading });
 
 <template>
   <section ref="root" class="card">
-    <div class="card-head res-head">
-      <p class="res-sub">可下载的插件与扩展；装好后重启对应宿主应用生效。</p>
-      <button
-        type="button"
-        class="btn btn-secondary res-refresh"
-        :disabled="loading"
-        @click="load(true)"
-      >
-        {{ loading ? "检测中…" : "重新检测" }}
-      </button>
-    </div>
-
     <p v-if="loading && resources.length === 0" class="res-empty">正在检查资源版本…</p>
 
     <div class="res-grid">
@@ -205,30 +193,9 @@ defineExpose({ recheck, rechecking: loading });
 </template>
 
 <style scoped>
-/* 卡片外壳（.card）由设置页的样式提供；这里只管内部布局 */
-.res-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-}
-.res-head h4 {
-  margin: 0;
-  font-size: 14px;
-  color: var(--text-primary);
-}
-.res-sub {
-  margin: 4px 0 0;
-  font-size: 12px;
-  color: var(--text-muted);
-}
-.res-refresh {
-  flex-shrink: 0;
-  font-size: 12px;
-}
-
+/* 标题行和「重新检测」由设置页的分区头提供；这里只管列表本身 */
 .res-empty {
-  margin: 8px 0 0;
+  margin: 0;
   font-size: 12px;
   color: var(--text-muted);
 }
@@ -238,7 +205,6 @@ defineExpose({ recheck, rechecking: loading });
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
   gap: 12px;
-  margin-top: 12px;
 }
 
 .res-tile {

@@ -95,10 +95,6 @@ const resourceBusy = ref(false)
 /** 附件实际落盘目录：设置里的地址，未设置时解析成 App 私有 attachments 目录 */
 const resolvedUploadDir = ref('')
 
-const uploadDirSource = computed(() =>
-  props.defaultUploadDir ? '设置里指定的地址' : 'App 私有目录（未指定时的默认位置）',
-)
-
 async function loadStorageInfo() {
   try {
     configPath.value = await getConfigPath()
@@ -437,8 +433,18 @@ function formatBytes(bytes: number): string {
           </svg>
         </span>
         <span class="head-title">设置</span>
-        <button class="btn btn-secondary btn-xs menu-action" :disabled="refreshBusy" @click="refreshAll">
-          {{ refreshBusy ? '检测中…' : '重新检测' }}
+        <button
+          class="menu-action"
+          :class="{ 'is-busy': refreshBusy }"
+          :disabled="refreshBusy"
+          :title="refreshBusy ? '检测中…' : '重新检测'"
+          aria-label="重新检测"
+          @click="refreshAll"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M20.5 12a8.5 8.5 0 1 1-2.49-6.01" />
+            <path d="M20.5 4.5V10H15" />
+          </svg>
         </button>
       </div>
       <div class="menu-body">
@@ -560,67 +566,72 @@ function formatBytes(bytes: number): string {
             <span class="info-value">异常：{{ storageInfo.error }}</span>
           </div>
 
-          <!-- 网络：按网卡列出 MAC 和该网卡的全部 IP，多 IP 逐条显示 -->
+          <!-- 网络：按网卡列出 MAC 和该网卡的全部 IP，条目直接排在「网络」右侧 -->
           <div class="net-block">
-            <div class="net-head">
-              <span class="net-title">网络</span>
-              <span class="net-sub">网卡的 MAC 与全部 IP</span>
-            </div>
-            <p v-if="networkLoading && !networkInfo" class="net-empty">正在读取网络信息…</p>
-            <p v-else-if="networkError" class="net-empty">读取失败：{{ networkError }}</p>
-            <p v-else-if="!networkInfo || networkInfo.interfaces.length === 0" class="net-empty">
-              未检测到可用的网络接口
-            </p>
-            <div v-else class="net-list">
-              <div v-for="iface in networkInfo.interfaces" :key="iface.name" class="net-item">
-                <span class="net-name mono">{{ iface.name }}</span>
-                <span class="net-mac mono">{{ iface.mac ? `MAC ${iface.mac}` : '无 MAC' }}</span>
-                <span v-for="address in iface.addresses" :key="address.ip" class="net-address">
-                  <span class="mono">
-                    {{ address.ip }}<template v-if="address.prefix !== null">/{{ address.prefix }}</template>
+            <span class="net-title">网络</span>
+            <div class="net-body">
+              <p v-if="networkLoading && !networkInfo" class="net-empty">正在读取网络信息…</p>
+              <p v-else-if="networkError" class="net-empty">读取失败：{{ networkError }}</p>
+              <p v-else-if="!networkInfo || networkInfo.interfaces.length === 0" class="net-empty">
+                未检测到可用的网络接口
+              </p>
+              <div v-else class="net-list">
+                <div v-for="iface in networkInfo.interfaces" :key="iface.name" class="net-item">
+                  <span class="net-name mono">{{ iface.name }}</span>
+                  <span class="net-mac mono">{{ iface.mac ? `MAC ${iface.mac}` : '无 MAC' }}</span>
+                  <span v-for="address in iface.addresses" :key="address.ip" class="net-address">
+                    <span class="mono">
+                      {{ address.ip }}<template v-if="address.prefix !== null">/{{ address.prefix }}</template>
+                    </span>
+                    <span class="tag" :class="address.family === 'IPv4' ? 'tag-ok' : 'tag-muted'">
+                      {{ address.family }}
+                    </span>
                   </span>
-                  <span class="tag" :class="address.family === 'IPv4' ? 'tag-ok' : 'tag-muted'">
-                    {{ address.family }}
-                  </span>
-                </span>
-                <span v-if="iface.addresses.length === 0" class="net-empty">暂无 IP</span>
+                  <span v-if="iface.addresses.length === 0" class="net-empty">暂无 IP</span>
+                </div>
               </div>
             </div>
           </div>
     </div>
 
     <div data-section="upload" class="settings-section">
-        <h4>附件上传</h4>
-          <div class="upload-dir-row">
-            <div class="upload-dir-main">
-              <span class="upload-dir-path mono" :title="resolvedUploadDir">
-                {{ resolvedUploadDir || '正在解析上传目录…' }}
-              </span>
-              <span class="upload-dir-source">来源：{{ uploadDirSource }}</span>
-            </div>
-            <div class="upload-dir-actions">
-              <button
-                class="btn btn-secondary btn-xs"
-                :disabled="!resolvedUploadDir"
-                title="在文件管理器中打开该目录"
-                @click="openUploadDir"
-              >
-                打开
-              </button>
-              <button class="btn btn-secondary btn-xs" @click="changeDefaultDir">更改</button>
-              <button
-                class="btn btn-secondary btn-xs"
-                :disabled="!defaultUploadDir"
-                @click="resetDefaultDir"
-              >
-                恢复默认
-              </button>
-            </div>
+        <div class="section-head">
+          <h4>附件上传</h4>
+          <div class="section-actions">
+            <button
+              class="btn btn-secondary btn-xs"
+              :disabled="!resolvedUploadDir"
+              title="在文件管理器中打开该目录"
+              @click="openUploadDir"
+            >
+              打开
+            </button>
+            <button class="btn btn-secondary btn-xs" @click="changeDefaultDir">更改</button>
+            <button
+              class="btn btn-secondary btn-xs"
+              :disabled="!defaultUploadDir"
+              @click="resetDefaultDir"
+            >
+              恢复默认
+            </button>
           </div>
+        </div>
+        <span class="upload-dir-path mono" :title="resolvedUploadDir">
+          {{ resolvedUploadDir || '正在解析上传目录…' }}
+        </span>
     </div>
 
       <div data-section="resources" class="settings-section">
-        <h4>资源</h4>
+        <div class="section-head">
+          <h4>资源</h4>
+          <button
+            class="btn btn-secondary btn-xs"
+            :disabled="resourceBusy"
+            @click="resourcePanel?.recheck()"
+          >
+            {{ resourceBusy ? '检测中…' : '重新检测' }}
+          </button>
+        </div>
         <ResourcePanel ref="resourcePanel" @busy="resourceBusy = $event" />
       </div>
       </div>
@@ -683,7 +694,40 @@ function formatBytes(bytes: number): string {
 }
 .menu-action {
   margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
   flex-shrink: 0;
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+.menu-action:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.menu-action:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+.menu-action svg {
+  width: 16px;
+  height: 16px;
+}
+/* 检测中：图标转起来 */
+.menu-action.is-busy svg {
+  animation: menu-spin 0.9s linear infinite;
+}
+@keyframes menu-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 .menu-body {
   flex: 1;
@@ -751,6 +795,23 @@ function formatBytes(bytes: number): string {
   color: var(--text-primary);
   margin-bottom: 12px;
 }
+/* 分区标题行：标题在左、操作按钮在右，按钮统一 btn-xs 尺寸 */
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.section-head h4 {
+  margin-bottom: 0;
+}
+.section-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
 .toast {
   flex-shrink: 0;
   margin-bottom: 16px;
@@ -808,26 +869,22 @@ function formatBytes(bytes: number): string {
   color: var(--text-muted);
   margin-bottom: 12px;
 }
-/* 网络：MAC / 全部 IP */
-/* 不再画那条横贯整行的分隔线，靠留白把「网络」和上面的信息分开 */
+/* 网络：MAC / 全部 IP，条目直接排在「网络」右侧，不再套灰底块 */
 .net-block {
-  margin-top: 20px;
-}
-.net-head {
   display: flex;
-  align-items: baseline;
   gap: 8px;
-  margin-bottom: 8px;
+  margin-top: 20px;
 }
 .net-title {
   font-size: 12px;
   color: var(--text-muted);
   width: 104px;
   flex-shrink: 0;
+  padding: 4px 0;
 }
-.net-sub {
-  font-size: 12px;
-  color: var(--text-muted);
+.net-body {
+  flex: 1;
+  min-width: 0;
 }
 .net-list {
   display: flex;
@@ -839,9 +896,7 @@ function formatBytes(bytes: number): string {
   align-items: center;
   flex-wrap: wrap;
   gap: 8px 12px;
-  padding: 8px 8px;
-  border-radius: 6px;
-  background: var(--bg-secondary);
+  padding: 4px 0;
   font-size: 12px;
 }
 .net-name {
@@ -862,32 +917,11 @@ function formatBytes(bytes: number): string {
   font-size: 12px;
   color: var(--text-muted);
 }
-.upload-dir-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-.upload-dir-main {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
 .upload-dir-path {
+  display: block;
   font-size: 12px;
   color: var(--text-secondary);
   word-break: break-all;
-}
-.upload-dir-source {
-  font-size: 12px;
-  color: var(--text-muted);
-}
-.upload-dir-actions {
-  display: flex;
-  gap: 8px;
-  flex-shrink: 0;
 }
 /* 检查更新 */
 .update-progress {
