@@ -371,19 +371,31 @@ function build() {
   // 配置覆盖（合并到默认配置里，不改动源文件）：版本号 + 是否产出更新签名产物
   const overrides = {}
   if (VERSION_OVERRIDE) overrides.version = VERSION_OVERRIDE
-  if (NO_SIGN) overrides.bundle = { createUpdaterArtifacts: false }
+  const bundleOverrides = {}
+  if (NO_SIGN) bundleOverrides.createUpdaterArtifacts = false
+
+  // Windows 的 MSI（WiX）不接受预发布版本号：`1.0.25-beta.4` 会报
+  // "optional pre-release identifier in app version must be numeric-only"。
+  // 用 bundle.windows.wix.version 给 MSI 单独注入纯数字 ProductVersion
+  // （beta.4 → 1.0.25.4），应用版本仍是 beta，exe 与 msi 可以一起出。
+  const windowsBuild = TARGET.includes('windows') || process.platform === 'win32'
+  const betaParts = /^(\d+)\.(\d+)\.(\d+)-beta\.(\d+)$/.exec(VERSION_OVERRIDE || '')
+  if (windowsBuild && betaParts) {
+    const msiVersion = `${betaParts[1]}.${betaParts[2]}.${betaParts[3]}.${betaParts[4]}`
+    log(`MSI ProductVersion 用纯数字 ${msiVersion}（WiX 不接受 -beta.N 后缀）`)
+    bundleOverrides.windows = { wix: { version: msiVersion } }
+  } else if (windowsBuild && (VERSION_OVERRIDE || '').includes('-')) {
+    // 不是可推导的 X.Y.Z-beta.N 形态：保持旧行为，只出 NSIS，别让 MSI 拖挂整个构建
+    log('无法推导 MSI 数字版本，本次只出 NSIS 安装包')
+    if (!process.env.TAURI_BUNDLES) args.push('--bundles', 'nsis')
+  }
+  if (Object.keys(bundleOverrides).length) {
+    overrides.bundle = { ...(overrides.bundle || {}), ...bundleOverrides }
+  }
   if (Object.keys(overrides).length) args.push('--config', JSON.stringify(overrides))
   // 可用 TAURI_BUNDLES=app 跳过 dmg（例如受限环境无法创建 dmg 时）；
   // 更新通道只需要 .app.tar.gz，不依赖 dmg。
   if (process.env.TAURI_BUNDLES) args.push('--bundles', process.env.TAURI_BUNDLES)
-  // Windows 的 MSI（WiX）不接受预发布版本号：`1.0.25-beta.1` 会报
-  // "optional pre-release identifier in app version must be numeric-only"，
-  // 把整个打包步骤拖挂。beta 通道的更新载荷是 NSIS 的 exe，MSI 只是可选手工安装包，
-  // 所以带预发布后缀时只打 nsis（显式给了 TAURI_BUNDLES 就以它为准）。
-  else if (process.platform === 'win32' && VERSION_OVERRIDE.includes('-')) {
-    log('预发布版本号不支持 MSI 打包，本次只出 NSIS 安装包')
-    args.push('--bundles', 'nsis')
-  }
   // 在非 Windows 主机上交叉编译 Windows：需要 cargo-xwin + nsis + llvm
   if (TARGET.includes('windows') && process.platform !== 'win32') {
     args.push('--runner', 'cargo-xwin')

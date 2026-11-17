@@ -504,7 +504,7 @@ TAURI_SIGNING_PRIVATE_KEY_PASSWORD=
        pnpm release:beta -- --no-publish --target aarch64-apple-darwin --dmg
        pnpm release:beta -- --no-publish --target x86_64-apple-darwin --dmg --version <base>-beta.<N>
        ```
-     - Windows 必须出 **两个安装包**：NSIS 的 `.exe`（更新载荷）与 WiX 的 `.msi`（手工安装）。MSI 依赖 WiX，必须在 Windows 主机上构建，不能交叉编译：
+     - Windows 必须出 **两个安装包**：NSIS 的 `.exe`（更新载荷）与 WiX 的 `.msi`（手工安装）。MSI 依赖 WiX，必须在 Windows 主机上构建，不能交叉编译。WiX 不接受 `1.0.25-beta.4` 这种预发布版本号，发布脚本会给 MSI 单独注入纯数字 ProductVersion（如 `1.0.25.4`），应用版本仍是 beta：
        ```bash
        pnpm release:beta -- --no-publish --version <base>-beta.<N>
        ```
