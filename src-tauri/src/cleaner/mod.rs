@@ -10,7 +10,7 @@
 //! - `registry_id` / `paths`：平台无关的字符串与路径判定。
 //!
 //! 这里只放平台无关的公共小工具与 `CleanerState`，避免平台文件互相引用；
-//! 平台代码分离规范见 README「平台代码分离」。
+//! 平台代码分离规范见 docs/development.md「平台代码分离」。
 
 pub mod installer;
 pub(crate) mod paths;

@@ -25,7 +25,7 @@ pub use windows::{detect_all, import_openconnect, remove_managed_openconnect};
 
 pub use common::{fetch_version, pick_connector, ImportedOpenconnect};
 
-// 产品只支持 macOS / Windows（README「平台与限制」）。其它目标上不要悄悄编出一份
+// 产品只支持 macOS / Windows（docs/platform.md「平台与限制」）。其它目标上不要悄悄编出一份
 // 「半套实现」：直接给出明确信息，避免像旧 detect.rs 那样在 cfg 组合里缺函数。
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 compile_error!("VPN 连接器平台层目前只实现 macOS 与 Windows");
