@@ -69,8 +69,16 @@ pub const EVENT_SNAPSHOT: &str = "lan-share://snapshot";
 pub const EVENT_SEND_PROGRESS: &str = "lan-share://send-progress";
 /// 聊天相关变化：新消息 / 已读 / 会话删除。前端收到后按需重拉会话与消息。
 pub const EVENT_CHAT: &str = "lan-share://chat";
+/// 未读总数变化：主窗口 rail 红点 / 托盘快捷面板角标共用这一份订阅。
+pub const EVENT_UNREAD: &str = "lan-share://unread";
 /// 托盘消息列表点了某条会话：主窗口切到局域网分享并定位该会话。
 pub const EVENT_OPEN_CHAT: &str = "lan-share://open-chat";
+
+/// 未读事件载荷：唯一事实源是 SQLite 里的未读列，前端不再自己求和。
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct UnreadPayload {
+    pub total: u32,
+}
 
 /// `/chat` 请求体上限与正文长度上限（防误发 / 防大报文）
 pub const MAX_CHAT_BODY: usize = 16 * 1024;
@@ -1307,8 +1315,22 @@ fn emit_chat_with_direction_opt(
             direction: direction.map(str::to_string),
         },
     );
-    // 任何会话变化（新消息 / 已读 / 删除）后刷新 Dock 角标
+    // 任何会话变化（新消息 / 已读 / 删除）后刷新 Dock 角标、托盘红点与前端未读订阅
     refresh_dock_badge(inner, app);
+    emit_unread(inner, app);
+}
+
+/// 未读总数唯一出口：DB 是事实源，前端与托盘都订阅这一次推送。
+///
+/// store 先从锁里 clone 再查询，禁止持锁做 SQLite IO。
+fn emit_unread(inner: &InnerRef, app: &AppHandle) {
+    let store = lock_inner(inner).chat.clone();
+    let Some(store) = store else {
+        return;
+    };
+    let total = store.total_unread().unwrap_or(0);
+    let _ = app.emit(EVENT_UNREAD, UnreadPayload { total });
+    crate::refresh_tray_badge(app);
 }
 
 /// 全部会话未读总数 → macOS Dock 角标；0 时清掉，失败忽略。
@@ -1687,6 +1709,13 @@ mod tests {
         assert_eq!(snapshot.port, Some(53317));
         assert!(snapshot.last_error.is_none(), "保存失败不能算启动失败");
         assert!(snapshot.warning.is_some(), "要让用户看到「设置没存住」");
+    }
+
+    #[test]
+    fn unread_payload_serializes_contract() {
+        // 前端 UnreadPayload 按 { total: number } 解包；改字段名会悄悄让红点失效
+        let json = serde_json::to_string(&UnreadPayload { total: 3 }).unwrap();
+        assert_eq!(json, r#"{"total":3}"#);
     }
 
     #[test]

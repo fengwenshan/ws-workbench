@@ -370,6 +370,91 @@ fn tray_icon_image() -> Option<tauri::image::Image<'static>> {
     tauri::image::Image::from_bytes(bytes).ok()
 }
 
+/// 在托盘图标右上角画一个未读圆点：macOS 模板图用不透明黑点（系统按菜单栏明暗反色），
+/// Windows/Linux 用红点 + 白描边。返回 None 只在图标尺寸异常时发生。
+fn tray_icon_with_badge(
+    icon: tauri::image::Image<'static>,
+    unread: bool,
+) -> Option<tauri::image::Image<'static>> {
+    if !unread {
+        return Some(icon);
+    }
+    let width = icon.width();
+    let height = icon.height();
+    let mut rgba = image::RgbaImage::from_raw(width, height, icon.rgba().to_vec())?;
+    let radius = (width.min(height) as f32 * 0.17).max(3.0);
+    let cx = width as f32 - radius - 2.0;
+    let cy = radius + 2.0;
+
+    #[cfg(target_os = "macos")]
+    let dot = image::Rgba([0, 0, 0, 255]);
+    #[cfg(not(target_os = "macos"))]
+    let dot = image::Rgba([239, 68, 68, 255]);
+
+    // 非模板平台先铺一圈白底，深色任务栏上也看得清。
+    #[cfg(not(target_os = "macos"))]
+    draw_badge_circle(&mut rgba, cx, cy, radius + 1.5, image::Rgba([255, 255, 255, 255]));
+    draw_badge_circle(&mut rgba, cx, cy, radius, dot);
+
+    Some(tauri::image::Image::new_owned(
+        rgba.into_raw(),
+        width,
+        height,
+    ))
+}
+
+/// 在 RGBA 图上画实心圆（只用于托盘小角标，不需要抗锯齿）。
+fn draw_badge_circle(
+    rgba: &mut image::RgbaImage,
+    cx: f32,
+    cy: f32,
+    radius: f32,
+    color: image::Rgba<u8>,
+) {
+    let (width, height) = rgba.dimensions();
+    let min_x = (cx - radius).floor().max(0.0) as u32;
+    let max_x = (cx + radius).ceil().min(width as f32) as u32;
+    let min_y = (cy - radius).floor().max(0.0) as u32;
+    let max_y = (cy + radius).ceil().min(height as f32) as u32;
+    for y in min_y..max_y {
+        for x in min_x..max_x {
+            let dx = x as f32 + 0.5 - cx;
+            let dy = y as f32 + 0.5 - cy;
+            if dx * dx + dy * dy <= radius * radius {
+                rgba.put_pixel(x, y, color);
+            }
+        }
+    }
+}
+
+/// 上一次推送到托盘的「有无未读」：2 = 还没设置过。
+/// 同状态重复事件（发送中状态更新等）不再 set_icon，避免菜单栏图标闪。
+static TRAY_BADGE_STATE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(2);
+
+/// 未读数变化后刷新托盘图标：有未读 → 带红点，全部已读 → 基础图标。
+///
+/// macOS 的托盘图标必须在主线程改，统一 run_on_main_thread；
+/// 读未读只 clone store，不持 LAN 锁做 SQLite IO。
+pub(crate) fn refresh_tray_badge(app: &AppHandle) {
+    let unread = app
+        .try_state::<lanshare::LanShareState>()
+        .map(|state| state.total_unread())
+        .unwrap_or(0);
+    let wanted = u8::from(unread > 0);
+    if TRAY_BADGE_STATE.swap(wanted, std::sync::atomic::Ordering::Relaxed) == wanted {
+        return;
+    }
+    let app_handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let Some(tray) = app_handle.tray_by_id("main") else {
+            return;
+        };
+        if let Some(icon) = tray_icon_image().and_then(|icon| tray_icon_with_badge(icon, unread > 0)) {
+            let _ = tray.set_icon(Some(icon));
+        }
+    });
+}
+
 // ===== 托盘自检（**只在 Windows 编入**，macOS 的托盘路径保持原样）=====
 //
 // 起因：开发版在沙箱里跑时「窗口正常、右下角没有图标」。查下来是进程被降成低完整性
@@ -1419,6 +1504,7 @@ pub fn run() {
             commands::hosts_open_file_dir,
             // 局域网分享（2026-11-13 设计）：快照 / 设置 / 发送 / 清空记录（端口常开，无启停）
             commands::lan_share_snapshot,
+            commands::lan_share_unread_total,
             commands::lan_share_set_alias,
             commands::lan_share_set_download_dir,
             commands::lan_share_respond_offer,
@@ -1579,7 +1665,12 @@ pub fn run() {
                 });
             // 自检 1/3：只在 Windows 报告一下图标字节解出来没有（报告本身是
             // `#[cfg(windows)]`，macOS 的托盘路径和以前逐字一致）。
-            let tray_icon = tray_icon_image();
+            let initial_unread = app
+                .try_state::<lanshare::LanShareState>()
+                .map(|state| state.total_unread())
+                .unwrap_or(0);
+            let tray_icon =
+                tray_icon_image().and_then(|icon| tray_icon_with_badge(icon, initial_unread > 0));
             #[cfg(target_os = "windows")]
             report_tray_startup(tray_icon.as_ref());
             if let Some(icon) = tray_icon {
@@ -1600,6 +1691,9 @@ pub fn run() {
             // macOS / Linux：保持原样，一行都不多
             #[cfg(not(target_os = "windows"))]
             tray.build(app)?;
+
+            // 托盘已建好：按历史未读再对齐一次（Windows 分支 build 在上面）
+            refresh_tray_badge(app.handle());
 
             // 主窗口兜底：前端加载失败（或首屏逻辑异常）时不会调 app_ready，
             // 这里等 8 秒强制显示，避免应用只剩托盘图标、没有任何窗口。
@@ -1735,7 +1829,10 @@ pub fn run() {
 
 #[cfg(test)]
 mod quick_panel_tests {
-    use super::{panel_origin_at, PanelPlacement, QUICK_PANEL_HEIGHT, QUICK_PANEL_WIDTH};
+    use super::{
+        panel_origin_at, tray_icon_image, tray_icon_with_badge, PanelPlacement,
+        QUICK_PANEL_HEIGHT, QUICK_PANEL_WIDTH,
+    };
 
     const MENUBAR_SCREEN: (i32, i32, i32, i32) = (0, 0, 1920, 1080);
     const PANEL: (u32, u32) = (QUICK_PANEL_WIDTH as u32, QUICK_PANEL_HEIGHT as u32);
@@ -1750,6 +1847,23 @@ mod quick_panel_tests {
         assert_eq!(crate::commands::quick_panel_take_mode(), "messages");
         crate::commands::quick_panel_set_mode("quick".into());
         assert_eq!(crate::commands::quick_panel_take_mode(), "quick");
+    }
+
+    /// 托盘未读角标：无未读原样返回，有未读在右上角写入像素且尺寸不变
+    #[test]
+    fn tray_badge_only_draws_when_unread() {
+        let base = tray_icon_image().expect("托盘图标应能解码");
+        let same = tray_icon_with_badge(tray_icon_image().expect("托盘图标应能解码"), false)
+            .expect("无未读应返回原图");
+        assert_eq!(base.rgba(), same.rgba());
+
+        let badged = tray_icon_with_badge(tray_icon_image().expect("托盘图标应能解码"), true)
+            .expect("有未读应返回带点图标");
+        assert_eq!(base.width(), badged.width());
+        assert_eq!(base.height(), badged.height());
+        assert_ne!(base.rgba(), badged.rgba(), "红点/模板点应写入像素");
+        // 点在右上角：左上角原像素不受影响
+        assert_eq!(&base.rgba()[..4], &badged.rgba()[..4]);
     }
 
     /// macOS 菜单栏图标：面板挂在图标下方，水平居中于图标

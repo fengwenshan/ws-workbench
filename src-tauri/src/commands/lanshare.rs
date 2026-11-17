@@ -18,6 +18,12 @@ pub fn lan_share_snapshot(app: AppHandle) -> Result<LanShareSnapshot, String> {
     Ok(state(&app)?.snapshot())
 }
 
+/// 未读总数（首次加载用；后续变化走 `lan-share://unread` 事件订阅）
+#[tauri::command]
+pub fn lan_share_unread_total(app: AppHandle) -> Result<u32, String> {
+    Ok(state(&app)?.total_unread())
+}
+
 /// 修改设备名（空串回退主机名）
 #[tauri::command]
 pub fn lan_share_set_alias(app: AppHandle, alias: String) -> Result<LanShareSnapshot, String> {
