@@ -1064,10 +1064,18 @@ function exportBetaWindowsMsi(platform) {
   const dir = bundleDir({ ...platform, bundleSubdir: 'msi' })
   if (!existsSync(dir)) return ''
   const product = readConf().productName
-  const file = readdirSync(dir).find(
-    (name) => name.startsWith(product) && name.endsWith('.msi')
+  // 产物目录会同时留着历史版本的 msi（beta.4、beta.7 …）。不按本次版本过滤的话，
+  // 补发时会导出上一次那个文件，gitee-sync 再按当前版本名去找就找不到，MSI 会悄悄漏发。
+  const version = readVersion()
+  const files = readdirSync(dir)
+  const file = files.find(
+    (name) =>
+      name.startsWith(product) && name.endsWith('.msi') && name.includes(`_${version}_`)
   )
-  if (!file) return ''
+  if (!file) {
+    log(`MSI 目录里没有 ${version} 的安装包，跳过导出（目录内: ${files.join(', ')}）`)
+    return ''
+  }
   copyFileSync(join(dir, file), join(OUT_DIR, file))
   return file
 }
