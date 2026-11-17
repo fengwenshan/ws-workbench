@@ -10,6 +10,7 @@ import { useConfig } from "@/composables/useConfig";
 import { usePack } from "@/composables/usePack";
 import { useUpdater } from "@/composables/useUpdater";
 import { useVpn } from "@/composables/useVpn";
+import { useLanShareUnread } from "@/composables/useLanShareUnread";
 import { useWorkbenchLayout } from "@/composables/useWorkbenchLayout";
 import { useEntitySelection } from "@/composables/useEntitySelection";
 import { useProjectForm, type CreateTab } from "@/composables/useProjectForm";
@@ -102,6 +103,9 @@ const {
 
 // VPN 与项目打包共用同一份 config.json，这里复用 useConfig 的 saveConfig 落盘
 const vpn = useVpn(config, saveConfig);
+
+// LANLink 未读红点：订阅后端 lan-share://unread（唯一事实源），不在这里遍历会话求和
+const { unread: lanUnread } = useLanShareUnread();
 
 // VPN 状态点：图标栏 VPN 图标右下角的连接指示
 const vpnDotState = computed<"off" | "on" | "busy">(() => {
@@ -872,6 +876,8 @@ async function handlePack(project: ProjectConfig, asZip: boolean = false) {
               <circle cx="18" cy="18" r="2.3" />
               <path d="M8.1 10.9l7.8-3.8M8.1 13.1l7.8 3.8" />
             </svg>
+            <!-- 有未读消息时右上角红点（不挡点击，纯展示） -->
+            <span v-if="lanUnread > 0" class="rail-unread-dot" aria-hidden="true"></span>
           </button>
         </div>
         <div class="rail-bottom">
@@ -1355,6 +1361,19 @@ async function handlePack(project: ProjectConfig, asZip: boolean = false) {
   width: 20px;
   height: 20px;
 }
+/* LANLink 未读红点：8px + 白描边，active（淡蓝底）和普通白底上都看得清；不接管点击 */
+.rail-unread-dot {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #ef4444;
+  box-shadow: 0 0 0 2px #fff;
+  pointer-events: none;
+}
+
 .rail-vpn-badge {
   position: absolute;
   right: 4px;

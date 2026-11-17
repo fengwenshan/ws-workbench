@@ -5,6 +5,7 @@ import type { UnlistenFn } from '@tauri-apps/api/event'
 import { useConfig } from '@/composables/useConfig'
 import { useVpn } from '@/composables/useVpn'
 import { useKeepAwake } from '@/composables/useKeepAwake'
+import { useLanShareUnread } from '@/composables/useLanShareUnread'
 import { isDevBuild } from '@/api/app'
 import {
   getLanShareConversations,
@@ -190,10 +191,8 @@ const messagesError = ref('')
 /** 时间基准：面板打开 / 刷新时更新，formatListTime 用它判断今天 / 昨天 */
 const messagesNow = ref(Date.now())
 
-/** 托盘红点：所有会话未读之和 */
-const unreadTotal = computed(() =>
-  conversations.value.reduce((sum, item) => sum + item.unread, 0),
-)
+/** 未读角标：走 lan-share://unread 订阅（后端唯一事实源），不再用当前窗口的会话列表求和 */
+const { unread: unreadTotal } = useLanShareUnread()
 
 let messagesSeq = 0
 let messagesTimer: ReturnType<typeof setTimeout> | null = null

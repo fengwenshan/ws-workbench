@@ -16,6 +16,8 @@ export const EVENT_SEND_PROGRESS = 'lan-share://send-progress'
 export const EVENT_CHAT = 'lan-share://chat'
 /** 从托盘消息列表点某条会话：主窗口切到 LANLink 并定位到该会话 */
 export const EVENT_OPEN_CHAT = 'lan-share://open-chat'
+/** 总未读数变化事件（聊天数据任何变化后由后端统一推送，rail / 托盘角标共用） */
+export const EVENT_UNREAD = 'lan-share://unread'
 
 /** 局域网内发现到的另一台设备 */
 export interface LanPeer {
@@ -133,6 +135,11 @@ export interface ChatEvent {
   direction?: 'in' | 'out' | null
 }
 
+/** 未读总数事件载荷：所有会话 unread 之和（后端唯一事实源） */
+export interface UnreadPayload {
+  total: number
+}
+
 /** `lan-share://open-chat` 事件 payload：托盘消息列表要定位的会话 */
 export interface OpenChatEvent {
   peer_id: string
@@ -147,6 +154,11 @@ export interface DroppedFileInput {
 /** 拉取当前快照（页面初始化 / 切回页面时刷新） */
 export function getLanShareSnapshot(): Promise<LanShareSnapshot> {
   return invoke<LanShareSnapshot>('lan_share_snapshot')
+}
+
+/** 拉取总未读数（各窗口启动时取初始值，之后靠 lan-share://unread 事件增量更新） */
+export function getLanShareUnreadTotal(): Promise<number> {
+  return invoke<number>('lan_share_unread_total')
 }
 
 /** 修改设备名（空串回退主机名），返回最新快照 */
@@ -272,4 +284,9 @@ export function onLanShareChat(handler: (event: ChatEvent) => void): Promise<Unl
 /** 订阅「托盘消息列表定位会话」事件，返回取消订阅函数 */
 export function onLanShareOpenChat(handler: (event: OpenChatEvent) => void): Promise<UnlistenFn> {
   return listen<OpenChatEvent>(EVENT_OPEN_CHAT, (event) => handler(event.payload))
+}
+
+/** 订阅总未读数变化事件，返回取消订阅函数 */
+export function onLanShareUnread(handler: (payload: UnreadPayload) => void): Promise<UnlistenFn> {
+  return listen<UnreadPayload>(EVENT_UNREAD, (event) => handler(event.payload))
 }
