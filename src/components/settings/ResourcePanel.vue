@@ -140,10 +140,7 @@ defineExpose({ recheck, rechecking: loading });
 <template>
   <section ref="root" class="card">
     <div class="card-head res-head">
-      <div>
-        <h4>资源</h4>
-        <p class="res-sub">可下载的插件与扩展；装好后重启对应宿主应用生效。</p>
-      </div>
+      <p class="res-sub">可下载的插件与扩展；装好后重启对应宿主应用生效。</p>
       <button
         type="button"
         class="btn btn-secondary res-refresh"

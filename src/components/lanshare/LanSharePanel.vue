@@ -17,6 +17,8 @@ import { useLanShareNotify } from './useLanShareNotify'
 const props = defineProps<{
   /** 当前工具页是否激活（App.vue 的 view === 'lanshare'） */
   active: boolean
+  /** 左侧设备列表是否收起（再点一次「LANLink」图标切换，和项目树 / VPN 列表一致） */
+  menuCollapsed?: boolean
 }>()
 
 const {
@@ -71,8 +73,8 @@ function toggleSettings() {
 </script>
 
 <template>
-  <div class="lan-share-chat">
-    <aside class="lan-side">
+  <div class="lan-share-chat" :class="{ 'is-collapsed': menuCollapsed }">
+    <aside v-show="!menuCollapsed" class="lan-side">
       <LanShareSidebar
         :items="mergedPeers"
         :active-id="activePeerId"
@@ -166,6 +168,13 @@ function toggleSettings() {
   gap: 4px;
   overflow: hidden;
 }
+/* 设备列表收起后不再占位，右栏自己补上和 rail 的 4px 间隙 */
+.lan-share-chat.is-collapsed {
+  gap: 0;
+}
+.lan-share-chat.is-collapsed .lan-main {
+  margin-left: 4px;
+}
 
 /* 左栏：紧贴 rail 的独立卡片，顶部贴标题栏、下留 12px，整圈 1px 边框 + 12px 四角圆角 */
 .lan-side {
@@ -190,7 +199,7 @@ function toggleSettings() {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  margin: 0 8px 8px 0;
+  margin: 0 4px 8px 0;
   border: 1px solid var(--border-color);
   border-radius: var(--radius-lg);
   background: var(--bg-primary);

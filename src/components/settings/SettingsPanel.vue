@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { Modal, Segmented, Switch } from 'ant-design-vue'
+import { Menu, Modal, Segmented, Switch } from 'ant-design-vue'
 import { getConfigPath, getStorageInfo, type StorageInfo } from '@/api/config'
 import { resolveUploadDir } from '@/api/attachments'
 import { ensureDir, getNetworkInfo, openDir, type NetworkInfo } from '@/api/system'
@@ -16,6 +16,8 @@ import { useTheme, type ThemeMode } from '@/composables/useTheme'
 import ResourcePanel from '@/components/settings/ResourcePanel.vue'
 
 const props = defineProps<{
+  /** 左侧分区导航是否收起（再点一次「设置」图标切换，和项目树 / VPN 列表一致） */
+  menuCollapsed?: boolean
   defaultUploadDir: string | null
   /** 开发者模式开关（打开 = 接收内测版更新） */
   developerMode: boolean
@@ -38,6 +40,48 @@ const themeOptions = [
 
 
 const configPath = ref('')
+
+/** 左侧分区导航当前项 */
+type SettingsSection = 'appearance' | 'update' | 'env' | 'upload' | 'resources'
+const section = ref<SettingsSection>('appearance')
+const bodyEl = ref<HTMLElement | null>(null)
+
+/** 点击左侧导航：滚到对应分区 */
+function onNavSelect(key: string): void {
+  const target = key as SettingsSection
+  section.value = target
+  const body = bodyEl.value
+  const el = body?.querySelector<HTMLElement>(`[data-section="${target}"]`)
+  if (!body || !el) return
+  body.scrollTo({ top: el.offsetTop - 16, behavior: 'smooth' })
+}
+
+/** 滚动右侧内容：左侧自动选中当前看到的分区（和文档站的目录一样） */
+function onScroll(): void {
+  const body = bodyEl.value
+  if (!body) return
+  const items = body.querySelectorAll<HTMLElement>('[data-section]')
+  if (items.length === 0) return
+  let current: SettingsSection = 'appearance'
+  // 滚到底时最后一节可能永远够不到视口顶部，直接选中它
+  if (body.scrollTop + body.clientHeight >= body.scrollHeight - 8) {
+    current = items[items.length - 1].dataset.section as SettingsSection
+  } else {
+    const probe = body.scrollTop + 40
+    items.forEach((el) => {
+      if (el.offsetTop <= probe) current = el.dataset.section as SettingsSection
+    })
+  }
+  if (current !== section.value) section.value = current
+}
+
+const navItems = [
+  { key: 'appearance', label: '外观' },
+  { key: 'update', label: '检查更新' },
+  { key: 'env', label: '运行环境' },
+  { key: 'upload', label: '附件上传' },
+  { key: 'resources', label: '资源' },
+]
 const storageInfo = ref<StorageInfo | null>(null)
 const networkInfo = ref<NetworkInfo | null>(null)
 const networkError = ref('')
@@ -149,9 +193,41 @@ async function run(action: () => Promise<unknown>, failureLabel: string) {
 // ========== 检查更新 ==========
 // 与标题栏「更新」按钮共用 useUpdater 的模块级单例状态：这里看到的进度/结果就是
 // 标题栏那一份，不存在两处各查各的。
+/** 开发者模式默认藏起来：连点「当前版本」8 下（每次间隔 < 1.2s）才显示开关 */
+const DEV_TAP_TARGET = 8
+const DEV_TAP_WINDOW_MS = 1200
+const devTapCount = ref(0)
+const devTapLastAt = ref(0)
+const devRowUnlocked = ref(false)
+/** 已经开着开发者模式就一直显示；否则要连点解锁，且离开设置页后重新隐藏 */
+const devRowVisible = computed(() => props.developerMode || devRowUnlocked.value)
+
+function onVersionTap(): void {
+  if (devRowVisible.value) return
+  const now = Date.now()
+  devTapCount.value = now - devTapLastAt.value <= DEV_TAP_WINDOW_MS ? devTapCount.value + 1 : 1
+  devTapLastAt.value = now
+  if (devTapCount.value < DEV_TAP_TARGET) return
+  devTapCount.value = 0
+  devRowUnlocked.value = true
+  message.value = '开发者模式选项已显示'
+}
+
+// 离开设置页就重新藏起来：下次进来要再连点（除非开发者模式本来开着）
+watch(
+  () => props.active,
+  (active) => {
+    if (active) return
+    devRowUnlocked.value = false
+    devTapCount.value = 0
+  },
+)
+
 /** 开启开发者模式（= 接收内测版更新）要确认一次：内测版可能有未回归的问题 */
 function handleDeveloperModeChange(checked: boolean) {
   if (!checked) {
+    devRowUnlocked.value = false
+    devTapCount.value = 0
     emit('changeDeveloperMode', false)
     return
   }
@@ -350,258 +426,340 @@ function formatBytes(bytes: number): string {
 </script>
 
 <template>
-  <div class="settings">
-    <div class="settings-head">
-      <div>
-        <h3>设置</h3>
-      </div>
-      <button class="btn btn-secondary" :disabled="refreshBusy" @click="refreshAll">
-        {{ refreshBusy ? '检测中…' : '重新检测' }}
-      </button>
-    </div>
-
-    <p v-if="message" class="toast">{{ message }}</p>
-
-    <!-- 外观：主题三档，切换即时生效（偏好加密持久化） -->
-    <section class="card">
-      <h4>外观</h4>
-      <div class="info-grid">
-        <div class="info-row">
-          <span class="info-label">主题</span>
-          <span class="info-value">
-            <Segmented
-              :value="themeMode"
-              :options="themeOptions"
-              @change="(value) => setThemeMode(value as ThemeMode)"
-            />
-          </span>
-        </div>
-      </div>
-    </section>
-
-    <!-- 检查更新：状态与标题栏「更新」按钮共用同一份（useUpdater 模块级单例） -->
-    <section class="card">
-      <div class="card-head">
-        <h4>检查更新</h4>
-      </div>
-      <div class="info-grid">
-        <div class="info-row">
-          <span class="info-label">当前版本</span>
-          <span class="info-value mono">{{ currentVersionLabel }}</span>
-          <span v-if="isPrereleaseVersion" class="channel-beta-tag">内测版</span>
-        </div>
-        <div class="info-row">
-          <span class="info-label">开发者模式</span>
-          <span class="info-value channel-value">
-            <Switch
-              :checked="developerMode"
-              :disabled="updateBusy"
-              size="small"
-              @change="(checked) => handleDeveloperModeChange(!!checked)"
-            />
-            <span>{{ developerMode ? '已开启，接收内测版更新' : '已关闭，只接收正式版' }}</span>
-          </span>
-        </div>
-        <div v-if="latestVersionLabel" class="info-row">
-          <span class="info-label">最新版本</span>
-          <span class="info-value mono update-latest">{{ latestVersionLabel }}</span>
-        </div>
-      </div>
-
-      <div
-        v-if="showProgressBar"
-        class="update-progress"
-        role="progressbar"
-        :aria-valuenow="progressPercent"
-        aria-valuemin="0"
-        aria-valuemax="100"
-      >
-        <div class="update-progress-bar" :style="{ width: progressPercent + '%' }"></div>
-      </div>
-      <p v-if="progressDetail" class="update-progress-detail">{{ progressDetail }}</p>
-      <p v-if="updateFailed" class="update-error">
-        检查或下载失败：{{ updateErrorMessage || '未知错误' }}
-      </p>
-
-      <div v-if="primaryAction" class="update-actions">
-        <button
-          class="btn btn-primary btn-xs"
-          :disabled="updaterBusy"
-          @click="handlePrimaryAction"
-        >
-          {{ primaryActionLabel }}
+  <div class="settings" :class="{ 'is-collapsed': menuCollapsed }">
+    <!-- 左栏：页头 + 分区导航，样式和项目树左栏同一套；收起后右栏自己补 4px -->
+    <aside v-show="!menuCollapsed" class="settings-menu">
+      <div class="menu-header">
+        <span class="head-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
+            <circle cx="12" cy="12" r="3" />
+          </svg>
+        </span>
+        <span class="head-title">设置</span>
+        <button class="btn btn-secondary btn-xs menu-action" :disabled="refreshBusy" @click="refreshAll">
+          {{ refreshBusy ? '检测中…' : '重新检测' }}
         </button>
       </div>
-      <p v-if="primaryAction === 'install' || primaryAction === 'retry'" class="update-hint">
-        安装时会先断开 VPN，下载完成后重启应用生效。
-      </p>
-    </section>
+      <div class="menu-body">
+        <Menu
+          class="menu-list"
+          mode="inline"
+          :items="navItems"
+          :selected-keys="[section]"
+          @select="(info) => onNavSelect(info.key as string)"
+        />
+      </div>
+    </aside>
 
-    <!-- 运行环境 -->
-    <section class="card">
-      <h4>运行环境</h4>
-      <div class="info-grid">
-        <div class="info-row">
-          <span class="info-label">操作系统</span>
-          <span class="info-value">{{ platform.label }}</span>
-        </div>
-        <div class="info-row">
-          <span class="info-label">架构</span>
-          <span class="info-value mono">{{ platform.arch || '—' }}</span>
-        </div>
-        <div class="info-row">
-          <span class="info-label">可执行文件后缀</span>
-          <span class="info-value mono">{{ platform.exe_suffix || '（无）' }}</span>
-        </div>
-        <div class="info-row">
-          <span class="info-label">VPN 需要提权</span>
-          <span class="info-value">{{ platform.vpn_needs_admin ? '是' : '否' }}</span>
-        </div>
-      </div>
-      <div class="info-row">
-        <span class="info-label">数据库</span>
-        <span class="info-value mono">{{ storageInfo?.db_path || configPath || '—' }}</span>
-      </div>
-      <div class="info-row">
-        <span class="info-label">设置文件</span>
-        <span class="info-value mono">{{ storageInfo?.settings_path || '—' }}</span>
-      </div>
-      <div v-if="storageInfo && !storageInfo.ok" class="info-row">
-        <span class="info-label">存储状态</span>
-        <span class="info-value">异常：{{ storageInfo.error }}</span>
-      </div>
-
-      <!-- 网络：按网卡列出 MAC 和该网卡的全部 IP，多 IP 逐条显示 -->
-      <div class="net-block">
-        <div class="net-head">
-          <span class="net-title">网络</span>
-          <span class="net-sub">网卡的 MAC 与全部 IP</span>
-        </div>
-        <p v-if="networkLoading && !networkInfo" class="net-empty">正在读取网络信息…</p>
-        <p v-else-if="networkError" class="net-empty">读取失败：{{ networkError }}</p>
-        <p v-else-if="!networkInfo || networkInfo.interfaces.length === 0" class="net-empty">
-          未检测到可用的网络接口
-        </p>
-        <div v-else class="net-list">
-          <div v-for="iface in networkInfo.interfaces" :key="iface.name" class="net-item">
-            <span class="net-name mono">{{ iface.name }}</span>
-            <span class="net-mac mono">{{ iface.mac ? `MAC ${iface.mac}` : '无 MAC' }}</span>
-            <span v-for="address in iface.addresses" :key="address.ip" class="net-address">
-              <span class="mono">
-                {{ address.ip }}<template v-if="address.prefix !== null">/{{ address.prefix }}</template>
+    <!-- 右栏：一张内容卡，里面是一整列可滚动的设置分区 -->
+    <section class="settings-main">
+      <div ref="bodyEl" class="settings-body" @scroll="onScroll">
+        <p v-if="message" class="toast">{{ message }}</p>
+    <div data-section="appearance" class="settings-section">
+        <h4>外观</h4>
+          <div class="info-grid">
+            <div class="info-row">
+              <span class="info-label">主题</span>
+              <span class="info-value">
+                <Segmented
+                  :value="themeMode"
+                  :options="themeOptions"
+                  @change="(value) => setThemeMode(value as ThemeMode)"
+                />
               </span>
-              <span class="tag" :class="address.family === 'IPv4' ? 'tag-ok' : 'tag-muted'">
-                {{ address.family }}
-              </span>
-            </span>
-            <span v-if="iface.addresses.length === 0" class="net-empty">暂无 IP</span>
+            </div>
           </div>
-        </div>
+    </div>
+
+    <div data-section="update" class="settings-section">
+        <h4>检查更新</h4>
+          <div class="info-grid">
+            <div class="info-row">
+              <span class="info-label">当前版本</span>
+              <span class="info-value mono version-tap" @click="onVersionTap">{{ currentVersionLabel }}</span>
+              <span v-if="isPrereleaseVersion" class="channel-beta-tag">内测版</span>
+            </div>
+            <div v-if="devRowVisible" class="info-row">
+              <span class="info-label">开发者模式</span>
+              <span class="info-value channel-value">
+                <Switch
+                  :checked="developerMode"
+                  :disabled="updateBusy"
+                  size="small"
+                  @change="(checked) => handleDeveloperModeChange(!!checked)"
+                />
+                <span>{{ developerMode ? '已开启，接收内测版更新' : '已关闭，只接收正式版' }}</span>
+              </span>
+            </div>
+            <div v-if="latestVersionLabel" class="info-row">
+              <span class="info-label">最新版本</span>
+              <span class="info-value mono update-latest">{{ latestVersionLabel }}</span>
+            </div>
+          </div>
+
+          <div
+            v-if="showProgressBar"
+            class="update-progress"
+            role="progressbar"
+            :aria-valuenow="progressPercent"
+            aria-valuemin="0"
+            aria-valuemax="100"
+          >
+            <div class="update-progress-bar" :style="{ width: progressPercent + '%' }"></div>
+          </div>
+          <p v-if="progressDetail" class="update-progress-detail">{{ progressDetail }}</p>
+          <p v-if="updateFailed" class="update-error">
+            检查或下载失败：{{ updateErrorMessage || '未知错误' }}
+          </p>
+
+          <div v-if="primaryAction" class="update-actions">
+            <button
+              class="btn btn-primary btn-xs"
+              :disabled="updaterBusy"
+              @click="handlePrimaryAction"
+            >
+              {{ primaryActionLabel }}
+            </button>
+          </div>
+          <p v-if="primaryAction === 'install' || primaryAction === 'retry'" class="update-hint">
+            安装时会先断开 VPN，下载完成后重启应用生效。
+          </p>
+    </div>
+
+    <div data-section="env" class="settings-section">
+        <h4>运行环境</h4>
+          <div class="info-grid">
+            <div class="info-row">
+              <span class="info-label">操作系统</span>
+              <span class="info-value">{{ platform.label }}</span>
+            </div>
+            <div class="info-row">
+              <span class="info-label">架构</span>
+              <span class="info-value mono">{{ platform.arch || '—' }}</span>
+            </div>
+            <div class="info-row">
+              <span class="info-label">可执行文件后缀</span>
+              <span class="info-value mono">{{ platform.exe_suffix || '（无）' }}</span>
+            </div>
+            <div class="info-row">
+              <span class="info-label">VPN 需要提权</span>
+              <span class="info-value">{{ platform.vpn_needs_admin ? '是' : '否' }}</span>
+            </div>
+          </div>
+          <div class="info-row">
+            <span class="info-label">数据库</span>
+            <span class="info-value mono">{{ storageInfo?.db_path || configPath || '—' }}</span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">设置文件</span>
+            <span class="info-value mono">{{ storageInfo?.settings_path || '—' }}</span>
+          </div>
+          <div v-if="storageInfo && !storageInfo.ok" class="info-row">
+            <span class="info-label">存储状态</span>
+            <span class="info-value">异常：{{ storageInfo.error }}</span>
+          </div>
+
+          <!-- 网络：按网卡列出 MAC 和该网卡的全部 IP，多 IP 逐条显示 -->
+          <div class="net-block">
+            <div class="net-head">
+              <span class="net-title">网络</span>
+              <span class="net-sub">网卡的 MAC 与全部 IP</span>
+            </div>
+            <p v-if="networkLoading && !networkInfo" class="net-empty">正在读取网络信息…</p>
+            <p v-else-if="networkError" class="net-empty">读取失败：{{ networkError }}</p>
+            <p v-else-if="!networkInfo || networkInfo.interfaces.length === 0" class="net-empty">
+              未检测到可用的网络接口
+            </p>
+            <div v-else class="net-list">
+              <div v-for="iface in networkInfo.interfaces" :key="iface.name" class="net-item">
+                <span class="net-name mono">{{ iface.name }}</span>
+                <span class="net-mac mono">{{ iface.mac ? `MAC ${iface.mac}` : '无 MAC' }}</span>
+                <span v-for="address in iface.addresses" :key="address.ip" class="net-address">
+                  <span class="mono">
+                    {{ address.ip }}<template v-if="address.prefix !== null">/{{ address.prefix }}</template>
+                  </span>
+                  <span class="tag" :class="address.family === 'IPv4' ? 'tag-ok' : 'tag-muted'">
+                    {{ address.family }}
+                  </span>
+                </span>
+                <span v-if="iface.addresses.length === 0" class="net-empty">暂无 IP</span>
+              </div>
+            </div>
+          </div>
+    </div>
+
+    <div data-section="upload" class="settings-section">
+        <h4>附件上传</h4>
+          <div class="upload-dir-row">
+            <div class="upload-dir-main">
+              <span class="upload-dir-path mono" :title="resolvedUploadDir">
+                {{ resolvedUploadDir || '正在解析上传目录…' }}
+              </span>
+              <span class="upload-dir-source">来源：{{ uploadDirSource }}</span>
+            </div>
+            <div class="upload-dir-actions">
+              <button
+                class="btn btn-secondary btn-xs"
+                :disabled="!resolvedUploadDir"
+                title="在文件管理器中打开该目录"
+                @click="openUploadDir"
+              >
+                打开
+              </button>
+              <button class="btn btn-secondary btn-xs" @click="changeDefaultDir">更改</button>
+              <button
+                class="btn btn-secondary btn-xs"
+                :disabled="!defaultUploadDir"
+                @click="resetDefaultDir"
+              >
+                恢复默认
+              </button>
+            </div>
+          </div>
+    </div>
+
+      <div data-section="resources" class="settings-section">
+        <h4>资源</h4>
+        <ResourcePanel ref="resourcePanel" @busy="resourceBusy = $event" />
+      </div>
       </div>
     </section>
-
-    <!-- 附件上传 -->
-    <section class="card">
-      <h4>附件上传</h4>
-      <div class="upload-dir-row">
-        <div class="upload-dir-main">
-          <span class="upload-dir-path mono" :title="resolvedUploadDir">
-            {{ resolvedUploadDir || '正在解析上传目录…' }}
-          </span>
-          <span class="upload-dir-source">来源：{{ uploadDirSource }}</span>
-        </div>
-        <div class="upload-dir-actions">
-          <button
-            class="btn btn-secondary btn-xs"
-            :disabled="!resolvedUploadDir"
-            title="在文件管理器中打开该目录"
-            @click="openUploadDir"
-          >
-            打开
-          </button>
-          <button class="btn btn-secondary btn-xs" @click="changeDefaultDir">更改</button>
-          <button
-            class="btn btn-secondary btn-xs"
-            :disabled="!defaultUploadDir"
-            @click="resetDefaultDir"
-          >
-            恢复默认
-          </button>
-        </div>
-      </div>
-    </section>
-
-    <ResourcePanel ref="resourcePanel" @busy="resourceBusy = $event" />
   </div>
 </template>
 
 <style scoped>
+/* 「设置」模块：左栏是卡片（页头 + 分区导航，和项目树同一套），右栏也是一张内容卡，里面滚动 */
 .settings {
   flex: 1;
-  overflow-y: auto;
-  padding: 16px 20px;
+  min-height: 0;
+  display: flex;
+  gap: 4px;
+  overflow: hidden;
+}
+/* 分区导航收起后不再占位，右栏自己补上和 rail 的 4px 间隙 */
+.settings.is-collapsed {
+  gap: 0;
+}
+.settings.is-collapsed .settings-main {
+  margin-left: 4px;
+}
+.settings-menu {
+  width: var(--pane-left-width);
+  flex-shrink: 0;
   display: flex;
   flex-direction: column;
-  gap: 24px;
+  margin-bottom: 8px;
+  border: 1px solid var(--border-color);
+  border-left: 0;
+  border-radius: 0 var(--radius-lg) var(--radius-lg) 0;
+  background: var(--bg-primary);
+  overflow: hidden;
 }
-.settings-head {
+.menu-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  position: relative;
-}
-/* 「重新检测」不撑高标题行：标题高度与系统页标题一致，按钮再按标题中线居中 */
-.settings-head > .btn {
-  position: absolute;
-  right: 0;
-  top: 50%;
-  transform: translateY(-50%);
-}
-.settings-head h3 {
-  font-size: 16px;
+  gap: 8px;
+  flex-shrink: 0;
+  height: var(--pane-head-height);
+  padding: 0 8px 0 20px;
   color: var(--text-primary);
-  margin-bottom: 0;
 }
-.settings-head p {
-  font-size: 12px;
-  color: var(--text-muted);
+.head-icon {
+  display: inline-flex;
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  color: var(--primary);
+}
+.head-icon svg {
+  width: 20px;
+  height: 20px;
+}
+.head-title {
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+}
+.menu-action {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+.menu-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px;
+}
+/* 导航条目对齐项目树的 .list-item：30 高、6 圆角、选中浅底 + 加粗 */
+.settings .menu-list {
+  border-inline-end: 0;
+  background: transparent;
+}
+.settings .menu-list :deep(.ant-menu-item) {
+  height: 30px;
+  line-height: 30px;
+  margin: 0 0 2px;
+  padding-inline: 12px !important;
+  border-radius: var(--radius-md);
+  font-size: 14px;
+  color: var(--text-secondary);
+}
+.settings .menu-list :deep(.ant-menu-item:hover) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.settings .menu-list :deep(.ant-menu-item-selected) {
+  background: var(--bg-active);
+  color: var(--text-active);
+  font-weight: 500;
+}
+.settings .menu-list :deep(.ant-menu-item::after) {
+  display: none;
+}
+
+/* 右栏：一张内容卡，里面一整列分区滚动 */
+.settings-main {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  margin: 0 4px 8px 0;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  background: var(--bg-primary);
+  overflow: hidden;
+}
+.settings-body {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  padding: 16px 20px 24px;
+}
+.settings-section {
+  flex-shrink: 0;
+}
+.settings-section + .settings-section {
+  margin-top: 24px;
+}
+.settings-section h4 {
+  font-size: 14px;
+  color: var(--text-primary);
+  margin-bottom: 12px;
 }
 .toast {
+  flex-shrink: 0;
+  margin-bottom: 16px;
   font-size: 12px;
   color: var(--primary);
   background: var(--primary-soft);
   border: 1px solid var(--primary-soft);
   border-radius: var(--radius-md);
   padding: 8px 12px;
-}
-.card-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 12px;
-  position: relative;
-}
-/* 标题与右侧按钮垂直居中对齐：去掉 h4 默认下外边距，避免标题偏上 */
-.card .card-head h4 {
-  margin-bottom: 0;
-}
-/* 按钮绝对定位：不撑高标题行，保证所有卡片标题的上下间距一致 */
-.card-head > .btn {
-  position: absolute;
-  right: 0;
-  top: 50%;
-  transform: translateY(-50%);
-}
-/* 设置页不再一段一块卡片：直接铺在页面上，靠标题和 24px 留白分层 */
-.card {
-  padding: 0;
-}
-.card h4 {
-  font-size: 14px;
-  color: var(--text-primary);
-  margin-bottom: 12px;
 }
 .info-grid {
   display: grid;
@@ -631,7 +789,7 @@ function formatBytes(bytes: number): string {
 }
 .tag-ok {
   color: var(--success);
-  background: rgba(16, 185, 129, 0.1);
+  background: var(--success-soft);
 }
 .tag-muted {
   color: var(--text-secondary);
@@ -758,6 +916,11 @@ function formatBytes(bytes: number): string {
   word-break: break-word;
 }
 /* 有新版本时才出现的「最新版本」：用提示色和当前版本区分开 */
+/* 隐藏入口：连点版本号 8 下才显示开发者模式开关，光标不提示可点 */
+.version-tap {
+  cursor: default;
+  user-select: none;
+}
 .update-latest {
   color: var(--warning);
   font-weight: 600;

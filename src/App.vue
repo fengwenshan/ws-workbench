@@ -129,18 +129,22 @@ const {
   treeWidth,
   treeCollapsed,
   vpnMenuCollapsed,
+  cleanerMenuCollapsed,
+  lanMenuCollapsed,
+  settingsMenuCollapsed,
   startTreeResize,
   resetTreeWidth,
   onTreeResizerKeydown,
 } = useWorkbenchLayout();
 
-// 左侧没有模块栏时（清理 / 设置 / 收起的项目树或 VPN 列表），rail 自己就是整张卡片，四角都要圆
+// 左侧没有模块栏时（收起的项目树 / VPN 列表 / 系统 / LANLink / 设置 模块栏），rail 自己就是整张卡片，四角都要圆
 const railSolo = computed(
   () =>
-    view.value === "cleaner" ||
-    view.value === "settings" ||
     (view.value === "home" && treeCollapsed.value) ||
-    (view.value === "proxy" && vpnMenuCollapsed.value),
+    (view.value === "proxy" && vpnMenuCollapsed.value) ||
+    (view.value === "cleaner" && cleanerMenuCollapsed.value) ||
+    (view.value === "lanshare" && lanMenuCollapsed.value) ||
+    (view.value === "settings" && settingsMenuCollapsed.value),
 );
 
 // Windows 使用自绘标题栏；macOS 仍用系统红绿灯，Linux 保留系统边框
@@ -869,6 +873,7 @@ async function handlePack(project: ProjectConfig, asZip: boolean = false) {
             class="rail-btn"
             :class="{ active: view === 'lanshare' }"
             :aria-current="view === 'lanshare' ? 'page' : undefined"
+            :aria-expanded="view === 'lanshare' ? !lanMenuCollapsed : undefined"
             aria-label="LANLink"
             @click="selectTool('lanshare')"
           >
@@ -886,6 +891,7 @@ async function handlePack(project: ProjectConfig, asZip: boolean = false) {
             class="rail-btn"
             :class="{ active: view === 'cleaner' }"
             :aria-current="view === 'cleaner' ? 'page' : undefined"
+            :aria-expanded="view === 'cleaner' ? !cleanerMenuCollapsed : undefined"
             aria-label="系统"
             @click="selectTool('cleaner')"
           >
@@ -900,6 +906,7 @@ async function handlePack(project: ProjectConfig, asZip: boolean = false) {
             class="rail-btn"
             :class="{ active: view === 'settings' }"
             :aria-current="view === 'settings' ? 'page' : undefined"
+            :aria-expanded="view === 'settings' ? !settingsMenuCollapsed : undefined"
             aria-label="设置"
             @click="selectTool('settings')"
           >
@@ -995,12 +1002,12 @@ async function handlePack(project: ProjectConfig, asZip: boolean = false) {
 
         <!-- 清理工具 -->
         <div v-show="view === 'cleaner'" class="workspace-body">
-          <CleanerPanel :active="view === 'cleaner'" />
+          <CleanerPanel :active="view === 'cleaner'" :menu-collapsed="cleanerMenuCollapsed" />
         </div>
 
         <!-- LANLink 工具 -->
         <div v-show="view === 'lanshare'" class="workspace-body">
-          <LanSharePanel :active="view === 'lanshare'" />
+          <LanSharePanel :active="view === 'lanshare'" :menu-collapsed="lanMenuCollapsed" />
         </div>
 
         <!-- 设置工具 -->
@@ -1008,6 +1015,7 @@ async function handlePack(project: ProjectConfig, asZip: boolean = false) {
           <SettingsPanel
             :active="view === 'settings'"
             :default-upload-dir="config.default_upload_dir"
+            :menu-collapsed="settingsMenuCollapsed"
             :developer-mode="developerMode"
             @update-default-upload-dir="handleSetDefaultUploadDir"
             @change-developer-mode="handleChangeDeveloperMode"
@@ -1311,7 +1319,7 @@ async function handlePack(project: ProjectConfig, asZip: boolean = false) {
 .rail {
   width: 56px;
   flex-shrink: 0;
-  margin: 0 0 8px 8px;
+  margin: 0 0 8px 4px;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
@@ -1461,17 +1469,17 @@ async function handlePack(project: ProjectConfig, asZip: boolean = false) {
   flex-direction: column;
   overflow: hidden;
 }
-/* 项目详情：右栏是一张独立卡片，顶部贴住标题栏，右/下留 8px，整圈 1px 边框 + 12px 圆角 */
+/* 项目详情：右栏是一张独立卡片，顶部贴住标题栏，右留 4px、下留 8px，整圈 1px 边框 + 12px 圆角 */
 .home-body {
   overflow: hidden;
-  margin: 0 8px 8px 0;
+  margin: 0 4px 8px 0;
   background: var(--bg-primary);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-lg);
 }
-/* 项目树收起后左侧没有栏了，卡片自己补上 8px 左边距 */
+/* 项目树收起后左侧没有栏了，卡片自己补上和 rail 之间的 4px 间隙 */
 .workspace.tree-collapsed .home-body {
-  margin-left: 8px;
+  margin-left: 4px;
 }
 
 /* 窄窗口：先收起项目树；卡片自己补左边距，四周间距保持不变 */
@@ -1481,7 +1489,7 @@ async function handlePack(project: ProjectConfig, asZip: boolean = false) {
     display: none !important;
   }
   .home-body {
-    margin-left: 8px;
+    margin-left: 4px;
   }
 }
 /* 软件更新按钮（标题栏内） */

@@ -840,9 +840,9 @@ watch(
   gap: 4px;
   overflow: hidden;
 }
-/* 配置列表收起后左侧没有栏了，卡片自己补上 8px 左边距 */
+/* 配置列表收起后左侧没有栏了，卡片自己补上和 rail 之间的 4px 间隙 */
 .vpn-body.is-collapsed .detail {
-  margin-left: 8px;
+  margin-left: 4px;
 }
 .profile-list {
   width: var(--pane-left-width);
@@ -1036,7 +1036,7 @@ watch(
 .detail {
   flex: 1;
   overflow-y: auto;
-  margin: 0 8px 8px 0;
+  margin: 0 4px 8px 0;
   padding: 16px 20px;
   display: flex;
   flex-direction: column;

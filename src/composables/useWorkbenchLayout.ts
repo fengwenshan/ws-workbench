@@ -29,6 +29,10 @@ export function useWorkbenchLayout() {
   const treeCollapsed = ref(false)
   /** 代理页左侧 VPN 配置列表是否收起（再次点击「代理」切换） */
   const vpnMenuCollapsed = ref(false)
+  /** 系统 / LANLink / 设置 的左侧模块栏是否收起（再次点击对应图标切换） */
+  const cleanerMenuCollapsed = ref(false)
+  const lanMenuCollapsed = ref(false)
+  const settingsMenuCollapsed = ref(false)
 
   type DragState = { kind: 'tree'; startX: number; startWidth: number }
   let drag: DragState | null = null
@@ -56,9 +60,24 @@ export function useWorkbenchLayout() {
       vpnMenuCollapsed.value = !vpnMenuCollapsed.value
       return
     }
+    if (tool === 'cleaner' && view.value === 'cleaner') {
+      cleanerMenuCollapsed.value = !cleanerMenuCollapsed.value
+      return
+    }
+    if (tool === 'lanshare' && view.value === 'lanshare') {
+      lanMenuCollapsed.value = !lanMenuCollapsed.value
+      return
+    }
+    if (tool === 'settings' && view.value === 'settings') {
+      settingsMenuCollapsed.value = !settingsMenuCollapsed.value
+      return
+    }
     view.value = tool
     if (tool === 'home' && treeCollapsed.value) setTreeCollapsed(false)
     if (tool === 'proxy') vpnMenuCollapsed.value = false
+    if (tool === 'cleaner') cleanerMenuCollapsed.value = false
+    if (tool === 'lanshare') lanMenuCollapsed.value = false
+    if (tool === 'settings') settingsMenuCollapsed.value = false
   }
 
   /**
@@ -189,6 +208,9 @@ export function useWorkbenchLayout() {
     treeWidth,
     treeCollapsed,
     vpnMenuCollapsed,
+    cleanerMenuCollapsed,
+    lanMenuCollapsed,
+    settingsMenuCollapsed,
     toggleTree,
     startTreeResize,
     resetTreeWidth,

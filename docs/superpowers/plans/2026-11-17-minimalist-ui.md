@@ -140,3 +140,15 @@
 补充（设置页去卡片）：`SettingsPanel` 的 `.card` 去掉 border / radius / background，只留 `padding: 0`，`.settings` 列间距 16 → 24；「运行环境 → 网络」子块的分隔线由虚线改实线；`.toast` 的 `rgba()` 换成 `--primary-soft`；`ResourcePanel` 的 `res-tile` 悬停去掉位移和阴影，只保留边框变品牌蓝。实测 5 个 `.card` 段落 border 0 / padding 0 / 背景透明，`.settings` gap 24px。
 
 补充（设置页去掉那根横线）：`.net-block` 去掉 `border-top` 和 `padding-top`，只留 `margin-top: 20px`，实测 border-top 0 / margin-top 20px / padding-top 0，「设置文件」和「网络」之间只剩留白。
+
+补充（左右外边距 4px + 系统模块加内容卡）：`.rail` 左外边距 8 → 4，`.home-body` / `.detail` / `.lan-main` 右外边距 8 → 4（底部仍 8），`.tree-collapsed .home-body`、`.vpn-body.is-collapsed .detail` 的补位左边距同样 4；`CleanerPanel` 的 `.cleaner` 加 `margin: 0 4px 8px 4px` + 1px 边框 + 12px 圆角 + 白底，让「系统」模块也有一张内容卡。实测 1348×780：rail 4–60、左栏 60–320、右卡 324–1344、底 772（8px）。
+
+补充（设置 / 系统页改成左侧标题导航）：`SettingsPanel` 从「5 个 `.card` 段落」改成一张内容卡 + antd `Tabs tab-position="left"`（外观 / 检查更新 / 运行环境 / 附件上传 / 资源），正文里的 h4 标题删掉、标题只留在左侧导航；`CleanerPanel` 的 tabs 同样换成 `tab-position="left"`（屏幕休眠 / Hosts / 剪贴板 / 软件卸载，Windows 多一个弹窗拦截）。两处都是：导航 168px、条目 32 高、圆角 6、选中 `--bg-active` + 品牌蓝 + 600，隐藏 ink bar 和 `nav::before`，导航右边 1px 竖线。注意 `Tabs` 竖向时根节点要 `flex-direction: row`（我们原先写死 column，会把导航挤到上面）、导航要 `height: 100%` 才让竖线通到底。实测：设置卡 64–1344 / 38–772，导航 65–233，内容 232–1343；系统页同样。
+
+补充（设置 / 系统改两栏）：左栏不再用 antd 竖向 `Tabs`，改成「一张左栏卡片 + antd `Menu mode="inline"`」，样式对齐项目树：卡宽 `--pane-left-width`、栏头 56px（20px 品牌图标 + 14/700 标题，设置页右侧放「重新检测」btn-xs）、条目 30 高/6 圆角/选中 `--bg-active`+`--text-active`+500。右栏内容**不套卡片**，直接铺在工作区背景上，`overflow-y: auto` 独立滚动；`railSolo` 里去掉 cleaner/settings，让 rail 和左栏拼成一张卡（和项目一致）。同时把「屏幕休眠」两张内层 `.sleep-card` 拆成无边框段落（间距 12 → 24），「资源」段正文里重复的 h4「资源」删掉（标题只在左栏导航）。实测 1348×780：rail 4–60、左栏卡 60–320（宽 260）、右栏 324–1344（无边框、背景透明），`.sleep-card` border 0 / 无背景。
+
+补充（右栏恢复内容卡 + 设置页滚动联动）：右栏内容重新套回一张内容卡（`.settings-main` / `.cleaner-main`：`margin: 0 4px 8px 0` + 1px 边框 + 12px 圆角 + `--bg-primary`），卡内 `.settings-body` 独立滚动。「设置」不再按分区切换页面：五个分区顺序排在一列里（每个区块带 14px/600 的 h4 标题），右侧滚动时按 `scrollTop + 40` 命中当前分区、左侧 antd Menu 自动选中（滚到底时强制选最后一节，否则最后一节永远选不上）；点导航用 `scrollTo({ top: offsetTop - 16, behavior: 'smooth' })` 滚过去。顺带修回上一轮 CSS 重写时漏掉的 `.info-grid / .info-row / .info-label / .info-value / .tag* / .mono / .btn-xs / .muted`（`.info-label` 宽度 104px、`.info-grid` 两列各 481px）。实测 1348×780：rail 4–60、左栏卡 60–320、右栏卡 324–1344/38–772（1px 边框、12 圆角、白底）。
+
+补充（模块栏再点一次收起）：`useWorkbenchLayout` 新增 `cleanerMenuCollapsed` / `lanMenuCollapsed` / `settingsMenuCollapsed`，`selectTool` 在「已经在该工具」时切换对应收起状态，切到别的工具时重置为展开（和项目树 / VPN 列表同一套语义）；`railSolo` 把这三个也纳入，收起时 rail 自己成整张卡（四角 12）。`CleanerPanel` / `SettingsPanel` / `LanSharePanel` 收 `menu-collapsed` prop：左栏 `v-show`，根节点加 `is-collapsed`（`gap: 0`），右栏内容卡 `margin-left: 4px`。实测：展开 菜单 60–320 / 内容 324–1344；收起 菜单 display:none、内容 64–1344、rail `border-radius: 12px`；切走再回来菜单恢复 60–320。
+
+补充（开发者模式改成隐藏入口）：`SettingsPanel` 里「开发者模式」行默认不渲染，`devRowVisible = props.developerMode || devRowUnlocked`；连点 `当前版本` 8 次（相邻间隔 < 1200ms，用时间戳判断，不起定时器）后 `devRowUnlocked = true` 并给一条 toast「开发者模式选项已显示」。`watch(props.active)` 在离开设置页时重置解锁态；关掉开发者模式时同时重置，这一行立刻消失。实测（浏览器预览）：默认只有「当前版本」一行 → 点 8 下出现「开发者模式」→ 打开（确认弹窗）后离开再回来仍在 → 关闭后立刻消失、再进来也没有。

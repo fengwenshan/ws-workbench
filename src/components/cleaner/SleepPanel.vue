@@ -614,17 +614,15 @@ async function handleStop(): Promise<void> {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 24px;
   padding: 12px 20px 16px;
   overflow-y: auto;
 }
 
+/* 内层不再套卡片：靠 24px 留白分段 */
 .sleep-card {
   flex-shrink: 0;
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius-md);
-  background: var(--bg-primary);
-  padding: 16px;
+  padding: 0;
 }
 
 .card-head {
