@@ -495,6 +495,23 @@ TAURI_SIGNING_PRIVATE_KEY_PASSWORD=
   `updates/beta/latest.json` 只发到 Gitee（beta 不进 GitHub、不触发 GitHub 构建）。
   Windows 的 exe/msi、Mac 的 Intel 版在各自机器上 checkout 同一个提交，用同一个
   `--version` 再跑一次，清单会按平台补齐。
+- **beta 分支发布规则（推送前必做）**：beta 分支的每次代码推送都必须对应一个可安装的 beta 发行版，不允许「只推代码、没有包」。发布前按下面清单执行：
+  1. 工作区干净、当前在 `beta` 分支；`src-tauri/tauri.conf.json` 的 `version`（base）必须大于最新正式版，beta 版本号由脚本生成为 `<base>-beta.<N>`。
+  2. 本机先验证：`cd src-tauri && cargo test`、`pnpm build`。
+  3. 推送前先打包验证产物（`--no-publish` 只构建不上传）：
+     - macOS 必须出 **两个 dmg**：Apple Silicon（`aarch64`）与 Intel（`x86_64`）。在 Apple Silicon 上两条都跑；Intel 主机先 `rustup target add aarch64-apple-darwin`。`--dmg` 额外生成 dmg，更新载荷仍是 `.app.tar.gz`；受限环境无法挂载临时卷时加 `TAURI_BUNDLES=app`。
+       ```bash
+       pnpm release:beta -- --no-publish --target aarch64-apple-darwin --dmg
+       pnpm release:beta -- --no-publish --target x86_64-apple-darwin --dmg --version <base>-beta.<N>
+       ```
+     - Windows 必须出 **两个安装包**：NSIS 的 `.exe`（更新载荷）与 WiX 的 `.msi`（手工安装）。MSI 依赖 WiX，必须在 Windows 主机上构建，不能交叉编译：
+       ```bash
+       pnpm release:beta -- --no-publish --version <base>-beta.<N>
+       ```
+  4. 推送代码到 Gitee `beta` 分支。Gitee 发行版的 tag 必须挂在这个提交上，所以**正式上传放在 push 之后**；`--no-publish` 只用于推送前确认产物能打出来。
+  5. 推送后正式发布（去掉 `--no-publish`）：macOS 用 `--target aarch64-apple-darwin --dmg` 与 `--target x86_64-apple-darwin --dmg` 各跑一次，Windows 跑一次；补平台时用同一个 `--version <base>-beta.<N>`，保证所有产物挂在同一个 Gitee 发行版上。`GITEE_TOKEN` 放 `env.local`（beta 必填）。脚本会创建 `v<base>-beta.<N>` 发行版、上传 exe / msi / dmg，并把 `updates/beta/latest.json` 合并写回 Gitee（三个平台条目按平台合并，不覆盖另一个平台）。
+  6. 完成检查：Gitee 发行版列表里能看到 `v<base>-beta.<N>`，附件包含 macOS 两个 dmg（Intel + Apple Silicon）和 Windows exe + msi；`updates/beta/latest.json` 平台条目不缺；版本号与这次推送的提交一致。
+
 - **发布正式版**：`beta` 合进 `main` 后 push。CI 的 preflight 读 `tauri.conf.json` 的版本号，
   该版本没发过才构建（并发/重复 push 不会重复发版）；发完自动打 `v<version>` tag。
   想强制重跑用 Actions 的 `workflow_dispatch` + `force`。
