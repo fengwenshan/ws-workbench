@@ -21,7 +21,8 @@ src-tauri/src/
     fs.rs          目录创建、文本读写、可写性探测
     time.rs        本地 RFC3339 / UTC 毫秒时间戳
   config.rs        配置读写：整份加密、写入目录多级回退、历史字段迁移
-  crypto.rs        字符串密文信封（SM4-CBC + HMAC-SM3）与主密钥托管
+  crypto/          字符串密文信封（SM4-CBC + HMAC-SM3）；mod.rs 只放算法与子密钥派生，
+                   macos.rs 钥匙串 / windows.rs DPAPI（密钥文件跟着数据目录走）
   filecrypto.rs    附件流式加密容器 WST1
   packer/          打包：遍历、包含规则过滤、复制、流式 ZIP；svn_platform/ 按平台定位 svn
   updates.rs       更新包断点续传下载 + minisign 校验（安装交给 updater 插件）
@@ -51,6 +52,15 @@ src-tauri/src/
     mod.rs         模块导出与数据目录名
     rule_engine.rs 规则类型 / 走向解析（纯逻辑，可离线单测）
     split.rs       规则模式：按域名分流解析 + 隧道路由注入（macOS 转发器 / Windows 主动解析）
+    local_dns/     本机 DNS 转发器监听地址，按平台拆文件（macOS 随机高位端口 / Windows 不用转发器、不占 53）
+      mod.rs       平台分派与常量再导出
+      macos.rs     绑 127.0.0.1 的随机端口，不占 53
+      windows.rs   只有说明：回环 NRPT 收不到查询，Windows 走「NRPT 直连 VPN DNS + 后台解析」
+    proxy/         系统代理检测（判断会不会绕开按域名分流），按平台拆文件
+      mod.rs       平台分派
+      common.rs    绕过列表匹配、警告文案（纯逻辑）
+      macos.rs     解析 `scutil --proxy`
+      windows.rs   读 WinINET 注册表
     win_dns.rs     Windows 专用：NRPT 规则与接口 DNS
     fulltunnel.rs  全局模式：半默认路由 + 系统 DNS 接管（带验证与回滚）
     dns_client.rs  最小 DNS 客户端：构造 A 查询、解析应答

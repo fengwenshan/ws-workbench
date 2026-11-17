@@ -54,7 +54,7 @@
 
 - 前端 / 共享层改动：`pnpm build` 绿，并按第 1 节重启后手工验证。
 - 动 Rust：`cd src-tauri && cargo test --lib` 绿。
-- 动共享层（`util/`、`process.rs`、`crypto.rs` 等）或平台文件：两个平台的 CI（`test-macos` / `test-windows`）都要绿；
+- 动共享层（`util/`、`process.rs`、`crypto/` 等）或平台文件：两个平台的 CI（`test-macos` / `test-windows`）都要绿；
   本机跑不到对面平台就依赖 CI，不要只跑一边就宣布完成。
 - 只在真机才能验证的路径：按第 7 节写 `TODO(platform-verify:…)`、按第 12 节验收，不得口头说「应该没问题」。
 - 报告结论必须带证据：跑了什么命令、结果是什么。没验证的部分明确说「未验证」。
@@ -63,7 +63,7 @@
 
 凡写入本地磁盘的数据（配置文件、`localStorage`、数据库内容、附件）必须密文存储，展示时解密。
 
-- Rust 侧：新增持久化字段必须经 `crypto::encrypt_str` / `crypto::decrypt_str`（`src-tauri/src/crypto.rs`），不得直接明文落盘。
+- Rust 侧：新增持久化字段必须经 `crypto::encrypt_str` / `crypto::decrypt_str`（`src-tauri/src/crypto/mod.rs`），不得直接明文落盘。
 - 配置：`config.json` 整份加密，信封形如 `v1.<b64(iv)>.<b64(ct)>.<b64(mac)>`（SM4-CBC + HMAC-SM3）；主密钥由 macOS 钥匙串 / Windows DPAPI 托管。
 - 数据库：`ws-workbench.db` 表里只留 `id`、`group_id`、`sort_order` 等少量明文列，每行内容序列化后加密进 `payload` 列。
 - 前端侧：读写本地键值必须经 `safeStorage` 封装（`src/composables/safeStorage.ts`），不得直接调用 `localStorage`。
@@ -111,8 +111,8 @@
 - 平台文件只在对应 target 编译；CI 的 `test-macos` / `test-windows` 两个 job 是硬护栏，新增平台代码必须两边都绿。
 - 只改一个平台的文件时不应触碰另一个平台文件；改共享层必须同时跑两个平台的测试。
 - 跨平台行为差异写在注释或设计文档里，不要在代码里用「如果是 Windows 再……」打补丁。
-- 已拆完的范本：`cleaner/installer_macos/`、`cleaner/installer_windows/`、`cleaner/running/`、`cleaner/trash_guard/`、`cleaner/sleep/`、`hosts/file/`、`clipboard/`、`storage/`、`packer/svn_platform/`。
-- 存量未拆清单见 [docs/development.md](docs/development.md)「平台代码分离」（`vpn/split.rs`、`vpn/route.rs`、`vpn/fulltunnel.rs`、`vpn/elevate.rs`、`vpn/worker.rs`、`vpn/credential.rs`、`vpn/script.rs`、`commands/openwith.rs`、`crypto.rs`、`apps/finder.rs`、`process.rs` / `winps.rs`、`lib.rs` 的窗口/托盘/菜单、`cleaner/popup.rs`）。**下一次修改这些模块时必须按本规范拆分**，禁止在共享文件里继续新增平台分支。
+- 已拆完的范本：`cleaner/installer_macos/`、`cleaner/installer_windows/`、`cleaner/running/`、`cleaner/trash_guard/`、`cleaner/sleep/`、`hosts/file/`、`clipboard/`、`storage/`、`crypto/`、`packer/svn_platform/`、`vpn/local_dns/`、`vpn/proxy/`。
+- 存量未拆清单见 [docs/development.md](docs/development.md)「平台代码分离」（`vpn/split.rs`、`vpn/route.rs`、`vpn/fulltunnel.rs`、`vpn/elevate.rs`、`vpn/worker.rs`、`vpn/credential.rs`、`vpn/script.rs`、`commands/openwith.rs`、`apps/finder.rs`、`process.rs` / `winps.rs`、`lib.rs` 的窗口/托盘/菜单、`cleaner/popup.rs`）。**下一次修改这些模块时必须按本规范拆分**，禁止在共享文件里继续新增平台分支。
 
 ### 当前平台验证不了的代码：TODO 标记
 

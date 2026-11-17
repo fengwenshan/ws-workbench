@@ -148,6 +148,8 @@ export interface VpnStatus {
   snapshot: NetworkSnapshot | null
   /** 服务端下发的内网范围：只展示，不参与分流（老版本 status.json 可能没有） */
   server_scope?: ServerScope
+  /** 布线后需要用户处理的提示（例如系统代理会绕开按域名分流） */
+  warnings?: string[]
   error: string
   pid: number
   started_at: string

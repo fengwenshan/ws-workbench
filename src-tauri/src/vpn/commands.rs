@@ -222,12 +222,20 @@ fn owner_label(owner: &crate::vpn::session::SessionOwner) -> String {
 }
 
 /// 当前这条连接归谁：`owner.json` 只在连接存在期间存在，断开时由 worker 删掉。
+///
+/// 记录里的进程已经消失（崩溃 / 被强杀 / 开发版自动重启）时返回 `None`：这条连接
+/// 已经没有人在持有，界面不能显示成「由另一个窗口连接」，否则按钮永远按不动 ——
+/// 实际动作走的是 [`ensure_can_control`]，那种情况本来就放行，两边判断必须一致。
 pub fn session_owner_view(session: &VpnSession) -> Option<SessionOwnerView> {
     let owner = session.read_owner()?;
+    let mine = owner.pid == std::process::id();
+    if !mine && !is_process_alive(owner.pid) {
+        return None;
+    }
     Some(SessionOwnerView {
         pid: owner.pid,
         name: owner_label(&owner),
-        mine: owner.pid == std::process::id(),
+        mine,
     })
 }
 
@@ -576,9 +584,14 @@ fn validate_rule_set(rules: &[VpnRule], default_policy: &str) -> Result<(), Stri
     Ok(())
 }
 
-/// 会话是否处于「有活动连接」状态
+/// 会话是否处于「有活动连接」状态。
+///
+/// 不能只看 `status.json` 的 `phase`：worker 被强杀 / 开发版自动重启之后，那份
+/// 文件会停在「已连接」上，于是新连接被「已有活动连接」挡回去，而界面上根本没有
+/// 可断开的连接 —— 用户只能手动删会话文件。这里按 pid 复查一次存活，与
+/// [`status_after_liveness`] 用同一套判定。
 fn session_is_active(session: &VpnSession) -> bool {
-    let status = session.read_status().unwrap_or_default();
+    let status = status_after_liveness(session);
     !matches!(status.phase, VpnPhase::Disconnected | VpnPhase::Failed)
 }
 
@@ -1109,6 +1122,55 @@ pub struct VpnSnapshotPayload {
     pub owner: Option<SessionOwnerView>,
 }
 
+/// 把「上次连接的主进程已经不在」的状态改判成未连接，交给界面之前处理。
+///
+/// worker 被强杀、开发版自动重启、整机重启之后，`status.json` 会停在上一次的
+/// 「已连接」上。界面照抄这份状态就是「显示已连接、实际没连、按钮还按不动」，
+/// 用户唯一能做的操作是去删会话文件。判定依据是 `owner.json` 里那个**主进程**
+/// 的 pid：它和我们同一个用户、同一个完整性级别，存活判断可靠；而 `status.pid`
+/// 是提权 worker，从低完整性的开发版里 `tasklist` 看不到它，拿它判活会把正在
+/// 建立的隧道误判成断线（现场踩过）。
+fn status_after_liveness(session: &VpnSession) -> VpnStatus {
+    let status = session.read_status().unwrap_or_default();
+    normalize_stale_status(
+        status,
+        session.read_owner(),
+        std::process::id(),
+        is_process_alive,
+    )
+}
+
+/// [`status_after_liveness`] 的纯判定版本：归属与存活判断都注入，单测不碰进程表。
+///
+/// - 连接记录里的主进程还活着（或者就是我们自己）：`status.json` 可信；
+/// - 记录里的主进程没了：上一次连接的残留，改判成未连接；
+/// - 没有归属记录：不动。过渡态（`preparing` / `elevating`）也可能还没写 owner，
+///   这种情况宁可显示「连接中」，也不能把正在进行的连接判成断线。
+fn normalize_stale_status(
+    status: VpnStatus,
+    owner: Option<crate::vpn::session::SessionOwner>,
+    mine: u32,
+    alive: impl Fn(u32) -> bool,
+) -> VpnStatus {
+    if matches!(status.phase, VpnPhase::Disconnected | VpnPhase::Failed) {
+        return status;
+    }
+    let stale = match owner {
+        Some(owner) => owner.pid != mine && !alive(owner.pid),
+        None => false,
+    };
+    if !stale {
+        return status;
+    }
+    VpnStatus {
+        phase: VpnPhase::Disconnected,
+        message: "上次连接已中断（后台进程不在了），可以直接重新连接".to_string(),
+        routes: Vec::new(),
+        warnings: Vec::new(),
+        ..status
+    }
+}
+
 #[tauri::command]
 pub fn vpn_get_snapshot(state: State<'_, VpnState>) -> VpnSnapshotPayload {
     let runtime = match state.0.lock() {
@@ -1122,7 +1184,7 @@ pub fn vpn_get_snapshot(state: State<'_, VpnState>) -> VpnSnapshotPayload {
             }
         }
     };
-    let status = runtime.session.read_status().unwrap_or_default();
+    let status = status_after_liveness(&runtime.session);
     let policy_profile_id = runtime
         .policy_profile_id
         .clone()
@@ -1529,6 +1591,77 @@ mod tests {
         assert!(check_control(&session, 200, |_| true).is_ok());
         // 归属视图跟着走：本进程开的 mine = true
         assert!(session_owner_view(&session).unwrap().mine == (200 == std::process::id()));
+    }
+
+    #[test]
+    fn dead_owner_leaves_no_readonly_view() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = VpnSession::new(dir.path().to_path_buf());
+        // 记录里的进程已经不在了（崩溃 / 被强杀 / 开发版自动重启）：界面不该显示
+        // 「由另一个窗口连接」，否则按钮永远按不动，而动作本身是放行的。
+        session
+            .write_owner(&crate::vpn::session::SessionOwner {
+                pid: 4_294_967_294,
+                name: "ws-workbench".to_string(),
+            })
+            .unwrap();
+        assert!(session_owner_view(&session).is_none());
+    }
+
+    #[test]
+    fn stale_status_only_when_the_owner_process_is_gone() {
+        let some = |pid: u32| crate::vpn::session::SessionOwner {
+            pid,
+            name: "ws-workbench".to_string(),
+        };
+        let connecting = VpnStatus {
+            phase: VpnPhase::Connecting,
+            pid: 8884,
+            message: "正在建立隧道".to_string(),
+            ..Default::default()
+        };
+        // 归属进程还活着（另一个窗口正在连）：状态原样交给界面
+        let kept =
+            normalize_stale_status(connecting.clone(), Some(some(2222)), 1111, |pid| pid == 2222);
+        assert_eq!(kept.phase, VpnPhase::Connecting);
+        // 归属进程就是自己：同样原样
+        let mine = normalize_stale_status(connecting.clone(), Some(some(1111)), 1111, |_| false);
+        assert_eq!(mine.phase, VpnPhase::Connecting);
+        // 归属进程没了（崩溃 / 开发版自动重启）：不能停在「已连接」
+        let dead = VpnStatus {
+            phase: VpnPhase::Connected,
+            pid: 8884,
+            message: "已连接".to_string(),
+            warnings: vec!["系统代理…".to_string()],
+            ..Default::default()
+        };
+        let fixed = normalize_stale_status(dead, Some(some(2222)), 1111, |_| false);
+        assert_eq!(fixed.phase, VpnPhase::Disconnected);
+        assert!(fixed.routes.is_empty(), "残留路由要清掉");
+        assert!(fixed.warnings.is_empty(), "旧连接的提示要清掉");
+        assert!(fixed.message.contains("重新连接"), "要告诉用户可以直接重连");
+        // 没有归属记录：不动。过渡态可能还没写 owner，不能把进行中的连接判成断线
+        let preparing = VpnStatus {
+            phase: VpnPhase::Preparing,
+            pid: 0,
+            message: "准备中".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            normalize_stale_status(preparing, None, 1111, |_| false).phase,
+            VpnPhase::Preparing
+        );
+        // 本来就是未连接：一个字都不改
+        let idle = VpnStatus {
+            phase: VpnPhase::Disconnected,
+            pid: 0,
+            message: "当前未连接".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            normalize_stale_status(idle, Some(some(2222)), 1111, |_| false).message,
+            "当前未连接"
+        );
     }
 
     #[test]

@@ -46,9 +46,12 @@ Windows 与 macOS 的实现必须拆开写，禁止在共享文件里用 `cfg` �
 - hosts：`hosts/file/`（共享读取与提权编排、`scripts.rs` 纯脚本文本生成；`macos.rs` osascript 提权、`windows.rs` UAC PowerShell 提权）；
 - 剪贴板：`clipboard/`（共享采集编排 / 快捷键 / 面板门面；`macos.rs` NSPasteboard + NSWorkspace，`windows.rs` Win32 剪贴板与焦点）；
 - 数据目录：`storage/`（共享迁移逻辑，`macos.rs` / `windows.rs` 只列旧目录候选）；
-- 项目打包：`packer/svn_platform/`（svn 候选路径与 Windows `\\?\` 前缀处理各一份）。
+- 主密钥托管：`crypto/`（`mod.rs` 只放信封算法与子密钥派生，`macos.rs` 钥匙串、`windows.rs` DPAPI + 密钥文件跟数据目录走）；
+- 项目打包：`packer/svn_platform/`（svn 候选路径与 Windows `\\?\` 前缀处理各一份）；
+- VPN 本机 DNS 落点：`vpn/local_dns/`（`macos.rs` 绑随机高位端口；Windows 不用转发器、不占 53，`windows.rs` 只记录原因）；
+- VPN 系统代理检测：`vpn/proxy/`（`common.rs` 放绕过列表匹配与警告文案，`macos.rs` 解析 `scutil --proxy`、`windows.rs` 读 WinINET 注册表）。
 
-门面分派（`cleaner/installer.rs`、`cleaner/related.rs`、`commands/cleaner*.rs`、`uninstall_info.rs` 里只影响门面/窗口装饰/脚本落盘的零散 `cfg`）属于允许写法。还没拆的共享文件（下一批按本规范处理）：`vpn/split.rs`、`vpn/route.rs`、`vpn/fulltunnel.rs`、`vpn/elevate.rs`、`vpn/worker.rs`、`vpn/credential.rs`、`vpn/script.rs`（`vpn/platform/` 只覆盖连接器探测那一块）、`commands/openwith.rs`、`crypto.rs`（钥匙串 / DPAPI）、`apps/finder.rs`、`process.rs` / `winps.rs`、`lib.rs` 的窗口/托盘/菜单、`cleaner/popup.rs`；`platform.rs` 本身是平台判定入口，不算。Windows 实机验收项已用 `TODO(platform-verify:windows)` 标注，发版前用 `grep -rn "TODO(platform-verify" src-tauri/src src-tauri/nsis src-tauri/resources` 清点（NSIS 钩子和 PowerShell 资源里的 TODO 不在 Rust 目录，别漏）。
+门面分派（`cleaner/installer.rs`、`cleaner/related.rs`、`commands/cleaner*.rs`、`uninstall_info.rs` 里只影响门面/窗口装饰/脚本落盘的零散 `cfg`）属于允许写法。还没拆的共享文件（下一批按本规范处理）：`vpn/split.rs`、`vpn/route.rs`、`vpn/fulltunnel.rs`、`vpn/elevate.rs`、`vpn/worker.rs`、`vpn/credential.rs`、`vpn/script.rs`（`vpn/platform/` 只覆盖连接器探测那一块）、`commands/openwith.rs`、`apps/finder.rs`、`process.rs` / `winps.rs`、`lib.rs` 的窗口/托盘/菜单、`cleaner/popup.rs`；`platform.rs` 本身是平台判定入口，不算。Windows 实机验收项已用 `TODO(platform-verify:windows)` 标注，发版前用 `grep -rn "TODO(platform-verify" src-tauri/src src-tauri/nsis src-tauri/resources` 清点（NSIS 钩子和 PowerShell 资源里的 TODO 不在 Rust 目录，别漏）。
 
 ### 消息订阅与状态同步
 

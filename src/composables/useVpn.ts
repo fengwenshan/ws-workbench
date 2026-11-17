@@ -447,18 +447,37 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
       created_at: now,
       updated_at: now,
     }
-    config.value.vpn_profiles.push(profile)
+    // 先乐观显示、再落盘；写盘失败必须整体退回去 —— 否则列表里会留下一条
+    // 根本没存下的配置，重启后凭空消失，用户只看到「创建成功但弹窗不关」。
+    const previousProfiles = config.value.vpn_profiles
+    const previousActive = config.value.vpn_active_profile_id
+    const previousSelected = selectedProfileId.value
+    config.value.vpn_profiles = [...previousProfiles, profile]
     config.value.vpn_active_profile_id = profile.id
     selectedProfileId.value = profile.id
-    await saveConfig()
+    try {
+      await saveConfig()
+    } catch (err) {
+      config.value.vpn_profiles = previousProfiles
+      config.value.vpn_active_profile_id = previousActive
+      selectedProfileId.value = previousSelected
+      throw err
+    }
     return profile
   }
 
   async function updateProfile(id: string, patch: Partial<VpnProfile>) {
     const profile = profiles.value.find((p) => p.id === id)
     if (!profile) return
+    const previous = { ...profile }
     Object.assign(profile, patch, { updated_at: nowIso() })
-    await saveConfig()
+    try {
+      await saveConfig()
+    } catch (err) {
+      // 同 addProfile：存不下就把界面上的改动退回去
+      Object.assign(profile, previous)
+      throw err
+    }
   }
 
   async function deleteProfile(id: string) {
@@ -469,14 +488,25 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
     if (isConnected.value && status.value.profile_id === id) {
       throw new Error('这份配置正在连接中，先断开再删除')
     }
-    config.value.vpn_profiles = profiles.value.filter((p) => p.id !== id)
+    const previousProfiles = config.value.vpn_profiles
+    const previousActive = config.value.vpn_active_profile_id
+    const previousSelected = selectedProfileId.value
+    const remaining = profiles.value.filter((p) => p.id !== id)
+    config.value.vpn_profiles = remaining
     if (config.value.vpn_active_profile_id === id) {
-      config.value.vpn_active_profile_id = config.value.vpn_profiles[0]?.id ?? ''
+      config.value.vpn_active_profile_id = remaining[0]?.id ?? ''
     }
     if (selectedProfileId.value === id) {
-      selectedProfileId.value = config.value.vpn_profiles[0]?.id ?? ''
+      selectedProfileId.value = remaining[0]?.id ?? ''
     }
-    await saveConfig()
+    try {
+      await saveConfig()
+    } catch (err) {
+      config.value.vpn_profiles = previousProfiles
+      config.value.vpn_active_profile_id = previousActive
+      selectedProfileId.value = previousSelected
+      throw err
+    }
   }
 
   /**

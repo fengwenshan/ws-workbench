@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { Modal } from 'ant-design-vue'
+import { message, Modal } from 'ant-design-vue'
 import type { VpnApi } from '@/composables/useVpn'
 import type {
   NewVpnProfileInput,
@@ -95,6 +95,24 @@ const deleteBlockedReason = computed(() => {
   }
   return ''
 })
+
+// ============================ 布线提示 ============================
+
+/**
+ * worker 布线时算出来的提示（目前是「系统代理会绕开按域名分流」）。
+ *
+ * 关闭只对这次连接有效：换隧道后重新出现，避免旧提示一直挂着。
+ */
+const warningsDismissed = ref(false)
+const warnings = computed(() => vpn.status.warnings ?? [])
+const warningText = computed(() => warnings.value.join('；'))
+const showWarnings = computed(() => warnings.value.length > 0 && !warningsDismissed.value)
+watch(
+  () => vpn.status.conn_identity,
+  () => {
+    warningsDismissed.value = false
+  },
+)
 
 const connectLabel = computed(() => {
   if (readonlyOwner.value) return '由另一个窗口连接'
@@ -383,7 +401,10 @@ async function handleProfileSubmit(input: NewVpnProfileInput) {
     profileDialogOpen.value = false
     editingProfile.value = null
   } catch (err: any) {
+    // 写盘失败（例如数据目录不可用）时弹窗留在原地，表单内容不丢；
+    // 但光留弹窗等于静默失败 —— 列表里刚冒出来的那条也要退回去，再明确报错。
     vpn.pushLog('error', `${isEdit ? '更新' : '新建'} VPN 配置失败: ${err}`)
+    message.error(`${isEdit ? '保存' : '创建'} VPN 配置失败：${err}`)
   } finally {
     savingProfile.value = false
   }
@@ -396,12 +417,14 @@ function askDelete(profile: VpnProfile) {
 async function confirmDeleteProfile() {
   if (!confirmDelete.value) return
   const target = confirmDelete.value
+  const name = target.name
   confirmDelete.value = null
   try {
     await vpn.deleteProfile(target.id)
   } catch (err: any) {
     const text = err instanceof Error ? err.message : String(err)
-    vpn.pushLog('error', `删除 VPN 配置失败: ${text}`)
+    // 删除也要落盘，失败时配置还在，必须说清楚而不是静默留在列表里
+    vpn.pushLog('error', `删除 VPN 配置「${name}」失败: ${text}`)
     Modal.error({ title: '删除配置失败', content: text })
   }
 }
@@ -583,6 +606,19 @@ watch(
               VPN 正由「{{ readonlyOwner.name }}」连接，这个窗口只能看状态；
               断开、切换配置、改规则请到那个窗口操作。
             </span>
+          </div>
+
+          <!-- 布线时后端算出来的提示：系统代理会把按域名分流绕过去（现场踩过） -->
+          <div v-if="showWarnings" class="warn-banner" role="status">
+            <span class="warn-banner-text">{{ warningText }}</span>
+            <button
+              type="button"
+              class="warn-banner-close"
+              aria-label="关闭提示"
+              @click="warningsDismissed = true"
+            >
+              ×
+            </button>
           </div>
 
           <!-- 只有 Linux 还允许手动指定 openconnect 才显示位置：macOS / Windows 都用安装包内置副本，
@@ -1095,6 +1131,34 @@ watch(
   border-radius: 50%;
   background: var(--warning);
   flex-shrink: 0;
+}
+/* 布线提示：系统代理会绕开按域名分流时出现，可关闭，只对本次连接有效 */
+.warn-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 12px;
+  border-left: 2px solid var(--warning);
+  border-radius: var(--radius-md);
+  background: var(--warning-soft);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--warning-text);
+}
+.warn-banner-text {
+  flex: 1;
+  min-width: 0;
+  word-break: break-word;
+}
+.warn-banner-close {
+  flex-shrink: 0;
+  padding: 0 2px;
+  border: none;
+  background: none;
+  color: inherit;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
 }
 /* 手动指定的 openconnect 位置：长期显示，路径再长也要能一眼看全 */
 .connector-location {

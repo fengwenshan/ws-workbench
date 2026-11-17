@@ -353,6 +353,9 @@ pub struct VpnStatus {
     /// 服务端下发的内网范围：只展示，不自动生效
     #[serde(default)]
     pub server_scope: ServerScope,
+    /// 布线后需要用户处理的提示（例如系统代理会绕开按域名分流）
+    #[serde(default)]
+    pub warnings: Vec<String>,
     /// 失败原因
     #[serde(default)]
     pub error: String,
@@ -385,6 +388,7 @@ impl Default for VpnStatus {
             routes: Vec::new(),
             snapshot: None,
             server_scope: ServerScope::default(),
+            warnings: Vec::new(),
             error: String::new(),
             pid: 0,
             started_at: String::new(),

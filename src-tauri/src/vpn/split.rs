@@ -11,7 +11,7 @@
 //! | 步骤 | macOS | Windows |
 //! | --- | --- | --- |
 //! | 命中域名的解析交给本机转发器 | 写 `/etc/resolver/<域名>`（`nameserver 127.0.0.1` + `port <随机高位端口>`） | NRPT 规则指向 `127.0.0.1:53` |
-//! | 本机转发器把查询交给 VPN DNS | loopback 随机高位端口的转发器（不占 53，避开 Clash/dnsmasq） | `127.0.0.1:53` 转发器（NRPT 只能写 IP） |
+//! | 本机转发器把查询交给 VPN DNS | loopback 随机高位端口的转发器（**不占 53**，避开 Clash/dnsmasq） | `127.0.0.1:53` 转发器；53 被占就不绑、直接回退（**不抢**） |
 //! | 解析出来的内网 IP 进隧道 | 转发器在应答前注入 `/32` 路由 | 同左 |
 //! | `直连` 例外 | 转发器按查询名判 [`SplitPlan::tunnels`]，例外不注入 `/32` | 同左；回退路径的系统缓存扫描同一判定 |
 //!
@@ -27,6 +27,10 @@
 //! 如果本机 53 端口被占用，或 NRPT 指向 loopback 后没有查询进来，会退回原来的
 //! 「NRPT 直连 VPN DNS + 后台主动解析」路径，并在 worker.log 里写明原因。
 //!
+//! 转发器的落点在 `super::local_dns`：Windows 用 `127.0.0.1:53`（被占就让路）
+//! （把 `127.0.0.1:53` 留给 Clash/dnsmasq 这类同样要 53 的服务），macOS 直接
+//! 绑随机高位端口、不碰 53。
+//!
 //! 代价（必须让用户知道）：
 //! - `DOMAIN-KEYWORD` / `PROCESS-NAME` / `DST-PORT` 没有数据面可用，做不到；
 //! - 域名只覆盖「系统解析器（getaddrinfo）」这条路：自带 DoH/DoT 的应用不受控；
@@ -35,7 +39,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(any(target_os = "macos", test))]
+use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
@@ -47,22 +53,23 @@ use super::route;
 use super::rule_engine::{Policy, RuleKind};
 use super::session::VpnSession;
 
-/// 本机 DNS 转发器监听地址（Windows）。
+/// 本机 DNS 转发器的监听地址按平台分（见 `super::local_dns`）：
 ///
-/// Windows 的 NRPT 只能写一个 IP、不能写端口，所以转发器只能钉在 53 上；
-/// 端口被别的 DNS 服务占用时回退到「后台主动解析」。
+/// - Windows 的 NRPT 只能写一个 IP、不能写端口，所以转发器必须落在 53 上；
+///   而 Windows DNS Client 只把 `127.0.0.1` 当本机解析器（换成 `127.0.0.2` 能绑上、
+///   查询却不进来），所以只能绑 `127.0.0.1:53`。端口被 Clash/dnsmasq 占住时
+///   **不抢**：不绑转发器，直接回退到「NRPT 直连 VPN DNS + 后台主动解析」。
+/// - macOS 用 `/etc/resolver` 的 `port` 关键字，转发器直接绑随机高位端口，
+///   完全不碰 53。
+/// macOS 转发器监听的主机（写日志用；端口在绑定时确定）。
+#[cfg(target_os = "macos")]
+const FORWARDER_HOST: &str = super::local_dns::HOST;
+/// macOS 的 /etc/resolver 指向的固定 loopback 地址。
 ///
-/// macOS 不用这个常量：`/etc/resolver` 支持 `port` 关键字，转发器绑 loopback
-/// 的随机高位端口再写进 resolver 文件，彻底避开 53 被 Clash/dnsmasq 等占用
-/// （现场就撞过 `绑定 127.0.0.1:53 失败：Address already in use`）。
-#[cfg(target_os = "windows")]
-pub const FORWARDER_ADDR: &str = "127.0.0.1:53";
-/// macOS 转发器监听的 loopback 地址（端口随机分配，写进 `/etc/resolver`）。
+/// 与端口无关、与当前构建目标无关：写出来的文件在 macOS 上读取，
+/// 单测在其它平台跑也要拿到同一个字符串。
 #[cfg(any(target_os = "macos", test))]
-const FORWARDER_HOST: &str = "127.0.0.1";
-/// NRPT 指向本机转发器时使用的地址。
-#[cfg(target_os = "windows")]
-const LOCAL_DNS_SERVER: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 1);
+const RESOLVER_HOST: &str = "127.0.0.1";
 /// `/etc/resolver` 目录（macOS 的按域名分流解析配置目录）
 #[cfg(target_os = "macos")]
 pub const RESOLVER_DIR: &str = "/etc/resolver";
@@ -70,10 +77,10 @@ pub const RESOLVER_DIR: &str = "/etc/resolver";
 #[cfg(target_os = "macos")]
 pub const MANIFEST_FILE: &str = "resolver-manifest.txt";
 /// 单次上游查询的超时
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", test))]
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(2);
 /// 转发线程的收包粒度：只为了让 stop 标志能及时生效
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", test))]
 const POLL_TIMEOUT: Duration = Duration::from_millis(500);
 /// Windows：单次主动解析的超时。内网 DNS 正常是毫秒级，1.5s 足够，
 /// 也避免一条不通的上游把整轮解析拖到十几秒。
@@ -92,12 +99,6 @@ const CACHE_POLL_INTERVAL: Duration = Duration::from_secs(3);
 /// Windows：每扫几次缓存做一轮字面域名的主动解析（15 秒 / 3 秒 = 5）
 #[cfg(target_os = "windows")]
 const CACHE_ROUNDS_PER_RESOLVE: u64 = 5;
-/// Windows：确认「NRPT → 127.0.0.1:53」真的把查询送进来要等多久。
-///
-/// 1.5 秒在实机上偏紧：刚写完 NRPT 规则时 DNS Client 还要刷新策略表，
-/// 太短会把「只是慢一点」误判成「loopback 不通」。
-#[cfg(target_os = "windows")]
-const PROBE_TIMEOUT: Duration = Duration::from_millis(2500);
 /// Windows：一轮解析最多等多久（域名多、并发线程多时兜底）
 #[cfg(target_os = "windows")]
 const RESOLVE_ROUND_DEADLINE: Duration = Duration::from_secs(5);
@@ -745,20 +746,20 @@ pub struct SplitTunnel {
     /// Windows：NRPT 不可用时退回了「只给隧道网卡配 DNS」
     #[cfg(target_os = "windows")]
     adapter_dns_fallback: bool,
-    /// Windows：NRPT 是否指向本机 127.0.0.1:53 转发器
-    #[cfg(target_os = "windows")]
-    local_dns_proxy: bool,
     /// Windows / macOS：上次检查「绕过规则的已有连接」的时间（见 `guard`）
     #[cfg(any(target_os = "windows", target_os = "macos"))]
     last_bypass_check: Option<Instant>,
     /// Windows / macOS：已经报过的 `pid:远端地址`，同一条连接不重复刷日志
     #[cfg(any(target_os = "windows", target_os = "macos"))]
     bypass_reported: std::collections::BTreeSet<String>,
-    /// 本机转发器收到的查询数：Windows 用来确认 NRPT→loopback 是否真的通了
+    /// 本机转发器收到的查询数（仅 macOS 转发线程写，诊断用）
+    #[cfg(target_os = "macos")]
     dns_queries: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,
     /// macOS 的 DNS 转发线程 / Windows 的主动解析线程
     thread: Option<std::thread::JoinHandle<()>>,
+    /// 布线后检测到的、需要用户处理的警告（系统代理会绕开按域名分流等）
+    warnings: Vec<String>,
 }
 
 impl SplitTunnel {
@@ -831,14 +832,15 @@ impl SplitTunnel {
             #[cfg(target_os = "windows")]
             adapter_dns_fallback: false,
             #[cfg(target_os = "windows")]
-            local_dns_proxy: false,
             #[cfg(any(target_os = "windows", target_os = "macos"))]
             last_bypass_check: None,
             #[cfg(any(target_os = "windows", target_os = "macos"))]
             bypass_reported: std::collections::BTreeSet::new(),
+            #[cfg(target_os = "macos")]
             dns_queries: Arc::new(AtomicUsize::new(0)),
             stop: Arc::new(AtomicBool::new(false)),
             thread: None,
+            warnings: Vec::new(),
         };
 
         if let Err(e) = me.install_routes(&ip_plan.tunnel, &ip_plan.direct, session, snapshot) {
@@ -865,9 +867,33 @@ impl SplitTunnel {
                 me.teardown();
                 return Err(e);
             }
+            me.check_system_proxy(session);
         }
         flush_dns_cache();
         Ok(me)
+    }
+
+    /// 检测系统代理会不会绕开按域名分流（只在有域名规则时有意义）。
+    ///
+    /// 只提示、不改用户的代理设置：NRPT / `/etc/resolver` 只作用于系统解析器；
+    /// 浏览器把请求交给本机 HTTP 代理后，解析发生在代理内部，我们管不到。
+    /// 现场踩过「按 IP 能开、按域名打不开」，根因就是代理用公网 DNS 解析内网域名。
+    fn check_system_proxy(&mut self, session: &VpnSession) {
+        let state = super::proxy::detect();
+        if let Some(warning) = super::proxy::warning_for(&self.domains, &state) {
+            session.append_log(&format!("[分流] {}", warning));
+            self.warnings.push(warning);
+        } else if state.enabled {
+            session.append_log(&format!(
+                "[分流] 系统代理 {} 已开启，规则里的域名都在绕过列表里，按域名分流不受影响",
+                state.label()
+            ));
+        }
+    }
+
+    /// 本次布线产生的、需要在界面上提示用户的警告（系统代理等）。
+    pub fn warnings(&self) -> Vec<String> {
+        self.warnings.clone()
     }
 
     fn tun_index(&self) -> u32 {
@@ -1068,7 +1094,7 @@ impl SplitTunnel {
         Ok(())
     }
 
-    /// 起 DNS 分流线程：macOS 是 127.0.0.1:53 的转发器；Windows 优先也是同一个
+    /// 起 DNS 分流线程：macOS 是随机高位端口的转发器；Windows 优先用本机转发器
     /// 转发器（NRPT 指过来），只有转发器不可用时才退回后台主动解析线程。
     fn start_resolver(&mut self, session: &VpnSession) -> Result<(), String> {
         #[cfg(target_os = "macos")]
@@ -1077,12 +1103,7 @@ impl SplitTunnel {
         }
         #[cfg(target_os = "windows")]
         {
-            if self.local_dns_proxy {
-                // 转发线程已经在 install_windows_resolver 里起来了
-                Ok(())
-            } else {
-                self.start_resolve_thread(session)
-            }
+            self.start_resolve_thread(session)
         }
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
@@ -1093,24 +1114,14 @@ impl SplitTunnel {
 
     /// 绑定本机转发器并起转发线程（macOS）。
     ///
-    /// 优先绑 53（兼容性最好）；被占用时改绑 loopback 的随机高位端口 ——
-    /// 现场常见 Clash/dnsmasq/AdGuard 占着 53，占住就「只建隧道、不接管流量」。
-    /// `/etc/resolver` 支持 `port` 关键字，所以端口可以随便挑，绑定之后把实际
-    /// 端口写进 resolver 文件即可。
+    /// 直接绑 loopback 的**随机高位端口**，不碰 53：现场 Clash/dnsmasq/AdGuard
+    /// 经常占着 53，我们先起来就等于把它们挤掉。`/etc/resolver` 支持 `port`
+    /// 关键字，端口可以随便挑，绑定之后把实际端口写进 resolver 文件即可。
     #[cfg(target_os = "macos")]
     fn start_forwarder(&mut self, session: &VpnSession) -> Result<(), String> {
-        let (socket, fallback_from_53) = match UdpSocket::bind((FORWARDER_HOST, 53)) {
-            Ok(socket) => (socket, None),
-            Err(e53) => {
-                let socket = UdpSocket::bind((FORWARDER_HOST, 0)).map_err(|e| {
-                    format!(
-                        "绑定 {}:53 失败（{}），改绑随机端口也失败：{}（本机 DNS 转发器起不来）",
-                        FORWARDER_HOST, e53, e
-                    )
-                })?;
-                (socket, Some(e53))
-            }
-        };
+        let bind = super::local_dns::BIND_ADDR;
+        let socket = UdpSocket::bind(bind)
+            .map_err(|e| format!("绑定本机转发器 {} 失败：{}（本机 DNS 转发器起不来）", bind, e))?;
         self.forwarder_port = socket
             .local_addr()
             .map_err(|e| format!("读取本机转发器端口失败：{}", e))?
@@ -1119,23 +1130,15 @@ impl SplitTunnel {
             .set_read_timeout(Some(POLL_TIMEOUT))
             .map_err(|e| e.to_string())?;
         self.write_resolver_files()?;
-        if let Some(e53) = fallback_from_53 {
-            session.append_log(&format!(
-                "[分流] {}:53 被占用（{}），本机转发器改绑 {}:{}，\
-                 /etc/resolver 用 port 字段指过去（不再和别的 DNS 服务抢 53）",
-                FORWARDER_HOST, e53, FORWARDER_HOST, self.forwarder_port
-            ));
-        } else {
-            session.append_log(&format!(
-                "[分流] 本机转发器监听 {}:{}，上游 VPN DNS {:?}",
-                FORWARDER_HOST, self.forwarder_port, self.vpn_dns
-            ));
-        }
+        session.append_log(&format!(
+            "[分流] 本机转发器监听 {}:{}（随机高位端口，不占 53），上游 VPN DNS {:?}",
+            FORWARDER_HOST, self.forwarder_port, self.vpn_dns
+        ));
         self.spawn_forwarder(socket, session)
     }
 
-    /// 起转发线程（macOS / Windows 共用）。
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    /// 起转发线程（仅 macOS：Windows 不用本机转发器，见 local_dns/windows.rs）。
+    #[cfg(target_os = "macos")]
     fn spawn_forwarder(&mut self, socket: UdpSocket, session: &VpnSession) -> Result<(), String> {
         let upstreams: Vec<SocketAddrV4> = self
             .vpn_dns
@@ -1175,77 +1178,28 @@ impl SplitTunnel {
         Ok(())
     }
 
-    /// Windows：优先把 NRPT 指向本机 127.0.0.1:53 转发器，失败再退回旧路径。
+    /// Windows：NRPT 直接指向 VPN DNS，不用本机转发器（也不占 53）。
     ///
-    /// 这是 Windows 上和 macOS 对齐的关键：NRPT 只负责把命中域名的查询交给
-    /// 本机转发器；转发器拿到 VPN DNS 的应答后，先按 A 记录装 `/32` 路由，
-    /// 再把应答交回 DNS Client。这样 `DOMAIN-SUFFIX` 的任意子域都能在
-    /// 「应用拿到地址之前」完成路由注入。
+    /// 原设计是「NRPT 指向本机转发器 → 转发器按应答装 `/32` → 再回包」，这样
+    /// `DOMAIN-SUFFIX` 的任意子域都能在应用拿到地址之前完成布线。实测这条路在
+    /// Windows 上走不通：NRPT 写 `127.0.0.1` / `127.0.0.2` 都能写进去，但 DNS
+    /// Client 不会把查询送到回环地址（两次实机探针各 2.5 秒零查询），只能回退。
+    /// 既然后者必然退化，不如一开始就不绑 53：Clash / dnsmasq / AdGuard 继续
+    /// 用着它们的 53，`-vpn` 也不会在连接瞬间和它们抢端口。
+    ///
+    /// 代价是子域路由依赖「扫系统 DNS 缓存 + 主动解析」补齐，首个请求可能失败一次
+    /// （日志与 `docs/features.md` 都写明了）。
     #[cfg(target_os = "windows")]
     fn install_windows_resolver(&mut self, session: &VpnSession) -> Result<(), String> {
-        match self.start_windows_local_proxy(session) {
-            Ok(()) => {
-                match super::win_dns::apply_namespace_rules(&self.domains, &[LOCAL_DNS_SERVER]) {
-                    Ok(count) if count > 0 => {
-                        self.nrpt_installed = true;
-                        self.local_dns_proxy = true;
-                        flush_dns_cache();
-                        if self.local_proxy_receives_queries() {
-                            session.append_log(&format!(
-                                "[分流] NRPT 已写好 {} 条规则（域名 + 前导点子域后缀），\
-                                 查询交给本机转发器 {}；按应答注入内网 /32 路由\
-                                 （DOMAIN-SUFFIX 覆盖任意子域）",
-                                count, FORWARDER_ADDR
-                            ));
-                            return Ok(());
-                        }
-                        // NRPT 写成功了，但系统没有把（子域）查询送进 loopback：
-                        // 不能假装成功，先说明白再回退。
-                        session.append_log(&format!(
-                            "[分流] NRPT 已指向 {}，但 {}ms 内没有查询进入本机转发器；\
-                             回退到「NRPT 直连 VPN DNS + 后台解析」",
-                            FORWARDER_ADDR,
-                            PROBE_TIMEOUT.as_millis()
-                        ));
-                        // 把系统实际存下来的命名空间打进日志：带前导点的才覆盖子域，
-                        // 现场能据此判断是「规则没点」还是「loopback 不通」。
-                        if let Ok(namespaces) = super::win_dns::installed_namespaces() {
-                            session.append_log(&format!(
-                                "[分流] 当前 NRPT 命名空间：{:?}（只有带前导点的才匹配子域）",
-                                namespaces
-                            ));
-                        }
-                        let _ = super::win_dns::remove_all_rules();
-                        self.nrpt_installed = false;
-                        self.stop_local_forwarder();
-                    }
-                    Ok(_) => {
-                        session.append_log(
-                            "[分流] NRPT 规则一条都没写进去（域名与子域后缀都被系统拒绝）；\
-                             回退到「NRPT 直连 VPN DNS + 后台解析」",
-                        );
-                        self.stop_local_forwarder();
-                    }
-                    Err(e) => {
-                        session.append_log(&format!(
-                            "[分流] 本机 DNS 转发器已启动，但 NRPT 指向 {} 失败：{}；回退到旧路径",
-                            FORWARDER_ADDR, e
-                        ));
-                        self.stop_local_forwarder();
-                    }
-                }
-            }
-            Err(e) => {
-                session.append_log(&format!(
-                    "[分流] 本机 DNS 转发器不可用：{}；回退到「NRPT 直连 VPN DNS + 后台解析」",
-                    e
-                ));
-            }
-        }
+        session.append_log(
+            "[分流] 不用本机转发器：Windows DNS Client 不把指向回环地址的 NRPT 查询送出来\
+             （实测 127.0.0.1 / 127.0.0.2 都收不到），也不占用 53 端口；\
+             改走「NRPT 直连 VPN DNS + 后台解析」",
+        );
 
-        // 旧路径：NRPT 直接指向 VPN DNS 时，用户态看不到子域查询，只能靠后台
-        // 主动解析 + 扫系统 DNS 缓存补齐子域路由；这是保底，不再是首选。
-        match super::win_dns::apply_namespace_rules(&self.domains, &self.vpn_dns) {
+        // NRPT 直接指向 VPN DNS：用户态看不到子域查询，只能靠后台主动解析 +
+        // 扫系统 DNS 缓存补齐子域路由。
+        match self.apply_nrpt(session, &self.vpn_dns.clone()) {
             Ok(count) if count > 0 => {
                 self.nrpt_installed = true;
                 session.append_log(&format!(
@@ -1294,74 +1248,41 @@ impl SplitTunnel {
         }
     }
 
-    /// Windows：绑定 127.0.0.1:53 并起转发线程。失败时不会留下半启动状态。
-    #[cfg(target_os = "windows")]
-    fn start_windows_local_proxy(&mut self, session: &VpnSession) -> Result<(), String> {
-        let socket = UdpSocket::bind(FORWARDER_ADDR).map_err(|e| {
-            format!(
-                "绑定 {} 失败：{}（端口被其它 DNS 服务占用？）",
-                FORWARDER_ADDR, e
-            )
-        })?;
-        socket
-            .set_read_timeout(Some(POLL_TIMEOUT))
-            .map_err(|e| e.to_string())?;
-        self.spawn_forwarder(socket, session)?;
-        self.local_dns_proxy = true;
-        session.append_log(&format!(
-            "[分流] 本机 DNS 转发器已监听 {}，上游 VPN DNS {:?}",
-            FORWARDER_ADDR, self.vpn_dns
-        ));
-        Ok(())
-    }
-
-    /// 停掉本机转发线程，并把 stop 标志复位，方便回退路径再起主动解析线程。
-    #[cfg(target_os = "windows")]
-    fn stop_local_forwarder(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        if let Some(handle) = self.thread.take() {
-            let _ = handle.join();
-        }
-        self.stop = Arc::new(AtomicBool::new(false));
-        self.local_dns_proxy = false;
-    }
-
-    /// 用一条随机子域查询确认「NRPT -> 127.0.0.1:53」真的能把**子域**查询送进来。
+    /// 写 NRPT（命名空间与服务器都没变就跳过重写），写完校验，缺失时重写一次。
     ///
-    /// 只看 NRPT 写成功不够，两个原因：
-    /// 1. 带前导点的后缀命名空间可能被系统拒绝（只剩精确规则，子域根本不会进来）；
-    /// 2. Windows 对 loopback DNS 的支持在不同版本/策略下不一致。
-    /// 探针用的是 `随机子域.域名`，只有后缀规则生效才会命中；没查询进来就回退，
-    /// 而不是让用户以为子域分流已经生效。
+    /// 每次连接都「删光再写」会让 DNS 客户端在删除与新增之间读到半张策略表；
+    /// 现场系统日志出现过 `Name resolution policy table has been corrupted`。
+    /// 这里只在规则真的变了时才重写，并把系统实际存下来的值记进日志。
+    ///
+    /// 判等必须带 `NameServers`：服务端换过 DNS、或上次写的是另一组服务器时，
+    /// 命名空间一样但服务器不一样；只看命名空间会跳过重写，NRPT 还指着旧地址。
     #[cfg(target_os = "windows")]
-    fn local_proxy_receives_queries(&self) -> bool {
-        let before = self.dns_queries.load(Ordering::Relaxed);
-        let Some(domain) = self.domains.first() else {
-            return false;
-        };
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let probe = format!("ws-probe-{}-{}.{}", std::process::id(), stamp, domain);
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            use std::net::ToSocketAddrs;
-            let _ = (probe.as_str(), 443u16).to_socket_addrs();
-            let _ = tx.send(());
-        });
-        let _ = rx.recv_timeout(PROBE_TIMEOUT);
-        self.dns_queries.load(Ordering::Relaxed) > before
-    }
-
-    /// 当前 NRPT 应该指向谁：本机转发器，或退回时的 VPN DNS。
-    #[cfg(target_os = "windows")]
-    fn nrpt_servers(&self) -> Vec<Ipv4Addr> {
-        if self.local_dns_proxy {
-            vec![LOCAL_DNS_SERVER]
-        } else {
-            self.vpn_dns.clone()
+    fn apply_nrpt(&mut self, session: &VpnSession, servers: &[Ipv4Addr]) -> Result<usize, String> {
+        let wanted: Vec<(String, Vec<Ipv4Addr>)> = super::win_dns::desired_namespaces(&self.domains)
+            .into_iter()
+            .map(|namespace| (namespace, servers.to_vec()))
+            .collect();
+        let installed = super::win_dns::installed_rules().unwrap_or_default();
+        if super::win_dns::rules_cover(&wanted, &installed) {
+            session.append_log(&format!(
+                "[分流] NRPT 规则未变（{} 条，指向 {:?}），跳过重写",
+                wanted.len(),
+                servers
+            ));
+            return Ok(wanted.len());
         }
+        let mut count = super::win_dns::apply_namespace_rules(&self.domains, servers)?;
+        if count > 0 {
+            let after = super::win_dns::installed_rules().unwrap_or_default();
+            if !super::win_dns::rules_cover(&wanted, &after) {
+                session.append_log(&format!(
+                    "[分流] NRPT 写完后规则不完整（现有 {:?}），重写一次",
+                    after
+                ));
+                count = super::win_dns::apply_namespace_rules(&self.domains, servers)?;
+            }
+        }
+        Ok(count)
     }
 
     /// 起后台解析线程（Windows，回退路径）。
@@ -1566,7 +1487,7 @@ impl SplitTunnel {
                     if missing {
                         let _ = super::win_dns::apply_namespace_rules(
                             &self.domains,
-                            &self.nrpt_servers(),
+                            &self.vpn_dns.clone(),
                         );
                     }
                 }
@@ -1863,7 +1784,7 @@ impl SplitTunnel {
 /// 不必和系统里别的 DNS 服务抢 53。
 #[cfg(any(target_os = "macos", test))]
 pub fn resolver_file_content(port: u16) -> String {
-    format!("nameserver {}\nport {}\n", FORWARDER_HOST, port)
+    format!("nameserver {}\nport {}\n", RESOLVER_HOST, port)
 }
 
 /// 这个 resolver 文件是不是我们写的（只认「nameserver loopback」+ 可选的 `port` 行）。
@@ -1877,7 +1798,7 @@ fn is_our_resolver_content(content: &str) -> bool {
     let Some(nameserver) = lines.next() else {
         return false;
     };
-    if nameserver != format!("nameserver {}", FORWARDER_HOST) {
+    if nameserver != format!("nameserver {}", RESOLVER_HOST) {
         return false;
     }
     // 没有后续行（旧格式）或只有 port 行（新格式）都算我们的
@@ -1947,7 +1868,7 @@ pub fn cleanup_stale(session: &VpnSession) {
 ///
 /// 单独拧出来是因为 `forward_loop` 原来有 8 个位置参数，调用点很难看出哪个是
 /// 域名清单、哪个是动态路由集合；收成一个结构体后，线程闭包里只搬一份。
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", test))]
 struct ForwarderCtx {
     upstreams: Vec<SocketAddrV4>,
     tun_dev: String,
@@ -1964,9 +1885,9 @@ struct ForwarderCtx {
     session: VpnSession,
 }
 
-/// 转发线程主体（macOS / Windows）：收本机 DNS Client 的查询 -> 经隧道问 VPN DNS
+/// 转发线程主体（仅 macOS）：收本机 resolver 送来的查询 -> 经隧道问 VPN DNS
 /// -> 注入路由 -> 回包。
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", test))]
 fn forward_loop(socket: UdpSocket, ctx: ForwarderCtx) {
     // 收包超时自己设一遍：调用方忘了设的话，`recv_from` 会一直阻塞，
     // stop 标志检查不到，teardown 里的 join 就永远回不来。
@@ -2023,9 +1944,9 @@ fn forward_loop(socket: UdpSocket, ctx: ForwarderCtx) {
 
 /// 把应答里的 A 记录注入隧道（已注入过的不重复装；macOS / Windows）。
 ///
-/// Windows 必须在 DNS 应答回给应用之前装好路由；多 A 记录时逐条起 PowerShell
-/// 会把回包拖到 DNS Client 超时，所以先把新地址攒起来，一条 PowerShell 批量装。
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+/// 必须在 DNS 应答回给应用之前装好路由；多 A 记录时逐条起子进程会把回包拖到
+/// 客户端超时，所以先把新地址攒起来，一条命令批量装。
+#[cfg(any(target_os = "macos", test))]
 fn install_dynamic_routes(packet: &[u8], ctx: &ForwarderCtx) {
     let ForwarderCtx {
         tun_dev,

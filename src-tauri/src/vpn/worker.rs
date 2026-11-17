@@ -822,6 +822,7 @@ Get-Service -Name Dnscache | Format-List Status,StartType
                 ));
                 split.spawn_self_check(self.session.clone());
                 self.status.routes = split.routes_for_status();
+                self.status.warnings = split.warnings();
                 self.split = Some(split);
                 Ok(())
             }
@@ -878,6 +879,7 @@ Get-Service -Name Dnscache | Format-List Status,StartType
                     full.dns_servers()
                 ));
                 self.status.routes = full.routes_for_status();
+                self.status.warnings.clear();
                 self.full = Some(full);
                 Ok(())
             }
@@ -912,6 +914,7 @@ Get-Service -Name Dnscache | Format-List Status,StartType
         }
         self.degraded_reason = None;
         self.status.routes.clear();
+        self.status.warnings.clear();
         self.applied_mode = target;
         self.status.applied_mode = target.as_str().to_string();
         let result = match target {
@@ -941,6 +944,7 @@ Get-Service -Name Dnscache | Format-List Status,StartType
         }
         self.degraded_reason = None;
         self.status.routes.clear();
+        self.status.warnings.clear();
         if let Err(e) = self.start_split_rules() {
             self.log(&format!("[分流] 重新下发分流失败：{}", e));
         }
@@ -1004,6 +1008,7 @@ Get-Service -Name Dnscache | Format-List Status,StartType
             self.log("[清理] 路由注入分流已回收（解析器配置、隧道路由、后台解析线程）");
         }
         self.status.routes.clear();
+        self.status.warnings.clear();
         // 脚本给 VPN 服务器加的防环主机路由不在这份记录里，SIGKILL 停止时脚本的
         // disconnect 分支不会执行，它会一直残留并可能让下次连接选源失败，这里一并清掉。
         for ip in std::mem::take(&mut self.vpn_server_ips) {

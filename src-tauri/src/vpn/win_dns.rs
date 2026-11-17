@@ -197,16 +197,100 @@ pub fn display_name_to_domain(display_name: &str) -> Option<String> {
     Some(domain)
 }
 
+/// 我们期望在 NRPT 里看到的命名空间集合（每个域名两条：子域后缀 + 精确）。
+///
+/// 与 [`build_apply_script`] 写入的顺序一致；`namespaces_cover` 不关心顺序。
+pub fn desired_namespaces(domains: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for domain in domains {
+        out.push(suffix_namespace(domain));
+        out.push(domain.clone());
+    }
+    out
+}
+
+/// `wanted` 是否都已经在 `installed` 里（大小写不敏感）。
+///
+/// 用途：连接时命名空间没变就跳过「删光再写」，减少 DNS 客户端读到半张策略表
+/// 的窗口（现场系统日志出现过 `Name resolution policy table has been corrupted`）。
+pub fn namespaces_cover(wanted: &[String], installed: &[String]) -> bool {
+    !wanted.is_empty()
+        && wanted
+            .iter()
+            .all(|want| installed.iter().any(|have| have.eq_ignore_ascii_case(want)))
+}
+
 /// 列出当前生效的、属于我们的**原始命名空间**（带前导点会原样保留）。
 ///
 /// 只用于现场诊断：用它能一眼确认系统到底存了 `.example.com` 还是把点吞掉了。
-pub fn installed_namespaces() -> Result<Vec<String>, String> {
-    let text = winps::run(&build_namespace_script())?;
+pub fn installed_namespaces() -> Result<Vec<String>, String> {    let text = winps::run(&build_namespace_script())?;
     let value = winps::parse_json(&text)?;
     Ok(winps::json_array(value)
         .into_iter()
         .filter_map(|item| item.as_str().map(str::to_string))
         .collect())
+}
+
+/// 列出当前生效的、属于我们的规则，含每条规则的 `NameServers`。
+///
+/// 只比命名空间不够：上一次连接走的是「回退路径」时，规则会把域名交给 VPN DNS；
+/// 这次如果 53 空闲、能起自己的转发器，命名空间没变但**服务器变了**，
+/// 按命名空间判等会跳过重写，NRPT 就还指着 VPN DNS，而日志却说交给我们了。
+pub fn installed_rules() -> Result<Vec<(String, Vec<Ipv4Addr>)>, String> {
+    let text = winps::run(&build_rules_script())?;
+    let value = winps::parse_json(&text)?;
+    Ok(winps::json_array(value)
+        .into_iter()
+        .filter_map(|item| {
+            let namespace = item.get("ns")?.as_str()?.trim().to_string();
+            if namespace.is_empty() {
+                return None;
+            }
+            let servers = item
+                .get("servers")
+                .and_then(|servers| servers.as_array())
+                .map(|servers| {
+                    servers
+                        .iter()
+                        .filter_map(|server| server.as_str())
+                        .filter_map(|server| server.trim().parse::<Ipv4Addr>().ok())
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some((namespace, servers))
+        })
+        .collect())
+}
+
+/// 生成「列出我们自己的规则 + Namespace + NameServers」的脚本，输出 JSON 数组。
+fn build_rules_script() -> String {
+    format!(
+        "$rules = @(Get-DnsClientNrptRule -ErrorAction SilentlyContinue | \
+         Where-Object {{ $_.DisplayName -like '{}*' }} | ForEach-Object {{ \
+           [pscustomobject]@{{ ns = [string]$_.Namespace; \
+             servers = @($_.NameServers | ForEach-Object {{ [string]$_ }}) }} }}); \
+         ConvertTo-Json -InputObject $rules -Compress",
+        RULE_PREFIX
+    )
+}
+
+/// `wanted` 里的每条「命名空间 + 服务器」是否都已在系统里生效。
+///
+/// 命名空间按大小写不敏感比较，服务器按集合比较（顺序无关，`127.0.0.1` 与
+/// `::1` 这类不同协议栈的写法不会混进来）。
+pub fn rules_cover(wanted: &[(String, Vec<Ipv4Addr>)], installed: &[(String, Vec<Ipv4Addr>)]) -> bool {
+    if wanted.is_empty() {
+        return false;
+    }
+    wanted.iter().all(|(want_ns, want_servers)| {
+        installed
+            .iter()
+            .find(|(have_ns, _)| have_ns.eq_ignore_ascii_case(want_ns))
+            .map(|(_, have_servers)| {
+                want_servers.iter().all(|want| have_servers.contains(want))
+            })
+            .unwrap_or(false)
+    })
 }
 
 /// 生成「列出我们自己的规则的 Namespace」的脚本，输出 JSON 数组。
@@ -364,6 +448,55 @@ mod tests {
         assert_eq!(parse_added_count("WARNING: 某条规则被跳过\n3\n"), 3);
         assert_eq!(parse_added_count(""), 0);
         assert_eq!(parse_added_count("no digits here"), 0);
+    }
+
+    #[test]
+    fn desired_namespaces_has_two_rules_per_domain() {
+        let wanted = desired_namespaces(&["risencn.com".to_string(), "corp.example".to_string()]);
+        assert_eq!(
+            wanted,
+            vec![
+                ".risencn.com".to_string(),
+                "risencn.com".to_string(),
+                ".corp.example".to_string(),
+                "corp.example".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn namespaces_cover_requires_every_rule() {
+        let wanted = vec![".risencn.com".to_string(), "risencn.com".to_string()];
+        let both = vec![".risencn.com".to_string(), "risencn.com".to_string()];
+        // 大小写不敏感：系统存下来的值不一定和我们写的一致
+        let upper = vec![".RISENCN.COM".to_string(), "Risencn.com".to_string()];
+        let missing_exact = vec![".risencn.com".to_string()];
+        assert!(namespaces_cover(&wanted, &both));
+        assert!(namespaces_cover(&wanted, &upper));
+        assert!(!namespaces_cover(&wanted, &missing_exact));
+        assert!(!namespaces_cover(&[], &both));
+    }
+
+    #[test]
+    fn rules_cover_also_checks_servers() {
+        let forwarder = Ipv4Addr::new(127, 0, 0, 1);
+        let vpn_dns = Ipv4Addr::new(223, 5, 5, 5);
+        let wanted = vec![
+            (".risencn.com".to_string(), vec![forwarder]),
+            ("risencn.com".to_string(), vec![forwarder]),
+        ];
+        // 命名空间一样、服务器也一样：可以跳过重写
+        assert!(rules_cover(&wanted, &wanted.clone()));
+        // 上次走回退路径留下的规则指向 VPN DNS：不能算「已生效」
+        let stale = vec![
+            (".risencn.com".to_string(), vec![vpn_dns]),
+            ("risencn.com".to_string(), vec![vpn_dns]),
+        ];
+        assert!(!rules_cover(&wanted, &stale));
+        // 缺一条后缀规则
+        let half = vec![("risencn.com".to_string(), vec![forwarder])];
+        assert!(!rules_cover(&wanted, &half));
+        assert!(!rules_cover(&[], &wanted));
     }
 
     #[test]
