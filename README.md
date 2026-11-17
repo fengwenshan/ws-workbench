@@ -340,6 +340,33 @@ Windows 与 macOS 的实现必须拆开写，禁止在共享文件里用 `cfg` �
 
 门面分派（`cleaner/installer.rs`、`cleaner/related.rs`、`commands/cleaner*.rs`、`uninstall_info.rs` 里只影响门面/窗口装饰/脚本落盘的零散 `cfg`）属于允许写法。还没拆的共享文件（下一批按本规范处理）：`vpn/split.rs`、`vpn/route.rs`、`vpn/fulltunnel.rs`、`vpn/elevate.rs`、`vpn/worker.rs`、`vpn/credential.rs`、`vpn/script.rs`（`vpn/platform/` 只覆盖连接器探测那一块）、`commands/openwith.rs`、`crypto.rs`（钥匙串 / DPAPI）、`apps/finder.rs`、`process.rs` / `winps.rs`、`lib.rs` 的窗口/托盘/菜单、`cleaner/popup.rs`；`platform.rs` 本身是平台判定入口，不算。Windows 实机验收项已用 `TODO(platform-verify:windows)` 标注，发版前用 `grep -rn "TODO(platform-verify" src-tauri/src src-tauri/nsis src-tauri/resources` 清点（NSIS 钩子和 PowerShell 资源里的 TODO 不在 Rust 目录，别漏）。
 
+### 消息订阅与状态同步
+
+后端状态和前端动作要分开：**状态用订阅，动作用命令**。不要把所有交互都做成事件，也不要每个组件各自轮询、各自求和。判断标准是「这份状态是否需要长期、跨组件地跟着后端变化」，不是「能不能用事件」。
+
+| 场景 | 做法 |
+| --- | --- |
+| 同一状态被多个窗口/多个组件长期展示（未读数、VPN 连接状态、传输进度、peer 在线列表、托盘角标） | 订阅后端事件 |
+| 状态由后台线程/另一个窗口改变，前端无法从本地操作推导（收到消息、定时探测、传输完成） | 订阅后端事件 |
+| 打开下拉框、详情页首屏、表单草稿等只在当前组件生命周期内用一次的数据 | 调 command 取，不用事件 |
+| 模态框、选中项、校验提示等纯前端临时 UI 状态 | 组件内 `ref`，不用事件 |
+| 能由已有状态推导的值（例如「未读总数」） | 只维护一份源状态，其余 computed；不要为派生值再发事件 |
+| 需要返回值/错误/超时/重试的动作（发送、删除、保存） | command；事件只做「发生了变化」的通知，不当 RPC |
+| 高频或大 payload 的数据 | 事件只带 id/计数/进度，正文让前端按需拉；聊天事件只带 `peer_id/kind/direction` 就是按这条做的 |
+
+实现要求：
+
+- **单一事实源在后端**（SQLite / 运行时状态）。一个状态只维护一份，禁止各组件遍历列表自己求和；反例是 QuickPanel 以前用 `conversations.reduce(...)` 算未读，现在统一订阅 `lan-share://unread`。
+- **事件命名**用 `域://事件`，与命令名一起写进设计文档；payload 用 serde 结构、前后端字段名对齐，并加序列化单测锁契约（参考 `UnreadPayload` 的 `{"total":n}` 断言）。
+- **统一出口推送**，不要在多处零散 emit；已经算出来的值顺手复用（例如 emit 未读时把 total 传给托盘，别为托盘再查一次库）。
+- **前端封装在 composable**：`onMounted` 先订阅再拉初始值，用 revision 丢弃过期初始值，`onUnmounted` 取消订阅并处理 disposed 竞态；不要在组件里裸 `listen` 不清理。
+- **每个 WebView 各自订阅**（主窗口、QuickPanel 独立）。不要试图跨窗口共享 JS 单例；跨窗口一致性靠后端事件广播。
+- **幂等与降噪**：同一状态重复推送要幂等（前端覆盖赋值、托盘按状态去重）；高频事件做防抖/节流。
+- **失败降级**：订阅失败只打日志、不阻塞界面；首屏初始值用 command 兜底，事件恢复后自动补齐。
+- **先查再建**：新增事件前先看有没有现成的域事件能扩展；事件越多，契约、清理和排查成本越高。
+
+评审新增订阅时先回答四个问题：谁消费？需要跨窗口吗？订阅生命周期谁负责？payload 是否最小？答不上来就先用 command。
+
 ### 实机冒烟
 
 单测只覆盖纯逻辑（过滤 / 去重 / `UninstallString` 解析），「列表 → 残留扫描 → 删进回收站 → 卸载 → 注册表键删除」这条链路要真机。每个平台各有一份 `#[ignore]` 的冒烟用例，只在手动执行时跑，且写入都用唯一名字、结束（含断言失败）自动清理：
