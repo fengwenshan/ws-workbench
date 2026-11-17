@@ -504,7 +504,7 @@ defineExpose({
 }
 .type-tip {
   margin-top: 12px;
-  padding: 10px 12px;
+  padding: 12px 12px;
   border-radius: 6px;
   font-size: 14px;
   line-height: 1.5;
@@ -519,7 +519,7 @@ defineExpose({
 }
 .form-row label {
   display: block;
-  margin-bottom: 6px;
+  margin-bottom: 8px;
   font-size: 14px;
   color: var(--text-secondary);
 }
@@ -529,7 +529,7 @@ defineExpose({
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 6px;
+  margin-bottom: 8px;
 }
 .form-row-head label {
   margin-bottom: 0;
@@ -540,11 +540,11 @@ defineExpose({
   gap: 8px;
 }
 .pack-rules-tag {
-  padding: 0 6px;
+  padding: 0 8px;
   border-radius: 4px;
   background: var(--bg-tag);
   color: var(--text-tag);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 18px;
 }
 .pack-rules-count {
@@ -552,7 +552,7 @@ defineExpose({
   color: var(--text-muted);
 }
 .form-hint {
-  margin: 6px 0 0;
+  margin: 8px 0 0;
   font-size: 12px;
   line-height: 1.5;
   color: var(--text-muted);
@@ -604,14 +604,14 @@ defineExpose({
 .vcs-info {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   min-width: 0;
-  margin-top: 6px;
+  margin-top: 8px;
   font-size: 12px;
 }
 .vcs-badge {
   flex: none;
-  padding: 2px 6px;
+  padding: 4px 8px;
   border: 1px solid var(--border-color);
   border-radius: 4px;
   background: transparent;
@@ -635,15 +635,11 @@ defineExpose({
   flex: none;
   color: var(--success);
 }
-.vcs-badge.vcs-git {
-  color: #f05032;
-  border-color: #f05032;
-  background: rgba(240, 80, 50, 0.08);
-}
+.vcs-badge.vcs-git,
 .vcs-badge.vcs-svn {
-  color: #809cc9;
-  border-color: #809cc9;
-  background: rgba(128, 156, 201, 0.08);
+  color: var(--text-secondary);
+  border-color: var(--border-color);
+  background: var(--bg-readonly);
 }
 .vcs-url {
   flex: 1;
@@ -652,7 +648,7 @@ defineExpose({
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--text-secondary);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--font-mono);
   user-select: text;
   cursor: pointer;
   transition: color 0.12s;

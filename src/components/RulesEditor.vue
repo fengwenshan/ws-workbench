@@ -61,9 +61,9 @@ function onKeydown(e: KeyboardEvent) {
 .rules-editor {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 8px;
   align-items: center;
-  padding: 6px 8px;
+  padding: 8px 8px;
   border: 1px solid var(--border-color);
   border-radius: 6px;
   min-height: 38px;
@@ -72,13 +72,13 @@ function onKeydown(e: KeyboardEvent) {
 .tags {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 8px;
 }
 .tag {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  padding: 2px 8px;
+  padding: 4px 8px;
   background: var(--bg-tag);
   border-radius: 4px;
   font-size: 14px;

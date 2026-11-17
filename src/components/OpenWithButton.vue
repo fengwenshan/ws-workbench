@@ -278,26 +278,26 @@ function glyph(app: OpenWithApp | null) {
 .ow-split.is-compact .ow-icon {
   width: 15px;
   height: 15px;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
 }
 .ow-split.is-compact .ow-glyph {
   width: 15px;
   height: 15px;
-  border-radius: 3px;
-  font-size: 10px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
 }
 .open-with.is-compact .ow-menu {
   top: calc(100% + 4px);
   min-width: 180px;
 }
 .open-with.is-compact .ow-item {
-  padding: 6px 8px;
+  padding: 8px 8px;
   font-size: 13px;
 }
 .open-with.is-compact .ow-item .ow-icon {
   width: 16px;
   height: 16px;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
 }
 
 .ow-main,
@@ -346,8 +346,8 @@ function glyph(app: OpenWithApp | null) {
   width: 18px;
   height: 18px;
   border-radius: 4px;
-  background: #e5e7eb;
-  color: #4b5563;
+  background: var(--bg-tag);
+  color: var(--text-secondary);
   font-size: 12px;
   font-weight: 600;
   line-height: 1;
@@ -362,9 +362,9 @@ function glyph(app: OpenWithApp | null) {
   min-width: 200px;
   padding: 4px;
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--bg-input);
-  box-shadow: 0 10px 24px rgba(17, 24, 39, 0.12);
+  box-shadow: var(--shadow-popover);
 }
 .ow-item {
   display: flex;

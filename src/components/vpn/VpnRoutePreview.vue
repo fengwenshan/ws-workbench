@@ -124,17 +124,15 @@ const scopeNote = computed(() => {
 </template>
 
 <style scoped>
+/* 和代理模式一样直接铺在页面上，不套卡片 */
 .preview {
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
-  padding: 14px;
-  background: var(--bg-primary);
+  padding: 0;
 }
 .preview-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 10px;
+  margin-bottom: 12px;
 }
 .preview-head h4 {
   font-size: 14px;
@@ -143,7 +141,7 @@ const scopeNote = computed(() => {
 .preview-empty {
   font-size: 12px;
   color: var(--text-muted);
-  padding: 10px 0;
+  padding: 12px 0;
   text-align: center;
 }
 .info-grid {
@@ -166,7 +164,7 @@ const scopeNote = computed(() => {
   display: flex;
   gap: 8px;
   font-size: 12px;
-  padding: 2px 0;
+  padding: 4px 0;
 }
 .info-label {
   color: var(--text-muted);
@@ -178,24 +176,24 @@ const scopeNote = computed(() => {
   word-break: break-all;
 }
 .mono {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--font-mono);
 }
 .routes {
-  border: 1px solid var(--border-color);
-  border-radius: 6px;
-  overflow: hidden;
+  border: none;
+  border-radius: 0;
+  overflow: visible;
 }
 .routes-head,
 .route-row {
   display: flex;
   gap: 8px;
-  padding: 6px 10px;
+  padding: 8px 12px;
   font-size: 12px;
   align-items: center;
 }
 .routes-head {
-  background: var(--bg-secondary);
   color: var(--text-muted);
+  border-bottom: 1px solid var(--border-color);
 }
 .routes-head span:first-child,
 .route-row span:first-child {
@@ -218,15 +216,15 @@ const scopeNote = computed(() => {
 .via-tag {
   font-style: normal;
   font-size: 12px;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   padding: 1px 8px;
 }
 .via-vpn {
   color: var(--primary);
-  background: rgba(59, 130, 246, 0.1);
+  background: var(--primary-soft);
 }
 .via-local {
   color: var(--success);
-  background: rgba(16, 185, 129, 0.1);
+  background: var(--success-soft);
 }
 </style>

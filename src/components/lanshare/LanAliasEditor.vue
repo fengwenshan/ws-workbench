@@ -178,7 +178,7 @@ async function save() {
 .alias-edit {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   min-width: 0;
   min-height: 28px;
 }
@@ -198,7 +198,7 @@ async function save() {
   flex: 1;
   min-width: 0;
   height: 28px;
-  padding: 0 10px;
+  padding: 0 12px;
   border: 1px solid var(--border-color);
   border-radius: 6px;
   background: var(--bg-input);

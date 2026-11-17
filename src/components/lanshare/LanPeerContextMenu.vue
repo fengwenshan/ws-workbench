@@ -209,15 +209,15 @@ onUnmounted(() => {
   min-width: 180px;
   padding: 4px;
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--bg-primary);
-  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.16);
+  box-shadow: var(--shadow-popover);
   user-select: none;
 }
 
 .ctx-title {
-  margin: 2px 8px 4px;
-  font-size: 11px;
+  margin: 4px 8px 4px;
+  font-size: 12px;
   color: var(--text-muted);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -229,7 +229,7 @@ onUnmounted(() => {
   align-items: center;
   gap: 8px;
   width: 100%;
-  padding: 6px 8px;
+  padding: 8px 8px;
   border: 0;
   border-radius: 6px;
   background: transparent;
@@ -266,7 +266,7 @@ onUnmounted(() => {
 
 .ctx-hint {
   flex-shrink: 0;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-muted);
 }
 
@@ -277,7 +277,7 @@ onUnmounted(() => {
 
 .ctx-divider {
   height: 1px;
-  margin: 4px 2px;
+  margin: 4px 4px;
   background: var(--border-color);
 }
 </style>

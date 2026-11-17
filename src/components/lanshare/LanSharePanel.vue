@@ -157,43 +157,32 @@ function toggleSettings() {
 </template>
 
 <style scoped>
-/* 模块画布：浅色渐变 + 左上光晕；整体圆角 16 浮在应用底色上 */
+/* 工作区本身就是外框：模块铺满工作区，只留两栏之间的间隙 */
 .lan-share-chat {
   position: relative;
   flex: 1;
   min-height: 0;
   display: flex;
-  gap: 12px;
-  margin: 10px 12px 12px;
-  padding: 12px;
-  border-radius: 16px;
+  gap: 4px;
   overflow: hidden;
-  background: linear-gradient(160deg, #f3f6fc 0%, #eef2f9 55%, #edf1f8 100%);
-  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
-}
-.lan-share-chat::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  background: radial-gradient(60% 55% at 8% 0%, rgba(99, 102, 241, 0.1), transparent 70%);
-  pointer-events: none;
 }
 
-/* 左栏：半透明玻璃表面，不用右边框，与右栏靠间距和阴影分层 */
+/* 左栏：紧贴 rail 的独立卡片，顶部贴标题栏、下留 12px，整圈 1px 边框 + 12px 四角圆角 */
 .lan-side {
   position: relative;
-  width: 300px;
+  width: var(--pane-left-width);
   flex-shrink: 0;
   min-height: 0;
   display: flex;
-  border-radius: 16px;
-  background: rgba(255, 255, 255, 0.55);
-  backdrop-filter: blur(18px);
-  -webkit-backdrop-filter: blur(18px);
+  margin-bottom: 8px;
+  border: 1px solid var(--border-color);
+  border-left: 0;
+  border-radius: 0 var(--radius-lg) var(--radius-lg) 0;
+  background: var(--bg-primary);
   overflow: hidden;
 }
 
-/* 右栏：近白表面 + 中等阴影，像浮起来的对话卡 */
+/* 右栏内容区：独立卡片，顶部贴住标题栏，右/下留 8px，整圈 1px 边框 + 12px 圆角 */
 .lan-main {
   position: relative;
   flex: 1;
@@ -201,18 +190,19 @@ function toggleSettings() {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  border-radius: 16px;
-  background: #fbfcfe;
-  box-shadow: 0 10px 30px -18px rgba(15, 23, 42, 0.28);
+  margin: 0 8px 8px 0;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  background: var(--bg-primary);
   overflow: hidden;
 }
 
 .lan-alert {
   flex-shrink: 0;
-  margin: 10px 16px 0;
+  margin: 12px 16px 0;
   padding: 8px 12px;
-  border-radius: 10px;
-  background: rgba(239, 68, 68, 0.08);
+  border-radius: var(--radius-md);
+  background: var(--danger-soft);
   color: var(--danger);
   font-size: 12px;
   line-height: 1.6;

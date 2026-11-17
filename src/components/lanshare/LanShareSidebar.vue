@@ -58,12 +58,14 @@ function onKeydown(event: KeyboardEvent, item: MergedPeer) {
           viewBox="0 0 24 24"
           fill="none"
           stroke="currentColor"
-          stroke-width="2"
+          stroke-width="1.8"
           stroke-linecap="round"
+          stroke-linejoin="round"
         >
-          <circle cx="5.5" cy="12" r="2.1" />
-          <circle cx="18.5" cy="12" r="2.1" />
-          <path d="M7.6 12h8.8" />
+          <circle cx="6" cy="12" r="2.3" />
+          <circle cx="18" cy="6" r="2.3" />
+          <circle cx="18" cy="18" r="2.3" />
+          <path d="M8.1 10.9l7.8-3.8M8.1 13.1l7.8 3.8" />
         </svg>
       </span>
       <h3 class="brand-name">LANLink</h3>
@@ -174,7 +176,7 @@ function onKeydown(event: KeyboardEvent, item: MergedPeer) {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 0 12px 0 18px;
+  padding: 0 12px 0 20px;
 }
 .brand-mark {
   display: inline-flex;
@@ -203,21 +205,20 @@ function onKeydown(event: KeyboardEvent, item: MergedPeer) {
   height: 30px;
   padding: 0;
   border: none;
-  border-radius: 9px;
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
   flex-shrink: 0;
-  transition: background 0.16s, color 0.16s, box-shadow 0.16s;
+  transition: background-color 0.2s ease, color 0.2s ease;
 }
 .settings-btn:hover {
-  background: rgba(255, 255, 255, 0.8);
+  background: var(--bg-hover);
   color: var(--text-primary);
 }
 .settings-btn.active {
-  background: rgba(255, 255, 255, 0.95);
+  background: var(--bg-hover);
   color: var(--primary);
-  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.05);
 }
 .settings-btn svg {
   width: 17px;
@@ -228,7 +229,7 @@ function onKeydown(event: KeyboardEvent, item: MergedPeer) {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 2px 10px 14px;
+  padding: 4px 12px 16px;
 }
 .peer-list {
   list-style: none;
@@ -239,44 +240,42 @@ function onKeydown(event: KeyboardEvent, item: MergedPeer) {
   gap: 4px;
 }
 
-/* 列表项：默认透明；hover 玻璃上浮；选中白色卡片 + 左侧主色指示条 */
+/* 列表项：默认透明；hover/选中都是浅灰底，选中项加 2px 品牌蓝竖线 */
 .peer-item {
   position: relative;
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 10px 12px 10px 14px;
-  border-radius: 12px;
+  gap: 12px;
+  padding: 12px 12px 12px 16px;
+  border-radius: var(--radius-md);
   cursor: pointer;
   outline: none;
-  transition: background 0.16s, box-shadow 0.16s, transform 0.16s;
+  transition: background-color 0.2s ease;
 }
 .peer-item:hover {
-  background: rgba(255, 255, 255, 0.75);
-  transform: translateY(-1px);
+  background: var(--bg-hover);
 }
 .peer-item:focus-visible {
-  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.35);
+  box-shadow: 0 0 0 2px var(--primary-soft);
 }
 .peer-item.active {
-  background: rgba(255, 255, 255, 0.95);
-  box-shadow:
-    0 1px 2px rgba(15, 23, 42, 0.05),
-    0 12px 28px -18px rgba(37, 99, 235, 0.45);
+  background: var(--bg-hover);
+}
+.peer-item.active .item-name {
+  font-weight: 600;
 }
 .peer-item.active::before {
   content: '';
   position: absolute;
-  left: 4px;
+  left: 0;
   top: 50%;
   transform: translateY(-50%);
-  width: 3px;
-  height: 18px;
-  border-radius: 3px;
+  width: 2px;
+  height: 20px;
   background: var(--primary);
 }
 .peer-item.active .online-dot {
-  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.16);
+  box-shadow: 0 0 0 3px var(--success-soft);
 }
 
 .online-dot {
@@ -288,7 +287,7 @@ function onKeydown(event: KeyboardEvent, item: MergedPeer) {
 }
 .online-dot.is-online {
   background: var(--success);
-  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.14);
+  box-shadow: 0 0 0 3px var(--success-soft);
 }
 .online-dot.is-offline {
   background: var(--text-muted);
@@ -299,7 +298,7 @@ function onKeydown(event: KeyboardEvent, item: MergedPeer) {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 4px;
 }
 .item-top,
 .item-bottom {
@@ -320,7 +319,7 @@ function onKeydown(event: KeyboardEvent, item: MergedPeer) {
 }
 .item-time {
   flex-shrink: 0;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-muted);
 }
 .item-preview {
@@ -339,11 +338,11 @@ function onKeydown(event: KeyboardEvent, item: MergedPeer) {
   flex-shrink: 0;
   min-width: 17px;
   height: 17px;
-  padding: 0 5px;
-  border-radius: 9px;
+  padding: 0 4px;
+  border-radius: var(--radius-md);
   background: var(--danger);
-  color: #fff;
-  font-size: 11px;
+  color: var(--on-primary);
+  font-size: 12px;
   line-height: 17px;
   text-align: center;
 }
@@ -351,11 +350,11 @@ function onKeydown(event: KeyboardEvent, item: MergedPeer) {
 .offer-badge {
   flex-shrink: 0;
   height: 17px;
-  padding: 0 6px;
-  border-radius: 9px;
+  padding: 0 8px;
+  border-radius: var(--radius-md);
   border: 1px solid var(--warning);
   color: var(--warning);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 15px;
   white-space: nowrap;
 }
@@ -366,8 +365,8 @@ function onKeydown(event: KeyboardEvent, item: MergedPeer) {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 6px;
-  padding: 48px 14px;
+  gap: 8px;
+  padding: 48px 16px;
   text-align: center;
 }
 .peer-empty-icon {

@@ -65,13 +65,13 @@ function displayName(item: LanShareConversation): string {
 .qp-messages {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
 }
 
 .msg-error {
   margin: 0;
-  padding: 7px 10px;
-  border-radius: 8px;
+  padding: 8px 12px;
+  border-radius: var(--radius-md);
   background: rgba(239, 68, 68, 0.08);
   color: var(--danger);
   font-size: 12px;
@@ -81,7 +81,7 @@ function displayName(item: LanShareConversation): string {
 .msg-list {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 4px;
   /* 会话多时内部滚动，面板高度按内容量到上限为止 */
   max-height: 320px;
   overflow-y: auto;
@@ -92,9 +92,9 @@ function displayName(item: LanShareConversation): string {
   align-items: center;
   gap: 8px;
   width: 100%;
-  padding: 7px 8px;
+  padding: 8px 8px;
   border: 0;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: transparent;
   text-align: left;
   cursor: pointer;
@@ -109,7 +109,7 @@ function displayName(item: LanShareConversation): string {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 4px;
 }
 
 .msg-top {
@@ -133,7 +133,7 @@ function displayName(item: LanShareConversation): string {
 .msg-time {
   flex-shrink: 0;
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .msg-preview {
@@ -152,18 +152,18 @@ function displayName(item: LanShareConversation): string {
   flex-shrink: 0;
   min-width: 17px;
   height: 17px;
-  padding: 0 5px;
-  border-radius: 9px;
+  padding: 0 4px;
+  border-radius: var(--radius-md);
   background: var(--danger);
-  color: #fff;
-  font-size: 11px;
+  color: var(--on-primary);
+  font-size: 12px;
   line-height: 17px;
   text-align: center;
 }
 
 .msg-empty {
   margin: 0;
-  padding: 24px 10px;
+  padding: 24px 12px;
   color: var(--text-muted);
   font-size: 12px;
   text-align: center;

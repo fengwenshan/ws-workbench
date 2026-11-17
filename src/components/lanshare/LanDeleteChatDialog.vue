@@ -66,7 +66,7 @@ function onCancel() {
 
 <style scoped>
 .delete-tip {
-  margin: 0 0 10px;
+  margin: 0 0 12px;
   color: var(--text-secondary);
   font-size: 13px;
   line-height: 1.6;
@@ -83,7 +83,7 @@ function onCancel() {
 }
 
 .delete-files input {
-  margin-top: 3px;
+  margin-top: 4px;
   accent-color: var(--danger);
   cursor: pointer;
 }

@@ -209,8 +209,8 @@ async function submit() {
 .field-label-stack {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  padding-bottom: 2px;
+  gap: 4px;
+  padding-bottom: 4px;
 }
 .field-title {
   font-size: 14px;

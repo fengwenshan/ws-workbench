@@ -609,7 +609,7 @@ html body,
   height: 100%;
   overflow: hidden;
   border: 1px solid var(--border-color);
-  border-radius: 14px;
+  border-radius: var(--radius-lg);
   background: var(--bg-primary);
   color: var(--text-primary);
   font-size: 13px;
@@ -622,7 +622,7 @@ html body,
   align-items: center;
   gap: 8px;
   height: 46px;
-  padding: 0 14px;
+  padding: 0 16px;
   border-bottom: 1px solid var(--border-color);
   background: var(--bg-primary);
   flex-shrink: 0;
@@ -640,7 +640,7 @@ html body,
   position: relative;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   height: 46px;
   padding: 0 8px;
   border: 0;
@@ -659,10 +659,10 @@ html body,
   min-width: 16px;
   height: 16px;
   padding: 0 4px;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--danger);
-  color: #fff;
-  font-size: 10px;
+  color: var(--on-primary);
+  font-size: 12px;
   line-height: 16px;
   text-align: center;
 }
@@ -674,7 +674,7 @@ html body,
   right: 8px;
   bottom: 0;
   height: 2px;
-  border-radius: 2px;
+  border-radius: var(--radius-sm);
   background: var(--primary);
 }
 
@@ -684,11 +684,11 @@ html body,
   display: inline-flex;
   align-items: center;
   height: 18px;
-  padding: 0 7px;
-  border-radius: 9px;
+  padding: 0 8px;
+  border-radius: var(--radius-md);
   background: var(--bg-tag);
   color: var(--text-tag);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.02em;
   user-select: none;
@@ -712,19 +712,19 @@ html body,
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 14px;
+  padding: 16px;
 }
 
 .qp-pane {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
 }
 
 .qp-tip {
   margin: 0;
-  padding: 7px 10px;
-  border-radius: 8px;
+  padding: 8px 12px;
+  border-radius: var(--radius-md);
   background: var(--bg-secondary);
   color: var(--text-secondary);
   font-size: 12px;
@@ -732,13 +732,13 @@ html body,
 }
 
 .qp-tip.ok {
-  background: #ecfdf5;
-  color: #047857;
+  background: var(--success-soft);
+  color: var(--success-text);
 }
 
 .qp-tip.warn {
-  background: #fffbeb;
-  color: #b45309;
+  background: var(--warning-soft);
+  color: var(--warning-text);
 }
 
 .qp-section {
@@ -757,10 +757,10 @@ html body,
 .vpn-card {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   padding: 12px;
   border: 1px solid var(--border-color);
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   background: var(--bg-secondary);
 }
 
@@ -788,7 +788,7 @@ html body,
 }
 
 .vpn-meta p {
-  margin: 2px 0 0;
+  margin: 4px 0 0;
   overflow: hidden;
   color: var(--text-secondary);
   text-overflow: ellipsis;
@@ -801,9 +801,9 @@ html body,
   height: 30px;
   padding: 0 16px;
   border: 0;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--primary);
-  color: #fff;
+  color: var(--on-primary);
   font-size: 13px;
   cursor: pointer;
 }
@@ -824,14 +824,14 @@ html body,
 
 .mode-group {
   display: flex;
-  gap: 6px;
+  gap: 8px;
 }
 
 .mode-btn {
   flex: 1;
   height: 32px;
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--bg-input);
   color: var(--text-secondary);
   font-size: 12px;
@@ -872,14 +872,14 @@ html body,
   flex-shrink: 0;
   justify-content: space-between;
   gap: 16px;
-  padding: 6px 14px 10px;
+  padding: 8px 16px 12px;
   border-top: 1px solid var(--border-color);
   background: var(--bg-secondary);
 }
 
 /* 纯文本按钮：不要边框和底色，只留文字；hover 只变色，不影响布局高度 */
 .qp-foot-btn {
-  padding: 2px 0;
+  padding: 4px 0;
   border: 0;
   border-radius: 6px;
   background: transparent;

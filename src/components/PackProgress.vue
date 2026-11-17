@@ -100,7 +100,7 @@ watch(() => props.packing, (isPacking, wasPacking) => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 6px;
+  margin-bottom: 8px;
   font-size: 14px;
 }
 .phase-label {
@@ -126,7 +126,7 @@ watch(() => props.packing, (isPacking, wasPacking) => {
   transition: width 0.3s ease;
 }
 .pack-status {
-  margin-top: 6px;
+  margin-top: 8px;
   font-size: 12px;
   color: var(--text-secondary);
 }
@@ -135,7 +135,7 @@ watch(() => props.packing, (isPacking, wasPacking) => {
 }
 .pack-errors {
   margin: 4px 0 0;
-  padding-left: 18px;
+  padding-left: 20px;
   font-size: 12px;
   color: var(--danger);
 }

@@ -166,12 +166,9 @@ async function openFolderAction() {
 .file-card {
   width: 320px;
   max-width: 100%;
-  border: 1px solid transparent;
-  border-radius: 12px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
   background: var(--bg-primary);
-  box-shadow:
-    0 1px 2px rgba(15, 23, 42, 0.04),
-    0 10px 30px -22px rgba(15, 23, 42, 0.28);
   overflow: hidden;
 }
 .file-card.is-failed {
@@ -189,8 +186,8 @@ async function openFolderAction() {
 .file-card-main {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 12px 12px 10px;
+  gap: 12px;
+  padding: 12px 12px 12px;
 }
 .file-icon {
   display: inline-flex;
@@ -199,7 +196,7 @@ async function openFolderAction() {
   width: 40px;
   height: 40px;
   flex-shrink: 0;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   background: rgba(59, 130, 246, 0.1);
   color: var(--primary);
 }
@@ -212,7 +209,7 @@ async function openFolderAction() {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 4px;
 }
 .file-name {
   font-size: 13px;
@@ -223,7 +220,7 @@ async function openFolderAction() {
   white-space: nowrap;
 }
 .file-sub {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-muted);
 }
 
@@ -258,7 +255,7 @@ async function openFolderAction() {
   color: var(--text-muted);
 }
 .state-error {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--danger);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -268,13 +265,13 @@ async function openFolderAction() {
   width: 120px;
   max-width: 100%;
   height: 3px;
-  border-radius: 2px;
+  border-radius: var(--radius-sm);
   background: var(--bg-readonly);
   overflow: hidden;
 }
 .progress-fill {
   height: 100%;
-  border-radius: 2px;
+  border-radius: var(--radius-sm);
   background: var(--primary);
   transition: width 0.25s ease;
 }
@@ -283,12 +280,12 @@ async function openFolderAction() {
   flex-shrink: 0;
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
 }
 .pill-btn {
-  padding: 2px 10px;
+  padding: 4px 12px;
   border: 1px solid var(--border-color);
-  border-radius: 999px;
+  border-radius: var(--radius-sm);
   background: var(--bg-primary);
   color: var(--text-secondary);
   font-size: 12px;

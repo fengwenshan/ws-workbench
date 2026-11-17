@@ -559,10 +559,10 @@ async function handleStop(): Promise<void> {
 .trigger-row {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 7px 10px;
+  gap: 12px;
+  padding: 8px 12px;
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--bg-secondary);
 }
 
@@ -585,7 +585,7 @@ async function handleStop(): Promise<void> {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding-top: 2px;
+  padding-top: 4px;
 }
 
 .trigger-kind {
@@ -615,16 +615,16 @@ async function handleStop(): Promise<void> {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  padding: 10px 20px 16px;
+  padding: 12px 20px 16px;
   overflow-y: auto;
 }
 
 .sleep-card {
   flex-shrink: 0;
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--bg-primary);
-  padding: 14px;
+  padding: 16px;
 }
 
 .card-head {
@@ -636,7 +636,7 @@ async function handleStop(): Promise<void> {
 .card-titles {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 4px;
 }
 .card-label {
   font-size: 14px;
@@ -644,7 +644,7 @@ async function handleStop(): Promise<void> {
   color: var(--text-primary);
 }
 .card-sub {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-muted);
 }
 .card-sub strong {
@@ -655,16 +655,16 @@ async function handleStop(): Promise<void> {
 .card-actions {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   flex-shrink: 0;
 }
 
 .warn-bar {
   display: flex;
   align-items: center;
-  gap: 10px;
-  margin-top: 10px;
-  padding: 7px 12px;
+  gap: 12px;
+  margin-top: 12px;
+  padding: 8px 12px;
   border: 1px solid rgba(245, 158, 11, 0.3);
   border-radius: 6px;
   background: rgba(245, 158, 11, 0.08);
@@ -675,12 +675,12 @@ async function handleStop(): Promise<void> {
 .error-bar {
   display: flex;
   align-items: center;
-  gap: 10px;
-  margin-top: 10px;
-  padding: 7px 12px;
+  gap: 12px;
+  margin-top: 12px;
+  padding: 8px 12px;
   border: 1px solid rgba(239, 68, 68, 0.28);
   border-radius: 6px;
-  background: #fef2f2;
+  background: var(--danger-soft);
   color: var(--danger);
   font-size: 12px;
 }
@@ -693,7 +693,7 @@ async function handleStop(): Promise<void> {
 /* ===== 设置 ===== */
 .duration-chip {
   height: 28px;
-  padding: 0 14px;
+  padding: 0 16px;
   border: 1px solid var(--border-color);
   border-radius: 6px;
   background: var(--bg-primary);
@@ -731,13 +731,13 @@ async function handleStop(): Promise<void> {
 .preset-block {
   display: flex;
   align-items: flex-start;
-  gap: 14px;
+  gap: 16px;
   margin-top: 12px;
 }
 .preset-label {
   flex-shrink: 0;
   width: 44px;
-  padding-top: 6px;
+  padding-top: 8px;
   font-size: 12px;
   font-weight: 600;
   color: var(--text-secondary);
@@ -751,7 +751,7 @@ async function handleStop(): Promise<void> {
   min-width: 0;
 }
 .custom-block {
-  margin-top: 14px;
+  margin-top: 16px;
   padding-top: 12px;
   border-top: 1px dashed var(--border-color);
 }
@@ -777,7 +777,7 @@ async function handleStop(): Promise<void> {
 }
 
 .btn-xs {
-  padding: 4px 10px;
+  padding: 4px 12px;
   font-size: 12px;
 }
 </style>

@@ -113,7 +113,7 @@ watch(
 .remark-editor {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   min-width: 0;
 }
 .name {
@@ -128,7 +128,7 @@ watch(
 .remark-input {
   width: 180px;
   max-width: 40vw;
-  padding: 2px 6px;
+  padding: 4px 8px;
   border: 1px solid var(--primary);
   border-radius: 4px;
   background: var(--bg-input);

@@ -9,7 +9,7 @@ import LanAliasEditor from './LanAliasEditor.vue'
 /**
  * 右栏设置页（LANLink 刷新 §1 / §2.2）。
  *
- * 不再有标题和「返回聊天」：设置由左栏齿轮进入、再点一次齿轮或选设备返回。
+ * 不再有「返回聊天」按钮：设置由左栏齿轮进入、再点一次齿轮或选设备返回。
  * 内容以白色为主：一张带细边框的设置卡，设备名/接收目录/本机地址/设备 ID
  * 用「左标签 + 右值」的同一套行结构，靠分隔线分行；启动失败 / 设置未存住仍用顶部告警展示。
  *
@@ -106,7 +106,6 @@ async function openDownloadDir() {
 
           <header class="settings-head">
             <h2 class="settings-title">本机设置</h2>
-            <p class="settings-sub">设备身份、接收位置与网络信息</p>
           </header>
 
           <!-- 所有设置收在同一张白色卡片里，统一「左标签 + 右值」的行结构 -->
@@ -177,7 +176,7 @@ async function openDownloadDir() {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  background: #fff;
+  background: var(--bg-primary);
 }
 
 .settings-body {
@@ -201,8 +200,8 @@ async function openDownloadDir() {
 /* 告警：只做提示，不抢设置卡的层次 */
 .alert {
   margin: 0 0 12px;
-  padding: 10px 14px;
-  border-radius: 12px;
+  padding: 12px 16px;
+  border-radius: var(--radius-lg);
   font-size: 12px;
   line-height: 1.6;
 }
@@ -212,14 +211,14 @@ async function openDownloadDir() {
 }
 .alert.is-warn {
   background: rgba(245, 158, 11, 0.1);
-  color: #b45309;
+  color: var(--warning-text);
 }
 .alert-hint {
   color: var(--text-muted);
 }
 
 .settings-head {
-  padding: 2px 4px 14px;
+  padding: 4px 4px 16px;
 }
 .settings-title {
   margin: 0;
@@ -227,29 +226,23 @@ async function openDownloadDir() {
   font-weight: 600;
   color: var(--text-primary);
 }
-.settings-sub {
-  margin: 4px 0 0;
-  font-size: 12px;
-  line-height: 1.6;
-  color: var(--text-muted);
-}
 
 /* 白底设置卡：细边框 + 很轻的阴影，和纯白页面的层次拉开一点即可 */
 .settings-card {
   padding: 4px 20px;
-  border: 1px solid #eef0f4;
-  border-radius: 14px;
-  background: #fff;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  background: var(--bg-primary);
   box-shadow: 0 1px 2px rgba(15, 23, 42, 0.03);
 }
 .setting-row {
   display: flex;
   align-items: flex-start;
   gap: 16px;
-  padding: 15px 0;
+  padding: 16px 0;
 }
 .setting-row + .setting-row {
-  border-top: 1px solid #f0f2f5;
+  border-top: 1px solid var(--border-color);
 }
 .setting-label {
   flex-shrink: 0;
@@ -297,7 +290,7 @@ async function openDownloadDir() {
 .dir-line {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   min-width: 0;
   flex-wrap: wrap;
   row-gap: 4px;
@@ -315,11 +308,11 @@ async function openDownloadDir() {
 .dir-actions {
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: 4px;
   flex-shrink: 0;
 }
 .text-btn {
-  padding: 2px 6px;
+  padding: 4px 8px;
   border: none;
   border-radius: 6px;
   background: transparent;
@@ -339,15 +332,15 @@ async function openDownloadDir() {
 }
 
 .mono {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--font-mono);
 }
 
 @media (max-width: 760px) {
   .settings-body {
-    padding: 18px 16px 24px;
+    padding: 20px 16px 24px;
   }
   .settings-card {
-    padding: 2px 16px;
+    padding: 4px 16px;
   }
   .setting-label,
   .alias-row :deep(.alias-label) {

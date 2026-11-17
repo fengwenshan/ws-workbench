@@ -71,14 +71,14 @@ function remainingText(offer: PendingOffer): string {
   align-self: flex-start;
   padding: 12px;
   border: 1px solid rgba(245, 158, 11, 0.4);
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   background: rgba(245, 158, 11, 0.07);
 }
 .offer-head {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: 10px;
+  gap: 12px;
   margin-bottom: 8px;
 }
 .offer-title {
@@ -88,7 +88,7 @@ function remainingText(offer: PendingOffer): string {
 }
 .offer-expire {
   flex-shrink: 0;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--warning);
 }
 .offer-files {
@@ -132,7 +132,7 @@ function remainingText(offer: PendingOffer): string {
   color: var(--text-secondary);
 }
 .btn.btn-xs {
-  padding: 4px 10px;
+  padding: 4px 12px;
   font-size: 12px;
 }
 </style>

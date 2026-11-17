@@ -290,8 +290,8 @@ onUnmounted(() => {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 10px 20px 16px;
+  gap: 12px;
+  padding: 12px 20px 16px;
   overflow: hidden;
 }
 
@@ -324,11 +324,11 @@ onUnmounted(() => {
 }
 
 .hosts-save kbd {
-  margin-left: 6px;
+  margin-left: 8px;
   padding: 0 4px;
   border: 1px solid currentColor;
   border-radius: 4px;
-  font-size: 10px;
+  font-size: 12px;
   font-family: inherit;
   opacity: 0.75;
 }
@@ -342,7 +342,7 @@ onUnmounted(() => {
   gap: 12px;
   padding: 8px 12px;
   border: 1px solid rgba(239, 68, 68, 0.35);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: rgba(239, 68, 68, 0.06);
   color: var(--danger);
   font-size: 12px;
@@ -365,7 +365,7 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--bg-primary);
   overflow: hidden;
 }
@@ -374,7 +374,7 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 6px 12px;
+  padding: 8px 12px;
   background: var(--bg-secondary);
   color: var(--text-secondary);
   font-size: 12px;
@@ -385,7 +385,7 @@ onUnmounted(() => {
 }
 
 .backups-empty {
-  padding: 14px 12px;
+  padding: 16px 12px;
   color: var(--text-muted);
   font-size: 12px;
 }
@@ -399,7 +399,7 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 16px;
-  padding: 5px 12px;
+  padding: 4px 12px;
   border-top: 1px solid var(--border-color);
   font-size: 12px;
 }
@@ -433,7 +433,7 @@ onUnmounted(() => {
   flex: 1;
   min-height: 0;
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--bg-primary);
   overflow: hidden;
 }
@@ -449,7 +449,7 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 10px;
+  gap: 12px;
   background: var(--bg-primary);
   color: var(--text-muted);
   font-size: 13px;
@@ -462,7 +462,7 @@ onUnmounted(() => {
 /* ===== 底部 ===== */
 .hosts-foot-dirty {
   flex-shrink: 0;
-  color: #b45309;
+  color: var(--warning-text);
 }
 
 .hosts-empty {
@@ -471,9 +471,9 @@ onUnmounted(() => {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 10px;
+  gap: 12px;
   border: 1px dashed var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   color: var(--text-muted);
   font-size: 13px;
 }
@@ -491,6 +491,6 @@ onUnmounted(() => {
   align-items: center;
   gap: 12px;
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 12px;
 }
 </style>

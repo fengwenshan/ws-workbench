@@ -116,9 +116,9 @@ const emit = defineEmits<{
   display: flex;
   flex-direction: column;
 }
-/* 标题栏压到固定高度，和左侧「项目分组」的下边线同一水平线 */
+/* 标题栏压到固定高度，和左侧「项目分组」页头同一水平线 */
 .detail-tabs :deep(.ant-tabs-nav) {
-  height: var(--panel-header-height);
+  height: var(--pane-head-height);
   margin: 0 0 12px;
   flex-shrink: 0;
 }
@@ -171,7 +171,7 @@ const emit = defineEmits<{
   align-items: center;
   justify-content: center;
   height: 26px;
-  padding: 0 10px;
+  padding: 0 12px;
   font-size: 12px;
   line-height: 1;
   white-space: nowrap;
@@ -206,37 +206,17 @@ const emit = defineEmits<{
   border-color: var(--danger);
   background: rgba(220, 38, 38, 0.06);
 }
-.type-layui {
-  color: #16a34a;
-  border-color: #16a34a;
-  background: rgba(22, 163, 74, 0.08);
-}
+.type-layui,
 .type-vue2,
-.type-vue3 {
-  color: #42b883;
-  border-color: #42b883;
-  background: rgba(66, 184, 131, 0.08);
-}
-.type-react {
-  color: #087ea4;
-  border-color: #087ea4;
-  background: rgba(8, 126, 164, 0.08);
-}
+.type-vue3,
+.type-react,
 .type-spring,
-.type-springboot {
-  color: #6db33f;
-  border-color: #6db33f;
-  background: rgba(109, 179, 63, 0.08);
-}
-.type-struts2 {
-  color: #d22128;
-  border-color: #d22128;
-  background: rgba(210, 33, 40, 0.08);
-}
+.type-springboot,
+.type-struts2,
 .type-java {
-  color: #e76f00;
-  border-color: #e76f00;
-  background: rgba(231, 111, 0, 0.08);
+  color: var(--text-secondary);
+  border-color: var(--border-color);
+  background: var(--bg-readonly);
 }
 .type-unknown {
   color: var(--text-secondary);

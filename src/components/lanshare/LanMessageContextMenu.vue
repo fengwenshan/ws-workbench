@@ -118,9 +118,9 @@ onUnmounted(() => {
   min-width: 140px;
   padding: 4px;
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--bg-primary);
-  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.16);
+  box-shadow: var(--shadow-popover);
   user-select: none;
 }
 
@@ -129,7 +129,7 @@ onUnmounted(() => {
   align-items: center;
   gap: 8px;
   width: 100%;
-  padding: 6px 8px;
+  padding: 8px 8px;
   border: 0;
   border-radius: 6px;
   background: transparent;

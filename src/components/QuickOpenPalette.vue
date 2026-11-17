@@ -240,7 +240,7 @@ function onKeydown(event: KeyboardEvent) {
   flex-direction: column;
   background: var(--bg-primary);
   border: 1px solid var(--border-color);
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   box-shadow: 0 18px 50px rgba(0, 0, 0, 0.22);
   overflow: hidden;
 }
@@ -267,7 +267,7 @@ function onKeydown(event: KeyboardEvent) {
   align-items: center;
   gap: 12px;
   width: 100%;
-  padding: 6px 10px;
+  padding: 8px 12px;
   border: none;
   border-radius: 6px;
   background: transparent;
@@ -288,11 +288,11 @@ function onKeydown(event: KeyboardEvent) {
 }
 .quickopen-kind {
   flex: none;
-  padding: 0 5px;
+  padding: 0 4px;
   border-radius: 4px;
   background: var(--bg-tag);
   color: var(--text-tag);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 16px;
 }
 .quickopen-hit {
@@ -304,9 +304,9 @@ function onKeydown(event: KeyboardEvent) {
   flex: 0 1 auto;
   min-width: 0;
   max-width: 38%;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-secondary);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--font-mono);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -322,7 +322,7 @@ function onKeydown(event: KeyboardEvent) {
   white-space: nowrap;
 }
 .quickopen-empty {
-  padding: 18px 16px;
+  padding: 20px 16px;
   font-size: 14px;
   color: var(--text-muted);
 }

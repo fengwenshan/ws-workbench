@@ -70,12 +70,12 @@ async function copyCommand(command: string) {
 .guide {
   border: 1px solid rgba(245, 158, 11, 0.35);
   background: rgba(245, 158, 11, 0.06);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   padding: 16px;
 }
 .guide-head {
   display: flex;
-  gap: 10px;
+  gap: 12px;
   align-items: flex-start;
 }
 .guide-dot {
@@ -83,7 +83,7 @@ async function copyCommand(command: string) {
   height: 8px;
   border-radius: 50%;
   background: var(--warning);
-  margin-top: 6px;
+  margin-top: 8px;
   flex-shrink: 0;
 }
 .guide-head h4 {
@@ -97,7 +97,7 @@ async function copyCommand(command: string) {
   color: var(--text-secondary);
 }
 .guide-steps {
-  margin: 14px 0 0 18px;
+  margin: 16px 0 0 20px;
   padding: 0;
 }
 .guide-steps li {
@@ -117,14 +117,14 @@ async function copyCommand(command: string) {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-top: 6px;
+  margin-top: 8px;
 }
 .step-command code {
   flex: 1;
   background: var(--bg-tag);
   border-radius: 4px;
-  padding: 6px 8px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  padding: 8px 8px;
+  font-family: var(--font-mono);
   font-size: 12px;
   color: var(--text-primary);
   word-break: break-all;
@@ -133,7 +133,7 @@ async function copyCommand(command: string) {
   border: 1px solid var(--border-color);
   background: var(--bg-input);
   border-radius: 4px;
-  padding: 4px 10px;
+  padding: 4px 12px;
   font-size: 12px;
   cursor: pointer;
   color: var(--text-secondary);
@@ -149,14 +149,14 @@ async function copyCommand(command: string) {
   justify-content: space-between;
   gap: 12px;
   margin-top: 16px;
-  padding-top: 14px;
+  padding-top: 16px;
   border-top: 1px dashed rgba(245, 158, 11, 0.35);
 }
 .import-text code {
   background: var(--bg-tag);
-  border-radius: 3px;
-  padding: 0 3px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  border-radius: var(--radius-sm);
+  padding: 0 4px;
+  font-family: var(--font-mono);
 }
 .import-text {
   display: flex;
@@ -173,8 +173,8 @@ async function copyCommand(command: string) {
 .guide-links {
   display: flex;
   flex-wrap: wrap;
-  gap: 14px;
-  margin-top: 14px;
+  gap: 16px;
+  margin-top: 16px;
   font-size: 12px;
 }
 .guide-links a {

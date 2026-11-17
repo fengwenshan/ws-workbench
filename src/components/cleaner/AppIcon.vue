@@ -94,7 +94,7 @@ const fallbackStyle = computed(() => ({
   justify-content: center;
   width: 100%;
   height: 100%;
-  color: #fff;
+  color: var(--on-primary);
   font-weight: 600;
   line-height: 1;
   user-select: none;

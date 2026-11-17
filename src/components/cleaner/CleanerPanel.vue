@@ -106,7 +106,7 @@ const clipboardTabActive = computed(() => props.active && tab.value === 'clipboa
   min-height: 0;
   display: flex;
   flex-direction: column;
-  margin-top: 10px;
+  margin-top: 12px;
 }
 .cleaner-tabs :deep(.ant-tabs-nav) {
   height: var(--panel-header-height);

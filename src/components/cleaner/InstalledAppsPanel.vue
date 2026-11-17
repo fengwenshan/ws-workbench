@@ -337,7 +337,7 @@ async function openUninstall(app: InstalledApp): Promise<void> {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding: 10px 20px 16px;
+  padding: 12px 20px 16px;
   overflow: hidden;
 }
 
@@ -346,7 +346,7 @@ async function openUninstall(app: InstalledApp): Promise<void> {
   flex-shrink: 0;
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
 }
 .apps-search {
   width: 300px;
@@ -363,7 +363,7 @@ async function openUninstall(app: InstalledApp): Promise<void> {
 .sort-btn {
   display: inline-flex;
   align-items: center;
-  gap: 2px;
+  gap: 4px;
   height: 32px;
   padding: 0 12px;
   border: 1px solid var(--border-color);
@@ -383,7 +383,7 @@ async function openUninstall(app: InstalledApp): Promise<void> {
   color: var(--primary);
 }
 .sort-arrow {
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1;
 }
 .apps-count {
@@ -396,7 +396,7 @@ async function openUninstall(app: InstalledApp): Promise<void> {
 .apps-rescan {
   flex-shrink: 0;
   height: 32px;
-  padding: 0 14px;
+  padding: 0 16px;
   border-radius: 6px;
   font-size: 12px;
   transition:
@@ -413,8 +413,8 @@ async function openUninstall(app: InstalledApp): Promise<void> {
   flex-shrink: 0;
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 6px 10px;
+  gap: 12px;
+  padding: 8px 12px;
   border: 1px solid var(--border-color);
   border-radius: 6px;
   background: var(--bg-secondary);
@@ -428,7 +428,7 @@ async function openUninstall(app: InstalledApp): Promise<void> {
 }
 .apps-progress-count {
   flex-shrink: 0;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
 }
@@ -436,13 +436,13 @@ async function openUninstall(app: InstalledApp): Promise<void> {
   flex: 1;
   min-width: 80px;
   height: 4px;
-  border-radius: 2px;
+  border-radius: var(--radius-sm);
   background: var(--bg-tag);
   overflow: hidden;
 }
 .progress-fill {
   height: 100%;
-  border-radius: 2px;
+  border-radius: var(--radius-sm);
   background: var(--primary);
   transition: width 0.2s ease;
 }
@@ -464,11 +464,11 @@ async function openUninstall(app: InstalledApp): Promise<void> {
   flex-shrink: 0;
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 7px 12px;
+  gap: 12px;
+  padding: 8px 12px;
   border: 1px solid rgba(239, 68, 68, 0.28);
   border-radius: 6px;
-  background: #fef2f2;
+  background: var(--danger-soft);
   color: var(--danger);
   font-size: 12px;
 }
@@ -498,7 +498,7 @@ async function openUninstall(app: InstalledApp): Promise<void> {
   flex-direction: column;
   overflow: hidden;
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--bg-primary);
 }
 .apps-scroll {
@@ -514,7 +514,7 @@ async function openUninstall(app: InstalledApp): Promise<void> {
     minmax(150px, 1.5fr) 78px minmax(90px, 0.9fr) 78px 92px
     minmax(110px, 1.2fr) 92px;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   height: 44px;
   padding: 0 12px;
   border-bottom: 1px solid var(--border-color);
@@ -532,7 +532,7 @@ async function openUninstall(app: InstalledApp): Promise<void> {
   height: 32px;
   background: var(--bg-secondary);
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.2px;
 }
@@ -557,7 +557,7 @@ async function openUninstall(app: InstalledApp): Promise<void> {
   white-space: nowrap;
 }
 .app-source {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-muted);
 }
 .col-version,
@@ -580,9 +580,9 @@ async function openUninstall(app: InstalledApp): Promise<void> {
 }
 .row-btn {
   height: 24px;
-  padding: 0 10px;
+  padding: 0 12px;
   border: 1px solid var(--border-color);
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   background: var(--bg-input);
   color: var(--text-secondary);
   font-size: 12px;
@@ -598,8 +598,8 @@ async function openUninstall(app: InstalledApp): Promise<void> {
 }
 .tag {
   display: inline-block;
-  font-size: 11px;
-  border-radius: 9px;
+  font-size: 12px;
+  border-radius: var(--radius-md);
   padding: 1px 8px;
   white-space: nowrap;
 }
@@ -608,10 +608,10 @@ async function openUninstall(app: InstalledApp): Promise<void> {
   background: var(--bg-tag);
 }
 .mono {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--font-mono);
 }
 .btn-xs {
-  padding: 4px 10px;
+  padding: 4px 12px;
   font-size: 12px;
 }
 </style>

@@ -168,7 +168,7 @@ watch(
   padding: 8px 20px 16px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 16px;
   background: transparent;
 }
 
@@ -183,7 +183,7 @@ watch(
   padding: 0;
   background: transparent;
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 12px;
   letter-spacing: 0.02em;
 }
 
@@ -198,7 +198,7 @@ watch(
   flex-direction: row-reverse;
 }
 .msg-avatar {
-  margin-top: 2px;
+  margin-top: 4px;
 }
 .msg-body {
   display: flex;
@@ -218,7 +218,7 @@ watch(
   align-items: baseline;
   gap: 8px;
   max-width: 100%;
-  padding: 0 2px;
+  padding: 0 4px;
 }
 .msg-row.is-out .msg-head {
   justify-content: flex-end;
@@ -232,7 +232,7 @@ watch(
   white-space: nowrap;
 }
 .msg-time {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-muted);
   white-space: nowrap;
 }
@@ -241,7 +241,7 @@ watch(
 .bubble {
   max-width: 100%;
   padding: 8px 12px;
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   font-size: 13px;
   line-height: 1.6;
   color: var(--text-primary);
@@ -250,7 +250,7 @@ watch(
 }
 /* 气泡用阴影分层，不用边框；自己一侧淡主色底 */
 .msg-row.is-in .bubble {
-  background: #fff;
+  background: var(--bg-primary);
   box-shadow:
     0 1px 2px rgba(15, 23, 42, 0.04),
     0 10px 30px -22px rgba(15, 23, 42, 0.28);
@@ -267,18 +267,18 @@ watch(
   align-items: center;
   gap: 8px;
   max-width: 100%;
-  padding: 0 2px;
+  padding: 0 4px;
 }
 .msg-error {
   max-width: 320px;
   color: var(--danger);
-  font-size: 11px;
+  font-size: 12px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .text-btn {
-  padding: 2px 6px;
+  padding: 4px 8px;
   border: none;
   border-radius: 4px;
   background: transparent;
@@ -305,7 +305,7 @@ watch(
   color: var(--text-secondary);
 }
 .chat-hint-text {
-  margin-top: 6px;
+  margin-top: 8px;
   font-size: 12px;
   color: var(--text-muted);
 }

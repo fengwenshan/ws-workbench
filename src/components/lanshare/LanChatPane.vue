@@ -271,7 +271,7 @@ const { dragging, onPaste, onDragEnter, onDragOver, onDragLeave, onDrop } = useL
   align-items: center;
   justify-content: center;
   border: 2px dashed var(--primary);
-  border-radius: 14px;
+  border-radius: var(--radius-lg);
   background: rgba(59, 130, 246, 0.08);
   pointer-events: none;
 }
@@ -279,10 +279,10 @@ const { dragging, onPaste, onDragEnter, onDragOver, onDragLeave, onDrop } = useL
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  padding: 10px 16px;
-  border-radius: 999px;
+  padding: 12px 16px;
+  border-radius: var(--radius-sm);
   background: var(--bg-primary);
-  box-shadow: 0 18px 45px -24px rgba(15, 23, 42, 0.35);
+  box-shadow: var(--shadow-popover);
   color: var(--primary);
   font-size: 13px;
   font-weight: 600;
@@ -297,14 +297,14 @@ const { dragging, onPaste, onDragEnter, onDragOver, onDragLeave, onDrop } = useL
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 14px 20px 10px;
+  padding: 16px 20px 12px;
 }
 .head-main {
   flex: 1;
   min-width: 0;
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
 }
 .head-avatar {
   flex-shrink: 0;
@@ -314,12 +314,12 @@ const { dragging, onPaste, onDragEnter, onDragOver, onDragLeave, onDrop } = useL
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 2px;
+  gap: 4px;
   min-width: 0;
 }
 .head-sub {
   max-width: 100%;
-  padding-left: 2px;
+  padding-left: 4px;
   font-size: 12px;
   line-height: 1.4;
   color: var(--text-muted);
@@ -338,9 +338,9 @@ const { dragging, onPaste, onDragEnter, onDragOver, onDragLeave, onDrop } = useL
 }
 
 .head-action {
-  padding: 6px 9px;
+  padding: 8px 8px;
   border: none;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--text-secondary);
   font-size: 12px;
@@ -354,7 +354,7 @@ const { dragging, onPaste, onDragEnter, onDragOver, onDragLeave, onDrop } = useL
   color: var(--primary);
 }
 .head-action.is-danger:hover:not(:disabled) {
-  background: rgba(239, 68, 68, 0.08);
+  background: var(--danger-soft);
   color: var(--danger);
 }
 .head-action:disabled {
@@ -365,24 +365,23 @@ const { dragging, onPaste, onDragEnter, onDragOver, onDragLeave, onDrop } = useL
 
 .chat-input {
   flex-shrink: 0;
-  padding: 8px 20px 18px;
+  padding: 8px 20px 20px;
   background: transparent;
 }
 .input-offline {
   margin: 0 0 8px;
-  padding: 6px 12px;
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.78);
+  padding: 8px 12px;
+  border-radius: var(--radius-md);
+  background: var(--bg-secondary);
   color: var(--text-muted);
   font-size: 12px;
 }
 .input-card {
-  padding: 10px;
-  border-radius: 14px;
-  background: #fff;
-  box-shadow:
-    0 1px 2px rgba(15, 23, 42, 0.04),
-    0 18px 45px -24px rgba(15, 23, 42, 0.35);
+  padding: 12px;
+  border-radius: var(--radius-lg);
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  box-shadow: var(--shadow-card);
 }
 .input-row {
   display: flex;
@@ -398,7 +397,7 @@ const { dragging, onPaste, onDragEnter, onDragOver, onDragLeave, onDrop } = useL
   flex-shrink: 0;
   padding: 0;
   border: none;
-  border-radius: 9px;
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
@@ -421,9 +420,9 @@ const { dragging, onPaste, onDragEnter, onDragOver, onDragLeave, onDrop } = useL
   min-width: 0;
   min-height: 34px;
   max-height: 120px;
-  padding: 7px 8px;
+  padding: 8px 8px;
   border: 1px solid transparent;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--text-primary);
   font-size: 13px;
@@ -443,9 +442,9 @@ const { dragging, onPaste, onDragEnter, onDragOver, onDragLeave, onDrop } = useL
 .send-btn {
   flex-shrink: 0;
   height: 34px;
-  padding: 0 18px;
+  padding: 0 20px;
   font-size: 13px;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
 }
 
 .chat-empty-state {
@@ -478,14 +477,14 @@ const { dragging, onPaste, onDragEnter, onDragOver, onDragLeave, onDrop } = useL
 }
 @media (max-width: 760px) {
   .chat-head {
-    padding: 10px 14px 6px;
+    padding: 12px 16px 8px;
     flex-wrap: wrap;
   }
   .head-actions {
     margin-left: auto;
   }
   .chat-input {
-    padding: 6px 14px 14px;
+    padding: 8px 16px 16px;
   }
 }
 

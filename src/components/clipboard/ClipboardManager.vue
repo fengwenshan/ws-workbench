@@ -442,9 +442,9 @@ onUnmounted(() => {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
   /* 与 Hosts / 屏幕休眠等页签一致的内容区边距 */
-  padding: 10px 20px 16px;
+  padding: 12px 20px 16px;
   overflow: hidden;
 }
 
@@ -476,9 +476,9 @@ onUnmounted(() => {
 .cm-search-input {
   width: 100%;
   height: 32px;
-  padding: 0 12px 0 30px;
+  padding: 0 12px 0 32px;
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--bg-secondary);
   color: var(--text-primary);
   font-size: 13px;
@@ -508,7 +508,7 @@ onUnmounted(() => {
 .cm-icon-btn {
   height: 32px;
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: transparent;
   font-size: 12px;
   cursor: pointer;
@@ -516,7 +516,7 @@ onUnmounted(() => {
 
 .cm-refresh,
 .cm-clear {
-  padding: 0 14px;
+  padding: 0 16px;
 }
 
 .cm-icon-btn {
@@ -569,7 +569,7 @@ onUnmounted(() => {
 
 .cm-result-hint {
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 12px;
   flex-shrink: 0;
 }
 
@@ -581,7 +581,7 @@ onUnmounted(() => {
   min-height: 0;
   overflow-y: auto;
   border: 1px solid var(--border-color);
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   background: var(--bg-primary);
 }
 
@@ -589,7 +589,7 @@ onUnmounted(() => {
 .cm-row {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
   padding: 8px 12px;
   border-bottom: 1px solid var(--border-color);
   background: var(--bg-primary);
@@ -607,7 +607,7 @@ onUnmounted(() => {
 .cm-row-main {
   display: flex;
   align-items: flex-start;
-  gap: 10px;
+  gap: 12px;
   min-width: 0;
 }
 
@@ -615,7 +615,7 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 6px;
+  gap: 8px;
 }
 
 .cm-thumb-btn {
@@ -646,10 +646,10 @@ onUnmounted(() => {
   right: 2px;
   bottom: 2px;
   padding: 0 4px;
-  border-radius: 999px;
+  border-radius: var(--radius-sm);
   background: rgba(15, 23, 42, 0.7);
-  color: #fff;
-  font-size: 10px;
+  color: var(--on-primary);
+  font-size: 12px;
   line-height: 14px;
   pointer-events: none;
 }
@@ -680,21 +680,21 @@ onUnmounted(() => {
 .cm-time {
   flex-shrink: 0;
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 12px;
   white-space: nowrap;
 }
 
 .cm-actions {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   flex-shrink: 0;
 }
 
 /* 文本按钮：无底色，只保留绿 / 红文字 */
 .cm-action {
   height: 22px;
-  padding: 0 6px;
+  padding: 0 8px;
   border: 0;
   border-radius: 4px;
   background: transparent;
@@ -703,7 +703,7 @@ onUnmounted(() => {
 }
 
 .cm-action.copy {
-  color: #16a34a;
+  color: var(--success-text);
 }
 
 .cm-action.copy:hover {
@@ -711,7 +711,7 @@ onUnmounted(() => {
 }
 
 .cm-action.delete {
-  color: #dc2626;
+  color: var(--danger-text);
 }
 
 .cm-action.delete:hover {
@@ -726,10 +726,10 @@ onUnmounted(() => {
 }
 
 .cm-more {
-  padding: 6px 0;
+  padding: 8px 0;
   text-align: center;
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .cm-sentinel {
@@ -741,7 +741,7 @@ onUnmounted(() => {
 .cm-viewer {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
 }
 
 .cm-viewer-stage {
@@ -751,7 +751,7 @@ onUnmounted(() => {
   justify-content: center;
   min-height: 280px;
   max-height: 52vh;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--bg-secondary);
   overflow: hidden;
 }
@@ -769,9 +769,9 @@ onUnmounted(() => {
   width: 32px;
   height: 48px;
   border: 0;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: rgba(15, 23, 42, 0.45);
-  color: #fff;
+  color: var(--on-primary);
   font-size: 24px;
   line-height: 1;
   cursor: pointer;
@@ -793,9 +793,9 @@ onUnmounted(() => {
 
 .cm-viewer-strip {
   display: flex;
-  gap: 6px;
+  gap: 8px;
   overflow-x: auto;
-  padding-bottom: 2px;
+  padding-bottom: 4px;
 }
 
 .cm-viewer-strip-item {
@@ -827,9 +827,9 @@ onUnmounted(() => {
 
 .cm-btn {
   height: 32px;
-  padding: 0 14px;
+  padding: 0 16px;
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--bg-primary);
   color: var(--text-primary);
   font-size: 12px;
@@ -843,7 +843,7 @@ onUnmounted(() => {
 .cm-btn.primary {
   border-color: var(--primary);
   background: var(--primary);
-  color: #fff;
+  color: var(--on-primary);
 }
 
 .cm-btn.primary:hover {

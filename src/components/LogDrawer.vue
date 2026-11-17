@@ -189,13 +189,13 @@ onUnmounted(() => {
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
-  padding: 14px 16px 10px;
+  padding: 16px 16px 12px;
   border-bottom: 1px solid var(--border-color);
 }
 .head-main {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 4px;
   min-width: 0;
 }
 .head-main h4 {
@@ -210,7 +210,7 @@ onUnmounted(() => {
 .head-actions {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   flex-wrap: wrap;
   justify-content: flex-end;
 }
@@ -242,7 +242,7 @@ onUnmounted(() => {
   display: flex;
   align-items: baseline;
   gap: 8px;
-  padding: 2px 0;
+  padding: 4px 0;
   border-bottom: 1px solid transparent;
   word-break: break-all;
 }
@@ -258,19 +258,19 @@ onUnmounted(() => {
 .log-level {
   flex-shrink: 0;
   width: 34px;
-  font-size: 10px;
+  font-size: 12px;
   color: var(--text-muted);
 }
 .log-entry.warn .log-level,
 .log-entry.warn .log-message {
-  color: #b45309;
+  color: var(--warning-text);
 }
 .log-entry.error .log-level,
 .log-entry.error .log-message {
   color: var(--danger);
 }
 .log-entry.success .log-level {
-  color: #15803d;
+  color: var(--success-text);
 }
 .log-message {
   color: var(--text-secondary);

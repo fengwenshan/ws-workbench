@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, reactive, ref, watch } from 'vue'
-import { Button, Empty, Input, Modal, Tooltip, message } from 'ant-design-vue'
+import { Button, Empty, Input, Modal, TabPane, Tabs, Tooltip, message } from 'ant-design-vue'
 import {
   CopyOutlined,
   DeleteOutlined,
@@ -293,169 +293,164 @@ function outlineIndent(level: number): string {
 
 <template>
   <div class="note-sidebar">
-    <!-- 顶部页签 + 收起按钮 -->
-    <div class="sidebar-tabs" role="tablist">
-      <button
-        type="button"
-        role="tab"
-        class="sidebar-tab"
-        :class="{ active: activeTab === 'outline' }"
-        :aria-selected="activeTab === 'outline'"
-        @click="activeTab = 'outline'"
-      >
-        <span>大纲</span>
-        <span class="sidebar-tab-count">{{ headings.length }}</span>
-      </button>
-      <button
-        type="button"
-        role="tab"
-        class="sidebar-tab"
-        :class="{ active: activeTab === 'assets' }"
-        :aria-selected="activeTab === 'assets'"
-        @click="activeTab = 'assets'"
-      >
-        <span>附件</span>
-        <span class="sidebar-tab-count">{{ assets.length }}</span>
-      </button>
-      <span class="sidebar-tab-spacer" />
-      <Tooltip title="收起侧栏">
-        <Button
-          type="text"
-          size="small"
-          class="sidebar-collapse"
-          aria-label="收起侧栏"
-          @click="emit('collapse')"
-        >
-          <DoubleRightOutlined />
-        </Button>
-      </Tooltip>
-    </div>
+    <!-- 顶部页签：antd Tabs（和项目页「笔记 / 配置 / 上传」同一套），收起按钮挂在右侧 extra -->
+    <Tabs v-model:activeKey="activeTab" size="small" class="note-tabs">
+      <template #rightExtra>
+        <Tooltip title="收起侧栏">
+          <Button
+            type="text"
+            size="small"
+            class="sidebar-collapse"
+            aria-label="收起侧栏"
+            @click="emit('collapse')"
+          >
+            <DoubleRightOutlined />
+          </Button>
+        </Tooltip>
+      </template>
 
-    <!-- 附件页 -->
-    <div v-show="activeTab === 'assets'" class="sidebar-body">
-      <!-- 空状态：附件由正文引用自动解析，不提供手动上传 -->
-      <div v-if="assets.length === 0" class="assets-empty">
-        <FileImageOutlined class="assets-empty-icon" />
-        <p class="assets-empty-title">还没有附件资源</p>
-        <p class="assets-empty-text">
-          在笔记里插入图片（工具栏 / 粘贴 / 拖入正文），正文引用到的资源会自动出现在这里
-        </p>
-        <p class="assets-empty-formats">支持 png · jpg · jpeg · gif · webp · bmp · svg</p>
-      </div>
-
-      <!-- 资源卡片：缩略图 + 名称/大小 + hover 才出现的操作条 -->
-      <div v-else class="assets-list">
-        <div
-          v-for="asset in assets"
-          :key="asset.url"
-          class="asset-card"
-          :class="{ 'is-missing': isMissing(asset) }"
-        >
-          <div class="asset-row">
-            <div class="asset-thumb">
-              <img
-                v-if="!failedThumbs.has(asset.url)"
-                :src="asset.url"
-                :alt="noteAssetDisplayName(asset)"
-                loading="lazy"
-                @error="onThumbError(asset)"
-              />
-              <FileImageOutlined v-else class="asset-thumb-icon" />
-            </div>
-            <div class="asset-main">
-              <span class="asset-name" :title="noteAssetDisplayName(asset)">
-                {{ noteAssetDisplayName(asset) }}
-              </span>
-              <span class="asset-meta" :class="{ missing: isMissing(asset) }">
-                {{ assetMetaText(asset) }}
-              </span>
-            </div>
+      <TabPane key="outline">
+        <template #tab>
+          <span class="tab-label">
+            <span>大纲</span>
+            <span class="sidebar-tab-count">{{ headings.length }}</span>
+          </span>
+        </template>
+        <!-- 大纲页 -->
+        <div class="sidebar-body">
+          <div v-if="headings.length === 0" class="outline-empty">
+            <Empty :image="Empty.PRESENTED_IMAGE_SIMPLE" description="笔记里还没有标题" />
+            <p class="outline-empty-hint">用「# 标题」给笔记分节，就能在这里快速跳转</p>
           </div>
-
-          <div class="asset-actions">
-            <Tooltip title="复制 Markdown">
-              <Button
-                type="text"
-                size="small"
-                class="asset-action"
-                aria-label="复制 Markdown"
-                @click="copyAssetMarkdown(asset)"
-              >
-                <CopyOutlined />
-              </Button>
-            </Tooltip>
-            <Tooltip title="预览">
-              <Button
-                type="text"
-                size="small"
-                class="asset-action"
-                aria-label="预览"
-                @click="openPreview(asset)"
-              >
-                <EyeOutlined />
-              </Button>
-            </Tooltip>
-            <Tooltip title="下载">
-              <Button
-                type="text"
-                size="small"
-                class="asset-action"
-                aria-label="下载"
-                :disabled="busyUrl === asset.url"
-                @click="handleDownload(asset)"
-              >
-                <DownloadOutlined />
-              </Button>
-            </Tooltip>
-            <Tooltip title="重命名">
-              <Button
-                type="text"
-                size="small"
-                class="asset-action"
-                aria-label="重命名"
-                @click="openRename(asset)"
-              >
-                <EditOutlined />
-              </Button>
-            </Tooltip>
-            <Tooltip title="删除">
-              <Button
-                type="text"
-                size="small"
-                class="asset-action danger"
-                aria-label="删除"
-                @click="confirmDelete(asset)"
-              >
-                <DeleteOutlined />
-              </Button>
-            </Tooltip>
+          <div v-else class="outline-list">
+            <button
+              v-for="heading in headings"
+              :key="`${heading.index}-${heading.line}`"
+              type="button"
+              class="outline-item"
+              :class="`outline-level-${Math.min(heading.level, 3)}`"
+              :style="{ paddingLeft: outlineIndent(heading.level) }"
+              :title="heading.text"
+              @click="emit('scrollToHeading', heading.index)"
+            >
+              <span class="outline-level">H{{ heading.level }}</span>
+              <span class="outline-text">{{ heading.text }}</span>
+            </button>
           </div>
         </div>
-      </div>
-    </div>
+      </TabPane>
 
-    <!-- 大纲页 -->
-    <div v-show="activeTab === 'outline'" class="sidebar-body">
-      <div v-if="headings.length === 0" class="outline-empty">
-        <Empty :image="Empty.PRESENTED_IMAGE_SIMPLE" description="笔记里还没有标题" />
-        <p class="outline-empty-hint">用「# 标题」给笔记分节，就能在这里快速跳转</p>
-      </div>
-      <div v-else class="outline-list">
-        <button
-          v-for="heading in headings"
-          :key="`${heading.index}-${heading.line}`"
-          type="button"
-          class="outline-item"
-          :class="`outline-level-${Math.min(heading.level, 3)}`"
-          :style="{ paddingLeft: outlineIndent(heading.level) }"
-          :title="heading.text"
-          @click="emit('scrollToHeading', heading.index)"
-        >
-          <span class="outline-level">H{{ heading.level }}</span>
-          <span class="outline-text">{{ heading.text }}</span>
-        </button>
-      </div>
-    </div>
+      <TabPane key="assets">
+        <template #tab>
+          <span class="tab-label">
+            <span>附件</span>
+            <span class="sidebar-tab-count">{{ assets.length }}</span>
+          </span>
+        </template>
+        <!-- 附件页 -->
+        <div class="sidebar-body">
+          <!-- 空状态：附件由正文引用自动解析，不提供手动上传 -->
+          <div v-if="assets.length === 0" class="assets-empty">
+            <FileImageOutlined class="assets-empty-icon" />
+            <p class="assets-empty-title">还没有附件资源</p>
+            <p class="assets-empty-text">
+              在笔记里插入图片（工具栏 / 粘贴 / 拖入正文），正文引用到的资源会自动出现在这里
+            </p>
+            <p class="assets-empty-formats">支持 png · jpg · jpeg · gif · webp · bmp · svg</p>
+          </div>
+
+          <!-- 资源卡片：缩略图 + 名称/大小 + hover 才出现的操作条 -->
+          <div v-else class="assets-list">
+            <div
+              v-for="asset in assets"
+              :key="asset.url"
+              class="asset-card"
+              :class="{ 'is-missing': isMissing(asset) }"
+            >
+              <div class="asset-row">
+                <div class="asset-thumb">
+                  <img
+                    v-if="!failedThumbs.has(asset.url)"
+                    :src="asset.url"
+                    :alt="noteAssetDisplayName(asset)"
+                    loading="lazy"
+                    @error="onThumbError(asset)"
+                  />
+                  <FileImageOutlined v-else class="asset-thumb-icon" />
+                </div>
+                <div class="asset-main">
+                  <span class="asset-name" :title="noteAssetDisplayName(asset)">
+                    {{ noteAssetDisplayName(asset) }}
+                  </span>
+                  <span class="asset-meta" :class="{ missing: isMissing(asset) }">
+                    {{ assetMetaText(asset) }}
+                  </span>
+                </div>
+              </div>
+
+              <div class="asset-actions">
+                <Tooltip title="复制 Markdown">
+                  <Button
+                    type="text"
+                    size="small"
+                    class="asset-action"
+                    aria-label="复制 Markdown"
+                    @click="copyAssetMarkdown(asset)"
+                  >
+                    <CopyOutlined />
+                  </Button>
+                </Tooltip>
+                <Tooltip title="预览">
+                  <Button
+                    type="text"
+                    size="small"
+                    class="asset-action"
+                    aria-label="预览"
+                    @click="openPreview(asset)"
+                  >
+                    <EyeOutlined />
+                  </Button>
+                </Tooltip>
+                <Tooltip title="下载">
+                  <Button
+                    type="text"
+                    size="small"
+                    class="asset-action"
+                    aria-label="下载"
+                    :disabled="busyUrl === asset.url"
+                    @click="handleDownload(asset)"
+                  >
+                    <DownloadOutlined />
+                  </Button>
+                </Tooltip>
+                <Tooltip title="重命名">
+                  <Button
+                    type="text"
+                    size="small"
+                    class="asset-action"
+                    aria-label="重命名"
+                    @click="openRename(asset)"
+                  >
+                    <EditOutlined />
+                  </Button>
+                </Tooltip>
+                <Tooltip title="删除">
+                  <Button
+                    type="text"
+                    size="small"
+                    class="asset-action danger"
+                    aria-label="删除"
+                    @click="confirmDelete(asset)"
+                  >
+                    <DeleteOutlined />
+                  </Button>
+                </Tooltip>
+              </div>
+            </div>
+          </div>
+        </div>
+      </TabPane>
+    </Tabs>
 
     <!-- 预览大图：点遮罩 / 右上角都能关 -->
     <Modal
@@ -517,59 +512,73 @@ function outlineIndent(level: number): string {
   transition: background 0.15s;
 }
 
-/* ===== 顶部页签 ===== */
-.sidebar-tabs {
+/* ===== 顶部页签：antd Tabs（和项目页「笔记 / 配置 / 上传」同一套） ===== */
+.note-tabs {
+  flex: 1;
+  min-height: 0;
   display: flex;
-  align-items: center;
-  gap: 2px;
+  flex-direction: column;
+}
+.note-sidebar .note-tabs :deep(.ant-tabs-nav) {
   height: var(--panel-header-height);
+  margin: 0;
   padding: 0 4px 0 8px;
-  border-bottom: 1px solid var(--border-color);
   flex-shrink: 0;
 }
-.sidebar-tab {
-  appearance: none;
+/* 只保留选中项的 ink bar，不画整行下边框线 */
+.note-sidebar .note-tabs :deep(.ant-tabs-nav::before) {
+  display: none;
+}
+.note-sidebar .note-tabs :deep(.ant-tabs-nav-wrap),
+.note-sidebar .note-tabs :deep(.ant-tabs-nav-list),
+.note-sidebar .note-tabs :deep(.ant-tabs-extra-content) {
+  height: 100%;
+}
+.note-sidebar .note-tabs :deep(.ant-tabs-extra-content) {
+  display: flex;
+  align-items: center;
+}
+.note-sidebar .note-tabs :deep(.ant-tabs-tab) {
+  height: 100%;
+  margin: 0 8px 0 0;
+  padding: 0 8px;
+}
+.note-sidebar .note-tabs :deep(.ant-tabs-tab + .ant-tabs-tab) {
+  margin-left: 0;
+}
+.note-sidebar .note-tabs :deep(.ant-tabs-tab-btn) {
+  font-size: 14px;
+}
+/* 不要页签下面那条会跟着切换移动的 ink bar，只靠文字颜色区分选中 */
+.note-sidebar .note-tabs :deep(.ant-tabs-ink-bar) {
+  display: none;
+}
+.note-sidebar .note-tabs :deep(.ant-tabs-content-holder),
+.note-sidebar .note-tabs :deep(.ant-tabs-content),
+.note-sidebar .note-tabs :deep(.ant-tabs-tabpane) {
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+}
+.tab-label {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  height: 26px;
-  padding: 0 8px;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
-  font-family: inherit;
-  font-size: 13px;
-  line-height: 1;
-  color: var(--text-secondary);
-  cursor: pointer;
-  transition: background 0.15s, color 0.15s;
-}
-.sidebar-tab:hover {
-  background: var(--bg-hover);
-  color: var(--text-primary);
-}
-.sidebar-tab.active {
-  color: var(--primary);
-  background: var(--bg-active);
-  font-weight: 600;
+  gap: 4px;
 }
 .sidebar-tab-count {
   min-width: 16px;
-  padding: 0 5px;
-  border-radius: 8px;
-  font-size: 11px;
+  padding: 0 4px;
+  border-radius: var(--radius-md);
+  font-size: 12px;
   font-weight: 400;
   line-height: 16px;
   text-align: center;
   color: var(--text-tag);
   background: var(--bg-tag);
 }
-.sidebar-tab.active .sidebar-tab-count {
+.note-sidebar .note-tabs :deep(.ant-tabs-tab-active .sidebar-tab-count) {
   color: var(--primary);
-  background: rgba(59, 130, 246, 0.14);
-}
-.sidebar-tab-spacer {
-  flex: 1;
+  background: var(--primary-soft);
 }
 .sidebar-collapse {
   color: var(--text-muted);
@@ -582,6 +591,7 @@ function outlineIndent(level: number): string {
 /* ===== 内容区（列表内部滚动） ===== */
 .sidebar-body {
   flex: 1;
+  height: 100%;
   min-height: 0;
   display: flex;
   flex-direction: column;

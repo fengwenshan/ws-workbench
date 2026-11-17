@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { Modal, Switch } from 'ant-design-vue'
+import { Modal, Segmented, Switch } from 'ant-design-vue'
 import { getConfigPath, getStorageInfo, type StorageInfo } from '@/api/config'
 import { resolveUploadDir } from '@/api/attachments'
 import { ensureDir, getNetworkInfo, openDir, type NetworkInfo } from '@/api/system'
@@ -12,6 +12,7 @@ import {
   useUpdater,
 } from '@/composables/useUpdater'
 import { pickDirectory } from '@/utils/dialog'
+import { useTheme, type ThemeMode } from '@/composables/useTheme'
 import ResourcePanel from '@/components/settings/ResourcePanel.vue'
 
 const props = defineProps<{
@@ -26,6 +27,15 @@ const emit = defineEmits<{
   updateDefaultUploadDir: [dir: string | null]
   changeDeveloperMode: [enabled: boolean]
 }>()
+
+/** 外观：三档主题，切换即时生效；偏好由 useTheme 加密持久化 */
+const { mode: themeMode, setThemeMode } = useTheme()
+const themeOptions = [
+  { label: '跟随系统', value: 'system' },
+  { label: '浅色', value: 'light' },
+  { label: '深色', value: 'dark' },
+]
+
 
 const configPath = ref('')
 const storageInfo = ref<StorageInfo | null>(null)
@@ -352,6 +362,23 @@ function formatBytes(bytes: number): string {
 
     <p v-if="message" class="toast">{{ message }}</p>
 
+    <!-- 外观：主题三档，切换即时生效（偏好加密持久化） -->
+    <section class="card">
+      <h4>外观</h4>
+      <div class="info-grid">
+        <div class="info-row">
+          <span class="info-label">主题</span>
+          <span class="info-value">
+            <Segmented
+              :value="themeMode"
+              :options="themeOptions"
+              @change="(value) => setThemeMode(value as ThemeMode)"
+            />
+          </span>
+        </div>
+      </div>
+    </section>
+
     <!-- 检查更新：状态与标题栏「更新」按钮共用同一份（useUpdater 模块级单例） -->
     <section class="card">
       <div class="card-head">
@@ -515,7 +542,7 @@ function formatBytes(bytes: number): string {
   padding: 16px 20px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 24px;
 }
 .settings-head {
   display: flex;
@@ -543,9 +570,9 @@ function formatBytes(bytes: number): string {
 .toast {
   font-size: 12px;
   color: var(--primary);
-  background: rgba(59, 130, 246, 0.08);
-  border: 1px solid rgba(59, 130, 246, 0.25);
-  border-radius: 6px;
+  background: var(--primary-soft);
+  border: 1px solid var(--primary-soft);
+  border-radius: var(--radius-md);
   padding: 8px 12px;
 }
 .card-head {
@@ -553,7 +580,7 @@ function formatBytes(bytes: number): string {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 10px;
+  margin-bottom: 12px;
   position: relative;
 }
 /* 标题与右侧按钮垂直居中对齐：去掉 h4 默认下外边距，避免标题偏上 */
@@ -567,16 +594,14 @@ function formatBytes(bytes: number): string {
   top: 50%;
   transform: translateY(-50%);
 }
+/* 设置页不再一段一块卡片：直接铺在页面上，靠标题和 24px 留白分层 */
 .card {
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
-  background: var(--bg-primary);
-  padding: 14px;
+  padding: 0;
 }
 .card h4 {
   font-size: 14px;
   color: var(--text-primary);
-  margin-bottom: 10px;
+  margin-bottom: 12px;
 }
 .info-grid {
   display: grid;
@@ -600,7 +625,7 @@ function formatBytes(bytes: number): string {
 }
 .tag {
   font-size: 12px;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   padding: 1px 8px;
   white-space: nowrap;
 }
@@ -613,29 +638,28 @@ function formatBytes(bytes: number): string {
   background: var(--bg-tag);
 }
 .mono {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--font-mono);
 }
 .btn-xs {
-  padding: 4px 10px;
+  padding: 4px 12px;
   font-size: 12px;
 }
 .muted {
   font-size: 12px;
   line-height: 1.6;
   color: var(--text-muted);
-  margin-bottom: 10px;
+  margin-bottom: 12px;
 }
 /* 网络：MAC / 全部 IP */
+/* 不再画那条横贯整行的分隔线，靠留白把「网络」和上面的信息分开 */
 .net-block {
-  margin-top: 10px;
-  padding-top: 10px;
-  border-top: 1px dashed var(--border-color);
+  margin-top: 20px;
 }
 .net-head {
   display: flex;
   align-items: baseline;
   gap: 8px;
-  margin-bottom: 6px;
+  margin-bottom: 8px;
 }
 .net-title {
   font-size: 12px;
@@ -656,8 +680,8 @@ function formatBytes(bytes: number): string {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 6px 12px;
-  padding: 6px 8px;
+  gap: 8px 12px;
+  padding: 8px 8px;
   border-radius: 6px;
   background: var(--bg-secondary);
   font-size: 12px;
@@ -691,7 +715,7 @@ function formatBytes(bytes: number): string {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 4px;
 }
 .upload-dir-path {
   font-size: 12px;
@@ -704,30 +728,30 @@ function formatBytes(bytes: number): string {
 }
 .upload-dir-actions {
   display: flex;
-  gap: 6px;
+  gap: 8px;
   flex-shrink: 0;
 }
 /* 检查更新 */
 .update-progress {
   margin-top: 8px;
   height: 6px;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   background: var(--bg-tag);
   overflow: hidden;
 }
 .update-progress-bar {
   height: 100%;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   background: var(--primary);
   transition: width 0.2s ease;
 }
 .update-progress-detail {
-  margin-top: 6px;
+  margin-top: 8px;
   font-size: 12px;
   color: var(--text-muted);
 }
 .update-error {
-  margin-top: 6px;
+  margin-top: 8px;
   font-size: 12px;
   line-height: 1.6;
   color: var(--danger);
@@ -743,7 +767,7 @@ function formatBytes(bytes: number): string {
   align-items: center;
   flex-wrap: wrap;
   gap: 8px;
-  margin-top: 10px;
+  margin-top: 12px;
 }
 .update-hint {
   margin-top: 8px;
@@ -761,11 +785,11 @@ function formatBytes(bytes: number): string {
   display: inline-flex;
   align-items: center;
   height: 16px;
-  padding: 0 6px;
-  border-radius: 8px;
+  padding: 0 8px;
+  border-radius: var(--radius-md);
   background: var(--bg-tag);
   color: var(--text-tag);
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 600;
   line-height: 1;
 }

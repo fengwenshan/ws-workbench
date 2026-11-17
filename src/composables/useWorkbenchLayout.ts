@@ -7,6 +7,7 @@ export type AppView = 'home' | 'proxy' | 'cleaner' | 'lanshare' | 'settings'
 
 const TREE_WIDTH_KEY = 'ws-workbench:layout:tree-width'
 const TREE_COLLAPSED_KEY = 'ws-workbench:layout:tree-collapsed'
+/** 与 main.css 的 --pane-left-width 保持一致：项目/VPN/LANLink 左栏同宽，切换工具时右栏起点不跳 */
 const TREE_WIDTH_DEFAULT = 260
 const TREE_WIDTH_MIN = 200
 const TREE_WIDTH_MAX = 420

@@ -16,6 +16,8 @@ import { useEntitySelection } from "@/composables/useEntitySelection";
 import { useProjectForm, type CreateTab } from "@/composables/useProjectForm";
 import { useDeleteConfirm } from "@/composables/useDeleteConfirm";
 import { initPlatform, platform } from "@/platform";
+import { useTheme } from "@/composables/useTheme";
+import { buildAntdTheme } from "@/theme/antdTheme";
 import appIcon from "@/assets/app-icon.png";
 import type {
   AttachmentMeta,
@@ -39,6 +41,10 @@ import QuickOpenPalette from "@/components/QuickOpenPalette.vue";
 import AttachmentPreview from "@/components/AttachmentPreview.vue";
 import { detectVcsMany } from "@/api/project";
 import { getAppName, getAppVersion, isDevBuild, isPrereleaseBuild } from "@/api/app";
+
+/** 主题：mode 来自 useTheme，antd token 跟着解析结果切换（亮/暗） */
+const { resolved: themeResolved } = useTheme();
+const antdTheme = computed(() => buildAntdTheme(themeResolved.value === "dark"));
 
 /** 标题栏上的应用名：开发构建带 -dev，发布版是 ws-workbench（由 Rust 侧按构建给出） */
 const appName = ref("ws-workbench");
@@ -127,6 +133,15 @@ const {
   resetTreeWidth,
   onTreeResizerKeydown,
 } = useWorkbenchLayout();
+
+// 左侧没有模块栏时（清理 / 设置 / 收起的项目树或 VPN 列表），rail 自己就是整张卡片，四角都要圆
+const railSolo = computed(
+  () =>
+    view.value === "cleaner" ||
+    view.value === "settings" ||
+    (view.value === "home" && treeCollapsed.value) ||
+    (view.value === "proxy" && vpnMenuCollapsed.value),
+);
 
 // Windows 使用自绘标题栏；macOS 仍用系统红绿灯，Linux 保留系统边框
 const isWindows = computed(() => platform.is_windows);
@@ -705,7 +720,7 @@ async function handlePack(project: ProjectConfig, asZip: boolean = false) {
 </script>
 
 <template>
-  <ConfigProvider :locale="zhCN">
+  <ConfigProvider :locale="zhCN" :theme="antdTheme">
   <div class="app-layout">
     <!-- 标题栏：整条可拖动窗口；macOS 下红绿灯浮在左侧，留白由 CSS 处理 -->
     <header
@@ -807,7 +822,7 @@ async function handlePack(project: ProjectConfig, asZip: boolean = false) {
 
     <div class="workbench">
       <!-- 工具图标栏 -->
-      <nav class="rail" aria-label="工具">
+      <nav class="rail" :class="{ 'rail-solo': railSolo }" aria-label="工具">
         <div class="rail-group">
           <button
             class="rail-btn"
@@ -849,19 +864,6 @@ async function handlePack(project: ProjectConfig, asZip: boolean = false) {
               <VpnStatusDot :state="vpnDotState" size="md" glow />
             </span>
           </button>
-          <!-- 清理工具：系统清理（软件卸载 + 内存占用） -->
-          <button
-            class="rail-btn"
-            :class="{ active: view === 'cleaner' }"
-            :aria-current="view === 'cleaner' ? 'page' : undefined"
-            aria-label="系统"
-            @click="selectTool('cleaner')"
-          >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <path d="M12 3.5l1.8 4.4 4.4 1.8-4.4 1.8L12 15.9l-1.8-4.4L5.8 9.7l4.4-1.8z" />
-              <path d="M18.5 15l.8 1.9 1.9.8-1.9.8-.8 1.9-.8-1.9-1.9-.8 1.9-.8z" />
-            </svg>
-          </button>
           <!-- LANLink：发现同一局域网里运行本应用的设备并互传文件 -->
           <button
             class="rail-btn"
@@ -878,6 +880,19 @@ async function handlePack(project: ProjectConfig, asZip: boolean = false) {
             </svg>
             <!-- 有未读消息时右上角红点（不挡点击，纯展示） -->
             <span v-if="lanUnread > 0" class="rail-unread-dot" aria-hidden="true"></span>
+          </button>
+          <!-- 清理工具：系统清理（软件卸载 + 内存占用） -->
+          <button
+            class="rail-btn"
+            :class="{ active: view === 'cleaner' }"
+            :aria-current="view === 'cleaner' ? 'page' : undefined"
+            aria-label="系统"
+            @click="selectTool('cleaner')"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M12 3.5l1.8 4.4 4.4 1.8-4.4 1.8L12 15.9l-1.8-4.4L5.8 9.7l4.4-1.8z" />
+              <path d="M18.5 15l.8 1.9 1.9.8-1.9.8-.8 1.9-.8-1.9-1.9-.8 1.9-.8z" />
+            </svg>
           </button>
         </div>
         <div class="rail-bottom">
@@ -932,7 +947,7 @@ async function handlePack(project: ProjectConfig, asZip: boolean = false) {
       ></div>
 
       <!-- 工作区：按工具切换内容 -->
-      <main class="workspace">
+      <main class="workspace" :class="{ 'tree-collapsed': treeCollapsed }">
         <!-- 项目工具 -->
         <div v-show="view === 'home'" class="workspace-body home-body">
           <div class="config-section">
@@ -970,7 +985,7 @@ async function handlePack(project: ProjectConfig, asZip: boolean = false) {
         </div>
 
         <!-- 代理工具 -->
-        <div v-show="view === 'proxy'" class="workspace-body">
+        <div v-show="view === 'proxy'" class="workspace-body proxy-body">
           <VpnPanel
             :vpn="vpn"
             :active="view === 'proxy'"
@@ -1145,7 +1160,7 @@ async function handlePack(project: ProjectConfig, asZip: boolean = false) {
   display: flex;
   flex-direction: column;
   height: 100vh;
-  background: var(--bg-primary);
+  background: var(--bg-secondary);
 }
 
 /* 标题栏：承载窗口拖动、当前工具、版本与更新按钮 */
@@ -1158,11 +1173,10 @@ async function handlePack(project: ProjectConfig, asZip: boolean = false) {
   justify-content: space-between;
   gap: 12px;
   padding: 0 12px 0 16px;
-  border-bottom: 1px solid var(--border-color);
-  background: var(--bg-primary);
+  background: transparent;
 }
 .titlebar-mac {
-  padding-left: 78px;
+  padding-left: 80px;
 }
 .titlebar-windows {
   padding-right: 0;
@@ -1204,7 +1218,7 @@ async function handlePack(project: ProjectConfig, asZip: boolean = false) {
 .titlebar-actions {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   flex-shrink: 0;
   /* 窗口按钮是第三个 flex 子项，必须把 actions 推到右侧，否则 space-between
      会把它放在标题栏正中 */
@@ -1248,8 +1262,8 @@ async function handlePack(project: ProjectConfig, asZip: boolean = false) {
   stroke-width: 1;
 }
 .window-controls.hover-ready .window-control-close:hover {
-  background: #c42b1c;
-  color: #fff;
+  background: var(--danger);
+  color: var(--on-primary);
 }
 .titlebar-search {
   position: absolute;
@@ -1259,13 +1273,13 @@ async function handlePack(project: ProjectConfig, asZip: boolean = false) {
   z-index: 2;
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   width: min(440px, 38vw);
   height: 24px;
-  padding: 0 10px;
+  padding: 0 12px;
   border: 1px solid var(--border-color);
-  border-radius: 6px;
-  background: var(--bg-secondary);
+  border-radius: var(--radius-md);
+  background: var(--bg-primary);
   color: var(--text-muted);
   cursor: pointer;
 }
@@ -1297,12 +1311,18 @@ async function handlePack(project: ProjectConfig, asZip: boolean = false) {
 .rail {
   width: 56px;
   flex-shrink: 0;
+  margin: 0 0 8px 8px;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
   padding: 8px 0;
-  border-right: 1px solid var(--border-color);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg) 0 0 var(--radius-lg);
   background: var(--bg-primary);
+}
+/* 左边没有模块栏时（清理 / 设置 / 收起模块栏），rail 自己就是一张完整卡片 */
+.rail.rail-solo {
+  border-radius: var(--radius-lg);
 }
 .rail-group,
 .rail-bottom {
@@ -1319,7 +1339,7 @@ async function handlePack(project: ProjectConfig, asZip: boolean = false) {
   align-items: center;
   justify-content: center;
   border: none;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--text-secondary);
   cursor: pointer;
@@ -1369,8 +1389,8 @@ async function handlePack(project: ProjectConfig, asZip: boolean = false) {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: #ef4444;
-  box-shadow: 0 0 0 2px #fff;
+  background: var(--danger);
+  box-shadow: 0 0 0 2px var(--bg-primary);
   pointer-events: none;
 }
 
@@ -1389,13 +1409,17 @@ async function handlePack(project: ProjectConfig, asZip: boolean = false) {
 }
 
 /* 项目树面板 */
+/* 项目树：和 rail 拼成左栏卡片——顶/右/下 1px 线，下留 8px，圆角只做右侧两只角 */
 .tree-panel {
   position: relative;
   flex-shrink: 0;
   min-width: 0;
   display: flex;
   flex-direction: column;
-  border-right: 1px solid var(--border-color);
+  margin-bottom: 8px;
+  border: 1px solid var(--border-color);
+  border-left: 0;
+  border-radius: 0 var(--radius-lg) var(--radius-lg) 0;
   background: var(--bg-primary);
   overflow: hidden;
 }
@@ -1411,8 +1435,9 @@ async function handlePack(project: ProjectConfig, asZip: boolean = false) {
   outline: 2px solid var(--primary);
   outline-offset: -2px;
 }
+/* 项目树与详情之间的拖动条，同时充当两栏 12px 间隙 */
 .resizer-tree {
-  width: 6px;
+  width: 4px;
   cursor: col-resize;
 }
 .resizer:hover {
@@ -1436,27 +1461,39 @@ async function handlePack(project: ProjectConfig, asZip: boolean = false) {
   flex-direction: column;
   overflow: hidden;
 }
+/* 项目详情：右栏是一张独立卡片，顶部贴住标题栏，右/下留 8px，整圈 1px 边框 + 12px 圆角 */
 .home-body {
   overflow: hidden;
+  margin: 0 8px 8px 0;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+}
+/* 项目树收起后左侧没有栏了，卡片自己补上 8px 左边距 */
+.workspace.tree-collapsed .home-body {
+  margin-left: 8px;
 }
 
-/* 窄窗口：先收起项目树 */
+/* 窄窗口：先收起项目树；卡片自己补左边距，四周间距保持不变 */
 @media (max-width: 900px) {
   .tree-panel,
   .resizer-tree {
     display: none !important;
   }
+  .home-body {
+    margin-left: 8px;
+  }
 }
 /* 软件更新按钮（标题栏内） */
 .update-btn {
-  padding: 4px 10px;
+  padding: 4px 12px;
   border: 1px solid var(--border-color);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--bg-input);
   color: var(--text-secondary);
   font-size: 12px;
   cursor: pointer;
-  transition: all 0.15s;
+  transition: background-color 0.2s ease, color 0.2s ease, border-color 0.2s ease;
   white-space: nowrap;
 }
 .update-btn:hover:not(:disabled) {
@@ -1471,13 +1508,13 @@ async function handlePack(project: ProjectConfig, asZip: boolean = false) {
 .update-btn-primary {
   border-color: var(--primary);
   background: var(--primary);
-  color: #fff;
+  color: var(--on-primary);
   font-weight: 500;
 }
 .update-btn-primary:hover:not(:disabled) {
   border-color: var(--primary-hover);
   background: var(--primary-hover);
-  color: #fff;
+  color: var(--on-primary);
 }
 .update-btn-titlebar {
   width: auto;
@@ -1489,11 +1526,11 @@ async function handlePack(project: ProjectConfig, asZip: boolean = false) {
   display: inline-flex;
   align-items: center;
   height: 18px;
-  padding: 0 7px;
-  border-radius: 9px;
+  padding: 0 8px;
+  border-radius: var(--radius-md);
   background: var(--bg-tag);
   color: var(--text-tag);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.02em;
   user-select: none;
@@ -1501,7 +1538,7 @@ async function handlePack(project: ProjectConfig, asZip: boolean = false) {
 /* 内测版标识：和 dev 标签同形，换成主色实心 */
 .titlebar-beta-tag {
   background: var(--primary);
-  color: #fff;
+  color: var(--on-primary);
 }
 
 .config-section {
