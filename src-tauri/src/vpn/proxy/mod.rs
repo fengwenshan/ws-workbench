@@ -24,7 +24,7 @@ use unsupported as platform;
 #[cfg(target_os = "windows")]
 use windows as platform;
 
-pub use common::{bypass_covers, warning_for, ProxyState};
+pub use common::{bypass_covers, uncovered_domains, warning_for, ProxyState};
 
 /// 读当前系统的代理设置（失败时返回「没开代理」，不阻塞连接）。
 pub fn detect() -> ProxyState {

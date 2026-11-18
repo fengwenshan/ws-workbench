@@ -106,7 +106,6 @@ const deleteBlockedReason = computed(() => {
 const warningsDismissed = ref(false)
 const warnings = computed(() => vpn.status.warnings ?? [])
 const warningText = computed(() => warnings.value.join('；'))
-const showWarnings = computed(() => warnings.value.length > 0 && !warningsDismissed.value)
 watch(
   () => vpn.status.conn_identity,
   () => {
@@ -133,6 +132,38 @@ const activeProfileId = computed(() => vpn.status.profile_id || vpn.selectedProf
 const policyOwnerId = computed(() => vpn.policyProfileId || vpn.status.profile_id)
 const isPolicyOwner = computed(
   () => !!vpn.selectedProfile && vpn.selectedProfile.id === policyOwnerId.value,
+)
+
+/**
+ * 选中的配置是不是在用当前这条隧道。
+ *
+ * 同一时间只有一条连接：通道参数不同的配置要先断开重连，它自己没有隧道状态。
+ * 把正在生效那份的隧道地址、服务端下发范围、布线提示挂在它下面，看起来就会像
+ * 「第二份配置连着第一条隧道」。
+ */
+const selectedOwnsTunnel = computed(() => {
+  const profile = vpn.selectedProfile
+  if (!profile || !vpn.isConnected) return false
+  if (profile.id === policyOwnerId.value) return true
+  // 打开隧道的那份、以及同通道共用这条隧道的配置，状态本来就是同一条
+  if (profile.id === vpn.status.profile_id) return true
+  const active = vpn.status.conn_identity
+  return !!active && vpn.identities[profile.id] === active
+})
+
+/** 真正在生效的那份配置：未连接的详情页用它说明隧道归谁 */
+const effectiveProfileLabel = computed(() => {
+  const activeId = vpn.status.profile_id || policyOwnerId.value
+  const profile = vpn.profiles.find((item) => item.id === activeId)
+  const name = vpn.status.profile_name || profile?.name || ''
+  const server = profile?.server || ''
+  if (name && server) return `${name}（${server}）`
+  return name || server || '另一份配置'
+})
+
+/** 提示属于正在生效的那条隧道，不能挂在另一份未连接的配置下面 */
+const showWarnings = computed(
+  () => selectedOwnsTunnel.value && warnings.value.length > 0 && !warningsDismissed.value,
 )
 
 function profileDotState(profile: VpnProfile): ProfileDotState {
@@ -738,7 +769,10 @@ watch(
             </p>
           </section>
 
-          <VpnRoutePreview :status="vpn.status" />
+          <VpnRoutePreview
+            :status="vpn.status"
+            :detached-from="vpn.isConnected && !selectedOwnsTunnel ? effectiveProfileLabel : ''"
+          />
         </template>
 
         <div v-else class="detail-empty detail-empty-create">

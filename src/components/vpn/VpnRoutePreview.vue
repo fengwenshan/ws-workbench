@@ -4,7 +4,15 @@ import type { VpnStatus } from '@/types/vpn'
 
 const props = defineProps<{
   status: VpnStatus
+  /**
+   * 正在生效的是另一份配置时传它的标签：只说明隧道归谁，不展示明细。
+   * 同一时间只有一条连接，把别人的隧道算到这份配置头上，看起来就像它自己连着。
+   */
+  detachedFrom?: string
 }>()
+
+/** 断开后 status 里还留着上一次会话的隧道字段，不能当成本次的参数展示 */
+const isLive = computed(() => props.status.phase === 'connected')
 
 const tunnelRows = computed(() => {
   const status = props.status
@@ -74,10 +82,14 @@ const scopeNote = computed(() => {
 <template>
   <div class="preview">
     <div class="preview-head">
-      <h4>当前生效的分流</h4>
+      <h4>{{ detachedFrom ? '连接状态' : '当前生效的分流' }}</h4>
     </div>
 
-    <div v-if="tunnelRows.length === 0" class="preview-empty">
+    <div v-if="detachedFrom" class="preview-empty preview-empty-detached">
+      这份配置未连接，当前生效的是「{{ detachedFrom }}」的连接。切过去之后，这里会显示它自己的隧道参数与分流。
+    </div>
+
+    <div v-else-if="!isLive || tunnelRows.length === 0" class="preview-empty">
       连接成功后，这里会显示隧道参数与实际下发的路由。
     </div>
 
@@ -143,6 +155,11 @@ const scopeNote = computed(() => {
   color: var(--text-muted);
   padding: 12px 0;
   text-align: center;
+}
+/* 未连接的说明是一整句话，左对齐比居中好读 */
+.preview-empty-detached {
+  text-align: left;
+  line-height: 1.6;
 }
 .info-grid {
   display: grid;

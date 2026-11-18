@@ -881,6 +881,18 @@ impl SplitTunnel {
         let state = super::proxy::detect();
         if let Some(warning) = super::proxy::warning_for(&self.domains, &state) {
             session.append_log(&format!("[分流] {}", warning));
+            // 界面只说一句「设置绕过」，日志里保留缺哪些域名，排查时能直接对照
+            let uncovered = super::proxy::uncovered_domains(&self.domains, &state);
+            let suggestions = uncovered
+                .iter()
+                .map(|domain| format!("*.{}", domain))
+                .collect::<Vec<_>>()
+                .join("、");
+            session.append_log(&format!(
+                "[分流] 不在代理绕过列表里的域名：{}（建议加入 {}）",
+                uncovered.join("、"),
+                suggestions
+            ));
             self.warnings.push(warning);
         } else if state.enabled {
             session.append_log(&format!(

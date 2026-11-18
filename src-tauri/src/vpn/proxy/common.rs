@@ -63,28 +63,33 @@ pub fn warning_for(domains: &[String], state: &ProxyState) -> Option<String> {
     if !state.enabled || domains.is_empty() {
         return None;
     }
-    let uncovered: Vec<&str> = domains
-        .iter()
-        .map(String::as_str)
-        .filter(|domain| !bypass_covers(&state.bypass, domain))
-        .collect();
-    if uncovered.is_empty() {
+    if uncovered_domains(domains, state).is_empty() {
         return None;
     }
-    let list = uncovered.join("、");
-    let suggestions = uncovered
-        .iter()
-        .map(|domain| format!("*.{}", domain))
-        .collect::<Vec<_>>()
-        .join("、");
+    // 界面只说要做什么：具体缺哪些域名由 `uncovered_domains` 交给日志，
+    // 提示条不把规则细节摊开（用户要的是「去设置绕过」这一句）。
     Some(format!(
-        "系统代理 {} 会绕开按域名分流：{} 不在代理绕过列表里，\
-         浏览器走代理时会用代理自己的 DNS 解析，拿到公网地址后连不上内网服务。\
-         把 {} 加进系统代理的绕过列表（或停用系统代理）再重连",
-        state.label(),
-        list,
-        suggestions
+        "系统代理 {} 已开启，设置相应的规则绕过代理即可",
+        state.label()
     ))
+}
+
+/// 没有被代理绕过列表覆盖的域名（保持规则顺序、忽略大小写去重）。
+///
+/// 与 `warning_for` 共用同一套判定；调用方用它把缺失项写进日志，
+/// 界面提示本身不再罗列条目。
+pub fn uncovered_domains<'a>(domains: &'a [String], state: &ProxyState) -> Vec<&'a str> {
+    let mut out: Vec<&str> = Vec::new();
+    for domain in domains {
+        let host = domain.as_str();
+        if bypass_covers(&state.bypass, host)
+            || out.iter().any(|seen| seen.eq_ignore_ascii_case(host))
+        {
+            continue;
+        }
+        out.push(host);
+    }
+    out
 }
 
 /// `169.254/16` / `10.0.0.0/8` 这类条目 → (网络号, 前缀长度)。
@@ -218,15 +223,27 @@ mod tests {
     }
 
     #[test]
-    fn warning_names_uncovered_domains() {
+    fn warning_only_asks_to_set_bypass() {
         let message = warning_for(
             &["oa.risencn.com".to_string(), "cas.risencn.com".to_string()],
             &state(&["192.168.*"]),
         )
         .expect("系统代理开着、域名没在绕过列表里，应当报警");
         assert!(message.contains("127.0.0.1:7897"), "{}", message);
-        assert!(message.contains("oa.risencn.com"), "{}", message);
-        assert!(message.contains("*.risencn.com"), "{}", message);
+        assert!(message.contains("设置相应的规则绕过代理即可"), "{}", message);
+        // 界面提示不列条目：域名清单只进日志
+        assert!(!message.contains("oa.risencn.com"), "{}", message);
+    }
+
+    #[test]
+    fn uncovered_domains_keeps_only_missing() {
+        let domains = entries(&["oa.risencn.com", "ok.risencn.com"]);
+        let missing = uncovered_domains(&domains, &state(&["*.ok.risencn.com", "ok.risencn.com"]));
+        assert_eq!(missing, vec!["oa.risencn.com"]);
+        // 重复规则只报一次
+        let duplicated = entries(&["oa.risencn.com", "OA.risencn.com"]);
+        let missing = uncovered_domains(&duplicated, &state(&[]));
+        assert_eq!(missing, vec!["oa.risencn.com"]);
     }
 
     #[test]
