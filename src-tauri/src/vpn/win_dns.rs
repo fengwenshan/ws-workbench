@@ -223,7 +223,8 @@ pub fn namespaces_cover(wanted: &[String], installed: &[String]) -> bool {
 /// 列出当前生效的、属于我们的**原始命名空间**（带前导点会原样保留）。
 ///
 /// 只用于现场诊断：用它能一眼确认系统到底存了 `.example.com` 还是把点吞掉了。
-pub fn installed_namespaces() -> Result<Vec<String>, String> {    let text = winps::run(&build_namespace_script())?;
+pub fn installed_namespaces() -> Result<Vec<String>, String> {
+    let text = winps::run(&build_namespace_script())?;
     let value = winps::parse_json(&text)?;
     Ok(winps::json_array(value)
         .into_iter()

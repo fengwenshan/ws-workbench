@@ -3499,7 +3499,8 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_ips_skip_addresses_that_must_not_be_routed() {        assert!(usable_tunnel_ip(Ipv4Addr::new(10, 10, 3, 17)));
+    fn dynamic_ips_skip_addresses_that_must_not_be_routed() {
+        assert!(usable_tunnel_ip(Ipv4Addr::new(10, 10, 3, 17)));
         assert!(!usable_tunnel_ip(Ipv4Addr::new(127, 0, 0, 1)));
         assert!(!usable_tunnel_ip(Ipv4Addr::new(0, 0, 0, 0)));
         assert!(!usable_tunnel_ip(Ipv4Addr::new(224, 0, 0, 1)));

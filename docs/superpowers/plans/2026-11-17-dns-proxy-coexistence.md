@@ -44,6 +44,14 @@
 - [x] `AGENTS.md` §7：把两个新模块登记为平台拆分范本。
 - [x] 前端：`vue-tsc --noEmit` + `vite build` 绿。
 - [x] Rust：`cargo check --lib --tests` 绿且无 warning。
-- [ ] 实机（Windows）：连 VPN → 日志「不用本机转发器…不占用 53」、53 上没有我们的进程、
-      `Resolve-DnsName oa.risencn.com` 返回内网地址；系统代理开着时日志与界面出现代理警告。
-- [ ] macOS：`/etc/resolver` 里 `port` 为随机高位端口、53 未被占用（本机无法实跑，CI + 说明）。
+- [x] 实机（Windows，2026-11-17 17:00 于 744fce6）：连 VPN → 日志「不用本机转发器…也不占用
+      53 端口」、`Get-NetUDPEndpoint -LocalPort 53` 为空、NRPT 两条指向 `223.5.5.5`、
+      `Resolve-DnsName oa.risencn.com` → `192.168.18.41`（`applied_mode=rule`）；
+      系统代理开着（`ProxyEnable=1`）时日志与 `VpnStatus.warnings` 出现代理提示，提示条 725×52。
+- [~] 提示文案在 0aad915 之后精简成一句、缺失域名只进日志，`744fce6..HEAD` 只动了
+      `vpn/proxy/` 的提示组装与 macOS 的 `cfg`（`install_windows_resolver` / `apply_nrpt` 未变），
+      所以端口与 NRPT 的实机结论仍然成立；新文案由单测 `warning_only_asks_to_set_bypass`
+      锁定（含「不含域名、含『设置相应的规则绕过代理即可』」），**界面上的新文案未再实机复看**。
+- [ ] macOS：`/etc/resolver` 里 `port` 为随机高位端口、53 未被占用。本机没有 macOS，
+      只能靠 CI 的 `test-macos` 覆盖编译与单测；真机行为按
+      `src-tauri/src/vpn/local_dns/macos.rs` 的 `TODO(platform-verify:macos)` 验收。
