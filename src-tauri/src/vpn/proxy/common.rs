@@ -94,8 +94,17 @@ fn parse_cidr(entry: &str) -> Option<(u32, u8)> {
     if prefix > 32 {
         return None;
     }
-    let addr: std::net::Ipv4Addr = addr.trim().parse().ok()?;
-    Some((u32::from(addr), prefix))
+    // WinINET / macOS 的绕过列表常写省略形式：`169.254/16` 表示 `169.254.0.0/16`，
+    // 缺的段按 0 补齐，不能直接按四段 IPv4 解析。
+    let parts: Vec<&str> = addr.trim().split('.').collect();
+    if parts.is_empty() || parts.len() > 4 {
+        return None;
+    }
+    let mut octets = [0u8; 4];
+    for (slot, part) in octets.iter_mut().zip(&parts) {
+        *slot = part.parse().ok()?;
+    }
+    Some((u32::from(std::net::Ipv4Addr::from(octets)), prefix))
 }
 
 fn in_network(ip: std::net::Ipv4Addr, network: u32, prefix: u8) -> bool {

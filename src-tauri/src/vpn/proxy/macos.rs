@@ -91,6 +91,10 @@ pub(crate) fn parse_scutil(text: &str) -> ProxyState {
         }
     }
 
+    if !state.enabled {
+        // 系统代理关着：地址与绕过列表都不参与提示，别让调用方误读成「有状态」
+        return ProxyState::default();
+    }
     if state.servers.is_empty() {
         // 只开了 SOCKS、或 Enable 位开了却没填服务器：都不值得报警
         state.enabled = false;

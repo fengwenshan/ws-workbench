@@ -1589,8 +1589,16 @@ mod tests {
         assert!(check_control(&session, 100, |_| false).is_ok());
         // 自己开的：正常操作
         assert!(check_control(&session, 200, |_| true).is_ok());
-        // 归属视图跟着走：本进程开的 mine = true
-        assert!(session_owner_view(&session).unwrap().mine == (200 == std::process::id()));
+        // 归属视图跟着走：本进程开的 mine = true。
+        // 不用固定 pid 200 断言视图：它不一定在跑，`session_owner_view` 会按存活过滤。
+        session
+            .write_owner(&crate::vpn::session::SessionOwner {
+                pid: std::process::id(),
+                name: "ws-workbench".to_string(),
+            })
+            .unwrap();
+        let view = session_owner_view(&session).expect("本进程还活着，归属视图应当存在");
+        assert!(view.mine);
     }
 
     #[test]

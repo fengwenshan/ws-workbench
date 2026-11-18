@@ -831,7 +831,6 @@ impl SplitTunnel {
             nrpt_installed: false,
             #[cfg(target_os = "windows")]
             adapter_dns_fallback: false,
-            #[cfg(target_os = "windows")]
             #[cfg(any(target_os = "windows", target_os = "macos"))]
             last_bypass_check: None,
             #[cfg(any(target_os = "windows", target_os = "macos"))]
