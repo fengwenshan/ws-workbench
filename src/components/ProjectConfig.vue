@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, reactive, watch, computed, nextTick, onUnmounted } from 'vue'
+import { Checkbox } from 'ant-design-vue'
 import type { LogLevel, ProjectConfig, ProjectType, VcsInfo } from '@/types'
 import {
   detectProjectType as detectProjectTypeCommand,
@@ -23,10 +24,10 @@ function autoResize(el: HTMLTextAreaElement | null) {
 const props = withDefaults(
   defineProps<{
     project: ProjectConfig | null
-    /** 全局默认包含规则：项目未单独配置时沿用，也是「恢复默认」的目标 */
-    defaultInclude?: string[]
+    /** 全局默认排除规则：项目未单独配置时沿用，也是「恢复默认」的目标 */
+    defaultExclude?: string[]
   }>(),
-  { defaultInclude: () => [] },
+  { defaultExclude: () => [] },
 )
 
 const emit = defineEmits<{
@@ -256,32 +257,21 @@ onUnmounted(() => {
 
 const selectedProject = computed(() => localProject.value)
 
-// ============================ 打包包含规则 ============================
+// ============================ 打包排除规则 ============================
 
 /**
  * 只有 layui 项目需要打包规则；已经配置过规则的项目即使类型暂时识别失败
  * （源目录失效等）也继续显示，避免规则「消失」后没法改回来。
  */
 const showPackRules = computed(
-  () => projectType.value === 'layui' || !!localProject.value?.pack_include?.length,
+  () => projectType.value === 'layui' || !!localProject.value?.pack_exclude?.length,
 )
 
-/**
- * 纯后缀自动补成通配符：输入 psd / .psd 都记成 *.psd，
- * 让「添加特殊文件后缀」不用手写 glob。其它规则（*.html、js/**）原样保留。
- */
-function normalizePackRule(rule: string): string {
-  const value = rule.trim()
-  if (!value) return ''
-  if (/^[A-Za-z0-9]+$/.test(value)) return `*.${value}`
-  if (/^\.[A-Za-z0-9]+$/.test(value)) return `*.${value.slice(1)}`
-  return value
-}
-
+/** 规则按 .gitignore 语法原样保存，只去掉首尾空白并去重 */
 function normalizePackRules(rules: string[]): string[] {
   const out: string[] = []
   for (const rule of rules) {
-    const value = normalizePackRule(rule)
+    const value = rule.trim()
     if (value && !out.includes(value)) out.push(value)
   }
   return out
@@ -289,23 +279,42 @@ function normalizePackRules(rules: string[]): string[] {
 
 /** 编辑器的值：项目没配置时展示全局默认规则（继承），改一下就落成项目自己的规则 */
 const packRules = computed<string[]>({
-  get: () => localProject.value?.pack_include ?? props.defaultInclude ?? [],
+  get: () => localProject.value?.pack_exclude ?? props.defaultExclude ?? [],
   set: (rules) => {
     if (!localProject.value) return
     const normalized = normalizePackRules(rules)
-    // 空数组在打包器里等于「全部放行」，容易误打包；清空时回到继承默认规则
-    localProject.value.pack_include = normalized.length ? normalized : null
+    // 空数组在打包器里等于「不排除」，会把 .git、node_modules 一起打进去；
+    // 清空时回到继承默认规则
+    localProject.value.pack_exclude = normalized.length ? normalized : null
     debouncedSave()
   },
 })
 
 /** 规则来源：项目自己配过就是「项目自定义」，否则沿用全局默认 */
-const packRulesInherited = computed(() => !localProject.value?.pack_include)
+const packRulesInherited = computed(() => !localProject.value?.pack_exclude)
+
+/** 含空格的目录 / 文件是否跳过；老项目没有字段时默认跳过 */
+const skipSpacedDirs = computed({
+  get: () => localProject.value?.pack_skip_spaced_dirs ?? true,
+  set: (value: boolean) => {
+    if (!localProject.value) return
+    localProject.value.pack_skip_spaced_dirs = value
+    debouncedSave()
+  },
+})
+const skipSpacedFiles = computed({
+  get: () => localProject.value?.pack_skip_spaced_files ?? true,
+  set: (value: boolean) => {
+    if (!localProject.value) return
+    localProject.value.pack_skip_spaced_files = value
+    debouncedSave()
+  },
+})
 
 /** 恢复默认 = 取消项目自己的规则，重新继承全局默认 */
 function resetPackRules() {
   if (!localProject.value) return
-  localProject.value.pack_include = null
+  localProject.value.pack_exclude = null
   debouncedSave()
 }
 
@@ -315,7 +324,9 @@ function saveProjectNow() {
     name: localProject.value.name,
     source_dir: localProject.value.source_dir,
     output_dir: localProject.value.output_dir,
-    pack_include: localProject.value.pack_include ?? null,
+    pack_exclude: localProject.value.pack_exclude ?? null,
+    pack_skip_spaced_dirs: localProject.value.pack_skip_spaced_dirs ?? true,
+    pack_skip_spaced_files: localProject.value.pack_skip_spaced_files ?? true,
   })
 }
 
@@ -457,9 +468,7 @@ defineExpose({
       <div v-if="showPackRules" class="form-row pack-rules">
         <div class="form-row-head">
           <div class="pack-rules-title">
-            <label>打包包含规则</label>
-            <span class="pack-rules-tag">{{ packRulesInherited ? '继承全局默认' : '项目自定义' }}</span>
-            <span class="pack-rules-count">{{ packRules.length }} 条</span>
+            <label>打包排除规则</label>
           </div>
           <button
             class="btn btn-secondary btn-xs"
@@ -471,12 +480,12 @@ defineExpose({
         </div>
         <RulesEditor
           v-model="packRules"
-          placeholder="输入规则或特殊文件后缀后回车，如 *.psd、psd、js/**"
+          placeholder="输入 .gitignore 规则后回车，如 *.md、.*、node_modules/、!README.md"
         />
-        <p class="form-hint">
-          只打包命中的文件，每个 layui 项目可以不同；输入纯后缀（如 psd）会自动补成 *.psd。
-          未单独配置时沿用全局默认规则。点、_ 开头和含空格的路径始终跳过。
-        </p>
+        <div class="pack-spaces">
+          <Checkbox v-model:checked="skipSpacedDirs">文件夹含空格始终跳过</Checkbox>
+          <Checkbox v-model:checked="skipSpacedFiles">文件含空格始终跳过</Checkbox>
+        </div>
       </div>
 
       <div v-if="projectType === 'unknown'" class="type-tip type-tip-unknown">
@@ -517,7 +526,7 @@ defineExpose({
 .form-row {
   margin-bottom: 16px;
 }
-.form-row label {
+.form-row > label {
   display: block;
   margin-bottom: 8px;
   font-size: 14px;
@@ -532,30 +541,22 @@ defineExpose({
   margin-bottom: 8px;
 }
 .form-row-head label {
+  display: block;
   margin-bottom: 0;
+  font-size: 14px;
+  color: var(--text-secondary);
 }
 .pack-rules-title {
   display: flex;
   align-items: center;
   gap: 8px;
 }
-.pack-rules-tag {
-  padding: 0 8px;
-  border-radius: 4px;
-  background: var(--bg-tag);
-  color: var(--text-tag);
-  font-size: 12px;
-  line-height: 18px;
-}
-.pack-rules-count {
-  font-size: 12px;
-  color: var(--text-muted);
-}
-.form-hint {
-  margin: 8px 0 0;
-  font-size: 12px;
-  line-height: 1.5;
-  color: var(--text-muted);
+.pack-spaces {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 8px;
 }
 .form-input {
   width: 100%;

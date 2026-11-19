@@ -64,10 +64,14 @@ export interface ProjectConfig {
   note: string
   attachments: AttachmentMeta[]
   /**
-   * layui 打包包含规则（白名单）。null / undefined 表示沿用全局默认规则
-   * （AppConfig.default_include）；数组表示项目自己的规则。
+   * layui 打包排除规则（黑名单）。null / undefined 表示沿用全局默认规则
+   * （AppConfig.default_exclude）；数组表示项目自己的规则。
    */
-  pack_include?: string[] | null
+  pack_exclude?: string[] | null
+  /** 打包时跳过目录名含空格的路径；缺省 / true = 跳过，false = 照常打包 */
+  pack_skip_spaced_dirs?: boolean
+  /** 打包时跳过文件名含空格的路径；缺省 / true = 跳过，false = 照常打包 */
+  pack_skip_spaced_files?: boolean
 }
 
 export interface ProjectGroup {
@@ -87,8 +91,8 @@ export interface AppConfig {
   projects: ProjectConfig[]
   /** 项目树一级顺序：分组 id 与一级项目 id 的混排顺序 */
   tree_order?: string[]
-  default_include: string[]
-  default_include_version?: number
+  default_exclude: string[]
+  default_exclude_version?: number
   /** VPN 配置列表 */
   vpn_profiles: VpnProfile[]
   /** @deprecated 老版本全局规则集，只读，仅用于一次性迁移到各配置 */

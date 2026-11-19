@@ -14,6 +14,7 @@ import VpnProfileDialog from './VpnProfileDialog.vue'
 import VpnRoutePreview from './VpnRoutePreview.vue'
 import VpnRuleDialog from './VpnRuleDialog.vue'
 import VpnStatusDot from './VpnStatusDot.vue'
+import PaneResizer from '@/components/PaneResizer.vue'
 
 const props = defineProps<{
   vpn: VpnApi
@@ -554,6 +555,8 @@ watch(
         </div>
       </aside>
 
+      <PaneResizer v-show="!menuCollapsed" />
+
       <!-- 右侧：详情 -->
       <section class="detail">
         <template v-if="vpn.selectedProfile">
@@ -927,7 +930,7 @@ watch(
 .vpn-body {
   flex: 1;
   display: flex;
-  gap: 4px;
+  gap: 0;
   overflow: hidden;
 }
 /* 配置列表收起后左侧没有栏了，卡片自己补上和 rail 之间的 4px 间隙 */

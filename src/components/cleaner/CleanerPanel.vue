@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { Menu } from 'ant-design-vue'
+import PaneResizer from '@/components/PaneResizer.vue'
 import { platform } from '@/platform'
 import { useCleaner } from '@/composables/useCleaner'
 import InstalledAppsPanel from './InstalledAppsPanel.vue'
@@ -84,6 +85,8 @@ const clipboardTabActive = computed(() => props.active && tab.value === 'clipboa
       </div>
     </aside>
 
+    <PaneResizer v-show="!menuCollapsed" />
+
     <!-- 右栏：内容不套框，直接铺在工作区背景上 -->
     <section class="cleaner-main">
       <div v-show="tab === 'popup'" class="cleaner-pane">
@@ -112,7 +115,7 @@ const clipboardTabActive = computed(() => props.active && tab.value === 'clipboa
   flex: 1;
   min-height: 0;
   display: flex;
-  gap: 4px;
+  gap: 0;
   overflow: hidden;
 }
 /* 模块栏收起后不再占位，右栏自己补上和 rail 的 4px 间隙 */

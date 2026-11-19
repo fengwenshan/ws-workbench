@@ -1,86 +1,102 @@
 use serde::{Deserialize, Serialize};
 
-/// 打包包含规则：**命中任一规则的文件才进包**（白名单）。
-///
-/// 面向 layui 工程的打包白名单：只放浏览器/控件运行时真的会请求的类型。
-/// `scss`/`ts`/`map`/`md`/设计源文件、构建配置这些开发期产物不在列表里；
-/// `.thm`/`.tjs`/`.dotm` 是 layui 模板与 WPS 控件，`.doc`/`.docx` 是 WebOffice
-/// 新建正文的空白模板（旧版 Word 用 `.doc`），`.cab` 是 NTKO 正文控件的
-/// ActiveX 安装包，都按运行时资源处理；`.ftl` 是 NTKO 控件模板的服务端片段，
-/// 前端不直接请求，但这类工程常与后端模板同目录部署，漏了正文控件起不来。
-/// 路径里以 `.` 或 `_` 开头的段一律跳过，由 `packer::scan_files` 硬编码处理。
-pub const DEFAULT_INCLUDE: &[&str] = &[
-    "*.html",
-    "*.htm",
-    "*.css",
-    "*.js",
-    "*.mjs",
-    "*.json",
-    "*.png",
-    "*.jpg",
-    "*.jpeg",
-    "*.gif",
-    "*.svg",
-    "*.webp",
-    "*.avif",
-    "*.ico",
-    "*.bmp",
-    "*.woff",
-    "*.woff2",
-    "*.ttf",
-    "*.eot",
-    "*.otf",
-    "*.mp4",
-    "*.webm",
-    "*.mp3",
-    "*.wav",
-    "*.ogg",
-    "*.txt",
-    "*.xml",
-    // layui 工程特有：模板与 WPS 控件不是开发期产物，运行时真的会被请求
-    // - .thm: layui 表单/列表模板（rsViewRender.js 按 APP_ROOT + '/xmodules/pcp/tpl/**.thm' 拉取）
-    // - .tjs: 模板配套脚本
-    // - .dotm: WPS 控件模板（<object data=".../Normal.dotm">）
-    "*.thm",
-    "*.tjs",
-    "*.dotm",
-    // WebOffice 新建正文的空白模板：rsWebOffice.js 用 $.ajax 直接 GET newDocument.doc(x)
-    // - .docx: 新版本 Office 模板
-    // - .doc: 旧版 Word 模板，部分 layui 工程只放了这一份
-    "*.docx",
-    "*.doc",
-    // NTKO 正文控件的 ActiveX 安装包：rsOfficeRender.js 的 codebase 指向
-    // `APP_ROOT + '/xmodules/pcip/module/lib/ntko/ntkoControl.cab'`，IE 下由浏览器请求安装
-    "*.cab",
-    // NTKO 控件模板的服务端片段（ntko_lib.ftl）：前端不直接请求，但 layui 工程常把
-    // 模板与静态资源放在同一份目录里部署，由后端 include，漏了正文控件渲染不出来
-    "*.ftl",
-];
-
-/// 当前包含规则版本号。以后新增默认规则时递增，老配置由
-/// [`migrate_default_include`] 补齐（只追加缺的，不动用户已有规则）。
-pub const DEFAULT_INCLUDE_VERSION: u32 = 5;
-
-/// 默认包含规则列表
-pub fn default_include_rules() -> Vec<String> {
-    DEFAULT_INCLUDE.iter().map(|rule| rule.to_string()).collect()
+/// 老项目没有空间过滤字段时默认「跳过含空格的目录 / 文件」
+fn default_true() -> bool {
+    true
 }
 
-/// 老配置补齐当前版本的默认包含规则。
+/// 打包排除规则：**命中任一规则的文件/目录不进包**（黑名单）。
 ///
-/// 返回是否发生变化。规则为空（老版本没有包含规则字段）或版本落后时，
+/// 默认只列开发期产物与打包垃圾，其余文件全部进包：
+/// - 隐藏文件/目录（`.git`、`.svn`、`.idea`、`.vscode`、`.DS_Store`…）
+/// - 文档目录、文档、样式源码、sourcemap
+/// - 测试文件与 `__tests__` 目录
+/// - 依赖目录与历史压缩包
+///
+/// 下划线开头的文件/目录不再默认跳过，按普通文件打包；要排除就在项目里
+/// 自己加 `_*`。规则语法与 `.gitignore` 一致，规则为空 = 不排除。
+pub const DEFAULT_EXCLUDE: &[&str] = &[
+    ".*",
+    "docs/**",
+    "*.md",
+    "*.scss",
+    "*.less",
+    "*.map",
+    "*.test.js",
+    "*.spec.js",
+    "__tests__",
+    "node_modules",
+    "*.zip",
+];
+
+/// 各版本新增的默认排除规则：(版本号, 规则列表)。
+///
+/// 迁移时只追加本版本新增的规则（以及显式移除的默认规则），
+/// 不碰用户自己加的其它规则。
+pub const DEFAULT_EXCLUDE_ADDITIONS: &[(u32, &[&str])] = &[
+    // 2026-11-19：测试文件与 __tests__ 目录
+    (2, &["*.test.js", "*.spec.js", "__tests__"]),
+    // 2026-11-19：文档目录
+    (4, &["docs/**"]),
+];
+
+/// 各版本移除的默认排除规则：(版本号, 规则列表)。
+///
+/// 只删这些具体默认规则，用户自己新增的其它规则不受影响。
+pub const DEFAULT_EXCLUDE_REMOVALS: &[(u32, &[&str])] = &[(3, &["_*"])];
+
+/// 当前排除规则版本号。以后新增/移除默认规则时递增，老配置由
+/// [`migrate_default_exclude`] 按版本增量合并，不动用户自己加的其它规则。
+pub const DEFAULT_EXCLUDE_VERSION: u32 = 4;
+
+/// 默认排除规则列表
+pub fn default_exclude_rules() -> Vec<String> {
+    DEFAULT_EXCLUDE.iter().map(|rule| rule.to_string()).collect()
+}
+
+/// 老配置补齐当前版本的默认排除规则。
+///
+/// 返回是否发生变化。规则为空（老版本没有排除规则字段）或版本落后时，
 /// 把缺的默认规则追加进去；用户自己加/删的规则不会被覆盖。
-pub fn migrate_default_include(rules: &mut Vec<String>, version: &mut u32) -> bool {
-    if *version >= DEFAULT_INCLUDE_VERSION {
+pub fn migrate_default_exclude(rules: &mut Vec<String>, version: &mut u32) -> bool {
+    if *version >= DEFAULT_EXCLUDE_VERSION {
         return false;
     }
-    for rule in DEFAULT_INCLUDE {
+    let from_version = *version;
+    let mut changed = false;
+
+    // 版本 0 是还没有排除规则字段的老配置：补齐完整默认集。
+    // 之后的版本只追加该版本新增的规则，避免把用户删掉的旧规则重新塞回去。
+    let additions: Vec<&str> = if from_version == 0 {
+        DEFAULT_EXCLUDE.iter().copied().collect()
+    } else {
+        DEFAULT_EXCLUDE_ADDITIONS
+            .iter()
+            .filter(|(added_in, _)| *added_in > from_version && *added_in <= DEFAULT_EXCLUDE_VERSION)
+            .flat_map(|(_, rules)| rules.iter().copied())
+            .collect()
+    };
+
+    for rule in additions {
         if !rules.iter().any(|existing| existing == rule) {
-            rules.push((*rule).to_string());
+            rules.push(rule.to_string());
+            changed = true;
         }
     }
-    *version = DEFAULT_INCLUDE_VERSION;
-    true
+
+    // 移除新版本不再想要的默认规则（例如 v3 去掉过宽的 `.*`）
+    for (removed_in, removals) in DEFAULT_EXCLUDE_REMOVALS {
+        if *removed_in > from_version && *removed_in <= DEFAULT_EXCLUDE_VERSION {
+            let before = rules.len();
+            rules.retain(|rule| !removals.iter().any(|removed| rule == removed));
+            if rules.len() != before {
+                changed = true;
+            }
+        }
+    }
+
+    *version = DEFAULT_EXCLUDE_VERSION;
+    changed || from_version != DEFAULT_EXCLUDE_VERSION
 }
 
 /// 附件元信息。`id` 即磁盘上密文文件的主名（`<id>.wst`）
@@ -121,9 +137,9 @@ pub struct ProjectGroup {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
     #[serde(default)]
-    pub default_include: Vec<String>,
+    pub default_exclude: Vec<String>,
     #[serde(default)]
-    pub default_include_version: u32,
+    pub default_exclude_version: u32,
     /// 上次选中的 VPN 配置
     #[serde(default)]
     pub vpn_active_profile_id: String,
@@ -147,8 +163,8 @@ pub struct AppSettings {
 impl Default for AppSettings {
     fn default() -> Self {
         AppSettings {
-            default_include: default_include_rules(),
-            default_include_version: DEFAULT_INCLUDE_VERSION,
+            default_exclude: default_exclude_rules(),
+            default_exclude_version: DEFAULT_EXCLUDE_VERSION,
             vpn_active_profile_id: String::new(),
             vpn_worker_session_dir: String::new(),
             default_upload_dir: None,
@@ -166,9 +182,9 @@ pub struct AppConfig {
     #[serde(default)]
     pub projects: Vec<ProjectConfig>,
     #[serde(default)]
-    pub default_include: Vec<String>,
+    pub default_exclude: Vec<String>,
     #[serde(default)]
-    pub default_include_version: u32,
+    pub default_exclude_version: u32,
     /// VPN 配置列表
     #[serde(default)]
     pub vpn_profiles: Vec<crate::vpn::models::VpnProfile>,
@@ -201,8 +217,8 @@ impl Default for AppConfig {
         AppConfig {
             groups: vec![],
             projects: vec![],
-            default_include: default_include_rules(),
-            default_include_version: DEFAULT_INCLUDE_VERSION,
+            default_exclude: default_exclude_rules(),
+            default_exclude_version: DEFAULT_EXCLUDE_VERSION,
             vpn_profiles: vec![],
             vpn_rule_sets: vec![],
             vpn_active_profile_id: String::new(),
@@ -230,11 +246,18 @@ pub struct ProjectConfig {
     /// 附件列表
     #[serde(default)]
     pub attachments: Vec<AttachmentMeta>,
-    /// layui 打包包含规则（白名单）。`None` 表示沿用全局默认规则
-    /// （`AppSettings::default_include`）；`Some` 为该项目自己的规则。
-    /// 不能只存空数组：空数组在打包器里等价于「不过滤、全部放行」。
+    /// layui 打包排除规则（黑名单）。`None` 表示沿用全局默认规则
+    /// （`AppSettings::default_exclude`）；`Some` 为该项目自己的规则。
+    /// 空数组在打包器里等价于「不排除、全部打包」，前端会把它归一成 `None`
+    /// 回退到全局默认，避免误打包。
     #[serde(default)]
-    pub pack_include: Option<Vec<String>>,
+    pub pack_exclude: Option<Vec<String>>,
+    /// 打包时跳过路径中含空格的目录（默认跳过；关掉后这类目录里的文件也会打包）
+    #[serde(default = "default_true")]
+    pub pack_skip_spaced_dirs: bool,
+    /// 打包时跳过文件名含空格的文件（默认跳过；关掉后这类文件也会打包）
+    #[serde(default = "default_true")]
+    pub pack_skip_spaced_files: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -299,66 +322,126 @@ pub struct VcsInfo {
 
 
 #[cfg(test)]
-mod default_include_tests {
+mod default_exclude_tests {
     use super::*;
 
-    /// 默认包含集 = 浏览器能直接用的类型；开发期产物一个都不能进
+    /// 默认排除集覆盖常见 VCS/IDE 目录、文档、样式源码、测试与依赖等
     #[test]
-    fn default_rules_are_browser_loadable_types() {
-        let rules = default_include_rules();
+    fn default_rules_cover_dev_artifacts() {
+        let rules = default_exclude_rules();
         let has = |rule: &str| rules.iter().any(|item| item == rule);
         for rule in [
-            "*.html", "*.htm", "*.css", "*.js", "*.json", "*.png", "*.jpg", "*.svg",
-            "*.woff2", "*.ttf", "*.mp4", "*.txt",
-            // layui 工程特有
-            "*.thm", "*.tjs", "*.dotm", "*.docx", "*.doc",
-            // NTKO 正文控件：ActiveX 安装包 + 服务端模板片段
-            "*.cab", "*.ftl",
+            ".*", "docs/**", "*.md", "*.scss", "*.less", "*.map",
+            "*.test.js", "*.spec.js", "__tests__", "node_modules", "*.zip",
         ] {
-            assert!(has(rule), "默认包含规则缺少 {}", rule);
+            assert!(has(rule), "默认排除规则缺少 {}", rule);
         }
-        for dev_only in [
-            "*.scss", "*.less", "*.ts", "*.tsx", "*.vue", "*.map", "*.md", "*.psd",
-            "*.pdf", "*.log", "package.json", "vite.config.*", "*.zip", "node_modules",
-        ] {
-            assert!(!has(dev_only), "开发期文件不该默认进包: {}", dev_only);
-        }
+        assert!(!has("_*"), "下划线开头不再默认排除");
+    }
+
+    /// 老项目缺空间过滤字段时默认两个都跳过
+    #[test]
+    fn project_space_flags_default_to_true() {
+        let project: ProjectConfig = serde_json::from_str(
+            r#"{"id":"p1","name":"n","source_dir":"/a","output_dir":"/b"}"#,
+        )
+        .unwrap();
+        assert!(project.pack_skip_spaced_dirs);
+        assert!(project.pack_skip_spaced_files);
     }
 
     #[test]
     fn default_rules_have_no_duplicates() {
-        let rules = default_include_rules();
+        let rules = default_exclude_rules();
         let mut sorted = rules.clone();
         sorted.sort();
         sorted.dedup();
-        assert_eq!(rules.len(), sorted.len(), "默认包含规则里有重复项");
+        assert_eq!(rules.len(), sorted.len(), "默认排除规则里有重复项");
     }
 
-    /// 老配置（没有 include 字段 / 版本 0）迁移后拿到完整默认集
+    /// 老配置（没有 exclude 字段 / 版本 0）迁移后拿到完整默认集
     #[test]
     fn migration_from_legacy_config_fills_defaults() {
         let mut rules: Vec<String> = Vec::new();
         let mut version = 0;
-        assert!(migrate_default_include(&mut rules, &mut version));
-        assert_eq!(version, DEFAULT_INCLUDE_VERSION);
+        assert!(migrate_default_exclude(&mut rules, &mut version));
+        assert_eq!(version, DEFAULT_EXCLUDE_VERSION);
         let mut sorted = rules.clone();
         sorted.sort();
-        let mut expected = default_include_rules();
+        let mut expected = default_exclude_rules();
         expected.sort();
         assert_eq!(sorted, expected);
 
         // 再跑不重复、不变化
         let before = rules.len();
-        assert!(!migrate_default_include(&mut rules, &mut version));
+        assert!(!migrate_default_exclude(&mut rules, &mut version));
         assert_eq!(rules.len(), before);
+    }
+
+    /// 版本 1 → 当前版本：补新增规则、移除 `_*`，不复活用户删掉的旧规则
+    #[test]
+    fn migration_v1_only_adds_new_rules() {
+        let mut rules = vec![
+            ".*".to_string(),
+            "_*".to_string(),
+            "*.md".to_string(),
+            "custom/**".to_string(),
+        ];
+        let mut version = 1;
+        assert!(migrate_default_exclude(&mut rules, &mut version));
+        assert_eq!(version, DEFAULT_EXCLUDE_VERSION);
+        assert!(rules.iter().any(|rule| rule == "*.test.js"));
+        assert!(rules.iter().any(|rule| rule == "*.spec.js"));
+        assert!(rules.iter().any(|rule| rule == "__tests__"));
+        assert!(rules.iter().any(|rule| rule == "docs/**"));
+        assert!(!rules.iter().any(|rule| rule == "_*"), "`_*` 应被移除");
+        assert!(rules.iter().any(|rule| rule == ".*"));
+        assert!(
+            !rules.iter().any(|rule| rule == "*.scss"),
+            "旧版本里已删掉的规则不该被重新塞回来"
+        );
+    }
+
+    /// 版本 2 → 当前版本：去掉 `_*`、补 `docs/**`，其余规则保持不动
+    #[test]
+    fn migration_v2_removes_underscore_rule() {
+        let mut rules = vec![
+            ".*".to_string(),
+            "_*".to_string(),
+            "*.md".to_string(),
+            "custom/**".to_string(),
+        ];
+        let mut version = 2;
+        assert!(migrate_default_exclude(&mut rules, &mut version));
+        assert_eq!(version, DEFAULT_EXCLUDE_VERSION);
+        assert!(!rules.iter().any(|rule| rule == "_*"), "`_*` 应被移除");
+        assert!(rules.iter().any(|rule| rule == "docs/**"));
+        assert!(rules.iter().any(|rule| rule == ".*"));
+        assert!(rules.iter().any(|rule| rule == "*.md"));
+        assert!(rules.iter().any(|rule| rule == "custom/**"));
+        assert!(
+            !rules.iter().any(|rule| rule == "*.test.js"),
+            "版本 2 已经有过测试规则，不应重复追加"
+        );
+    }
+
+    /// 版本 3 → 4：只补 `docs/**`
+    #[test]
+    fn migration_v3_adds_docs_dir() {
+        let mut rules = vec![".*".to_string(), "*.md".to_string()];
+        let mut version = 3;
+        assert!(migrate_default_exclude(&mut rules, &mut version));
+        assert_eq!(version, DEFAULT_EXCLUDE_VERSION);
+        assert!(rules.iter().any(|rule| rule == "docs/**"));
+        assert_eq!(rules.len(), 3);
     }
 
     /// 用户自己删掉的规则不会被重新塞回去（版本已是最新）
     #[test]
     fn migration_respects_user_edits_after_upgrade() {
-        let mut rules = vec!["*.html".to_string(), "*.js".to_string()];
-        let mut version = DEFAULT_INCLUDE_VERSION;
-        assert!(!migrate_default_include(&mut rules, &mut version));
-        assert_eq!(rules, vec!["*.html", "*.js"]);
+        let mut rules = vec!["*.scss".to_string(), "*.md".to_string()];
+        let mut version = DEFAULT_EXCLUDE_VERSION;
+        assert!(!migrate_default_exclude(&mut rules, &mut version));
+        assert_eq!(rules, vec!["*.scss", "*.md"]);
     }
 }

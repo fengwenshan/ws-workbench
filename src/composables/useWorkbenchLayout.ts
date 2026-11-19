@@ -1,16 +1,30 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
+import type { InjectionKey } from 'vue'
 import { safeGet, safeSet } from './safeStorage'
 import { platform } from '@/platform'
 
 /** 工具页标识 */
 export type AppView = 'home' | 'proxy' | 'cleaner' | 'lanshare' | 'settings'
 
-const TREE_WIDTH_KEY = 'ws-workbench:layout:tree-width'
+const PANE_WIDTH_KEY = 'ws-workbench:layout:tree-width'
 const TREE_COLLAPSED_KEY = 'ws-workbench:layout:tree-collapsed'
-/** 与 main.css 的 --pane-left-width 保持一致：项目/VPN/LANLink 左栏同宽，切换工具时右栏起点不跳 */
-const TREE_WIDTH_DEFAULT = 260
-const TREE_WIDTH_MIN = 200
-const TREE_WIDTH_MAX = 420
+/**
+ * 左栏宽度：项目树 / VPN / 系统 / LANLink / 设置共用同一个值。
+ * App.vue 把它写成 CSS 变量 --pane-left-width，切换工具时右栏起点不跳。
+ * 持久化键沿用历史 tree-width，避免升级后宽度丢失。
+ */
+const PANE_WIDTH_DEFAULT = 260
+const PANE_WIDTH_MIN = 200
+const PANE_WIDTH_MAX = 420
+
+/** 左栏拖拽条需要的最小能力；由 App.vue provide，各模块的左栏拖拽条 inject */
+export interface PaneResizeApi {
+  start: (event: PointerEvent) => void
+  keydown: (event: KeyboardEvent) => void
+  reset: () => void
+}
+
+export const PANE_RESIZE_KEY: InjectionKey<PaneResizeApi> = Symbol('pane-resize')
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max)
@@ -18,14 +32,14 @@ function clamp(value: number, min: number, max: number) {
 
 /**
  * 工作台布局与工具切换：
- * 项目树尺寸、折叠状态、快捷键、拖拽与持久化都收在这里，
+ * 左栏宽度、折叠状态、快捷键、拖拽与持久化都收在这里，
  * App.vue 只负责组装界面。
  */
 export function useWorkbenchLayout() {
   const view = ref<AppView>('home')
   const isMac = computed(() => platform.is_macos)
 
-  const treeWidth = ref(TREE_WIDTH_DEFAULT)
+  const paneWidth = ref(PANE_WIDTH_DEFAULT)
   const treeCollapsed = ref(false)
   /** 代理页左侧 VPN 配置列表是否收起（再次点击「代理」切换） */
   const vpnMenuCollapsed = ref(false)
@@ -34,7 +48,7 @@ export function useWorkbenchLayout() {
   const lanMenuCollapsed = ref(false)
   const settingsMenuCollapsed = ref(false)
 
-  type DragState = { kind: 'tree'; startX: number; startWidth: number }
+  type DragState = { startX: number; startWidth: number }
   let drag: DragState | null = null
 
   function setTreeCollapsed(collapsed: boolean) {
@@ -94,43 +108,42 @@ export function useWorkbenchLayout() {
     return `${label} (${isMac.value ? '⌘' : 'Ctrl+'}${key})`
   }
 
-  function startTreeResize(event: PointerEvent) {
+  function startPaneResize(event: PointerEvent) {
     event.preventDefault()
-    drag = { kind: 'tree', startX: event.clientX, startWidth: treeWidth.value }
+    drag = { startX: event.clientX, startWidth: paneWidth.value }
     ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
   }
 
   function onResizeMove(event: PointerEvent) {
     if (!drag) return
-    treeWidth.value = clamp(
+    paneWidth.value = clamp(
       drag.startWidth + event.clientX - drag.startX,
-      TREE_WIDTH_MIN,
-      TREE_WIDTH_MAX,
+      PANE_WIDTH_MIN,
+      PANE_WIDTH_MAX,
     )
   }
 
   function onResizeEnd() {
     if (!drag) return
-    void safeSet(TREE_WIDTH_KEY, String(treeWidth.value))
+    void safeSet(PANE_WIDTH_KEY, String(paneWidth.value))
     drag = null
   }
 
-  function resetTreeWidth() {
-    setTreeCollapsed(false)
-    treeWidth.value = TREE_WIDTH_DEFAULT
-    void safeSet(TREE_WIDTH_KEY, String(TREE_WIDTH_DEFAULT))
+  function resetPaneWidth() {
+    paneWidth.value = PANE_WIDTH_DEFAULT
+    void safeSet(PANE_WIDTH_KEY, String(PANE_WIDTH_DEFAULT))
   }
 
-  function onTreeResizerKeydown(event: KeyboardEvent) {
+  function onPaneResizerKeydown(event: KeyboardEvent) {
     if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
     event.preventDefault()
     const delta = event.key === 'ArrowRight' ? 16 : -16
-    treeWidth.value = clamp(
-      treeWidth.value + delta,
-      TREE_WIDTH_MIN,
-      TREE_WIDTH_MAX,
+    paneWidth.value = clamp(
+      paneWidth.value + delta,
+      PANE_WIDTH_MIN,
+      PANE_WIDTH_MAX,
     )
-    void safeSet(TREE_WIDTH_KEY, String(treeWidth.value))
+    void safeSet(PANE_WIDTH_KEY, String(paneWidth.value))
   }
 
   function isEditableTarget(target: EventTarget | null) {
@@ -177,9 +190,9 @@ export function useWorkbenchLayout() {
   }
 
   async function restoreLayout() {
-    const width = Number(await safeGet(TREE_WIDTH_KEY))
+    const width = Number(await safeGet(PANE_WIDTH_KEY))
     if (Number.isFinite(width) && width > 0) {
-      treeWidth.value = clamp(width, TREE_WIDTH_MIN, TREE_WIDTH_MAX)
+      paneWidth.value = clamp(width, PANE_WIDTH_MIN, PANE_WIDTH_MAX)
     }
     const collapsed = await safeGet(TREE_COLLAPSED_KEY)
     if (collapsed === 'true' || collapsed === 'false') {
@@ -205,15 +218,15 @@ export function useWorkbenchLayout() {
     shortcutTitle,
     selectTool,
     openHome,
-    treeWidth,
+    paneWidth,
     treeCollapsed,
     vpnMenuCollapsed,
     cleanerMenuCollapsed,
     lanMenuCollapsed,
     settingsMenuCollapsed,
     toggleTree,
-    startTreeResize,
-    resetTreeWidth,
-    onTreeResizerKeydown,
+    startPaneResize,
+    resetPaneWidth,
+    onPaneResizerKeydown,
   }
 }

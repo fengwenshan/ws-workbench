@@ -67,7 +67,8 @@
   --panel-header-height: 40px;
   /* 左栏页头（图标 + 标题 + 右侧操作，参考 LANLink）= 右侧内容区标题行高度 */
   --pane-head-height: 56px;
-  /* 两栏模块（项目 / VPN / LANLink）左栏统一长度，切换工具时右栏起点不跳 */
+  /* 两栏模块（项目 / VPN / 系统 / LANLink / 设置）左栏统一宽度，切换工具时右栏起点不跳 */
+  /* 运行时由 App.vue 按拖拽结果覆盖，这里只是首屏 fallback */
   --pane-left-width: 260px;
 }
 

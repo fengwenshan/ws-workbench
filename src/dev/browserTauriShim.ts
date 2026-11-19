@@ -54,8 +54,8 @@ function fixtures() {
       ],
       projects: [],
       tree_order: ['group-preview'],
-      default_include: ['*.html', '*.css', '*.js'],
-      default_include_version: 1,
+      default_exclude: ['.*', 'docs/**', '*.md', '*.scss', '*.less', '*.map', '*.test.js', '*.spec.js', '__tests__', 'node_modules', '*.zip'],
+      default_exclude_version: 4,
       vpn_profiles: [
         {
           id: 'vpn-preview',

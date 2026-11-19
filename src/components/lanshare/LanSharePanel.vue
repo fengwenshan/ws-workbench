@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import PaneResizer from '@/components/PaneResizer.vue'
 import LanShareSidebar from './LanShareSidebar.vue'
 import LanChatPane from './LanChatPane.vue'
 import LanShareSettings from './LanShareSettings.vue'
@@ -87,6 +88,8 @@ function toggleSettings() {
       />
     </aside>
 
+    <PaneResizer v-show="!menuCollapsed" />
+
     <section class="lan-main">
       <p v-if="loadError" class="lan-alert">{{ loadError }}</p>
 
@@ -165,7 +168,7 @@ function toggleSettings() {
   flex: 1;
   min-height: 0;
   display: flex;
-  gap: 4px;
+  gap: 0;
   overflow: hidden;
 }
 /* 设备列表收起后不再占位，右栏自己补上和 rail 的 4px 间隙 */

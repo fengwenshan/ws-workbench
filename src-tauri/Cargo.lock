@@ -5886,7 +5886,6 @@ dependencies = [
  "base64 0.22.1",
  "cbc",
  "chrono",
- "globset",
  "hmac",
  "ignore",
  "image",

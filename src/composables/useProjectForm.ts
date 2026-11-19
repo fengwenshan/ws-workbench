@@ -8,7 +8,6 @@ interface NewProjectData {
   name: string
   source_dir: string
   output_dir: string
-  exclude: string[]
 }
 
 interface Options {
@@ -160,7 +159,6 @@ export function useProjectForm(options: Options) {
       name: projectName,
       source_dir: sourceDir,
       output_dir: outputDir,
-      exclude: [],
     })
     if (created) {
       onProjectCreated?.(created)
