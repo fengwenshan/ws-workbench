@@ -12,7 +12,7 @@ export function usePack() {
   const error = ref('')
   let unlisten: UnlistenFn | null = null
 
-  async function pack(project: ProjectConfig, defaultInclude: string[], asZip: boolean = false) {
+  async function pack(project: ProjectConfig, defaultExclude: string[], asZip: boolean = false) {
     if (packing.value) return
     packing.value = true
     progress.value = null
@@ -28,7 +28,7 @@ export function usePack() {
       const command = asZip ? 'pack_to_zip' : 'pack_project'
       result.value = await invoke<PackResult>(command, {
         project,
-        defaultInclude,
+        defaultExclude,
       })
     } catch (err: any) {
       error.value = `${asZip ? 'ZIP打包' : '打包'}失败: ${err}`

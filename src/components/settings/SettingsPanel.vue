@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { Menu, Modal, Segmented, Switch } from 'ant-design-vue'
+import PaneResizer from '@/components/PaneResizer.vue'
 import { getConfigPath, getStorageInfo, type StorageInfo } from '@/api/config'
 import { resolveUploadDir } from '@/api/attachments'
 import { ensureDir, getNetworkInfo, openDir, type NetworkInfo } from '@/api/system'
@@ -458,6 +459,8 @@ function formatBytes(bytes: number): string {
       </div>
     </aside>
 
+    <PaneResizer v-show="!menuCollapsed" />
+
     <!-- 右栏：一张内容卡，里面是一整列可滚动的设置分区 -->
     <section class="settings-main">
       <div ref="bodyEl" class="settings-body" @scroll="onScroll">
@@ -645,7 +648,7 @@ function formatBytes(bytes: number): string {
   flex: 1;
   min-height: 0;
   display: flex;
-  gap: 4px;
+  gap: 0;
   overflow: hidden;
 }
 /* 分区导航收起后不再占位，右栏自己补上和 rail 的 4px 间隙 */

@@ -4,7 +4,7 @@
 
 业务数据（分组、项目、笔记、附件元信息、VPN 配置、规则集）存在应用私有目录的 `ws-workbench.db`（SQLite）中：表里只留 `id`、`group_id`、`sort_order` 等少量明文列，每行内容序列化成 JSON 后用 SM4 信封加密，存进 `payload` 列。一级项目的 `group_id` 记为空串（列本身 NOT NULL，不需要改表结构）；分组与一级项目的混排顺序存在 `config.json` 的 `tree_order`（一级 id 序列）里。`AppConfig` 与前端命令保持不变，加载时从多表组装，保存时与内存快照做 diff、事务内只写变化的行。
 
-应用设置（全局默认打包规则、上次选中的 VPN 配置、默认上传目录、worker 会话目录）仍存在 `config.json`（`tauri-plugin-store`，键名 `app_config`），**整份加密**：SM4-CBC + 随机 IV + HMAC-SM3，信封形如 `v1.<b64(iv)>.<b64(ct)>.<b64(mac)>`。主密钥（32 字节）首次启动时随机生成，macOS 存系统钥匙串（`ws-workbench-vault` / `ws-workbench`），Windows 用 DPAPI 加密后写进**当前数据目录**的 `.vault_key`。
+应用设置（全局默认打包排除规则、上次选中的 VPN 配置、默认上传目录、worker 会话目录）仍存在 `config.json`（`tauri-plugin-store`，键名 `app_config`），**整份加密**：SM4-CBC + 随机 IV + HMAC-SM3，信封形如 `v1.<b64(iv)>.<b64(ct)>.<b64(mac)>`。主密钥（32 字节）首次启动时随机生成，macOS 存系统钥匙串（`ws-workbench-vault` / `ws-workbench`），Windows 用 DPAPI 加密后写进**当前数据目录**的 `.vault_key`。
 
 主密钥必须和它加密的数据同目录：数据目录回退（见下一条）时密钥跟着走，`crypto/windows.rs` 会先用数据目录自带的 `.vault_key`，只有它能解开数据目录里已有的 `config.json`（或数据目录里还没有密文）时才沿用别处的旧密钥，并把它复制进数据目录；数据目录里已有密文却没有任何密钥能解开时直接报错，不会新建密钥覆盖。两者一旦分家，读出来全是「数据已被篡改」、写盘也全部失败（界面表现为「新建配置看起来成功了、弹窗却不关，重启后配置消失」）。
 

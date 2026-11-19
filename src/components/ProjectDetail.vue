@@ -11,7 +11,7 @@ defineProps<{
   project: ProjectConfig
   defaultUploadDir: string | null
   /** 全局默认打包规则：项目未单独配置时继承 */
-  defaultInclude?: string[]
+  defaultExclude?: string[]
 }>()
 
 const configRef = ref<InstanceType<typeof ProjectConfigPanel> | null>(null)
@@ -78,7 +78,7 @@ const emit = defineEmits<{
         <ProjectConfigPanel
           ref="configRef"
           :project="project"
-          :default-include="defaultInclude"
+          :default-exclude="defaultExclude"
           @update="(id, data) => emit('update', id, data)"
           @pack="(p, asZip) => emit('pack', p, asZip)"
           @log="(level, message) => emit('log', level, message)"

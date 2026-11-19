@@ -1416,7 +1416,7 @@ pub fn run() {
             commands::storage_info,
             commands::vault_encrypt,
             commands::vault_decrypt,
-            commands::get_default_include_rules,
+            commands::get_default_exclude_rules,
             commands::pack_project,
             commands::pack_to_zip,
             commands::validate_project,

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, nextTick, onMounted, onUnmounted, watch } from "vue";
+import { ref, computed, nextTick, onMounted, onUnmounted, watch, provide } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -11,12 +11,13 @@ import { usePack } from "@/composables/usePack";
 import { useUpdater } from "@/composables/useUpdater";
 import { useVpn } from "@/composables/useVpn";
 import { useLanShareUnread } from "@/composables/useLanShareUnread";
-import { useWorkbenchLayout } from "@/composables/useWorkbenchLayout";
+import { useWorkbenchLayout, PANE_RESIZE_KEY } from "@/composables/useWorkbenchLayout";
 import { useEntitySelection } from "@/composables/useEntitySelection";
 import { useProjectForm, type CreateTab } from "@/composables/useProjectForm";
 import { useDeleteConfirm } from "@/composables/useDeleteConfirm";
 import { initPlatform, platform } from "@/platform";
 import { useTheme } from "@/composables/useTheme";
+import PaneResizer from "@/components/PaneResizer.vue";
 import { buildAntdTheme } from "@/theme/antdTheme";
 import appIcon from "@/assets/app-icon.png";
 import type {
@@ -126,16 +127,23 @@ const {
   shortcutTitle,
   selectTool,
   openHome,
-  treeWidth,
+  paneWidth,
   treeCollapsed,
   vpnMenuCollapsed,
   cleanerMenuCollapsed,
   lanMenuCollapsed,
   settingsMenuCollapsed,
-  startTreeResize,
-  resetTreeWidth,
-  onTreeResizerKeydown,
+  startPaneResize,
+  resetPaneWidth,
+  onPaneResizerKeydown,
 } = useWorkbenchLayout();
+
+// 左栏宽度与拖拽能力给各模块的 PaneResizer 共用，切工具时宽度保持一致
+provide(PANE_RESIZE_KEY, {
+  start: startPaneResize,
+  keydown: onPaneResizerKeydown,
+  reset: resetPaneWidth,
+});
 
 // 左侧没有模块栏时（收起的项目树 / VPN 列表 / 系统 / LANLink / 设置 模块栏），rail 自己就是整张卡片，四角都要圆
 const railSolo = computed(
@@ -714,18 +722,18 @@ async function handleSetDefaultUploadDir(dir: string | null) {
 }
 
 async function handlePack(project: ProjectConfig, asZip: boolean = false) {
-  // 项目自己的包含规则优先；没配置（null / 空）时沿用全局默认，避免把空数组
-  // 传给后端（后端把空规则当成「全部放行」）。
-  const include = project.pack_include?.length
-    ? project.pack_include
-    : config.value.default_include;
-  await pack(project, include, asZip);
+  // 项目自己的排除规则优先；没配置（null / 空）时沿用全局默认，避免把空数组
+  // 传给后端（后端把空规则当成「不排除」，会把 .git、node_modules 一起打进去）。
+  const exclude = project.pack_exclude?.length
+    ? project.pack_exclude
+    : config.value.default_exclude;
+  await pack(project, exclude, asZip);
 }
 </script>
 
 <template>
   <ConfigProvider :locale="zhCN" :theme="antdTheme">
-  <div class="app-layout">
+  <div class="app-layout" :style="{ '--pane-left-width': `${paneWidth}px` }">
     <!-- 标题栏：整条可拖动窗口；macOS 下红绿灯浮在左侧，留白由 CSS 处理 -->
     <header
       class="titlebar"
@@ -922,7 +930,7 @@ async function handlePack(project: ProjectConfig, asZip: boolean = false) {
       <aside
         v-show="view === 'home' && !treeCollapsed"
         class="tree-panel"
-        :style="{ width: treeWidth + 'px' }"
+        :style="{ width: paneWidth + 'px' }"
       >
         <ProjectList
           :groups="config.groups"
@@ -940,18 +948,11 @@ async function handlePack(project: ProjectConfig, asZip: boolean = false) {
           @move-project="moveProject"
         />
       </aside>
-      <div
+      <PaneResizer
         v-show="view === 'home' && !treeCollapsed"
-        class="resizer resizer-tree"
-        role="separator"
-        aria-orientation="vertical"
-        aria-label="调整项目树宽度"
-        tabindex="0"
-        title="拖动调整项目树宽度，双击恢复默认"
-        @pointerdown="startTreeResize"
-        @keydown="onTreeResizerKeydown"
-        @dblclick="resetTreeWidth"
-      ></div>
+        class="resizer-tree"
+        label="调整项目树宽度"
+      />
 
       <!-- 工作区：按工具切换内容 -->
       <main class="workspace" :class="{ 'tree-collapsed': treeCollapsed }">
@@ -974,7 +975,7 @@ async function handlePack(project: ProjectConfig, asZip: boolean = false) {
               :key="'project-' + selection.id"
               :project="selectedProject"
               :default-upload-dir="config.default_upload_dir"
-              :default-include="config.default_include"
+              :default-exclude="config.default_exclude"
               @update="handleUpdate"
               @pack="handlePack"
               @update-note="(id, note) => handleEntityNote('project', id, note)"
@@ -1431,28 +1432,6 @@ async function handlePack(project: ProjectConfig, asZip: boolean = false) {
   background: var(--bg-primary);
   overflow: hidden;
 }
-/* 拖拽分隔条 */
-.resizer {
-  flex-shrink: 0;
-  position: relative;
-  background: transparent;
-  touch-action: none;
-  transition: background 0.15s;
-}
-.resizer:focus-visible {
-  outline: 2px solid var(--primary);
-  outline-offset: -2px;
-}
-/* 项目树与详情之间的拖动条，同时充当两栏 12px 间隙 */
-.resizer-tree {
-  width: 4px;
-  cursor: col-resize;
-}
-.resizer:hover {
-  background: var(--primary);
-  opacity: 0.45;
-}
-
 /* 工作区 */
 .workspace {
   position: relative;

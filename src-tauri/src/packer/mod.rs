@@ -2,18 +2,18 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use tauri::{AppHandle, Emitter};
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use ignore::WalkBuilder;
 use crate::models::*;
 
 mod svn_platform;
 
-/// 检查路径中是否有任何组件含空格
-fn path_has_space(path: &Path) -> bool {
-    path.components().any(|c| {
-        let s = c.as_os_str().to_string_lossy();
-        s.contains(' ')
-    })
+/// 文件自身的名字是否含空格
+fn file_name_has_space(path: &Path) -> bool {
+    path.file_name()
+        .map_or(false, |name| name.to_string_lossy().contains(' '))
 }
+
 
 /// 推送打包进度（无 AppHandle 时静默跳过，便于测试）
 fn emit_progress(app: Option<&AppHandle>, progress: PackProgress) {
@@ -22,88 +22,64 @@ fn emit_progress(app: Option<&AppHandle>, progress: PackProgress) {
     }
 }
 
-/// 路径段（文件名 / 目录名）是否属于「一律忽略」的类型：`.` 或 `_` 开头。
+/// 把排除规则编译成 `.gitignore` 语义的匹配器。
 ///
-/// 这类条目在遍历时直接剪掉，包含规则也放不进来：点开头的是配置/缓存
-/// （`.svn`、`.git`、`.idea`、`.vscode`…），下划线开头的是草稿/模板片段。
-fn is_ignored_name(name: &std::ffi::OsStr) -> bool {
-    match name.to_str() {
-        Some(name) => name.starts_with('.') || name.starts_with('_'),
-        None => false,
-    }
-}
-
-/// 把包含规则编译成两个匹配器：
-/// - 不含 `/` 的规则（`*.js`、`index.html`）按**文件名**匹配，任意层级都算
-/// - 含 `/` 的规则（`assets/**`、`js/app.js`）按**相对路径**匹配
-fn build_include_matchers(
-    includes: &[String],
-) -> Result<(globset::GlobSet, globset::GlobSet), String> {
-    let mut name_builder = globset::GlobSetBuilder::new();
-    let mut path_builder = globset::GlobSetBuilder::new();
-    for rule in includes {
-        let pattern = rule.trim();
-        if pattern.is_empty() {
+/// 规则写法与 `.gitignore` 一致：不带 `/` 的名字任意层级匹配，带 `/` 的从
+/// 源目录锚定，结尾 `/` 只匹配目录，`**` 跨目录，`!` 重新包含，`#` 是注释。
+fn build_exclude_matcher(source: &Path, excludes: &[String]) -> Result<Gitignore, String> {
+    let mut builder = GitignoreBuilder::new(source);
+    for rule in excludes {
+        let line = rule.trim();
+        if line.is_empty() {
             continue;
         }
-        let target = if pattern.contains('/') {
-            &mut path_builder
-        } else {
-            &mut name_builder
-        };
-        let glob = globset::GlobBuilder::new(pattern)
-            .literal_separator(true)
-            .build()
-            .map_err(|e| format!("包含规则 '{}' 解析失败: {}", rule, e))?;
-        target.add(glob);
+        builder
+            .add_line(None, line)
+            .map_err(|e| format!("排除规则 '{}' 解析失败: {}", rule, e))?;
     }
-    Ok((
-        name_builder.build().map_err(|e| format!("包含规则构建失败: {}", e))?,
-        path_builder.build().map_err(|e| format!("包含规则构建失败: {}", e))?,
-    ))
-}
-
-/// 文件是否命中包含规则。规则全为空时视为「未配置」，放行全部。
-fn is_included(rel: &Path, names: &globset::GlobSet, paths: &globset::GlobSet) -> bool {
-    if names.is_empty() && paths.is_empty() {
-        return true;
-    }
-    if let Some(name) = rel.file_name() {
-        if names.is_match(name) {
-            return true;
-        }
-    }
-    let rel = rel.to_string_lossy().replace('\\', "/");
-    paths.is_match(rel.as_str())
+    builder
+        .build()
+        .map_err(|e| format!("排除规则构建失败: {}", e))
 }
 
 /// 扫描源目录，返回需要打包的文件列表。
 ///
 /// 过滤顺序：
-/// 1. `.` / `_` 开头的路径段直接跳过（硬规则，任何包含规则都放不进来）
-/// 2. 命中包含规则（白名单）的文件才留下；规则为空时视为未配置，全部放行
-/// 3. 相对路径里任一段含空格的文件跳过（产品既定行为）
+/// 1. 目录命中排除规则（`.git`、`node_modules`…）时整棵剪掉
+/// 2. 文件命中排除规则（黑名单）时跳过；规则为空视为不排除，全部打包
+/// 3. 按项目勾选跳过含空格的目录 / 文件（默认都跳过，关掉后照常打包）
 ///
 /// `extra_excludes`（输出目录 / zip 自身）若在源目录内，整棵子树剪掉。
 fn scan_files(
     source: &Path,
-    includes: &[String],
+    excludes: &[String],
+    skip_spaced_dirs: bool,
+    skip_spaced_files: bool,
     extra_excludes: &[&Path],
 ) -> Result<Vec<PathBuf>, String> {
-    let (name_set, path_set) = build_include_matchers(includes)?;
+    let matcher = build_exclude_matcher(source, excludes)?;
+    let prune = matcher.clone();
+    let source_root = source.to_path_buf();
     let extras: Vec<PathBuf> = extra_excludes.iter().map(|path| path.to_path_buf()).collect();
 
     let mut builder = WalkBuilder::new(source);
     builder.standard_filters(false);
     builder.follow_links(false);
-    // 目录剪枝：`.`/`_` 开头、输出目录、zip 自身都不进去
+    // 目录剪枝：命中排除规则的目录不进去（与 .gitignore 一样，被排除目录里的
+    // 文件不能用 `!` 再救回来）；输出目录、zip 自身也整棵剪掉
     builder.filter_entry(move |entry| {
-        // 根目录本身不参与过滤（项目目录名可能带下划线）
+        // 根目录本身不参与过滤（项目目录名可能带点或下划线）
         if entry.depth() == 0 {
             return true;
         }
-        if is_ignored_name(entry.file_name()) {
-            return false;
+        let rel = entry.path().strip_prefix(&source_root).unwrap_or(entry.path());
+        if entry.file_type().map_or(false, |ft| ft.is_dir()) {
+            if prune.matched(rel, true).is_ignore() {
+                return false;
+            }
+            if skip_spaced_dirs && entry.file_name().to_string_lossy().contains(' ') {
+                return false;
+            }
         }
         !extras
             .iter()
@@ -120,10 +96,10 @@ fn scan_files(
         let path = entry.path();
         // 只检查相对源目录的路径：否则源目录本身含空格时会把所有文件都过滤掉
         let rel = path.strip_prefix(source).unwrap_or(path);
-        if path_has_space(rel) {
+        if skip_spaced_files && file_name_has_space(rel) {
             continue;
         }
-        if !is_included(rel, &name_set, &path_set) {
+        if matcher.matched(rel, false).is_ignore() {
             continue;
         }
         files.push(entry.into_path());
@@ -211,16 +187,16 @@ fn read_u16(bytes: &[u8], at: usize) -> usize {
 pub fn pack_project(
     app: &AppHandle,
     project: &ProjectConfig,
-    default_include: &[String],
+    default_exclude: &[String],
 ) -> Result<PackResult, String> {
-    pack_project_inner(Some(app), project, default_include)
+    pack_project_inner(Some(app), project, default_exclude)
 }
 
 /// "开始打包"的核心逻辑：遍历源目录 → 过滤排除规则 → 清空输出目录 → 复制文件
 fn pack_project_inner(
     app: Option<&AppHandle>,
     project: &ProjectConfig,
-    default_include: &[String],
+    default_exclude: &[String],
 ) -> Result<PackResult, String> {
     let start = Instant::now();
     let source = Path::new(&project.source_dir);
@@ -231,7 +207,7 @@ fn pack_project_inner(
 
     let output_path = Path::new(&project.output_dir);
 
-    // 阶段1：按包含规则扫描文件
+    // 阶段1：按排除规则扫描文件
     emit_progress(app, PackProgress {
         phase: "scanning".to_string(),
         current: 0,
@@ -240,7 +216,13 @@ fn pack_project_inner(
         percentage: 0.0,
     });
 
-    let files = scan_files(source, default_include, &[output_path])?;
+    let files = scan_files(
+        source,
+        default_exclude,
+        project.pack_skip_spaced_dirs,
+        project.pack_skip_spaced_files,
+        &[output_path],
+    )?;
     let total = files.len() as u64;
 
     if total == 0 {
@@ -304,9 +286,9 @@ fn pack_project_inner(
 pub fn pack_to_zip(
     app: &AppHandle,
     project: &ProjectConfig,
-    default_include: &[String],
+    default_exclude: &[String],
 ) -> Result<PackResult, String> {
-    pack_to_zip_inner(Some(app), project, default_include)
+    pack_to_zip_inner(Some(app), project, default_exclude)
 }
 
 /// ZIP 打包核心逻辑：扫描过滤后把源文件直接流式写入 zip，无任何中间产物
@@ -314,7 +296,7 @@ pub fn pack_to_zip(
 fn pack_to_zip_inner(
     app: Option<&AppHandle>,
     project: &ProjectConfig,
-    default_include: &[String],
+    default_exclude: &[String],
 ) -> Result<PackResult, String> {
     let start = Instant::now();
     let source = Path::new(&project.source_dir);
@@ -331,7 +313,7 @@ fn pack_to_zip_inner(
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| project.name.clone());
 
-    // 阶段1：按包含规则扫描文件（顺带排除输出目录与 zip 自身，防止被扫进来）
+    // 阶段1：按排除规则扫描文件（顺带排除输出目录与 zip 自身，防止被扫进来）
     emit_progress(app, PackProgress {
         phase: "scanning".to_string(),
         current: 0,
@@ -340,7 +322,13 @@ fn pack_to_zip_inner(
         percentage: 0.0,
     });
 
-    let files = scan_files(source, default_include, &[output_path, &zip_path])?;
+    let files = scan_files(
+        source,
+        default_exclude,
+        project.pack_skip_spaced_dirs,
+        project.pack_skip_spaced_files,
+        &[output_path, &zip_path],
+    )?;
     let total = files.len() as u64;
 
     if total == 0 {
@@ -1073,7 +1061,9 @@ mod tests {
             updated_at: String::new(),
             note: String::new(),
             attachments: Vec::new(),
-            pack_include: None,
+            pack_exclude: None,
+            pack_skip_spaced_dirs: true,
+            pack_skip_spaced_files: true,
         }
     }
 
@@ -1209,6 +1199,51 @@ mod tests {
         assert_eq!(result.total_files, 2, "源目录含空格时不应过滤文件");
     }
 
+    /// 含空格的目录 / 文件由两个勾选独立控制，默认都跳过
+    #[test]
+    fn spaced_dir_and_file_skips_are_independent() {
+        let src = tempfile::tempdir().unwrap();
+        write_file(src.path(), "normal.js", "n");
+        write_file(src.path(), "a b.html", "a");
+        write_file(src.path(), "with space/c.html", "c");
+
+        let cases = [
+            (true, true, vec!["normal.js"], vec!["a b.html", "with space/c.html"]),
+            (false, false, vec!["normal.js", "a b.html", "with space/c.html"], vec![]),
+            (false, true, vec!["normal.js", "with space/c.html"], vec!["a b.html"]),
+            (true, false, vec!["normal.js", "a b.html"], vec!["with space/c.html"]),
+        ];
+
+        for (index, (skip_dirs, skip_files, kept, dropped)) in cases.into_iter().enumerate() {
+            let out_parent = tempfile::tempdir().unwrap();
+            let output_dir = out_parent.path().join(format!("dist-{}", index));
+            let mut project = make_project(src.path(), &output_dir);
+            project.pack_skip_spaced_dirs = skip_dirs;
+            project.pack_skip_spaced_files = skip_files;
+
+            let result = pack_project_inner(None, &project, &[]).unwrap();
+            assert!(result.success, "{:?}", result.errors);
+            for rel in kept {
+                assert!(
+                    output_dir.join(rel).exists(),
+                    "应打包 {}（skip_dirs={}, skip_files={}）",
+                    rel,
+                    skip_dirs,
+                    skip_files
+                );
+            }
+            for rel in dropped {
+                assert!(
+                    !output_dir.join(rel).exists(),
+                    "不该打包 {}（skip_dirs={}, skip_files={}）",
+                    rel,
+                    skip_dirs,
+                    skip_files
+                );
+            }
+        }
+    }
+
     /// "开始打包"仍然落地到输出目录
     #[test]
     fn pack_project_extracts_to_output_dir() {
@@ -1254,15 +1289,16 @@ mod tests {
         );
     }
 
-    /// `.` / `_` 开头的路径段一律跳过（含子目录），包含规则也放不进来
+    /// `.` 开头的条目由默认规则 `.*` 排除；`_` 开头不再默认跳过
     #[test]
-    fn dot_and_underscore_entries_are_always_skipped() {
+    fn hidden_entries_are_excluded_by_default() {
         let src = tempfile::tempdir().unwrap();
         write_file(src.path(), "index.html", "<html></html>");
         write_file(src.path(), "js/app.js", "var a=1;");
         write_file(src.path(), ".env", "SECRET=1");
         write_file(src.path(), ".git/config", "[core]");
         write_file(src.path(), ".vscode/settings.json", "{}");
+        write_file(src.path(), ".DS_Store", "mac");
         write_file(src.path(), "js/.cache/tmp.js", "x");
         write_file(src.path(), "js/lib/.hidden.js", "y");
         write_file(src.path(), "_draft.html", "draft");
@@ -1273,12 +1309,19 @@ mod tests {
         let output_dir = out_parent.path().join("dist");
         let project = make_project(src.path(), &output_dir);
 
-        let includes = crate::models::default_include_rules();
-        let result = pack_to_zip_inner(None, &project, &includes).unwrap();
+        let excludes = crate::models::default_exclude_rules();
+        let result = pack_to_zip_inner(None, &project, &excludes).unwrap();
         assert!(result.success, "{:?}", result.errors);
 
         let entries = zip_entries(&output_dir.with_extension("zip"));
-        for expect in ["dist/index.html", "dist/js/app.js"] {
+        for expect in [
+            "dist/index.html",
+            "dist/js/app.js",
+            // `_` 开头不再默认排除：这些会进包
+            "dist/_draft.html",
+            "dist/partials/_header.html",
+            "dist/_notes/raw.js",
+        ] {
             assert!(
                 entries.contains(&expect.to_string()),
                 "缺少条目 {}，实际: {:?}",
@@ -1286,21 +1329,21 @@ mod tests {
                 entries
             );
         }
-        for entry in &entries {
-            let rel = entry.strip_prefix("dist/").unwrap_or(entry);
+        for banned in [".env", ".git", ".vscode", ".DS_Store", ".cache", ".hidden.js"] {
             assert!(
-                rel.split('/').all(|c| !c.starts_with('.') && !c.starts_with('_')),
-                "含 . / _ 开头的路径未被跳过: {:?}",
+                !entries.iter().any(|entry| entry.contains(banned)),
+                "{} 不该进包: {:?}",
+                banned,
                 entries
             );
         }
-        assert_eq!(result.total_files, 2, "条目: {:?}", entries);
+        assert_eq!(result.total_files, 5, "条目: {:?}", entries);
     }
 
-    /// 默认包含规则：浏览器能直接用的才进包，开发期文件一个不进
+    /// 默认排除规则只挡清单内的开发期产物，清单外的文件照常进包（黑名单语义）
     #[test]
-    fn only_browser_assets_are_included_by_default() {
-        let src = temp_dir("browser-assets");
+    fn default_excludes_filter_only_listed_files() {
+        let src = temp_dir("exclude-assets");
         write_file(src.path(), "index.html", "<html></html>");
         write_file(src.path(), "js/app.js", "var a=1;");
         write_file(src.path(), "css/main.css", ".a{color:red}");
@@ -1314,23 +1357,36 @@ mod tests {
         write_file(src.path(), "xmodules/pcip/module/lib/weboffice/legacyTemplate.doc", "doc");
         write_file(src.path(), "xmodules/pcip/module/lib/ntko/ntkoControl.cab", "cab");
         write_file(src.path(), "xmodules/pcip/module/lib/ntko/ntko_lib.ftl", "[#-- object --]");
-        write_file(src.path(), "src/main.ts", "export {}");
-        write_file(src.path(), "src/App.vue", "<template/>");
+        // 清单内的开发期产物
         write_file(src.path(), "styles/main.scss", "$a: 1;");
         write_file(src.path(), "styles/main.less", "@a: 1;");
         write_file(src.path(), "styles/main.css.map", "{}");
+        write_file(src.path(), "README.md", "# readme");
+        write_file(src.path(), ".env", "SECRET=1");
+        write_file(src.path(), ".git/config", "[core]");
+        write_file(src.path(), ".vscode/settings.json", "{}");
+        write_file(src.path(), ".DS_Store", "mac");
+        write_file(src.path(), "_draft.html", "draft");
+        write_file(src.path(), "node_modules/lib/index.js", "module.exports = {}");
+        write_file(src.path(), "old-package.zip", "zip");
+        write_file(src.path(), "js/app.test.js", "test('x', () => {});");
+        write_file(src.path(), "js/app.spec.js", "it('x', () => {});");
+        write_file(src.path(), "__tests__/app.js", "test();");
+        write_file(src.path(), "src/__tests__/deep.js", "test();");
+        // 清单外的文件：黑名单不负责，照常进包
+        write_file(src.path(), "src/main.ts", "export {}");
+        write_file(src.path(), "src/App.vue", "<template/>");
         write_file(src.path(), "package.json", "{}");
         write_file(src.path(), "vite.config.ts", "export default {}");
         write_file(src.path(), "design/logo.psd", "psd");
         write_file(src.path(), "docs/manual.pdf", "pdf");
         write_file(src.path(), "build.log", "log");
-        write_file(src.path(), "README.md", "# readme");
 
-        let out_parent = temp_dir("browser-assets-out");
+        let out_parent = temp_dir("exclude-assets-out");
         let output_dir = out_parent.path().join("dist");
         let project = make_project(src.path(), &output_dir);
-        let includes = crate::models::default_include_rules();
-        let result = pack_to_zip_inner(None, &project, &includes).unwrap();
+        let excludes = crate::models::default_exclude_rules();
+        let result = pack_to_zip_inner(None, &project, &excludes).unwrap();
         assert!(result.success, "{:?}", result.errors);
 
         let entries = zip_entries(&output_dir.with_extension("zip"));
@@ -1352,21 +1408,34 @@ mod tests {
             assert!(entries.contains(&expect.to_string()), "缺少 {}: {:?}", expect, entries);
         }
         for banned in [
-            "main.ts", "App.vue", "main.scss", "main.less", "main.css.map",
-            "vite.config.ts", "logo.psd", "manual.pdf", "build.log", "README.md",
+            "main.scss", "main.less", "main.css.map", "README.md",
+            ".env", ".git", ".vscode", ".DS_Store", "docs/manual.pdf",
+            "node_modules", "old-package.zip", "app.test.js", "app.spec.js",
+            "__tests__",
         ] {
             assert!(
                 !entries.iter().any(|entry| entry.contains(banned)),
-                "{} 不该进包: {:?}",
+                "{} 命中了排除规则却进包了: {:?}",
                 banned,
+                entries
+            );
+        }
+        for kept in [
+            "_draft.html", "src/main.ts", "src/App.vue", "package.json",
+            "vite.config.ts", "design/logo.psd", "build.log",
+        ] {
+            assert!(
+                entries.iter().any(|entry| entry.contains(kept)),
+                "清单外的 {} 应照常进包: {:?}",
+                kept,
                 entries
             );
         }
     }
 
-    /// 包含规则：不带 `/` 按文件名匹配（任意层级），带 `/` 按相对路径匹配
+    /// 排除规则：不带 `/` 按文件名匹配（任意层级），带 `/` 按相对路径匹配
     #[test]
-    fn include_rules_match_by_name_or_by_path() {
+    fn exclude_rules_match_by_name_or_by_path() {
         let src = tempfile::tempdir().unwrap();
         write_file(src.path(), "page.html", "<html></html>");
         write_file(src.path(), "js/app.js", "var a=1;");
@@ -1379,34 +1448,94 @@ mod tests {
         let project = make_project(src.path(), &output_dir);
 
         // 文件名规则 *.html -> page.html；路径规则 js/** -> js 下所有文件
-        let includes = vec!["*.html".to_string(), "js/**".to_string()];
-        let result = pack_to_zip_inner(None, &project, &includes).unwrap();
+        let excludes = vec!["*.html".to_string(), "js/**".to_string()];
+        let result = pack_to_zip_inner(None, &project, &excludes).unwrap();
         assert!(result.success, "{:?}", result.errors);
         let entries = zip_entries(&output_dir.with_extension("zip"));
-        for expect in ["dist/page.html", "dist/js/app.js", "dist/js/vendor/lib.js"] {
-            assert!(entries.contains(&expect.to_string()), "缺少 {}: {:?}", expect, entries);
-        }
-        for banned in ["main.css", "logo.png"] {
+        for banned in ["page.html", "js/app.js", "js/vendor/lib.js"] {
             assert!(
                 !entries.iter().any(|entry| entry.contains(banned)),
-                "{} 命中了不该命中的规则: {:?}",
+                "{} 没被排除: {:?}",
                 banned,
+                entries
+            );
+        }
+        for kept in ["css/main.css", "images/logo.png"] {
+            assert!(
+                entries.iter().any(|entry| entry.contains(kept)),
+                "{} 不该被排除: {:?}",
+                kept,
                 entries
             );
         }
 
         // 精确到文件的路径规则
-        let includes = vec!["js/app.js".to_string()];
-        let result = pack_to_zip_inner(None, &project, &includes).unwrap();
+        let excludes = vec!["js/app.js".to_string()];
+        let result = pack_to_zip_inner(None, &project, &excludes).unwrap();
         assert!(result.success, "{:?}", result.errors);
         let entries = zip_entries(&output_dir.with_extension("zip"));
-        assert!(entries.contains(&"dist/js/app.js".to_string()), "条目: {:?}", entries);
-        assert!(!entries.iter().any(|entry| entry.contains("lib.js")), "条目: {:?}", entries);
+        assert!(!entries.iter().any(|entry| entry.contains("js/app.js")), "条目: {:?}", entries);
+        assert!(entries.iter().any(|entry| entry.contains("js/vendor/lib.js")), "条目: {:?}", entries);
     }
 
-    /// 规则清空 = 未配置：全部放行（只受 `.`/`_` 与空格规则约束）
+    /// 排除规则与 .gitignore 同语义：`!` 重新包含、开头的 `/` 锚定源目录、
+    /// 结尾的 `/` 只匹配目录、`**` 跨层级
     #[test]
-    fn empty_include_rules_pack_everything_except_ignored_names() {
+    fn exclude_rules_follow_gitignore_semantics() {
+        let src = tempfile::tempdir().unwrap();
+        write_file(src.path(), "a.md", "a");
+        write_file(src.path(), "README.md", "# readme");
+        write_file(src.path(), "nested/b.md", "b");
+        write_file(src.path(), "docs/keep.txt", "keep");
+        write_file(src.path(), "docs/drop.txt", "drop");
+        write_file(src.path(), "root-only/x.txt", "x");
+        write_file(src.path(), "sub/root-only/x.txt", "x");
+        write_file(src.path(), "__tests__/root.js", "test");
+        write_file(src.path(), "src/__tests__/nested.js", "test");
+        write_file(src.path(), "app.test.js", "test");
+        write_file(src.path(), "src/ok.js", "ok");
+
+        let out_parent = tempfile::tempdir().unwrap();
+        let output_dir = out_parent.path().join("dist");
+        let project = make_project(src.path(), &output_dir);
+        let excludes: Vec<String> = [
+            "*.md",
+            "!README.md",
+            "docs/",
+            "!docs/keep.txt",
+            "/root-only/",
+            "**/__tests__/**",
+            "*.test.js",
+        ]
+        .iter()
+        .map(|rule| rule.to_string())
+        .collect();
+
+        let result = pack_project_inner(None, &project, &excludes).unwrap();
+        assert!(result.success, "{:?}", result.errors);
+
+        for kept in ["README.md", "sub/root-only/x.txt", "src/ok.js"] {
+            assert!(output_dir.join(kept).exists(), "{} 应被打包", kept);
+        }
+        for dropped in [
+            "a.md",
+            "nested/b.md",
+            // 目录整体被排除，里面的文件用 ! 也救不回来（与 gitignore 一致）
+            "docs/keep.txt",
+            "docs/drop.txt",
+            // 开头的 / 只锚定源目录，嵌套同名目录不受影响
+            "root-only/x.txt",
+            "__tests__/root.js",
+            "src/__tests__/nested.js",
+            "app.test.js",
+        ] {
+            assert!(!output_dir.join(dropped).exists(), "{} 不该被打包", dropped);
+        }
+    }
+
+    /// 规则清空 = 不排除：全部打包（只受空格规则约束）
+    #[test]
+    fn empty_exclude_rules_pack_everything() {
         let src = tempfile::tempdir().unwrap();
         write_file(src.path(), "a.html", "a");
         write_file(src.path(), "main.ts", "export {}");
@@ -1420,15 +1549,8 @@ mod tests {
         let result = pack_to_zip_inner(None, &project, &[]).unwrap();
         assert!(result.success, "{:?}", result.errors);
         let entries = zip_entries(&output_dir.with_extension("zip"));
-        assert!(entries.contains(&"dist/a.html".to_string()), "条目: {:?}", entries);
-        assert!(entries.contains(&"dist/main.ts".to_string()), "条目: {:?}", entries);
-        for banned in [".env", "_draft.js"] {
-            assert!(
-                !entries.iter().any(|entry| entry.contains(banned)),
-                "{} 不该进包: {:?}",
-                banned,
-                entries
-            );
+        for expect in ["dist/a.html", "dist/main.ts", "dist/.env", "dist/_draft.js"] {
+            assert!(entries.contains(&expect.to_string()), "缺少 {}: {:?}", expect, entries);
         }
     }
 

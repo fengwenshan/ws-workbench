@@ -723,7 +723,9 @@ mod tests {
                 created_at: 0,
                 dir: "/tmp".to_string(),
             }],
-            pack_include: None,
+            pack_exclude: None,
+            pack_skip_spaced_dirs: true,
+            pack_skip_spaced_files: true,
         }
     }
 

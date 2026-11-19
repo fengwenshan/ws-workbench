@@ -60,32 +60,35 @@ const canPack = computed(() => projectType.value === 'layui')
 - **开始打包**：逐个复制到输出目录，复制前会清空输出目录
 - **打包 ZIP**：流式 Deflate 直接写 zip，不落中间产物；zip 内会多包一层输出目录名，条目名按 UTF-8 写入并置位 bit 11
 
-打包用**白名单（layui 项目打包规则）**：只有命中规则的文件才进包。规则放在**项目「配置 → 打包包含规则」**里，每个 layui 项目一套；项目没单独配置时沿用全局默认规则（`AppConfig.default_include`，老版本在设置页编辑的那份），「恢复默认」就是清掉项目覆盖、重新继承默认。输入纯后缀（如 `psd`、`.psd`）会自动补成 `*.psd`，方便给每个项目加自己的特殊文件类型。
+打包用**排除规则（黑名单）**：命中规则的文件不进包，其余文件全部打包。规则放在**项目「配置 → 打包排除规则」**里，每个 layui 项目一套；项目没单独配置时沿用全局默认规则（`AppConfig.default_exclude`），「恢复默认」就是清掉项目覆盖、重新继承默认。规则按 `.gitignore` 语法原样保存，支持 `!` 重新包含。
+
+默认排除集：
 
 ```
-*.html *.htm *.css *.js *.mjs *.json
-*.png *.jpg *.jpeg *.gif *.svg *.webp *.avif *.ico *.bmp
-*.woff *.woff2 *.ttf *.eot *.otf
-*.mp4 *.webm *.mp3 *.wav *.ogg
-*.txt *.xml
-*.thm *.tjs *.dotm     # layui 模板 / 模板脚本 / WPS 控件模板
-*.doc *.docx           # WebOffice 新建正文的空白模板（旧版 / 新版 Word）
-*.cab                  # NTKO 正文控件的 ActiveX 安装包（IE）
-*.ftl                  # NTKO 控件模板（服务端 FreeMarker 片段）
+.*            # 隐藏文件/目录：.git、.svn、.idea、.vscode、.DS_Store…
+docs/**       # 文档目录
+*.md
+*.scss
+*.less
+*.map
+*.test.js
+*.spec.js
+__tests__
+node_modules
+*.zip
 ```
 
-- 只列运行时真的会被请求的类型；`scss`/`ts`/`vue`/`map`/`md`、构建配置（`package.json`、`vite.config.*`）、设计源文件、压缩包这些开发期产物都不在里面
-- layui 特有：`.thm`（表单/列表模板，`rsViewRender.js` 按 `APP_ROOT + '/xmodules/.../**.thm'` 拉取）、`.tjs`（模板脚本）、`.dotm`（WPS 控件的 `Normal.dotm`）都是运行时资源，默认收
-- `.doc`/`.docx` 只收运行时真会 GET 的那类模板（`rsWebOffice.js` 用 `$.ajax` 拉 `weboffice/newDocument.doc(x)` 当新建正文模板，旧版 Word 模板是 `.doc`）；上传控件 accept 里出现的 `.pdf`/`.wps` 等字符串不算引用，工程里没有对应资源的仍不收
-- NTKO 正文控件相关：`.cab`（`rsOfficeRender.js` 的 `codebase` 指向 `xmodules/pcip/module/lib/ntko/ntkoControl.cab`，IE 下由浏览器请求安装）、`.ftl`（控件模板 `ntko_lib.ftl`，前端不直接请求，但这类工程常与静态资源同目录部署、由后端 include，漏了正文控件起不来）
-- **`.` 或 `_` 开头的路径段一律跳过**（任意层级，文件或目录都算）：`.svn`/`.git`/`.idea`/`.vscode`、`.DS_Store`、`_draft.html`、`partials/_header.html` 都由这一条硬规则兜住，不占规则名额
-- 匹配语义：不带 `/` 的规则按**文件名**匹配、任意层级都算（`*.png`）；带 `/` 的按**相对源目录的路径**匹配（`assets/**`、`js/app.js`）
-- 规则清空 = 视为未配置：除 `.`/`_` 开头的条目外全部打包。项目配置页因此把「清空」处理成回退到默认规则，避免误把整个目录打进包
-- 路径里含空格的文件始终跳过
+- `.` 开头的隐藏文件/目录默认全部排除；`_` 开头不再默认跳过，按普通文件打包，要排除就在项目里自己加 `_*`
+- 默认只排除开发期产物与打包垃圾；`html`/`css`/`js`/图片/字体/`.thm`/`.tjs`/`.dotm`/`.docx`/`.doc`/`.cab`/`.ftl` 这些运行时资源不用再登记，新增类型默认就会进包
+- 黑名单不保底：清单外的开发文件（`*.ts`、`*.vue`、`package.json`、`*.psd`、`*.pdf`、`*.log`…）也会进包，介意就在项目里补规则
+- 规则语法与 `.gitignore` 完全一致：不带 `/` 的名字匹配任意层级（`*.md`、`.git`、`node_modules`）；带 `/` 的从源目录锚定（`/dist/`）；结尾 `/` 只匹配目录（`docs/`）；`**` 跨层级（`**/__tests__/**`）；`!` 表示重新包含（`!README.md`）；`#` 开头是注释
+- 与 gitignore 一样：被排除的目录整棵剪掉，目录里的文件不能用 `!` 再包含回来
+- 规则清空 = 不排除（全部打包）。项目配置页因此把「清空」处理成回退到默认规则，避免把 `.git`、`node_modules` 一起打进包
+- 含空格的目录 / 文件由项目里两个勾选控制（`pack_skip_spaced_dirs` / `pack_skip_spaced_files`），默认都勾选跳过；取消勾选后对应条目也会进包
 
-默认规则定义在 `src-tauri/src/models.rs` 的 `DEFAULT_INCLUDE`，带版本号（当前 `DEFAULT_INCLUDE_VERSION = 5`）：老配置（没有 include 字段）加载时自动补上默认集，之后用户自己删掉的规则不会被重新塞回去。项目级覆盖存在 `ProjectConfig.pack_include`（`None` = 继承全局默认），打包时前端取「项目规则非空 ? 项目规则 : 全局默认」传给后端，空数组不会直接传给打包器（后端把空规则当成「全部放行」）。
+默认规则定义在 `src-tauri/src/models.rs` 的 `DEFAULT_EXCLUDE`，带版本号（当前 `DEFAULT_EXCLUDE_VERSION = 4`）：老配置（没有 exclude 字段）加载时补上完整默认集；版本 1 → 2 追加测试规则（`*.test.js`、`*.spec.js`、`__tests__`），版本 2 → 3 移除 `_*`（`_` 开头的文件默认进包），版本 3 → 4 追加 `docs/**`，用户自己删掉的其它规则不会被重新塞回去。项目级覆盖存在 `ProjectConfig.pack_exclude`（`None` = 继承全局默认），打包时前端取「项目规则非空 ? 项目规则 : 全局默认」传给后端，空数组不会直接传给打包器。旧版的白名单字段 `pack_include` / `default_include` 不再读取（白名单无法等价翻译成黑名单），升级后项目回落为继承新的默认排除规则。
 
-遍历由 `ignore::WalkBuilder` 完成，标准过滤全部关闭、不跟随符号链接；`.`/`_` 开头的条目在 `filter_entry` 里直接剪掉，包含规则用 `globset` 在遍历结果上过滤（文件名匹配 + 路径匹配两个集合）。相对路径中任一段含空格的文件会被跳过。输出目录与 zip 自身通过 `extra_excludes` 整棵子树剪掉，避免上一次的产物被再打一遍。
+遍历由 `ignore::WalkBuilder` 完成，标准过滤全部关闭、不跟随符号链接；排除规则用 `ignore::gitignore::Gitignore` 编译成 `.gitignore` 语义的匹配器，目录命中时在 `filter_entry` 里整棵剪掉，文件再按同一匹配器过滤。含空格的目录 / 文件按项目勾选处理（默认跳过）。输出目录与 zip 自身通过 `extra_excludes` 整棵子树剪掉，避免上一次的产物被再打一遍。
 
 打包过程中通过 `pack-progress` 事件推送进度，阶段依次为 `scanning` → `cleaning` → `copying` / `zipping` → `done`。
 

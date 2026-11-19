@@ -9,7 +9,7 @@ export function useConfig() {
     groups: [],
     projects: [],
     tree_order: [],
-    default_include: [],
+    default_exclude: [],
     vpn_profiles: [],
     vpn_rule_sets: [],
     vpn_active_profile_id: '',

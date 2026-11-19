@@ -24,9 +24,9 @@ src-tauri/src/
   crypto/          字符串密文信封（SM4-CBC + HMAC-SM3）；mod.rs 只放算法与子密钥派生，
                    macos.rs 钥匙串 / windows.rs DPAPI（密钥文件跟着数据目录走）
   filecrypto.rs    附件流式加密容器 WST1
-  packer/          打包：遍历、包含规则过滤、复制、流式 ZIP；svn_platform/ 按平台定位 svn
+  packer/          打包：遍历、排除规则过滤、复制、流式 ZIP；svn_platform/ 按平台定位 svn
   updates.rs       更新包断点续传下载 + minisign 校验（安装交给 updater 插件）
-  models.rs        AppConfig / 分组 / 项目 / 附件元信息 / 默认包含规则
+  models.rs        AppConfig / 分组 / 项目 / 附件元信息 / 默认排除规则
   platform.rs      操作系统判定
   netinfo.rs       本机网卡 MAC / IP（Windows 走 PowerShell，macOS/Linux 走 getifaddrs）
   process.rs/winps.rs  进程管理与 PowerShell 调用
