@@ -13,6 +13,14 @@ on:
   pull_request:
   workflow_dispatch:
 
+env:
+  # 关掉增量编译：CI 上的 target/ 整个由 rust-cache 缓存，job 被 concurrency
+  # 取消（或链接中途超时）时缓存里可能留下一份写了一半的产物，下一次恢复到
+  # 同一个 key 后 cargo 认为「已是最新」不再重链，跑单测时直接
+  # STATUS_ENTRYPOINT_NOT_FOUND（0xc0000139，bash 里报 exit code 127）。
+  # 2026-11-19 在本机复现过同一现象：`cargo clean -p ws-workbench` 后重跑即恢复。
+  CARGO_INCREMENTAL: "0"
+
 # 同一分支连续推送时只保留最新一次运行，旧运行自动取消
 concurrency:
   group: ci-${{ github.ref }}
@@ -88,7 +96,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
-          key: windows-x64
+          # key 后缀 v2 是 2026-11-19 换的：旧缓存里存着一份坏掉的单测可执行
+          # 文件，恢复后每次都 STATUS_ENTRYPOINT_NOT_FOUND（见文件头 env 注释）。
+          # 再遇到「本地重链就好、CI 每次都挂」先怀疑缓存，把后缀往上抬一位。
+          key: windows-x64-v2
 
       - name: 安装前端依赖
         run: pnpm install --frozen-lockfile
@@ -97,6 +108,17 @@ jobs:
       - name: 构建前端
         run: pnpm build
 
+      # 用 pwsh 而不是 job 默认的 bash：Windows 上 bash 会把进程启动失败
+      # （例如 STATUS_ENTRYPOINT_NOT_FOUND）统一报成 exit code 127，和真的
+      # 「命令找不到」分不开；这里顺带把 cargo 输出的最后 40 行打成 ::error::
+      # 注解，没 token 拉日志时也能在 run 页面看到失败原因。
       - name: Rust 单测（本平台）
         working-directory: src-tauri
-        run: cargo test --lib
+        shell: pwsh
+        run: |
+          cargo test --lib 2>&1 | Tee-Object -FilePath test-output.log
+          if ($LASTEXITCODE -ne 0) {
+            "cargo test 失败，退出码 $LASTEXITCODE，最后 40 行："
+            Get-Content test-output.log -Tail 40 | ForEach-Object { Write-Host "::error::$_" }
+            exit 1
+          }

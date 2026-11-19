@@ -37,6 +37,7 @@ Windows 与 macOS 的实现必须拆开写，禁止在共享文件里用 `cfg` �
 - 结构照 `src-tauri/src/vpn/platform/`：`mod.rs` 只做平台分派，`common.rs` 放平台无关逻辑，`macos.rs` / `windows.rs` 各自完整实现；两个平台文件之间不互相引用。
 - 共享层只留「拿掉系统调用、权限、注册表/plist、安装卸载机制后仍成立」的纯逻辑；系统 API 一律放对应平台文件。
 - 改动必须过 CI 的 `test-macos` / `test-windows` 两个 job。
+- CI 的 Windows job 用 `pwsh` 跑 `cargo test --lib`（job 里其余步骤仍是 bash），失败时把 cargo 输出的最后 40 行打成 `::error::` 注解：Windows 的 bash 会把「进程启动失败」也算成 `exit code 127`，和真的「命令找不到」分不开。CI 还关了增量编译（`CARGO_INCREMENTAL=0`）并给 Windows 的缓存 key 加了后缀——`target/` 整个由 `Swatinem/rust-cache` 缓存，job 被 concurrency 取消时可能存下写了一半的单测可执行文件，下次恢复到同一个 key 后 cargo 认为「已是最新」直接复用，运行时就是 `0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND`（bash 里报 127）。本地遇到同一现象先 `cargo clean -p ws-workbench` 再重跑。
 - 本机验证不了的代码用 `// TODO(platform-verify:windows): <待验证行为>；验证步骤：<命令/手动步骤>；期望：<结果>` 标记，换到该平台验证通过后再删；提权/删除/卸载等高风险路径不得带未验证 TODO 发版。
 
 软件卸载、屏幕休眠、hosts、剪贴板、项目打包的平台代码都已按此规范拆完（`mod.rs` 只做分派，平台文件内不再出现 `cfg(target_os)`，两个平台文件互不引用）：
