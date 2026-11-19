@@ -148,6 +148,8 @@ export interface VpnStatus {
   snapshot: NetworkSnapshot | null
   /** 服务端下发的内网范围：只展示，不参与分流（老版本 status.json 可能没有） */
   server_scope?: ServerScope
+  /** 布线后需要用户处理的提示（例如系统代理会绕开按域名分流） */
+  warnings?: string[]
   error: string
   pid: number
   started_at: string
@@ -159,6 +161,20 @@ export interface VpnSnapshotPayload {
   elevation: string
   /** 运行期「当前生效配置」；同通道切换后是切过去的那份配置 */
   policy_profile_id: string
+  /**
+   * 这条连接归谁：`mine === false` 说明是另一个窗口（开发版 / 安装包）连的，
+   * 本窗口只能看状态，连接 / 断开 / 改规则都会被后端拒绝。
+   */
+  owner?: SessionOwnerView | null
+}
+
+/** 谁开着当前这条 VPN 连接 */
+export interface SessionOwnerView {
+  pid: number
+  /** 实例名：`ws-workbench` / `ws-workbench-dev` */
+  name: string
+  /** 是不是本进程开的 */
+  mine: boolean
 }
 
 export interface ConnectResult {

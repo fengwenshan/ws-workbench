@@ -19,6 +19,20 @@ use crate::vpn::session::VpnSession;
 /// 计划任务名（Windows）
 pub const TASK_NAME: &str = "WsWorkbenchVpnWorker";
 
+/// 本次构建实际使用的计划任务名。
+///
+/// 任务定义里写死的是「exe 路径 + 会话目录」（`--vpn-worker <dir>`）。会话目录两个构建
+/// 共用，但 exe 路径不同（安装包在 Program Files，开发版在 `target/debug`），所以共用
+/// 一个任务名只会互相覆盖：谁后连接谁改，另一个下次连接还得重新注册一次（又要一次 UAC）。
+/// 分开之后两边各注册各的，互不影响。
+pub fn task_name() -> String {
+    if crate::is_dev_build() {
+        format!("{}-dev", TASK_NAME)
+    } else {
+        TASK_NAME.to_string()
+    }
+}
+
 /// 提权辅助脚本的退出码文件（仅 Windows）
 #[cfg(target_os = "windows")]
 const ELEVATE_EXIT_FILE: &str = "elevate.exit";
@@ -64,9 +78,10 @@ extern "C" {
 pub fn worker_task_exists() -> bool {
     #[cfg(target_os = "windows")]
     {
+        let name = task_name();
         let (_, ok) = crate::process::run_with_timeout(
             Path::new("schtasks.exe"),
-            &["/Query", "/TN", TASK_NAME],
+            &["/Query", "/TN", name.as_str()],
             std::time::Duration::from_secs(20),
         );
         ok
@@ -92,8 +107,9 @@ fn worker_task_definition() -> Option<String> {
         use std::os::windows::process::CommandExt;
         use std::process::{Command, Stdio};
 
+        let name = task_name();
         let output = Command::new("schtasks.exe")
-            .args(["/Query", "/TN", TASK_NAME, "/XML"])
+            .args(["/Query", "/TN", name.as_str(), "/XML"])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -318,7 +334,7 @@ fn run_elevated_batch(session: &VpnSession, name: &str, body: &str) -> Result<()
 pub fn task_create_command(exe: &Path, session_dir: &Path) -> String {
     format!(
         "schtasks /Create /TN \"{}\" /TR \"\\\"{}\\\" --vpn-worker \\\"{}\\\"\" /SC ONCE /ST 00:00 /RL HIGHEST /F",
-        TASK_NAME,
+        task_name(),
         exe.display(),
         session_dir.display()
     )
@@ -384,9 +400,10 @@ pub fn ensure_worker_task(exe: &Path, session: &VpnSession) -> Result<bool, Stri
 pub fn delete_worker_task() -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
+        let name = task_name();
         let (text, ok) = crate::process::run_with_timeout(
             Path::new("schtasks.exe"),
-            &["/Delete", "/TN", TASK_NAME, "/F"],
+            &["/Delete", "/TN", name.as_str(), "/F"],
             std::time::Duration::from_secs(30),
         );
         if ok {
@@ -408,7 +425,7 @@ pub fn delete_worker_task() -> Result<(), String> {
 /// 直接删除失败时再走一次 UAC，把删除动作放进提权批处理里。
 #[cfg(target_os = "windows")]
 pub fn delete_worker_task_elevated(session: &VpnSession) -> Result<(), String> {
-    let body = format!("schtasks /Delete /TN \"{}\" /F", TASK_NAME);
+    let body = format!("schtasks /Delete /TN \"{}\" /F", task_name());
     run_elevated_batch(session, "delete-task", &body)
 }
 
@@ -495,9 +512,10 @@ pub fn start_worker(
                 let before = fs::metadata(session.log_path())
                     .map(|meta| meta.len())
                     .unwrap_or(0);
+                let name = task_name();
                 let (text, ok) = crate::process::run_with_timeout(
                     Path::new("schtasks.exe"),
-                    &["/Run", "/TN", TASK_NAME],
+                    &["/Run", "/TN", name.as_str()],
                     std::time::Duration::from_secs(30),
                 );
                 session.append_log(&format!(
@@ -633,8 +651,17 @@ mod tests {
 
     #[test]
     fn task_name_is_stable() {
-        // 任务名会写进系统计划任务列表，改动需要同步清理旧任务
+        // 任务名会写进系统计划任务列表，改动需要同步清理旧任务；
+        // 只有开发构建带 -dev 后缀，安装包的名字必须保持原样。
         assert_eq!(TASK_NAME, "WsWorkbenchVpnWorker");
+        assert_eq!(
+            task_name(),
+            if cfg!(debug_assertions) {
+                "WsWorkbenchVpnWorker-dev"
+            } else {
+                "WsWorkbenchVpnWorker"
+            }
+        );
     }
 
     #[test]

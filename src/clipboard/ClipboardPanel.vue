@@ -450,7 +450,7 @@ html body,
   height: 100%;
   overflow: hidden;
   border: 1px solid var(--border-color);
-  border-radius: 14px;
+  border-radius: var(--radius-lg);
   background: var(--bg-primary);
   color: var(--text-primary);
   font-size: 13px;
@@ -464,7 +464,7 @@ html body,
   justify-content: space-between;
   gap: 8px;
   height: 44px;
-  padding: 0 14px;
+  padding: 0 16px;
   border-bottom: 1px solid var(--border-color);
   flex-shrink: 0;
 }
@@ -472,7 +472,7 @@ html body,
 .cp-title {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   font-size: 14px;
   font-weight: 600;
 }
@@ -480,7 +480,7 @@ html body,
 .cp-head-actions {
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: 4px;
   flex-shrink: 0;
 }
 
@@ -533,7 +533,7 @@ html body,
   position: relative;
   display: flex;
   align-items: center;
-  margin: 10px 12px 4px;
+  margin: 12px 12px 4px;
   flex-shrink: 0;
 }
 
@@ -549,9 +549,9 @@ html body,
 .cp-search-input {
   width: 100%;
   height: 32px;
-  padding: 0 28px 0 30px;
+  padding: 0 28px 0 32px;
   border: 1px solid transparent;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--bg-secondary);
   color: var(--text-primary);
   font-size: 13px;
@@ -589,7 +589,7 @@ html body,
 .cp-result-hint {
   padding: 0 16px 4px;
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 12px;
   flex-shrink: 0;
 }
 
@@ -599,14 +599,14 @@ html body,
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 6px 8px 8px;
+  padding: 8px 8px 8px;
 }
 
 .cp-row {
-  margin-bottom: 2px;
+  margin-bottom: 4px;
   padding: 8px 12px;
   border: 1px solid transparent;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   cursor: pointer;
 }
 
@@ -623,7 +623,7 @@ html body,
 .cp-row-main {
   display: flex;
   align-items: flex-start;
-  gap: 10px;
+  gap: 12px;
   min-width: 0;
 }
 
@@ -655,10 +655,10 @@ html body,
   right: 2px;
   bottom: 2px;
   padding: 0 4px;
-  border-radius: 999px;
+  border-radius: var(--radius-sm);
   background: rgba(15, 23, 42, 0.7);
-  color: #fff;
-  font-size: 10px;
+  color: var(--on-primary);
+  font-size: 12px;
   line-height: 14px;
   pointer-events: none;
 }
@@ -694,7 +694,7 @@ html body,
 }
 
 .cp-empty p {
-  margin: 0 0 6px;
+  margin: 0 0 8px;
 }
 
 .cp-empty-sub {
@@ -704,19 +704,19 @@ html body,
 }
 
 .cp-empty kbd {
-  padding: 1px 5px;
+  padding: 1px 4px;
   border: 1px solid var(--border-color);
   border-radius: 4px;
   background: var(--bg-secondary);
-  font-size: 11px;
+  font-size: 12px;
   font-family: inherit;
 }
 
 .cp-more {
-  padding: 6px 0 2px;
+  padding: 8px 0 4px;
   text-align: center;
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .cp-sentinel {
@@ -740,7 +740,7 @@ html body,
 .cp-viewer-image {
   max-width: 100%;
   max-height: 100%;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--bg-primary);
   object-fit: contain;
 }
@@ -750,10 +750,10 @@ html body,
   top: 50%;
   width: 30px;
   height: 30px;
-  margin-top: -15px;
+  margin-top: -16px;
   border: 0;
   border-radius: 50%;
-  background: rgba(255, 255, 255, 0.9);
+  background: var(--bg-primary);
   color: var(--text-secondary);
   font-size: 18px;
   line-height: 1;
@@ -774,11 +774,11 @@ html body,
   left: 50%;
   transform: translateX(-50%);
   height: 30px;
-  padding: 0 14px;
+  padding: 0 16px;
   border: 0;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--primary);
-  color: #fff;
+  color: var(--on-primary);
   font-size: 12px;
   cursor: pointer;
 }

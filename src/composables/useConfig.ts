@@ -14,6 +14,8 @@ export function useConfig() {
     vpn_rule_sets: [],
     vpn_active_profile_id: '',
     default_upload_dir: null,
+    // 给初始快照一个合法值，避免保存早于加载时缺字段
+    developer_mode: false,
   })
   const selectedProjectId = ref<string | null>(null)
   const loading = ref(false)
@@ -94,6 +96,7 @@ export function useConfig() {
         vpn_rule_sets: loaded.vpn_rule_sets ?? [],
         vpn_active_profile_id: loaded.vpn_active_profile_id ?? '',
         default_upload_dir: loaded.default_upload_dir ?? null,
+        developer_mode: loaded.developer_mode ?? false,
       }
       // 老配置把规则放在全局列表里用 rule_set_id 引用，这里一次性搬进各配置
       const migration = migrateVpnRuleSets(config.value)

@@ -46,6 +46,18 @@ const sort = ref<{ by: SortBy; dir: SortDir }>({ by: 'name', dir: 'asc' })
 /** 正在打开卸载窗口的应用 id（防止重复点击） */
 const openingId = ref('')
 
+/** 滚动容器：表头吸顶 + 首尾列冻结都在同一个横向滚动上下文里 */
+const scrollEl = ref<HTMLElement | null>(null)
+/** 横向滚到中间时给冻结列补一条发丝线，滚回两端就撤掉（不滚动时不需要分隔线） */
+const xScrolledStart = ref(false)
+const xScrolledEnd = ref(false)
+
+function onScrollX(event: Event): void {
+  const el = event.currentTarget as HTMLElement
+  xScrolledStart.value = el.scrollLeft > 0
+  xScrolledEnd.value = el.scrollLeft + el.clientWidth < el.scrollWidth - 1
+}
+
 const unlisteners: UnlistenFn[] = []
 
 onMounted(async () => {
@@ -242,9 +254,14 @@ async function openUninstall(app: InstalledApp): Promise<void> {
       {{ emptyText }}
     </div>
 
-    <!-- 列表 -->
-    <div v-else class="apps-scroll">
-      <div class="apps-table">
+    <!-- 列表：首列「应用」和末列「操作」横向冻结，中间列左右滚动；表头纵向吸顶 -->
+    <div v-else class="apps-table">
+      <div
+        ref="scrollEl"
+        class="apps-scroll"
+        :class="{ 'is-x-scrolled-start': xScrolledStart, 'is-x-scrolled-end': xScrolledEnd }"
+        @scroll="onScrollX"
+      >
         <div class="apps-row apps-header">
           <span class="col-app">应用</span>
           <span class="col-version">版本</span>
@@ -302,7 +319,7 @@ async function openUninstall(app: InstalledApp): Promise<void> {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding: 10px 20px 16px;
+  padding: 12px 20px 16px;
   overflow: hidden;
 }
 
@@ -311,7 +328,7 @@ async function openUninstall(app: InstalledApp): Promise<void> {
   flex-shrink: 0;
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
 }
 .apps-search {
   width: 300px;
@@ -328,7 +345,7 @@ async function openUninstall(app: InstalledApp): Promise<void> {
 .sort-btn {
   display: inline-flex;
   align-items: center;
-  gap: 2px;
+  gap: 4px;
   height: 32px;
   padding: 0 12px;
   border: 1px solid var(--border-color);
@@ -348,7 +365,7 @@ async function openUninstall(app: InstalledApp): Promise<void> {
   color: var(--primary);
 }
 .sort-arrow {
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1;
 }
 .apps-count {
@@ -361,7 +378,7 @@ async function openUninstall(app: InstalledApp): Promise<void> {
 .apps-rescan {
   flex-shrink: 0;
   height: 32px;
-  padding: 0 14px;
+  padding: 0 16px;
   border-radius: 6px;
   font-size: 12px;
   transition:
@@ -378,8 +395,8 @@ async function openUninstall(app: InstalledApp): Promise<void> {
   flex-shrink: 0;
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 6px 10px;
+  gap: 12px;
+  padding: 8px 12px;
   border: 1px solid var(--border-color);
   border-radius: 6px;
   background: var(--bg-secondary);
@@ -393,7 +410,7 @@ async function openUninstall(app: InstalledApp): Promise<void> {
 }
 .apps-progress-count {
   flex-shrink: 0;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
 }
@@ -401,13 +418,13 @@ async function openUninstall(app: InstalledApp): Promise<void> {
   flex: 1;
   min-width: 80px;
   height: 4px;
-  border-radius: 2px;
+  border-radius: var(--radius-sm);
   background: var(--bg-tag);
   overflow: hidden;
 }
 .progress-fill {
   height: 100%;
-  border-radius: 2px;
+  border-radius: var(--radius-sm);
   background: var(--primary);
   transition: width 0.2s ease;
 }
@@ -429,11 +446,11 @@ async function openUninstall(app: InstalledApp): Promise<void> {
   flex-shrink: 0;
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 7px 12px;
+  gap: 12px;
+  padding: 8px 12px;
   border: 1px solid rgba(239, 68, 68, 0.28);
   border-radius: 6px;
-  background: #fef2f2;
+  background: var(--danger-soft);
   color: var(--danger);
   font-size: 12px;
 }
@@ -455,31 +472,35 @@ async function openUninstall(app: InstalledApp): Promise<void> {
   text-align: center;
 }
 
-/* 列表 */
+/* 列表：外层框固定；表头吸顶、首列和末列横向冻结，中间列左右滚动 */
+.apps-table {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  background: var(--bg-primary);
+}
 .apps-scroll {
   flex: 1;
   min-height: 0;
+  position: relative;
   overflow: auto;
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
-  background: var(--bg-primary);
-}
-.apps-table {
-  /* 7 列 + 间距的最小宽度；窗口更窄时横向滚动，不把内容挤变形 */
-  min-width: 780px;
 }
 .apps-row {
   display: grid;
   grid-template-columns:
-    minmax(150px, 1.5fr) 78px minmax(90px, 0.9fr) 78px 92px
-    minmax(110px, 1.2fr) 92px;
+    200px 72px minmax(140px, 1fr) 78px 96px minmax(160px, 1.2fr) 76px;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   height: 44px;
-  padding: 0 12px;
   border-bottom: 1px solid var(--border-color);
   font-size: 12px;
   color: var(--text-secondary);
+  /* 窄窗口（加了左栏后只剩 ~720px）时整行保持这个宽度，中间列横向滚动 */
+  min-width: 876px;
 }
 .apps-row:last-child {
   border-bottom: none;
@@ -490,13 +511,47 @@ async function openUninstall(app: InstalledApp): Promise<void> {
 .apps-header {
   position: sticky;
   top: 0;
-  z-index: 1;
+  z-index: 3;
   height: 32px;
   background: var(--bg-secondary);
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.2px;
+}
+/* 冻结列：左「应用」、右「操作」，滚动时保持贴边 */
+.col-app,
+.col-action {
+  position: sticky;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  background: var(--bg-primary);
+}
+.col-app {
+  left: 0;
+  padding-left: 12px;
+}
+.col-action {
+  right: 0;
+  justify-content: flex-end;
+  padding-right: 12px;
+}
+.apps-header .col-app,
+.apps-header .col-action {
+  z-index: 4;
+  background: var(--bg-secondary);
+}
+.apps-row:not(.apps-header):hover .col-app,
+.apps-row:not(.apps-header):hover .col-action {
+  background: var(--bg-hover);
+}
+/* 只在横向滚动到中间时给冻结列补分隔线，两端贴合时不留多余线条 */
+.apps-scroll.is-x-scrolled-start .col-app {
+  border-right: 1px solid var(--border-color);
+}
+.apps-scroll.is-x-scrolled-end .col-action {
+  border-left: 1px solid var(--border-color);
 }
 .app-cell {
   display: flex;
@@ -519,7 +574,7 @@ async function openUninstall(app: InstalledApp): Promise<void> {
   white-space: nowrap;
 }
 .app-source {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-muted);
 }
 .col-version,
@@ -542,9 +597,9 @@ async function openUninstall(app: InstalledApp): Promise<void> {
 }
 .row-btn {
   height: 24px;
-  padding: 0 10px;
+  padding: 0 12px;
   border: 1px solid var(--border-color);
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   background: var(--bg-input);
   color: var(--text-secondary);
   font-size: 12px;
@@ -560,8 +615,8 @@ async function openUninstall(app: InstalledApp): Promise<void> {
 }
 .tag {
   display: inline-block;
-  font-size: 11px;
-  border-radius: 9px;
+  font-size: 12px;
+  border-radius: var(--radius-md);
   padding: 1px 8px;
   white-space: nowrap;
 }
@@ -570,10 +625,10 @@ async function openUninstall(app: InstalledApp): Promise<void> {
   background: var(--bg-tag);
 }
 .mono {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--font-mono);
 }
 .btn-xs {
-  padding: 4px 10px;
+  padding: 4px 12px;
   font-size: 12px;
 }
 </style>

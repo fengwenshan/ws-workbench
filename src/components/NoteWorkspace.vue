@@ -148,7 +148,7 @@ onBeforeUnmount(() => {
   z-index: 5;
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: 4px;
   height: 30px;
   padding: 0 12px;
   font-size: 12px;
@@ -166,11 +166,11 @@ onBeforeUnmount(() => {
 }
 .sidebar-fab-count {
   min-width: 16px;
-  padding: 0 5px;
-  border-radius: 8px;
-  font-size: 11px;
+  padding: 0 4px;
+  border-radius: var(--radius-md);
+  font-size: 12px;
   line-height: 16px;
-  color: #fff;
+  color: var(--on-primary);
   background: var(--primary);
 }
 </style>

@@ -21,6 +21,11 @@ export async function getAppVersion(): Promise<string> {
   }
 }
 
+/** 当前安装的是不是内测版：版本号里带预发布后缀（如 1.0.25-beta.1） */
+export async function isPrereleaseBuild(): Promise<boolean> {
+  return (await getAppVersion()).includes('-')
+}
+
 /** 当前是不是开发构建；调用失败时按 Vite 的 DEV 兜底 */
 export async function isDevBuild(): Promise<boolean> {
   try {

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, nextTick, onMounted, onUnmounted, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { type UnlistenFn } from "@tauri-apps/api/event";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Modal, Checkbox, ConfigProvider, message, Form, FormItem, Input, Button, Segmented } from "ant-design-vue";
 import type { FormInstance } from "ant-design-vue";
@@ -10,13 +10,24 @@ import { useConfig } from "@/composables/useConfig";
 import { usePack } from "@/composables/usePack";
 import { useUpdater } from "@/composables/useUpdater";
 import { useVpn } from "@/composables/useVpn";
+import { useLanShareUnread } from "@/composables/useLanShareUnread";
 import { useWorkbenchLayout } from "@/composables/useWorkbenchLayout";
 import { useEntitySelection } from "@/composables/useEntitySelection";
 import { useProjectForm, type CreateTab } from "@/composables/useProjectForm";
 import { useDeleteConfirm } from "@/composables/useDeleteConfirm";
 import { initPlatform, platform } from "@/platform";
+import { useTheme } from "@/composables/useTheme";
+import { buildAntdTheme } from "@/theme/antdTheme";
 import appIcon from "@/assets/app-icon.png";
-import type { AttachmentMeta, EntityKind, QuickAttachmentItem } from "@/types";
+import type {
+  AttachmentMeta,
+  EntityKind,
+  ProjectConfig,
+  QuickAttachmentItem,
+  QuickPaletteChoose,
+  QuickProjectItem,
+  VcsInfo,
+} from "@/types";
 import ProjectList from "@/components/ProjectList.vue";
 import GroupDetail from "@/components/GroupDetail.vue";
 import ProjectDetail from "@/components/ProjectDetail.vue";
@@ -25,9 +36,15 @@ import VpnPanel from "@/components/vpn/VpnPanel.vue";
 import VpnStatusDot from "@/components/vpn/VpnStatusDot.vue";
 import SettingsPanel from "@/components/settings/SettingsPanel.vue";
 import CleanerPanel from "@/components/cleaner/CleanerPanel.vue";
+import LanSharePanel from "@/components/lanshare/LanSharePanel.vue";
 import QuickOpenPalette from "@/components/QuickOpenPalette.vue";
 import AttachmentPreview from "@/components/AttachmentPreview.vue";
-import { getAppName, isDevBuild } from "@/api/app";
+import { detectVcsMany } from "@/api/project";
+import { getAppName, getAppVersion, isDevBuild, isPrereleaseBuild } from "@/api/app";
+
+/** 主题：mode 来自 useTheme，antd token 跟着解析结果切换（亮/暗） */
+const { resolved: themeResolved } = useTheme();
+const antdTheme = computed(() => buildAntdTheme(themeResolved.value === "dark"));
 
 /** 标题栏上的应用名：开发构建带 -dev，发布版是 ws-workbench（由 Rust 侧按构建给出） */
 const appName = ref("ws-workbench");
@@ -40,6 +57,13 @@ const devBuild = ref(false);
 void isDevBuild().then((value) => {
   devBuild.value = value;
 });
+
+/** 当前安装的是内测版：标题栏更新按钮旁边挂 beta 标签，标签里带完整版本号 */
+const isPrerelease = ref(false);
+/** 当前安装的完整版本号（如 1.0.25-beta.2）；取不到时为空串 */
+const appVersion = ref("");
+const betaTagLabel = computed(() => (appVersion.value ? `beta v${appVersion.value}` : "beta"));
+const betaTagTitle = computed(() => (appVersion.value ? `内测版 v${appVersion.value}` : "内测版"));
 
 const {
   config,
@@ -73,9 +97,12 @@ const {
   info: updateInfo,
   errorMessage: updateError,
   percentage: updatePercentage,
+  developerMode,
   checkUpdate,
   installUpdate,
   restartApp,
+  setDeveloperMode,
+  initDeveloperMode,
   startDailyCheck,
   stopDailyCheck,
 } = useUpdater();
@@ -83,44 +110,45 @@ const {
 // VPN 与项目打包共用同一份 config.json，这里复用 useConfig 的 saveConfig 落盘
 const vpn = useVpn(config, saveConfig);
 
+// LANLink 未读红点：订阅后端 lan-share://unread（唯一事实源），不在这里遍历会话求和
+const { unread: lanUnread } = useLanShareUnread();
+
 // VPN 状态点：图标栏 VPN 图标右下角的连接指示
 const vpnDotState = computed<"off" | "on" | "busy">(() => {
   if (vpn.isConnected) return "on";
   if (vpn.phaseBusy || vpn.connecting) return "busy";
   return "off";
 });
-const vpnTitle = computed(() => {
-  if (vpn.isConnected) return `VPN 已连接：${vpn.status.message}`;
-  if (vpn.phaseBusy) return "VPN 连接中…";
-  return "VPN 未连接，点击进入代理";
-});
-
 // 工作台布局：工具切换、项目树尺寸与持久化
 const {
   view,
   isMac,
   shortcutTitle,
   selectTool,
+  openHome,
   treeWidth,
   treeCollapsed,
   vpnMenuCollapsed,
+  cleanerMenuCollapsed,
+  lanMenuCollapsed,
+  settingsMenuCollapsed,
   startTreeResize,
   resetTreeWidth,
   onTreeResizerKeydown,
 } = useWorkbenchLayout();
 
+// 左侧没有模块栏时（收起的项目树 / VPN 列表 / 系统 / LANLink / 设置 模块栏），rail 自己就是整张卡片，四角都要圆
+const railSolo = computed(
+  () =>
+    (view.value === "home" && treeCollapsed.value) ||
+    (view.value === "proxy" && vpnMenuCollapsed.value) ||
+    (view.value === "cleaner" && cleanerMenuCollapsed.value) ||
+    (view.value === "lanshare" && lanMenuCollapsed.value) ||
+    (view.value === "settings" && settingsMenuCollapsed.value),
+);
+
 // Windows 使用自绘标题栏；macOS 仍用系统红绿灯，Linux 保留系统边框
 const isWindows = computed(() => platform.is_windows);
-
-const proxyTitle = computed(() => {
-  const action =
-    view.value === "proxy"
-      ? vpnMenuCollapsed.value
-        ? "展开 VPN 配置"
-        : "收起 VPN 配置"
-      : "代理";
-  return vpn.isConnected ? `${action}（VPN 已连接）` : shortcutTitle(action, "2");
-});
 
 // 分组 / 项目选中状态
 const {
@@ -234,8 +262,73 @@ const quickItems = computed<QuickAttachmentItem[]>(() => {
   return out;
 });
 
+// 项目的 Git / SVN 地址不在配置里持久化，打开搜索时按源目录现查（只查一次，
+// 源目录变了才重查）；结果回来前先按「无仓库信息」展示，不阻塞搜索。
+type ProjectVcsCache = Record<string, { dir: string; info: VcsInfo }>;
+
+const projectVcs = ref<ProjectVcsCache>({});
+let projectVcsSeq = 0;
+
+function allProjects(): Array<{ id: string; name: string; source_dir: string; groupName: string }> {
+  const out: Array<{ id: string; name: string; source_dir: string; groupName: string }> = [];
+  for (const project of config.value.projects ?? []) {
+    out.push({
+      id: project.id,
+      name: project.name,
+      source_dir: project.source_dir,
+      groupName: "",
+    });
+  }
+  for (const group of config.value.groups ?? []) {
+    for (const project of group.projects ?? []) {
+      out.push({
+        id: project.id,
+        name: project.name,
+        source_dir: project.source_dir,
+        groupName: group.name,
+      });
+    }
+  }
+  return out;
+}
+
+async function loadProjectVcs() {
+  const seq = ++projectVcsSeq;
+  const targets = allProjects().filter(
+    (project) =>
+      project.source_dir && projectVcs.value[project.id]?.dir !== project.source_dir,
+  );
+  if (targets.length === 0) return;
+  try {
+    const infos = await detectVcsMany(targets.map((project) => project.source_dir));
+    if (seq !== projectVcsSeq) return;
+    targets.forEach((project, index) => {
+      const info = infos[index];
+      if (info) projectVcs.value[project.id] = { dir: project.source_dir, info };
+    });
+  } catch {
+    // 目录已不存在 / 没有 git、svn 命令：按「无仓库信息」处理，不影响搜索
+  }
+}
+
+/** 快速搜索的项目结果：名称 + 分组路径 + Git/SVN 地址 */
+const quickProjects = computed<QuickProjectItem[]>(() =>
+  allProjects().map((project) => {
+    const cached = projectVcs.value[project.id];
+    const info = cached && cached.dir === project.source_dir ? cached.info : null;
+    return {
+      id: project.id,
+      name: project.name,
+      path: project.groupName ? `${project.groupName} / ${project.name}` : project.name,
+      vcsType: info?.vcs_type ?? "none",
+      vcsUrl: info?.url ?? "",
+    };
+  }),
+);
+
 function openQuickSearch() {
   quickOpenVisible.value = true;
+  void loadProjectVcs();
 }
 
 function handleQuickKeydown(event: KeyboardEvent) {
@@ -250,15 +343,22 @@ function handleQuickKeydown(event: KeyboardEvent) {
 const quickPreviewOpen = ref(false);
 const quickPreviewMeta = ref<AttachmentMeta | null>(null);
 
-function handleQuickChoose(item: QuickAttachmentItem) {
+function handleQuickChoose(result: QuickPaletteChoose) {
   quickOpenVisible.value = false;
+  // 项目结果：直接跳到它所在的页面（附件预览只有附件才弹）
+  if (result.kind === "project") {
+    selection.value = { kind: "project", id: result.project.id };
+    openHome();
+    return;
+  }
+  const item = result.attachment;
   // 附件属于别的分组/项目时先切过去，关掉预览后看到的就是它所在的页面
   if (
     selection.value?.kind !== item.entityKind ||
     selection.value?.id !== item.entityId
   ) {
     selection.value = { kind: item.entityKind, id: item.entityId };
-    selectTool("home");
+    openHome();
   }
   quickPreviewMeta.value = item;
   quickPreviewOpen.value = true;
@@ -277,6 +377,24 @@ onMounted(() => window.addEventListener("keydown", handleQuickKeydown));
 onUnmounted(() => window.removeEventListener("keydown", handleQuickKeydown));
 onMounted(() => window.addEventListener("ws-open-settings", onOpenSettings));
 onUnmounted(() => window.removeEventListener("ws-open-settings", onOpenSettings));
+
+// 托盘「消息」列表点了某条会话：后端发 lan-share://open-chat，主窗口切到 LANLink 页。
+// 具体选中哪个会话由 useLanShareChat 监听同一事件处理（面板 v-show 常驻挂载）。
+let lanShareOpenChatUnlisten: UnlistenFn | null = null;
+onMounted(async () => {
+  try {
+    lanShareOpenChatUnlisten = await listen<{ peer_id: string }>(
+      "lan-share://open-chat",
+      () => selectTool("lanshare"),
+    );
+  } catch {
+    // 非 Tauri 环境或事件注册失败时不阻塞界面
+  }
+});
+onUnmounted(() => {
+  lanShareOpenChatUnlisten?.();
+  lanShareOpenChatUnlisten = null;
+});
 
 // 新建分组 / 添加项目弹窗都是「先选目录、后弹窗」，打开后把焦点落到名称输入框（已带出目录名，全选便于直接改写）
 const groupNameInputEl = ref<{ focus: () => void; select?: () => void } | null>(
@@ -338,16 +456,24 @@ const {
   ensureSelection,
 });
 
-// 打开应用先静默检查一次；之后每天 10:00 / 16:00 自动校验。
-// 开发构建一律不查：裸二进制装不了更新（Windows 上还会把 dev 可执行文件覆盖成发布版），
-// 而且开发版和生产版同时开着时没必要两边都去 GitHub 拉清单。
-onMounted(async () => {
+// 开发者模式来自 config，必须等配置加载完才能决定走哪条通道，
+// 所以启动检查放在 loading 由 true 变 false 之后，避免先按稳定通道查一次。
+let updaterInitialized = false;
+async function initUpdater() {
+  // 启动时只同步通道，不能走 setDeveloperMode：它会清掉「忽略此版本」，
+  // 导致每次启动都把用户已经忽略的版本重新提示一遍。
+  initDeveloperMode(config.value.developer_mode ?? false);
+  appVersion.value = await getAppVersion();
+  isPrerelease.value = await isPrereleaseBuild();
+  // 开发构建一律不查：裸二进制装不了更新（Windows 上会把 dev 可执行文件覆盖成发布版）
   if (await isDevBuild()) return;
   await checkUpdate({ silent: true });
-});
-onMounted(async () => {
-  if (await isDevBuild()) return;
   startDailyCheck();
+}
+watch(loading, (value) => {
+  if (value || updaterInitialized) return;
+  updaterInitialized = true;
+  void initUpdater();
 });
 onUnmounted(stopDailyCheck);
 
@@ -515,6 +641,24 @@ async function handleUpdateAction() {
   }
 }
 
+/** 设置页开关开发者模式：先落盘，再按新通道立刻检查一次 */
+async function handleChangeDeveloperMode(enabled: boolean) {
+  config.value.developer_mode = enabled;
+  try {
+    await saveConfig();
+  } catch (err) {
+    message.error(`保存开发者模式失败: ${err}`);
+  }
+  setDeveloperMode(enabled);
+  if (!enabled && isPrerelease.value) {
+    message.info(
+      "当前已安装内测版；关闭开发者模式不会降级，下一个正式版发布后会自动回到稳定版",
+    );
+  }
+  if (await isDevBuild()) return;
+  await checkUpdate({ silent: true });
+}
+
 // 重命名分组（默认分组不允许重命名）
 async function handleRenameGroup(id: string, name: string) {
   const group = config.value.groups.find((g) => g.id === id);
@@ -558,11 +702,6 @@ async function handleUpdate(id: string, data: any) {
   await updateProject(id, data);
 }
 
-async function handleUpdateDefaultInclude(rules: string[]) {
-  config.value.default_include = rules;
-  await saveConfig();
-}
-
 async function handleSetDefaultUploadDir(dir: string | null) {
   try {
     await setDefaultUploadDir(dir);
@@ -574,13 +713,18 @@ async function handleSetDefaultUploadDir(dir: string | null) {
   }
 }
 
-async function handlePack(project: any, asZip: boolean = false) {
-  await pack(project, config.value.default_include, asZip);
+async function handlePack(project: ProjectConfig, asZip: boolean = false) {
+  // 项目自己的包含规则优先；没配置（null / 空）时沿用全局默认，避免把空数组
+  // 传给后端（后端把空规则当成「全部放行」）。
+  const include = project.pack_include?.length
+    ? project.pack_include
+    : config.value.default_include;
+  await pack(project, include, asZip);
 }
 </script>
 
 <template>
-  <ConfigProvider :locale="zhCN">
+  <ConfigProvider :locale="zhCN" :theme="antdTheme">
   <div class="app-layout">
     <!-- 标题栏：整条可拖动窗口；macOS 下红绿灯浮在左侧，留白由 CSS 处理 -->
     <header
@@ -604,15 +748,15 @@ async function handlePack(project: any, asZip: boolean = false) {
       <!-- 居中搜索：仿 VS Code 命令中心，点击或 ⌘/Ctrl+P 呼出快速搜索 -->
       <button
         class="titlebar-search"
-        :title="shortcutTitle('搜索附件', 'P')"
-        aria-label="搜索附件"
+        :title="shortcutTitle('搜索附件或项目', 'P')"
+        aria-label="搜索附件或项目"
         @click="openQuickSearch"
       >
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
           <circle cx="11" cy="11" r="6" />
           <path d="M15.5 15.5L20 20" />
         </svg>
-        <span class="titlebar-search-label">搜索附件</span>
+        <span class="titlebar-search-label">搜索附件或项目</span>
         <span class="titlebar-search-hint">{{ isMac ? '⌘P' : 'Ctrl+P' }}</span>
       </button>
       <div class="titlebar-actions">
@@ -626,6 +770,12 @@ async function handlePack(project: any, asZip: boolean = false) {
         >
           {{ updateButtonLabel }}
         </button>
+        <span
+          v-if="isPrerelease"
+          class="titlebar-dev-tag titlebar-beta-tag"
+          :title="betaTagTitle"
+          >{{ betaTagLabel }}</span
+        >
         <span v-if="devBuild" class="titlebar-dev-tag" title="开发构建">dev</span>
       </div>
       <div
@@ -676,17 +826,12 @@ async function handlePack(project: any, asZip: boolean = false) {
 
     <div class="workbench">
       <!-- 工具图标栏 -->
-      <nav class="rail" aria-label="工具">
+      <nav class="rail" :class="{ 'rail-solo': railSolo }" aria-label="工具">
         <div class="rail-group">
           <button
             class="rail-btn"
             :class="{ active: view === 'home' }"
             :aria-current="view === 'home' ? 'page' : undefined"
-            :title="
-              view === 'home'
-                ? shortcutTitle(treeCollapsed ? '展开项目树' : '折叠项目树', '1')
-                : shortcutTitle('项目', '1')
-            "
             :aria-label="
               view === 'home'
                 ? treeCollapsed
@@ -706,7 +851,6 @@ async function handlePack(project: any, asZip: boolean = false) {
             :aria-current="view === 'proxy' ? 'page' : undefined"
             :aria-expanded="view === 'proxy' ? !vpnMenuCollapsed : undefined"
             aria-controls="vpn-profile-menu"
-            :title="proxyTitle"
             :aria-label="
               view === 'proxy'
                 ? vpnMenuCollapsed
@@ -720,16 +864,34 @@ async function handlePack(project: any, asZip: boolean = false) {
               <path d="M12 3l7 3v5.2c0 4.5-3 7.9-7 9.8-4-1.9-7-5.3-7-9.8V6z" />
               <path d="M9.5 12.2l1.8 1.9 3.4-3.7" />
             </svg>
-            <span class="rail-vpn-badge" :title="vpnTitle">
+            <span class="rail-vpn-badge">
               <VpnStatusDot :state="vpnDotState" size="md" glow />
             </span>
+          </button>
+          <!-- LANLink：发现同一局域网里运行本应用的设备并互传文件 -->
+          <button
+            class="rail-btn"
+            :class="{ active: view === 'lanshare' }"
+            :aria-current="view === 'lanshare' ? 'page' : undefined"
+            :aria-expanded="view === 'lanshare' ? !lanMenuCollapsed : undefined"
+            aria-label="LANLink"
+            @click="selectTool('lanshare')"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="6" cy="12" r="2.3" />
+              <circle cx="18" cy="6" r="2.3" />
+              <circle cx="18" cy="18" r="2.3" />
+              <path d="M8.1 10.9l7.8-3.8M8.1 13.1l7.8 3.8" />
+            </svg>
+            <!-- 有未读消息时右上角红点（不挡点击，纯展示） -->
+            <span v-if="lanUnread > 0" class="rail-unread-dot" aria-hidden="true"></span>
           </button>
           <!-- 清理工具：系统清理（软件卸载 + 内存占用） -->
           <button
             class="rail-btn"
             :class="{ active: view === 'cleaner' }"
             :aria-current="view === 'cleaner' ? 'page' : undefined"
-            :title="shortcutTitle('系统', '4')"
+            :aria-expanded="view === 'cleaner' ? !cleanerMenuCollapsed : undefined"
             aria-label="系统"
             @click="selectTool('cleaner')"
           >
@@ -744,7 +906,7 @@ async function handlePack(project: any, asZip: boolean = false) {
             class="rail-btn"
             :class="{ active: view === 'settings' }"
             :aria-current="view === 'settings' ? 'page' : undefined"
-            :title="shortcutTitle('设置', '3')"
+            :aria-expanded="view === 'settings' ? !settingsMenuCollapsed : undefined"
             aria-label="设置"
             @click="selectTool('settings')"
           >
@@ -792,7 +954,7 @@ async function handlePack(project: any, asZip: boolean = false) {
       ></div>
 
       <!-- 工作区：按工具切换内容 -->
-      <main class="workspace">
+      <main class="workspace" :class="{ 'tree-collapsed': treeCollapsed }">
         <!-- 项目工具 -->
         <div v-show="view === 'home'" class="workspace-body home-body">
           <div class="config-section">
@@ -812,6 +974,7 @@ async function handlePack(project: any, asZip: boolean = false) {
               :key="'project-' + selection.id"
               :project="selectedProject"
               :default-upload-dir="config.default_upload_dir"
+              :default-include="config.default_include"
               @update="handleUpdate"
               @pack="handlePack"
               @update-note="(id, note) => handleEntityNote('project', id, note)"
@@ -829,7 +992,7 @@ async function handlePack(project: any, asZip: boolean = false) {
         </div>
 
         <!-- 代理工具 -->
-        <div v-show="view === 'proxy'" class="workspace-body">
+        <div v-show="view === 'proxy'" class="workspace-body proxy-body">
           <VpnPanel
             :vpn="vpn"
             :active="view === 'proxy'"
@@ -839,7 +1002,12 @@ async function handlePack(project: any, asZip: boolean = false) {
 
         <!-- 清理工具 -->
         <div v-show="view === 'cleaner'" class="workspace-body">
-          <CleanerPanel :active="view === 'cleaner'" />
+          <CleanerPanel :active="view === 'cleaner'" :menu-collapsed="cleanerMenuCollapsed" />
+        </div>
+
+        <!-- LANLink 工具 -->
+        <div v-show="view === 'lanshare'" class="workspace-body">
+          <LanSharePanel :active="view === 'lanshare'" :menu-collapsed="lanMenuCollapsed" />
         </div>
 
         <!-- 设置工具 -->
@@ -847,9 +1015,10 @@ async function handlePack(project: any, asZip: boolean = false) {
           <SettingsPanel
             :active="view === 'settings'"
             :default-upload-dir="config.default_upload_dir"
-            :default-include="config.default_include"
+            :menu-collapsed="settingsMenuCollapsed"
+            :developer-mode="developerMode"
             @update-default-upload-dir="handleSetDefaultUploadDir"
-            @update-default-include="handleUpdateDefaultInclude"
+            @change-developer-mode="handleChangeDeveloperMode"
           />
         </div>
 
@@ -983,6 +1152,7 @@ async function handlePack(project: any, asZip: boolean = false) {
       <QuickOpenPalette
         v-if="quickOpenVisible"
         :items="quickItems"
+        :projects="quickProjects"
         @close="quickOpenVisible = false"
         @choose="handleQuickChoose"
       />
@@ -998,7 +1168,7 @@ async function handlePack(project: any, asZip: boolean = false) {
   display: flex;
   flex-direction: column;
   height: 100vh;
-  background: var(--bg-primary);
+  background: var(--bg-secondary);
 }
 
 /* 标题栏：承载窗口拖动、当前工具、版本与更新按钮 */
@@ -1011,11 +1181,10 @@ async function handlePack(project: any, asZip: boolean = false) {
   justify-content: space-between;
   gap: 12px;
   padding: 0 12px 0 16px;
-  border-bottom: 1px solid var(--border-color);
-  background: var(--bg-primary);
+  background: transparent;
 }
 .titlebar-mac {
-  padding-left: 78px;
+  padding-left: 80px;
 }
 .titlebar-windows {
   padding-right: 0;
@@ -1057,7 +1226,7 @@ async function handlePack(project: any, asZip: boolean = false) {
 .titlebar-actions {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   flex-shrink: 0;
   /* 窗口按钮是第三个 flex 子项，必须把 actions 推到右侧，否则 space-between
      会把它放在标题栏正中 */
@@ -1101,8 +1270,8 @@ async function handlePack(project: any, asZip: boolean = false) {
   stroke-width: 1;
 }
 .window-controls.hover-ready .window-control-close:hover {
-  background: #c42b1c;
-  color: #fff;
+  background: var(--danger);
+  color: var(--on-primary);
 }
 .titlebar-search {
   position: absolute;
@@ -1112,13 +1281,13 @@ async function handlePack(project: any, asZip: boolean = false) {
   z-index: 2;
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   width: min(440px, 38vw);
   height: 24px;
-  padding: 0 10px;
+  padding: 0 12px;
   border: 1px solid var(--border-color);
-  border-radius: 6px;
-  background: var(--bg-secondary);
+  border-radius: var(--radius-md);
+  background: var(--bg-primary);
   color: var(--text-muted);
   cursor: pointer;
 }
@@ -1150,12 +1319,18 @@ async function handlePack(project: any, asZip: boolean = false) {
 .rail {
   width: 56px;
   flex-shrink: 0;
+  margin: 0 0 8px 4px;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
   padding: 8px 0;
-  border-right: 1px solid var(--border-color);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg) 0 0 var(--radius-lg);
   background: var(--bg-primary);
+}
+/* 左边没有模块栏时（清理 / 设置 / 收起模块栏），rail 自己就是一张完整卡片 */
+.rail.rail-solo {
+  border-radius: var(--radius-lg);
 }
 .rail-group,
 .rail-bottom {
@@ -1172,7 +1347,7 @@ async function handlePack(project: any, asZip: boolean = false) {
   align-items: center;
   justify-content: center;
   border: none;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--text-secondary);
   cursor: pointer;
@@ -1214,6 +1389,19 @@ async function handlePack(project: any, asZip: boolean = false) {
   width: 20px;
   height: 20px;
 }
+/* LANLink 未读红点：8px + 白描边，active（淡蓝底）和普通白底上都看得清；不接管点击 */
+.rail-unread-dot {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--danger);
+  box-shadow: 0 0 0 2px var(--bg-primary);
+  pointer-events: none;
+}
+
 .rail-vpn-badge {
   position: absolute;
   right: 4px;
@@ -1229,13 +1417,17 @@ async function handlePack(project: any, asZip: boolean = false) {
 }
 
 /* 项目树面板 */
+/* 项目树：和 rail 拼成左栏卡片——顶/右/下 1px 线，下留 8px，圆角只做右侧两只角 */
 .tree-panel {
   position: relative;
   flex-shrink: 0;
   min-width: 0;
   display: flex;
   flex-direction: column;
-  border-right: 1px solid var(--border-color);
+  margin-bottom: 8px;
+  border: 1px solid var(--border-color);
+  border-left: 0;
+  border-radius: 0 var(--radius-lg) var(--radius-lg) 0;
   background: var(--bg-primary);
   overflow: hidden;
 }
@@ -1251,8 +1443,9 @@ async function handlePack(project: any, asZip: boolean = false) {
   outline: 2px solid var(--primary);
   outline-offset: -2px;
 }
+/* 项目树与详情之间的拖动条，同时充当两栏 12px 间隙 */
 .resizer-tree {
-  width: 6px;
+  width: 4px;
   cursor: col-resize;
 }
 .resizer:hover {
@@ -1276,27 +1469,39 @@ async function handlePack(project: any, asZip: boolean = false) {
   flex-direction: column;
   overflow: hidden;
 }
+/* 项目详情：右栏是一张独立卡片，顶部贴住标题栏，右留 4px、下留 8px，整圈 1px 边框 + 12px 圆角 */
 .home-body {
   overflow: hidden;
+  margin: 0 4px 8px 0;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+}
+/* 项目树收起后左侧没有栏了，卡片自己补上和 rail 之间的 4px 间隙 */
+.workspace.tree-collapsed .home-body {
+  margin-left: 4px;
 }
 
-/* 窄窗口：先收起项目树 */
+/* 窄窗口：先收起项目树；卡片自己补左边距，四周间距保持不变 */
 @media (max-width: 900px) {
   .tree-panel,
   .resizer-tree {
     display: none !important;
   }
+  .home-body {
+    margin-left: 4px;
+  }
 }
 /* 软件更新按钮（标题栏内） */
 .update-btn {
-  padding: 4px 10px;
+  padding: 4px 12px;
   border: 1px solid var(--border-color);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--bg-input);
   color: var(--text-secondary);
   font-size: 12px;
   cursor: pointer;
-  transition: all 0.15s;
+  transition: background-color 0.2s ease, color 0.2s ease, border-color 0.2s ease;
   white-space: nowrap;
 }
 .update-btn:hover:not(:disabled) {
@@ -1311,13 +1516,13 @@ async function handlePack(project: any, asZip: boolean = false) {
 .update-btn-primary {
   border-color: var(--primary);
   background: var(--primary);
-  color: #fff;
+  color: var(--on-primary);
   font-weight: 500;
 }
 .update-btn-primary:hover:not(:disabled) {
   border-color: var(--primary-hover);
   background: var(--primary-hover);
-  color: #fff;
+  color: var(--on-primary);
 }
 .update-btn-titlebar {
   width: auto;
@@ -1329,14 +1534,19 @@ async function handlePack(project: any, asZip: boolean = false) {
   display: inline-flex;
   align-items: center;
   height: 18px;
-  padding: 0 7px;
-  border-radius: 9px;
+  padding: 0 8px;
+  border-radius: var(--radius-md);
   background: var(--bg-tag);
   color: var(--text-tag);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.02em;
   user-select: none;
+}
+/* 内测版标识：和 dev 标签同形，换成主色实心 */
+.titlebar-beta-tag {
+  background: var(--primary);
+  color: var(--on-primary);
 }
 
 .config-section {

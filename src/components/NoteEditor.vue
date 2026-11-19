@@ -1228,7 +1228,7 @@ function onPasteCapture(event: ClipboardEvent) {
   gap: 12px;
   flex-shrink: 0;
   height: 30px;
-  padding: 0 4px 6px;
+  padding: 0 4px 8px;
   background: transparent;
   font-size: 12px;
   line-height: 1;
@@ -1282,7 +1282,7 @@ function onPasteCapture(event: ClipboardEvent) {
 
 /* ========== 工具栏：扁平、悬停高亮、tooltip 放在下方 ========== */
 .note-editor :deep(.vditor-toolbar) {
-  padding-top: 6px;
+  padding-top: 8px;
   padding-bottom: 4px;
   background: var(--note-bg);
   border-bottom: 0;
@@ -1316,7 +1316,7 @@ function onPasteCapture(event: ClipboardEvent) {
 }
 .note-editor :deep(.vditor-toolbar__divider) {
   height: 18px;
-  margin: 7px 7px;
+  margin: 8px 8px;
   border-left-color: var(--note-border-color);
 }
 
@@ -1329,10 +1329,10 @@ function onPasteCapture(event: ClipboardEvent) {
   left: 50%;
   transform: translateX(-50%);
   margin: 0;
-  padding: 5px 9px;
+  padding: 4px 8px;
   border-radius: 6px;
-  background: #1f2329;
-  color: #fff;
+  background: var(--code-bg);
+  color: var(--on-primary);
   font-size: 12px;
   line-height: 1.5;
   font-weight: 400;
@@ -1348,10 +1348,10 @@ function onPasteCapture(event: ClipboardEvent) {
   bottom: auto;
   right: auto;
   left: 50%;
-  margin: 0 0 0 -5px;
+  margin: 0 0 0 -4px;
   border: 5px solid transparent;
   border-top-color: transparent;
-  border-bottom-color: #1f2329;
+  border-bottom-color: var(--code-bg);
   z-index: 21;
   opacity: 1;
   animation: none;
@@ -1429,12 +1429,12 @@ function onPasteCapture(event: ClipboardEvent) {
 
 /* 行内代码：细边框小胶囊；只作用于非 pre 内的 code */
 .note-editor :deep(.vditor-reset :not(pre) > code) {
-  padding: 2px 6px;
+  padding: 4px 8px;
   border: 1px solid var(--note-border-color);
   border-radius: 4px;
   background: var(--note-bg-soft);
   color: var(--note-text);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 0.86em;
 }
 
@@ -1442,9 +1442,9 @@ function onPasteCapture(event: ClipboardEvent) {
 .note-editor :deep(.vditor-ir div[data-type='code-block']),
 .note-editor :deep(.vditor-wysiwyg div[data-type='code-block']) {
   position: relative;
-  margin: 14px 0;
+  margin: 16px 0;
   border: 1px solid var(--note-border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--note-bg-soft);
   overflow: hidden;
 }
@@ -1480,9 +1480,9 @@ function onPasteCapture(event: ClipboardEvent) {
   height: auto;
   overflow: visible;
   visibility: visible;
-  padding: 2px 6px;
+  padding: 4px 8px;
   border-radius: 4px;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 16px;
   text-align: right;
   color: var(--note-text-muted);
@@ -1516,7 +1516,7 @@ function onPasteCapture(event: ClipboardEvent) {
   padding: 0;
   border: 0;
   background: transparent;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 13px;
   line-height: 1.7;
 }
@@ -1608,7 +1608,7 @@ function onPasteCapture(event: ClipboardEvent) {
   width: 248px;
   padding: 4px;
   border: 1px solid var(--note-border-color);
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   background: var(--note-bg);
   box-shadow: 0 10px 30px rgba(15, 23, 42, 0.14);
 }
@@ -1624,7 +1624,7 @@ function onPasteCapture(event: ClipboardEvent) {
 }
 .note-lang-list {
   max-height: 240px;
-  padding-top: 2px;
+  padding-top: 4px;
   border-top: 1px solid var(--note-border-color);
   overflow-y: auto;
 }
@@ -1658,14 +1658,14 @@ function onPasteCapture(event: ClipboardEvent) {
 }
 .note-lang-value {
   color: var(--note-text-muted);
-  font-size: 11px;
+  font-size: 12px;
 }
 .note-lang-check {
   color: var(--note-primary);
   font-size: 12px;
 }
 .note-lang-empty {
-  padding: 10px 8px;
+  padding: 12px 8px;
   color: var(--note-text-muted);
   font-size: 12px;
 }
@@ -1675,21 +1675,21 @@ function onPasteCapture(event: ClipboardEvent) {
   position: absolute;
   z-index: 20;
   display: flex;
-  gap: 2px;
-  padding: 3px;
+  gap: 4px;
+  padding: 4px;
   border: 1px solid var(--note-border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--note-bg);
   box-shadow: 0 6px 18px rgba(15, 23, 42, 0.12);
 }
 .note-table-ops button {
   height: 22px;
-  padding: 0 7px;
+  padding: 0 8px;
   border: 0;
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--note-text-muted);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 22px;
   white-space: nowrap;
   cursor: pointer;
@@ -1708,7 +1708,7 @@ function onPasteCapture(event: ClipboardEvent) {
   max-width: 800px;
   margin: 0 auto;
   padding: 12px 0 32px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 13px;
   line-height: 1.9;
   color: var(--note-text);

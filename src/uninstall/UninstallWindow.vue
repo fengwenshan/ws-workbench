@@ -738,7 +738,7 @@ onUnmounted(() => {
   margin: 10px 40px 0;
   padding: 8px 12px;
   border: 1px solid rgba(0, 122, 255, 0.22);
-  border-radius: 8px;
+  border-radius: 6px;
   background: rgba(0, 122, 255, 0.06);
   color: var(--un-text-secondary);
   font-size: 12.5px;
@@ -760,7 +760,7 @@ onUnmounted(() => {
   margin: 10px 40px 0;
   padding: 9px 12px;
   border: 1px solid rgba(0, 122, 255, 0.22);
-  border-radius: 8px;
+  border-radius: 6px;
   background: rgba(0, 122, 255, 0.06);
   color: var(--un-text-secondary);
   font-size: 13px;
@@ -782,7 +782,7 @@ onUnmounted(() => {
   gap: 12px;
   padding: 0 0 0 16px;
   border-bottom: 1px solid var(--un-divider);
-  background: #fff;
+  background: var(--un-surface);
   user-select: none;
 }
 
@@ -855,8 +855,8 @@ onUnmounted(() => {
 }
 
 .unwin-window-btn-close:hover {
-  background: #c42b1c;
-  color: #fff;
+  background: var(--un-danger);
+  color: var(--un-surface);
 }
 
 .unwin-window-btn:focus-visible {

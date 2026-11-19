@@ -14,6 +14,8 @@ mod cleaner;
 mod clipboard;
 /// Hosts 在线编辑（macOS + Windows）
 mod hosts;
+/// 局域网分享：UDP 组播发现 + 明文 HTTP 文件收发
+mod lanshare;
 mod packer;
 pub mod apps;
 mod platform;
@@ -32,7 +34,7 @@ pub mod vpn;
 
 use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager, Runtime, WindowEvent,
+    AppHandle, Emitter, Manager, Runtime, WindowEvent,
 };
 
 /// 应用基础名（发布版显示名）
@@ -82,6 +84,13 @@ const QUICK_PANEL_MAX_HEIGHT: f64 = 480.0;
 /// 还不可见，只可能是用户自己把窗口收进了托盘，再强制显示就成了「点了关闭，
 /// 过几秒窗口又自己弹出来」。
 static MAIN_WINDOW_SHOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 快捷面板当前模式：true = 「消息」页签（托盘左键有未读时），false = VPN/休眠。
+///
+/// 首次创建面板时前端挂载后调 `quick_panel_take_mode()` 取初值；已打开的面板
+/// 由 `quick-panel://mode` 事件通知切换。
+static QUICK_PANEL_MESSAGES_MODE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// Windows 上只允许一个 GUI 实例。
 ///
@@ -359,6 +368,249 @@ fn tray_icon_image() -> Option<tauri::image::Image<'static>> {
         include_bytes!("../icons/tray/tray-white-48.png")
     };
     tauri::image::Image::from_bytes(bytes).ok()
+}
+
+/// 在托盘图标右上角画一个未读圆点：macOS 模板图用不透明黑点（系统按菜单栏明暗反色），
+/// Windows/Linux 用红点 + 白描边。返回 None 只在图标尺寸异常时发生。
+fn tray_icon_with_badge(
+    icon: tauri::image::Image<'static>,
+    unread: bool,
+) -> Option<tauri::image::Image<'static>> {
+    if !unread {
+        return Some(icon);
+    }
+    let width = icon.width();
+    let height = icon.height();
+    let mut rgba = image::RgbaImage::from_raw(width, height, icon.rgba().to_vec())?;
+    let radius = (width.min(height) as f32 * 0.17).max(3.0);
+    let cx = width as f32 - radius - 2.0;
+    let cy = radius + 2.0;
+
+    #[cfg(target_os = "macos")]
+    let dot = image::Rgba([0, 0, 0, 255]);
+    #[cfg(not(target_os = "macos"))]
+    let dot = image::Rgba([239, 68, 68, 255]);
+
+    // 非模板平台先铺一圈白底，深色任务栏上也看得清。
+    #[cfg(not(target_os = "macos"))]
+    draw_badge_circle(&mut rgba, cx, cy, radius + 1.5, image::Rgba([255, 255, 255, 255]));
+    draw_badge_circle(&mut rgba, cx, cy, radius, dot);
+
+    Some(tauri::image::Image::new_owned(
+        rgba.into_raw(),
+        width,
+        height,
+    ))
+}
+
+/// 在 RGBA 图上画实心圆（只用于托盘小角标，不需要抗锯齿）。
+fn draw_badge_circle(
+    rgba: &mut image::RgbaImage,
+    cx: f32,
+    cy: f32,
+    radius: f32,
+    color: image::Rgba<u8>,
+) {
+    let (width, height) = rgba.dimensions();
+    let min_x = (cx - radius).floor().max(0.0) as u32;
+    let max_x = (cx + radius).ceil().min(width as f32) as u32;
+    let min_y = (cy - radius).floor().max(0.0) as u32;
+    let max_y = (cy + radius).ceil().min(height as f32) as u32;
+    for y in min_y..max_y {
+        for x in min_x..max_x {
+            let dx = x as f32 + 0.5 - cx;
+            let dy = y as f32 + 0.5 - cy;
+            if dx * dx + dy * dy <= radius * radius {
+                rgba.put_pixel(x, y, color);
+            }
+        }
+    }
+}
+
+/// 上一次推送到托盘的「有无未读」：2 = 还没设置过。
+/// 同状态重复事件（发送中状态更新等）不再 set_icon，避免菜单栏图标闪。
+static TRAY_BADGE_STATE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(2);
+
+/// 未读数变化后刷新托盘图标：有未读 → 带红点，全部已读 → 基础图标。
+///
+/// macOS 的托盘图标必须在主线程改，统一 run_on_main_thread；
+/// 读未读只 clone store，不持 LAN 锁做 SQLite IO。
+pub(crate) fn refresh_tray_badge(app: &AppHandle) {
+    let unread = app
+        .try_state::<lanshare::LanShareState>()
+        .map(|state| state.total_unread())
+        .unwrap_or(0);
+    refresh_tray_badge_with_total(app, unread);
+}
+
+/// 已算好未读总数时的入口：`emit_unread` 刚查过 DB，别为托盘再查一遍。
+pub(crate) fn refresh_tray_badge_with_total(app: &AppHandle, unread: u32) {
+    let wanted = u8::from(unread > 0);
+    // 先 swap 占住目标状态：两个线程几乎同时以相反状态进来时，后到的那个也会排队
+    // 刷一次，不会被 load 提前 return 吞掉（否则可能留下旧红点直到下次事件）。
+    let previous = TRAY_BADGE_STATE.swap(wanted, std::sync::atomic::Ordering::Relaxed);
+    if previous == wanted {
+        return;
+    }
+    let app_handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let Some(tray) = app_handle.tray_by_id("main") else {
+            // 托盘还没建好：回滚状态，等下一次未读变化或启动对齐再刷
+            rollback_tray_badge_state(wanted, previous);
+            return;
+        };
+        let Some(icon) = tray_icon_image().and_then(|icon| tray_icon_with_badge(icon, wanted == 1))
+        else {
+            rollback_tray_badge_state(wanted, previous);
+            return;
+        };
+        // macOS 必须带 is_template 一起换图：tray-icon 的 set_icon 固定按
+        // is_template=false 处理，会把菜单栏模板图变成普通黑图（深色栏不可读）。
+        // Windows/Linux 传 false，与 set_icon 等价。
+        if tray
+            .set_icon_with_as_template(Some(icon), cfg!(target_os = "macos"))
+            .is_err()
+        {
+            // set_icon 失败：回滚成旧状态，下次事件仍会重试
+            rollback_tray_badge_state(wanted, previous);
+        }
+    });
+}
+
+/// 把被 swap 占住的状态回滚到 previous；只有当前仍是 wanted 才回滚，
+/// 避免覆盖期间其它线程已经写入的更新状态。
+fn rollback_tray_badge_state(wanted: u8, previous: u8) {
+    let _ = TRAY_BADGE_STATE.compare_exchange(
+        wanted,
+        previous,
+        std::sync::atomic::Ordering::Relaxed,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+// ===== 托盘自检（**只在 Windows 编入**，macOS 的托盘路径保持原样）=====
+//
+// 起因：开发版在沙箱里跑时「窗口正常、右下角没有图标」。查下来是进程被降成低完整性
+// （令牌 S-1-16-4096），而低完整性进程往 Explorer 的托盘窗口发 `Shell_NotifyIconW`
+// 会被 UIPI 挡掉；tray-icon 又把这个失败静默吞了，代码层面完全看不出来。下面几段是
+// 纯诊断：不改任何平台的实际行为，也不参与 macOS / Linux 的编译。
+
+/// 当前进程的完整性级别：0x1000 = 低、0x2000 = 中、0x3000 = 高、0x4000 = 系统。
+#[cfg(target_os = "windows")]
+fn process_integrity_level() -> Option<u32> {
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::Security::{
+        GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TokenIntegrityLevel,
+        TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
+    };
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    unsafe {
+        let mut token = HANDLE::default();
+        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).ok()?;
+
+        let mut size = 0u32;
+        let _ = GetTokenInformation(token, TokenIntegrityLevel, None, 0, &mut size);
+        if size == 0 {
+            let _ = CloseHandle(token);
+            return None;
+        }
+        let mut buf = vec![0u8; size as usize];
+        let result = GetTokenInformation(
+            token,
+            TokenIntegrityLevel,
+            Some(buf.as_mut_ptr() as *mut _),
+            size,
+            &mut size,
+        );
+        let _ = CloseHandle(token);
+        result.ok()?;
+
+        let label = &*(buf.as_ptr() as *const TOKEN_MANDATORY_LABEL);
+        let count = GetSidSubAuthorityCount(label.Label.Sid);
+        if count.is_null() || *count == 0 {
+            return None;
+        }
+        let rid = GetSidSubAuthority(label.Label.Sid, (*count - 1) as u32);
+        if rid.is_null() {
+            return None;
+        }
+        Some(*rid)
+    }
+}
+
+/// 完整性级别 → 日志里那一小段文字
+#[cfg(target_os = "windows")]
+fn integrity_label() -> String {
+    match process_integrity_level() {
+        Some(0x1000) => "低（沙箱：注册不了托盘图标）".to_string(),
+        Some(0x2000) => "中".to_string(),
+        Some(0x3000) => "高（管理员）".to_string(),
+        Some(0x4000) => "系统".to_string(),
+        Some(other) => format!("0x{other:X}"),
+        None => "未知".to_string(),
+    }
+}
+
+/// 启动时把「构建类型 / 进程完整性 / 托盘图标」打出来（自检 1/3）。
+///
+/// 图标那栏是 `None` 时说明 `Image::from_bytes` 没解出来：托盘照样会建，但 NIF_ICON
+/// 不置位，Explorer 里就是一个点不中的空位 —— 看起来同样是「没有图标」。
+#[cfg(target_os = "windows")]
+fn report_tray_startup(icon: Option<&tauri::image::Image<'static>>) {
+    eprintln!(
+        "[tray] 自检: 构建={} 完整性={} exe={:?} 图标={}",
+        if is_dev_build() { "dev" } else { "release" },
+        integrity_label(),
+        std::env::current_exe().ok(),
+        match icon {
+            Some(icon) => format!("{}x{}", icon.width(), icon.height()),
+            None => "解码失败（会建成看不见的空图标）".to_string(),
+        }
+    );
+    // 低完整性（沙箱）是「开发环境没有托盘图标」最常见也最不直观的原因：代码全对，
+    // 但 Shell_NotifyIconW 跨完整性被 UIPI 挡掉。这里直接把结论写出来。
+    if matches!(process_integrity_level(), Some(0x1000)) {
+        eprintln!(
+            "[tray] 自检: 进程跑在低完整性（沙箱）下 —— UIPI 不允许它注册托盘图标，图标不会出现，写 %APPDATA% 也会被拒；把开发版放到沙箱外的目录再跑"
+        );
+    }
+}
+
+/// 启动 3 秒后回查托盘图标在通知区域里的位置（自检 3/3），用来区分「图标根本没注册
+/// 上」和「注册上了但收在 ^ 溢出区」。
+///
+/// 为什么需要它：`tray.build(app)?` 返回 Ok 只说明 tray-icon 把宿主窗口建起来了，
+/// 它把 `Shell_NotifyIconW` 的失败静默吞掉（源码注释：Explorer 没准备好时先留着，
+/// 等 `TaskbarCreated` 再注册）。于是「窗口正常、右下角什么都没有」时，光看返回值
+/// 判断不了是哪一种：
+/// - 进程是低完整性（沙箱 / 受限令牌）→ UIPI 挡住跨完整性消息，图标压根注册不上；
+/// - 注册上了，但 Explorer 把它收在 `^` 溢出区（新 exe 默认如此）→ 也不在任务栏上。
+///
+/// 查到矩形 = Windows 确实把这条图标排在通知区域里，看不见只是显示设置的问题；
+/// 查不到 = 它此刻没摆在通知区域（收在 `^` 里没展开时 Windows 也给不出矩形），
+/// 再等 7 秒复查一次（避开 Explorer 启动慢）。
+#[cfg(target_os = "windows")]
+fn spawn_tray_diagnostics<R: Runtime>(app: AppHandle<R>) {
+    std::thread::spawn(move || {
+        for delay in [3u64, 7u64] {
+            std::thread::sleep(std::time::Duration::from_secs(delay));
+            let Some(tray) = app.tray_by_id("main") else {
+                eprintln!("[tray] 自检: 找不到 id=main 的托盘图标");
+                return;
+            };
+            match tray.rect() {
+                Ok(Some(rect)) => {
+                    eprintln!("[tray] 自检: 图标已注册，屏幕矩形 {rect:?}");
+                    return;
+                }
+                Ok(None) => eprintln!(
+                    "[tray] 自检: 查不到图标矩形 —— 它此刻不在通知区域（收在 ^ 里没展开，或没注册上）"
+                ),
+                Err(err) => eprintln!("[tray] 自检: 取图标矩形失败: {err}"),
+            }
+        }
+    });
 }
 
 // macOS 的 Dock 图标来自 .app 包里的 icns；`tauri dev` 跑的是裸二进制，
@@ -709,15 +961,36 @@ fn unix_millis() -> u64 {
         .unwrap_or(0)
 }
 
-/// 右键点托盘图标：已显示就收起，否则贴着图标弹出。
+/// 右键点托盘图标：已显示就收起，否则贴着图标弹出（VPN/休眠快捷面板）。
 ///
 /// 面板窗口是懒创建的：启动时不再创建，主窗口显示后预热；用户如果在预热前
 /// 就点了托盘图标，这里现场建一个再弹。
 fn toggle_quick_panel<R: Runtime>(app: &AppHandle<R>, rect: tauri::Rect) {
+    toggle_quick_panel_with_mode(app, rect, false);
+}
+
+/// 左键点托盘图标且有未读：贴着图标弹出「消息」页签。
+fn toggle_quick_panel_messages<R: Runtime>(app: &AppHandle<R>, rect: tauri::Rect) {
+    toggle_quick_panel_with_mode(app, rect, true);
+}
+
+fn toggle_quick_panel_with_mode<R: Runtime>(
+    app: &AppHandle<R>,
+    rect: tauri::Rect,
+    messages: bool,
+) {
+    // 面板可见且当前是普通模式、这次又要消息模式：切页签而不是收起（钉钉式）
+    let was_messages = QUICK_PANEL_MESSAGES_MODE.load(std::sync::atomic::Ordering::Relaxed);
+    // 先记模式再建窗口：首次创建时前端挂载后 take_mode 要能读到正确初值
+    QUICK_PANEL_MESSAGES_MODE.store(messages, std::sync::atomic::Ordering::Relaxed);
     let Some(window) = ensure_quick_panel(app) else {
         return;
     };
     if window.is_visible().unwrap_or(false) {
+        if messages && !was_messages {
+            emit_quick_panel_mode(app, true);
+            return;
+        }
         let _ = window.hide();
         return;
     }
@@ -733,6 +1006,7 @@ fn toggle_quick_panel<R: Runtime>(app: &AppHandle<R>, rect: tauri::Rect) {
         // 连兜底都拿不到屏幕信息：保持窗口原位置直接弹，至少不会卡住交互
         let _ = window.show();
         let _ = window.set_focus();
+        emit_quick_panel_mode(app, messages);
         return;
     };
     let (x, y) = panel_origin_at(placement.anchor, placement.panel, placement.screen);
@@ -743,8 +1017,12 @@ fn toggle_quick_panel<R: Runtime>(app: &AppHandle<R>, rect: tauri::Rect) {
 
     #[cfg(debug_assertions)]
     eprintln!(
-        "[quick-panel] logical={} anchor={:?} screen={:?} panel={:?} origin=({x},{y})",
-        placement.logical, placement.anchor, placement.screen, placement.panel
+        "[quick-panel] logical={} anchor={:?} screen={:?} panel={:?} origin=({x},{y}) mode={}",
+        placement.logical,
+        placement.anchor,
+        placement.screen,
+        placement.panel,
+        if messages { "messages" } else { "quick" }
     );
 
     if placement.logical {
@@ -755,6 +1033,22 @@ fn toggle_quick_panel<R: Runtime>(app: &AppHandle<R>, rect: tauri::Rect) {
     }
     let _ = window.show();
     let _ = window.set_focus();
+    emit_quick_panel_mode(app, messages);
+}
+
+/// 快捷面板模式事件：已打开的窗口收到后切到对应页签。
+#[derive(Clone, serde::Serialize)]
+struct QuickPanelModeEvent {
+    mode: &'static str,
+}
+
+fn emit_quick_panel_mode<R: Runtime>(app: &AppHandle<R>, messages: bool) {
+    let _ = app.emit(
+        "quick-panel://mode",
+        QuickPanelModeEvent {
+            mode: if messages { "messages" } else { "quick" },
+        },
+    );
 }
 
 /// 面板落点：锚点 + 显示器范围 + 面板尺寸，三者单位一致（由 `logical` 说明）。
@@ -1128,6 +1422,7 @@ pub fn run() {
             commands::validate_project,
             commands::detect_project_type,
             commands::detect_vcs,
+            commands::detect_vcs_many,
             commands::open_dir,
             commands::open_file,
             commands::list_open_with_apps,
@@ -1218,6 +1513,9 @@ pub fn run() {
             commands::quick_panel_resize,
             commands::quick_panel_show_main,
             commands::quick_panel_quit,
+            commands::quick_panel_take_mode,
+            commands::quick_panel_set_mode,
+            commands::quick_panel_open_chat,
             // 剪贴板历史（macOS / Windows；其它平台不启用）
             commands::clipboard_page,
             commands::clipboard_search,
@@ -1237,6 +1535,29 @@ pub fn run() {
             commands::hosts_backups,
             commands::hosts_restore,
             commands::hosts_open_file_dir,
+            // 局域网分享（2026-11-13 设计）：快照 / 设置 / 发送 / 清空记录（端口常开，无启停）
+            commands::lan_share_snapshot,
+            commands::lan_share_unread_total,
+            commands::lan_share_set_alias,
+            commands::lan_share_set_download_dir,
+            commands::lan_share_respond_offer,
+            commands::lan_share_send_files,
+            // 局域网分享（2026-11-16 聊天化改造）：会话 / 消息 / 发消息 / 已读 / 删除会话
+            commands::lan_share_conversations,
+            commands::lan_share_messages,
+            commands::lan_share_send_chat,
+            commands::lan_share_mark_read,
+            commands::lan_share_delete_conversation,
+            commands::lan_share_delete_message,
+            commands::lan_share_conversation_attachment_count,
+            commands::lan_share_delete_attachments,
+            commands::lan_share_import_clipboard_files,
+            commands::lan_share_send_dropped_files,
+            // 局域网分享（2026-11-16 视觉升级）：本机备注 / 打开文件所在目录
+            commands::lan_share_set_peer_remark,
+            commands::lan_share_open_file_dir,
+            // 更新检查：按通道（stable / beta）选清单，供前端替换插件 check()
+            updates::update_check,
             // 更新包断点续传：下载 / 安装（前端 useUpdater 调用）
             updates::update_download_resumed,
             updates::update_install_resumed,
@@ -1254,6 +1575,11 @@ pub fn run() {
             // 初始化 + setup 里的同步工作要好几秒，先亮一个白窗口会被系统标成
             // 「未响应」；等页面就绪再显示，用户看到的就是能立刻操作的界面。
             create_main_window(app)?;
+
+            // 关机 / 重启前先把 VPN 断开再放行：VPN 连着的时候直接关机，
+            // 隧道进程、`/32` 路由和 NRPT 规则都来不及回收，下次开机内网域名
+            // 会全部解析不了。Windows 上用 WM_QUERYENDSESSION 拦截（见 shutdown.rs）。
+            vpn::shutdown::install(app.handle());
 
             // dev 模式（裸二进制）Dock 会显示系统占位图标，这里补上真实图标
             #[cfg(target_os = "macos")]
@@ -1312,6 +1638,23 @@ pub fn run() {
             // 轮询会话目录里的状态文件，把 VPN 状态与日志推给前端
             vpn::commands::start_status_poller(app.handle().clone());
 
+            // 局域网分享：运行期状态（peer 表 / 待接收请求 / 接收会话）。
+            // 冷启动时按设置恢复监听；启动失败只记录原因，不阻断应用启动。
+            app.manage(lanshare::LanShareState::from_app(app.handle()));
+            {
+                let handle = app.handle().clone();
+                // 启动时按历史未读刷一次 Dock 角标（主线程，窗口已创建好）
+                let badge_handle = app.handle().clone();
+                if let Some(state) = badge_handle.try_state::<lanshare::LanShareState>() {
+                    state.sync_dock_badge(&badge_handle);
+                }
+                std::thread::spawn(move || {
+                    if let Some(state) = handle.try_state::<lanshare::LanShareState>() {
+                        state.restore_on_startup(&handle);
+                    }
+                });
+            }
+
             // 托盘：关掉窗口后应用仍在后台运行。
             //
             // 左键单击图标 = 直接显示主界面；右键 = 弹出快捷面板（面板底部带
@@ -1331,25 +1674,59 @@ pub fn run() {
                     };
                     match button {
                         MouseButton::Left => {
-                            // 面板开着时左键优先回主界面：先把面板收起来，
-                            // 否则 always_on_top 的面板会一直悬在主窗口上面
-                            if let Some(window) =
-                                tray.app_handle().get_webview_window(QUICK_PANEL_LABEL)
-                            {
-                                let _ = window.hide();
+                            let unread = tray
+                                .app_handle()
+                                .try_state::<lanshare::LanShareState>()
+                                .map(|state| state.total_unread())
+                                .unwrap_or(0);
+                            if unread > 0 {
+                                // 有未读：弹「消息」页签（钉钉/微信式），点一条定位会话
+                                toggle_quick_panel_messages(tray.app_handle(), rect);
+                            } else {
+                                // 无未读：保持原行为，面板收起、打开主界面
+                                if let Some(window) =
+                                    tray.app_handle().get_webview_window(QUICK_PANEL_LABEL)
+                                {
+                                    let _ = window.hide();
+                                }
+                                show_main_window(tray.app_handle());
                             }
-                            show_main_window(tray.app_handle());
                         }
                         MouseButton::Right => toggle_quick_panel(tray.app_handle(), rect),
                         _ => {}
                     }
                 });
-            if let Some(icon) = tray_icon_image() {
+            // 自检 1/3：只在 Windows 报告一下图标字节解出来没有（报告本身是
+            // `#[cfg(windows)]`，macOS 的托盘路径和以前逐字一致）。
+            let initial_unread = app
+                .try_state::<lanshare::LanShareState>()
+                .map(|state| state.total_unread())
+                .unwrap_or(0);
+            let tray_icon =
+                tray_icon_image().and_then(|icon| tray_icon_with_badge(icon, initial_unread > 0));
+            #[cfg(target_os = "windows")]
+            report_tray_startup(tray_icon.as_ref());
+            if let Some(icon) = tray_icon {
                 // macOS 菜单栏深浅色由系统决定，模板图交给系统着色；开发版也是模板图
                 // （开发标识是镂空点，不依赖颜色），所以这里不按构建区分
                 tray = tray.icon(icon).icon_as_template(cfg!(target_os = "macos"));
             }
+            // 自检 2/3：build 报错时别让它只留一行 panic 栈（报错会让 setup 整段失败）
+            #[cfg(target_os = "windows")]
+            {
+                if let Err(err) = tray.build(app) {
+                    eprintln!("[tray] 创建托盘图标失败: {err}");
+                    return Err(err.into());
+                }
+                // 自检 3/3：交给 Windows 之后，Explorer 到底认没认这条图标
+                spawn_tray_diagnostics(app.handle().clone());
+            }
+            // macOS / Linux：保持原样，一行都不多
+            #[cfg(not(target_os = "windows"))]
             tray.build(app)?;
+
+            // 托盘已建好：按历史未读再对齐一次（Windows 分支 build 在上面）
+            refresh_tray_badge(app.handle());
 
             // 主窗口兜底：前端加载失败（或首屏逻辑异常）时不会调 app_ready，
             // 这里等 8 秒强制显示，避免应用只剩托盘图标、没有任何窗口。
@@ -1465,6 +1842,16 @@ pub fn run() {
             vpn::commands::shutdown(app_handle);
         }
 
+        // macOS 的关机 / 注销不会走 ExitRequested —— AppKit 的 terminate 会直接到
+        // applicationWillTerminate → tao 的 LoopDestroyed → RunEvent::Exit。在这里
+        // 同步等 worker 把隧道、路由、解析器配置撤掉再让进程退出；loginwindow 会
+        // 等本进程退出，所以这几秒就是「先断开再关机」。Windows 同名逻辑在
+        // WM_QUERYENDSESSION 里（vpn/shutdown.rs），不在这里重复。
+        #[cfg(target_os = "macos")]
+        if let tauri::RunEvent::Exit = event {
+            vpn::shutdown::before_exit(app_handle);
+        }
+
         // 非 macOS 平台没有 Reopen 事件，这里显式忽略参数避免 unused 警告
         #[cfg(not(target_os = "macos"))]
         {
@@ -1475,13 +1862,42 @@ pub fn run() {
 
 #[cfg(test)]
 mod quick_panel_tests {
-    use super::{panel_origin_at, PanelPlacement, QUICK_PANEL_HEIGHT, QUICK_PANEL_WIDTH};
+    use super::{
+        panel_origin_at, tray_icon_image, tray_icon_with_badge, PanelPlacement,
+        QUICK_PANEL_HEIGHT, QUICK_PANEL_WIDTH,
+    };
 
     const MENUBAR_SCREEN: (i32, i32, i32, i32) = (0, 0, 1920, 1080);
     const PANEL: (u32, u32) = (QUICK_PANEL_WIDTH as u32, QUICK_PANEL_HEIGHT as u32);
     const GAP: i32 = 8;
     /// 居中时面板左边 = 图标中心 - 半个面板宽
     const HALF_PANEL: i32 = QUICK_PANEL_WIDTH as i32 / 2;
+
+    #[test]
+    fn take_mode_reads_without_reset() {
+        crate::QUICK_PANEL_MESSAGES_MODE.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(crate::commands::quick_panel_take_mode(), "messages");
+        assert_eq!(crate::commands::quick_panel_take_mode(), "messages");
+        crate::commands::quick_panel_set_mode("quick".into());
+        assert_eq!(crate::commands::quick_panel_take_mode(), "quick");
+    }
+
+    /// 托盘未读角标：无未读原样返回，有未读在右上角写入像素且尺寸不变
+    #[test]
+    fn tray_badge_only_draws_when_unread() {
+        let base = tray_icon_image().expect("托盘图标应能解码");
+        let same = tray_icon_with_badge(tray_icon_image().expect("托盘图标应能解码"), false)
+            .expect("无未读应返回原图");
+        assert_eq!(base.rgba(), same.rgba());
+
+        let badged = tray_icon_with_badge(tray_icon_image().expect("托盘图标应能解码"), true)
+            .expect("有未读应返回带点图标");
+        assert_eq!(base.width(), badged.width());
+        assert_eq!(base.height(), badged.height());
+        assert_ne!(base.rgba(), badged.rgba(), "红点/模板点应写入像素");
+        // 点在右上角：左上角原像素不受影响
+        assert_eq!(&base.rgba()[..4], &badged.rgba()[..4]);
+    }
 
     /// macOS 菜单栏图标：面板挂在图标下方，水平居中于图标
     #[test]

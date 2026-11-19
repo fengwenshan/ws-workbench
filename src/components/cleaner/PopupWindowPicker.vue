@@ -120,7 +120,7 @@ function close(): void {
 .picker {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
 }
 
 .picker-toolbar {
@@ -138,14 +138,14 @@ function close(): void {
   max-height: 380px;
   overflow-y: auto;
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
 }
 
 .picker-row {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 9px 12px;
+  gap: 12px;
+  padding: 8px 12px;
   border-bottom: 1px solid var(--border-color);
 }
 
@@ -171,9 +171,9 @@ function close(): void {
 }
 
 .picker-sub {
-  margin-top: 2px;
+  margin-top: 4px;
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 12px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -189,19 +189,19 @@ function close(): void {
 .picker-protected {
   flex-shrink: 0;
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .btn-sm {
-  padding: 2px 10px;
+  padding: 4px 12px;
   font-size: 12px;
 }
 
 .tag {
   flex-shrink: 0;
-  padding: 1px 6px;
+  padding: 1px 8px;
   border-radius: 4px;
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .tag-rule {
@@ -211,7 +211,7 @@ function close(): void {
 
 .tag-score {
   background: rgba(245, 158, 11, 0.14);
-  color: #b45309;
+  color: var(--warning-text);
 }
 
 .picker-footer {
@@ -223,6 +223,6 @@ function close(): void {
 
 .picker-hint {
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 12px;
 }
 </style>

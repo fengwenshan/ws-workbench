@@ -1,28 +1,116 @@
-:root {
-  --primary: #3b82f6;
-  --primary-hover: #2563eb;
-  --success: #10b981;
-  --warning: #f59e0b;
-  --danger: #ef4444;
+/**
+ * 全局设计令牌与基础样式。
+ *
+ * 规范见 docs/ui.md（Developer Minimalism）：90% 黑白灰、1px 边框、4/6/12 圆角、
+ * 两级阴影、4px 间距网格。亮色定义在 `:root`，暗色在 `html[data-theme='dark']`；
+ * 组件里只允许用变量，禁止再写字面色值（卸载窗口自带的变量除外）。
+ */
 
+:root {
+  color-scheme: light;
+
+  /* 品牌与语义色 */
+  --primary: #2563eb;
+  --primary-hover: #1d4ed8;
+  --primary-soft: #eff6ff;
+  --success: #10b981;
+  --success-soft: #ecfdf5;
+  --warning: #f59e0b;
+  --warning-soft: #fffbeb;
+  --danger: #ef4444;
+  --danger-soft: #fef2f2;
+
+  /* 背景与容器 */
   --bg-primary: #ffffff;
   --bg-secondary: #f9fafb;
+  --bg-surface: #ffffff;
   --bg-hover: #f3f4f6;
   --bg-active: #eff6ff;
   --bg-input: #ffffff;
-  --bg-tag: #e5e7eb;
+  --bg-tag: #f3f4f6;
   --bg-readonly: #f9fafb;
 
+  /* 文字 */
   --text-primary: #111827;
   --text-secondary: #4b5563;
-  --text-muted: #9ca3af;
+  --text-muted: #6b7280;
+  --text-disabled: #9ca3af;
   --text-active: #1d4ed8;
   --text-tag: #374151;
 
-  --border-color: #e5e7eb;
+  /* 语义补充：白字、状态文字、代码块 */
+  --on-primary: #ffffff;
+  --warning-text: #b45309;
+  --success-text: #047857;
+  --danger-text: #dc2626;
+  --code-bg: #1f2329;
+  --code-fg: #f8fafc;
+  --mask: rgba(0, 0, 0, 0.45);
 
-  /* 左右两栏顶部标题区共用高度，保证下边线对齐 */
+  /* 线条 */
+  --border-color: #e5e7eb;
+  --border-strong: #d1d5db;
+
+  /* 形状与阴影 */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 12px;
+  --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.02);
+  --shadow-popover: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
+
+  /* 字体 */
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial,
+    'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
+
+  /* 其它面板标题区高度（清理页、笔记侧栏等） */
   --panel-header-height: 40px;
+  /* 左栏页头（图标 + 标题 + 右侧操作，参考 LANLink）= 右侧内容区标题行高度 */
+  --pane-head-height: 56px;
+  /* 两栏模块（项目 / VPN / LANLink）左栏统一长度，切换工具时右栏起点不跳 */
+  --pane-left-width: 260px;
+}
+
+html[data-theme='dark'] {
+  color-scheme: dark;
+
+  --primary: #3b82f6;
+  --primary-hover: #60a5fa;
+  --primary-soft: rgba(59, 130, 246, 0.16);
+  --success: #34d399;
+  --success-soft: rgba(52, 211, 153, 0.14);
+  --warning: #fbbf24;
+  --warning-soft: rgba(251, 191, 36, 0.14);
+  --danger: #f87171;
+  --danger-soft: rgba(248, 113, 113, 0.14);
+
+  --bg-primary: #1e293b;
+  --bg-secondary: #0f172a;
+  --bg-surface: #1e293b;
+  --bg-hover: #334155;
+  --bg-active: rgba(59, 130, 246, 0.16);
+  --bg-input: #0f172a;
+  --bg-tag: #334155;
+  --bg-readonly: #0f172a;
+
+  --text-primary: #f1f5f9;
+  --text-secondary: #cbd5e1;
+  --text-muted: #94a3b8;
+  --text-disabled: #64748b;
+  --text-active: #60a5fa;
+  --text-tag: #cbd5e1;
+
+  --warning-text: #fbbf24;
+  --success-text: #34d399;
+  --danger-text: #f87171;
+  --code-bg: #0b1220;
+  --code-fg: #e2e8f0;
+  --mask: rgba(0, 0, 0, 0.6);
+
+  --border-color: #334155;
+  --border-strong: #475569;
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --shadow-popover: 0 4px 6px -1px rgba(0, 0, 0, 0.4);
 }
 
 * {
@@ -32,7 +120,9 @@
 }
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.6;
   background: var(--bg-secondary);
   color: var(--text-primary);
   -webkit-font-smoothing: antialiased;
@@ -42,13 +132,33 @@ body {
   height: 100vh;
 }
 
+a {
+  color: var(--primary);
+}
+
+.mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 按钮：规范里的三种形态；高度 30（紧凑 24），圆角 6，1px 边框 */
 .btn {
-  padding: 6px 16px;
-  border: none;
-  border-radius: 6px;
-  cursor: pointer;
-  font-size: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 16px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 13px;
   font-weight: 500;
+  line-height: 1;
+  cursor: pointer;
+  transition: background-color 0.2s ease, color 0.2s ease, border-color 0.2s ease;
 }
 .btn:disabled {
   opacity: 0.5;
@@ -56,49 +166,65 @@ body {
 }
 .btn-primary {
   background: var(--primary);
-  color: white;
+  border-color: var(--primary);
+  color: #ffffff;
 }
 .btn-primary:hover:not(:disabled) {
   background: var(--primary-hover);
+  border-color: var(--primary-hover);
 }
 .btn-secondary {
   background: var(--bg-input);
-  border: 1px solid var(--border-color);
+  border-color: var(--border-color);
   color: var(--text-secondary);
 }
-.btn-secondary:hover {
-  border-color: var(--primary);
-  color: var(--primary);
+.btn-secondary:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+  color: var(--text-primary);
 }
+/* 危险操作：白底红字，不用大红底铺满 */
 .btn-danger {
-  background: var(--danger);
-  color: white;
+  background: var(--bg-input);
+  border-color: var(--danger);
+  color: var(--danger);
 }
 .btn-danger:hover:not(:disabled) {
-  background: #dc2626;
+  background: var(--danger-soft);
 }
 .btn-danger-ghost {
-  background: transparent;
-  border: 1px solid var(--border-color);
+  background: var(--bg-input);
+  border-color: var(--border-color);
   color: var(--danger);
 }
 .btn-danger-ghost:hover:not(:disabled) {
   border-color: var(--danger);
-  background: #fef2f2;
+  background: var(--danger-soft);
 }
 .btn-pick {
-  padding: 6px 12px;
+  display: inline-flex;
+  align-items: center;
+  height: 30px;
+  padding: 0 12px;
   background: var(--bg-input);
   border: 1px solid var(--border-color);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   cursor: pointer;
-  font-size: 14px;
+  font-family: inherit;
+  font-size: 13px;
   color: var(--text-secondary);
   flex-shrink: 0;
+  transition: background-color 0.2s ease, color 0.2s ease, border-color 0.2s ease;
 }
 .btn-pick:hover {
-  border-color: var(--primary);
-  color: var(--primary);
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+.btn.btn-xs {
+  height: 24px;
+  padding: 0 10px;
+  font-size: 12px;
 }
 
 ::-webkit-scrollbar {
@@ -109,9 +235,110 @@ body {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #d1d5db;
-  border-radius: 4px;
+  background: var(--border-strong);
+  border-radius: var(--radius-sm);
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #9ca3af;
+  background: var(--text-disabled);
+}
+
+/* 输入类控件的兜底：antd 之外的少量原生 input/textarea 也要吃主题 */
+input,
+textarea,
+select {
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+input::placeholder,
+textarea::placeholder {
+  color: var(--text-disabled);
+}
+
+/* ===== antd 组件收口 =====
+ * ant-design-vue 4.2.6 的组件级 token 还不全（ComponentToken 基本是空接口），
+ * 这里用全局选择器把规范要的形态补齐；颜色仍全部走变量。 */
+.ant-segmented {
+  background: var(--bg-hover);
+  border-radius: var(--radius-md);
+  padding: 2px;
+}
+.ant-segmented .ant-segmented-item {
+  color: var(--text-secondary);
+  border-radius: var(--radius-sm);
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+.ant-segmented .ant-segmented-item:hover:not(.ant-segmented-item-selected) {
+  color: var(--text-primary);
+}
+.ant-segmented .ant-segmented-item-selected,
+.ant-segmented .ant-segmented-thumb {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  box-shadow: var(--shadow-card);
+}
+
+.ant-tree .ant-tree-node-content-wrapper.ant-tree-node-selected {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+  font-weight: 600;
+}
+.ant-tree .ant-tree-node-content-wrapper:hover {
+  background: var(--bg-hover);
+}
+
+.ant-modal .ant-modal-content {
+  background: var(--bg-primary);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-popover);
+}
+.ant-modal .ant-modal-header {
+  background: transparent;
+}
+.ant-modal .ant-modal-title {
+  color: var(--text-primary);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.ant-dropdown .ant-dropdown-menu,
+.ant-select-dropdown {
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-popover);
+}
+.ant-dropdown .ant-dropdown-menu-item:hover,
+.ant-select-dropdown .ant-select-item-option-active {
+  background: var(--bg-hover);
+}
+
+.ant-table .ant-table-thead > tr > th {
+  background: var(--bg-readonly);
+  color: var(--text-muted);
+  border-color: var(--border-color);
+  font-weight: 500;
+}
+.ant-table .ant-table-tbody > tr > td {
+  border-color: var(--border-color);
+}
+.ant-table .ant-table-tbody > tr:hover > td {
+  background: var(--bg-hover);
+}
+
+.ant-tag {
+  border-radius: var(--radius-sm);
+}
+
+.ant-input,
+.ant-input-affix-wrapper,
+.ant-select .ant-select-selector {
+  background: var(--bg-input);
+  border-color: var(--border-color);
+  border-radius: var(--radius-md);
+}
+.ant-input:hover,
+.ant-input-affix-wrapper:hover,
+.ant-select .ant-select-selector:hover {
+  border-color: var(--border-strong);
 }

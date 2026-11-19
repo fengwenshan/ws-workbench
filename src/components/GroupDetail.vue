@@ -71,7 +71,7 @@ const emit = defineEmits<{
   color: var(--text-secondary);
   background: var(--bg-tag);
   border-radius: 4px;
-  padding: 2px 8px;
+  padding: 4px 8px;
 }
 .detail-name {
   font-size: 16px;

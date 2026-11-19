@@ -34,7 +34,7 @@ MIRROR="${OC_SOURCE_MIRROR:-https://ftp.gnu.org}"
 GNUTLS_URL="${OC_GNUTLS_URL:-https://www.gnupg.org/ftp/gcrypt/gnutls/v3.8/gnutls-${GNUTLS_VERSION}.tar.xz}"
 OPENCONNECT_URL="${OC_OPENCONNECT_URL:-https://www.infradead.org/openconnect/download/openconnect-${OPENCONNECT_VERSION}.tar.gz}"
 
-# 与 README「平台与限制」一致：arm64 的 macOS 最低就是 11.0，Intel 也按 11.0 编，
+# 与 docs/platform.md「平台与限制」一致：arm64 的 macOS 最低就是 11.0，Intel 也按 11.0 编，
 # 避免依赖只在新系统上存在的符号。
 MIN_MACOS="11.0"
 

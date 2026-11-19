@@ -118,7 +118,13 @@ Function un.wsWbChooseData
     Return
   ${EndIf}
 
-  StrCpy $0 "$APPDATA\com.ws.workbench\uninstall-choose-data.ps1"
+  ; 优先用安装目录里随包发布的那份（bundle.resources）：它是当前版本自带的界面，
+  ; 用户「装完就卸载、从没启动过应用」时 AppData 里可能还是旧版本写下的脚本。
+  ; 都没有才回退到 AppData 里的副本（老版本安装没有这份资源）。
+  StrCpy $0 "$INSTDIR\resources\windows\uninstall-choose-data.ps1"
+  ${IfNot} ${FileExists} "$0"
+    StrCpy $0 "$APPDATA\com.ws.workbench\uninstall-choose-data.ps1"
+  ${EndIf}
   ${IfNot} ${FileExists} "$0"
     StrCpy $0 "$APPDATA\ws-workbench\uninstall-choose-data.ps1"
   ${EndIf}
@@ -235,7 +241,18 @@ FunctionEnd
 
   ; 2) 勾选要清除的数据类别（默认全部保留）；静默卸载/脚本缺失都按保留处理。
   Call un.wsWbReadInfo
-  Call un.wsWbChooseData
+  ; 模板在卸载确认页上自带一个「同时删除应用数据」勾选框（$DeleteAppDataCheckboxState）。
+  ; 勾了它就说明用户要「全删」，再弹一次细选纯属打扰，直接按删数据 + 删缓存走；
+  ; 没勾才弹细选。安装器随后还会自己清一次 BUNDLEID 目录，重复删除无副作用。
+  ${If} $DeleteAppDataCheckboxState == 1
+    StrCpy $wsWbDelData "1"
+    StrCpy $wsWbDelCache "1"
+    StrCpy $wsWbDelUpload "0"
+    Push "确认页勾选了「同时删除应用数据」，跳过细选：删除数据、缓存与偏好设置"
+    Call un.wsWbLog
+  ${Else}
+    Call un.wsWbChooseData
+  ${EndIf}
 
   ${If} $wsWbDelData == "1"
     Push "用户选择删除数据目录（设置、数据库与剪贴板历史）"

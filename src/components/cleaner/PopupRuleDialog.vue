@@ -207,7 +207,7 @@ function submit(): void {
   gap: 12px;
   padding: 12px;
   border: 1px solid var(--border-color);
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   background: var(--bg-secondary);
 }
 
@@ -226,12 +226,12 @@ function submit(): void {
 
 .target-process {
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 400;
 }
 
 .target-title {
-  margin-top: 3px;
+  margin-top: 4px;
   color: var(--text-secondary);
   font-size: 12px;
   overflow: hidden;
@@ -253,10 +253,10 @@ function submit(): void {
 .scope {
   display: flex;
   align-items: flex-start;
-  gap: 10px;
-  padding: 10px 12px;
+  gap: 12px;
+  padding: 12px 12px;
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--bg-primary);
   text-align: left;
   cursor: pointer;
@@ -281,7 +281,7 @@ function submit(): void {
   flex-shrink: 0;
   width: 14px;
   height: 14px;
-  margin-top: 2px;
+  margin-top: 4px;
   border: 1px solid var(--text-muted);
   border-radius: 50%;
   background: var(--bg-primary);
@@ -294,7 +294,7 @@ function submit(): void {
 .scope-text {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 4px;
   min-width: 0;
 }
 
@@ -306,7 +306,7 @@ function submit(): void {
 
 .scope-text em {
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 12px;
   font-style: normal;
   line-height: 1.5;
   word-break: break-all;
@@ -314,18 +314,18 @@ function submit(): void {
 
 .scope-warn {
   margin: 0;
-  padding: 6px 10px;
+  padding: 8px 12px;
   border-radius: 6px;
   background: rgba(245, 158, 11, 0.1);
-  color: #b45309;
-  font-size: 11px;
+  color: var(--warning-text);
+  font-size: 12px;
   line-height: 1.5;
 }
 
 .options {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
 }
 
 .option-row {

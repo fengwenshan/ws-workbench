@@ -21,6 +21,16 @@
   --un-border-strong: #d1d1d6;
   --un-hover: #f7f7f8;
   --un-danger: #e5484d;
+  --un-danger-soft: #fff5f5;
+  --un-warning: #f5a623;
+  --un-surface: #fff;
+  --un-surface-2: #fcfcfc;
+  --un-surface-3: #f9f9f9;
+  --un-scroll: #c9c9c9;
+  --un-scroll-hover: #b3b3b3;
+  --un-fill: #e6e6e6;
+  --un-fill-hover: #dedede;
+  --un-fill-active: #d5d5d5;
   /* AppIcon.vue 的兜底底色变量，独立页面里补一份 */
   --bg-secondary: #f2f2f3;
 }
@@ -34,7 +44,7 @@ body {
   margin: 0;
   box-sizing: border-box;
   overflow: hidden;
-  background: #fff;
+  background: var(--un-surface);
   color: var(--un-text);
   font-family:
     -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', 'PingFang SC',
@@ -65,7 +75,7 @@ button {
   height: 100%;
   display: flex;
   flex-direction: column;
-  background: #fff;
+  background: var(--un-surface);
 }
 
 /* 顶部：图标 / 名称 / 使用情况 / 合计大小 */
@@ -144,7 +154,7 @@ button {
 .unwin-spinner {
   width: 22px;
   height: 22px;
-  border: 2px solid #e8e8e8;
+  border: 2px solid var(--un-border);
   border-top-color: var(--un-blue);
   border-radius: 50%;
   animation: un-spin 0.8s linear infinite;
@@ -195,8 +205,8 @@ button {
   margin: 10px 40px 0;
   padding: 9px 12px;
   border: 1px solid rgba(229, 72, 77, 0.26);
-  border-radius: 8px;
-  background: #fff5f5;
+  border-radius: 6px;
+  background: var(--un-danger-soft);
   font-size: 12px;
   color: var(--un-danger);
 }
@@ -249,7 +259,7 @@ button {
   padding: 0 40px 6px;
   /* 细滚动条：只留 5px 的圆角滑块 */
   scrollbar-width: thin;
-  scrollbar-color: #c9c9c9 transparent;
+  scrollbar-color: var(--un-scroll) transparent;
 }
 
 .related-scroll::-webkit-scrollbar {
@@ -261,16 +271,16 @@ button {
 }
 
 .related-scroll::-webkit-scrollbar-thumb {
-  border: 3px solid #fff;
-  border-radius: 8px;
-  background: #c9c9c9;
+  border: 3px solid var(--un-surface);
+  border-radius: 6px;
+  background: var(--un-scroll);
   background-clip: padding-box;
 }
 
 .related-scroll::-webkit-scrollbar-thumb:hover {
-  background: #b3b3b3;
+  background: var(--un-scroll-hover);
   background-clip: padding-box;
-  border-color: #fff;
+  border-color: var(--un-surface);
 }
 
 .related-group {
@@ -317,7 +327,7 @@ button {
   margin-left: auto;
   width: 12px;
   height: 8px;
-  color: #a6a6aa;
+  color: var(--un-text-muted);
   transition: transform 0.18s ease;
 }
 
@@ -429,8 +439,8 @@ button {
   padding: 0;
   border: 1.5px solid var(--un-border-strong);
   border-radius: 3.5px;
-  background: #fff;
-  color: #fff;
+  background: var(--un-surface);
+  color: var(--un-surface);
   cursor: pointer;
   transition:
     background-color 0.12s ease,
@@ -438,7 +448,7 @@ button {
 }
 
 .u-check:hover:not(.is-checked):not(.is-mixed) {
-  border-color: #a9a9ae;
+  border-color: var(--un-text-muted);
 }
 
 .u-check.is-checked,
@@ -474,7 +484,7 @@ button {
   width: 7px;
   height: 1.5px;
   border-radius: 1px;
-  background: #fff;
+  background: var(--un-surface);
 }
 
 /* ============================ 底部操作栏 ============================ */
@@ -487,7 +497,7 @@ button {
   height: 59px;
   padding: 0 32px 0 40px;
   border-top: 1px solid var(--un-divider);
-  background: #fff;
+  background: var(--un-surface);
 }
 
 .foot-all {
@@ -567,19 +577,19 @@ button {
 
 .btn-ghost {
   border-color: var(--un-border);
-  background: #fff;
+  background: var(--un-surface);
   color: var(--un-text);
 }
 
 .btn-ghost:hover:not(:disabled) {
-  background: #f7f7f7;
-  border-color: #dcdcdc;
+  background: var(--un-hover);
+  border-color: var(--un-border-strong);
 }
 
 .btn-primary {
   border-color: var(--un-green);
   background: var(--un-green);
-  color: #fff;
+  color: var(--un-surface);
 }
 
 .btn-primary:hover:not(:disabled) {
@@ -617,7 +627,7 @@ button {
   height: 52px;
   border-radius: 50%;
   background: var(--un-green);
-  color: #fff;
+  color: var(--un-surface);
   box-shadow: 0 6px 18px rgba(7, 193, 96, 0.28);
 }
 
@@ -628,7 +638,7 @@ button {
 
 /* 有失败项：琥珀色警告（而不是绿色对勾） */
 .result-check.is-warning {
-  background: #f5a623;
+  background: var(--un-warning);
   box-shadow: 0 6px 18px rgba(245, 166, 35, 0.3);
 }
 
@@ -656,7 +666,7 @@ button {
   padding: 12px 16px;
   border: 1px solid var(--un-divider);
   border-radius: 10px;
-  background: #fcfcfc;
+  background: var(--un-surface-2);
 }
 
 .result-failures-title {
@@ -678,7 +688,7 @@ button {
   gap: 12px;
   padding: 4px 0;
   font-size: 12px;
-  border-top: 1px solid #f1f1f1;
+  border-top: 1px solid var(--un-divider);
 }
 
 .result-failures li:first-child {
@@ -731,7 +741,7 @@ button {
   height: 236px;
   padding: 26px 22px 15px;
   border-radius: 11px;
-  background: #f9f9f9;
+  background: var(--un-surface-3);
   box-shadow:
     0 12px 34px rgba(0, 0, 0, 0.24),
     0 1px 4px rgba(0, 0, 0, 0.08);
@@ -765,14 +775,14 @@ button {
   line-height: 17px;
   font-weight: 700;
   letter-spacing: 0.1px;
-  color: #262626;
+  color: var(--un-text-strong);
 }
 
 .fq-desc {
   margin: 9px 0 0;
   font-size: 13px;
   line-height: 17px;
-  color: #262626;
+  color: var(--un-text-strong);
 }
 
 .fq-actions {
@@ -787,8 +797,8 @@ button {
   height: 30px;
   border: none;
   border-radius: 6px;
-  background: #e6e6e6;
-  color: #262626;
+  background: var(--un-fill);
+  color: var(--un-text-strong);
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
@@ -796,11 +806,11 @@ button {
 }
 
 .fq-btn:hover {
-  background: #dedede;
+  background: var(--un-fill-hover);
 }
 
 .fq-btn:active {
-  background: #d5d5d5;
+  background: var(--un-fill-active);
 }
 
 .fq-btn:focus-visible {
@@ -813,6 +823,6 @@ button {
   .related-scroll,
   .unwin-result {
     scrollbar-width: thin;
-    scrollbar-color: #c9c9c9 transparent;
+    scrollbar-color: var(--un-scroll) transparent;
   }
 }

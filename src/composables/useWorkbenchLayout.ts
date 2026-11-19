@@ -3,10 +3,11 @@ import { safeGet, safeSet } from './safeStorage'
 import { platform } from '@/platform'
 
 /** 工具页标识 */
-export type AppView = 'home' | 'proxy' | 'cleaner' | 'settings'
+export type AppView = 'home' | 'proxy' | 'cleaner' | 'lanshare' | 'settings'
 
 const TREE_WIDTH_KEY = 'ws-workbench:layout:tree-width'
 const TREE_COLLAPSED_KEY = 'ws-workbench:layout:tree-collapsed'
+/** 与 main.css 的 --pane-left-width 保持一致：项目/VPN/LANLink 左栏同宽，切换工具时右栏起点不跳 */
 const TREE_WIDTH_DEFAULT = 260
 const TREE_WIDTH_MIN = 200
 const TREE_WIDTH_MAX = 420
@@ -28,6 +29,10 @@ export function useWorkbenchLayout() {
   const treeCollapsed = ref(false)
   /** 代理页左侧 VPN 配置列表是否收起（再次点击「代理」切换） */
   const vpnMenuCollapsed = ref(false)
+  /** 系统 / LANLink / 设置 的左侧模块栏是否收起（再次点击对应图标切换） */
+  const cleanerMenuCollapsed = ref(false)
+  const lanMenuCollapsed = ref(false)
+  const settingsMenuCollapsed = ref(false)
 
   type DragState = { kind: 'tree'; startX: number; startWidth: number }
   let drag: DragState | null = null
@@ -55,9 +60,34 @@ export function useWorkbenchLayout() {
       vpnMenuCollapsed.value = !vpnMenuCollapsed.value
       return
     }
+    if (tool === 'cleaner' && view.value === 'cleaner') {
+      cleanerMenuCollapsed.value = !cleanerMenuCollapsed.value
+      return
+    }
+    if (tool === 'lanshare' && view.value === 'lanshare') {
+      lanMenuCollapsed.value = !lanMenuCollapsed.value
+      return
+    }
+    if (tool === 'settings' && view.value === 'settings') {
+      settingsMenuCollapsed.value = !settingsMenuCollapsed.value
+      return
+    }
     view.value = tool
     if (tool === 'home' && treeCollapsed.value) setTreeCollapsed(false)
     if (tool === 'proxy') vpnMenuCollapsed.value = false
+    if (tool === 'cleaner') cleanerMenuCollapsed.value = false
+    if (tool === 'lanshare') lanMenuCollapsed.value = false
+    if (tool === 'settings') settingsMenuCollapsed.value = false
+  }
+
+  /**
+   * 程序化跳回项目页：只切视图、必要时展开项目树。
+   * 点「项目」图标走 selectTool——那套语义是「再点一次就把项目树收起」，
+   * 搜索面板跳转不能带这个副作用（在首页选搜索结果会把树收起来）。
+   */
+  function openHome() {
+    view.value = 'home'
+    if (treeCollapsed.value) setTreeCollapsed(false)
   }
 
   function shortcutTitle(label: string, key: string) {
@@ -135,6 +165,10 @@ export function useWorkbenchLayout() {
         event.preventDefault()
         selectTool('cleaner')
         break
+      case '5':
+        event.preventDefault()
+        selectTool('lanshare')
+        break
       case 'b':
         event.preventDefault()
         toggleTree()
@@ -170,9 +204,13 @@ export function useWorkbenchLayout() {
     isMac,
     shortcutTitle,
     selectTool,
+    openHome,
     treeWidth,
     treeCollapsed,
     vpnMenuCollapsed,
+    cleanerMenuCollapsed,
+    lanMenuCollapsed,
+    settingsMenuCollapsed,
     toggleTree,
     startTreeResize,
     resetTreeWidth,

@@ -474,7 +474,7 @@ onUnmounted(() => {
   gap: 12px;
   height: 100%;
   min-height: 0;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   transition: background 0.15s, outline-color 0.15s;
 }
 /* 拖文件进「上传」页：整块内容区都是热点，给个整体高亮 */
@@ -487,10 +487,10 @@ onUnmounted(() => {
 .dir-missing-row {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 8px 10px;
+  gap: 12px;
+  padding: 8px 12px;
   border: 1px solid var(--danger);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: rgba(220, 38, 38, 0.06);
 }
 .dir-missing-text {
@@ -508,8 +508,8 @@ onUnmounted(() => {
   align-items: center;
   justify-content: center;
   border: 1px dashed var(--border-color);
-  border-radius: 8px;
-  padding: 20px 18px 22px;
+  border-radius: var(--radius-md);
+  padding: 20px 20px 24px;
   text-align: center;
   transition: all 0.15s;
   background: var(--bg-input);
@@ -523,7 +523,7 @@ onUnmounted(() => {
   align-items: center;
   justify-content: center;
   gap: 8px;
-  margin-top: 6px;
+  margin-top: 8px;
   font-size: 14px;
   color: var(--text-secondary);
 }
@@ -552,16 +552,16 @@ onUnmounted(() => {
   overflow: auto;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
 }
 .attachment-item {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 8px 10px;
+  padding: 8px 12px;
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--bg-primary);
 }
 .attachment-item.busy {
@@ -570,7 +570,7 @@ onUnmounted(() => {
 .attachment-main {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 4px;
   min-width: 0;
   flex: 1;
 }
@@ -590,7 +590,7 @@ onUnmounted(() => {
 }
 .attachment-actions {
   display: flex;
-  gap: 6px;
+  gap: 8px;
   flex-shrink: 0;
 }
 </style>

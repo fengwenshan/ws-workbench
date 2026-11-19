@@ -30,6 +30,22 @@ export interface QuickAttachmentItem extends AttachmentMeta {
   entityPath: string
 }
 
+/** 快速搜索里的项目条目：名称 / 所属位置 / 识别到的 Git、SVN 地址都可匹配 */
+export interface QuickProjectItem {
+  id: string
+  name: string
+  /** 面包屑：分组名 + 项目名；一级项目只有项目名 */
+  path: string
+  vcsType: VcsType
+  /** 未识别到仓库地址时为空串 */
+  vcsUrl: string
+}
+
+/** 快速搜索选中的结果：附件走预览，项目直接跳转 */
+export type QuickPaletteChoose =
+  | { kind: 'attachment'; attachment: QuickAttachmentItem }
+  | { kind: 'project'; project: QuickProjectItem }
+
 /** 笔记内联资源的只读元信息（来自密文 WST1 明文头，不触发解密） */
 export interface AttachmentStat {
   /** 原始（明文）字节数 */
@@ -47,6 +63,11 @@ export interface ProjectConfig {
   updated_at: string
   note: string
   attachments: AttachmentMeta[]
+  /**
+   * layui 打包包含规则（白名单）。null / undefined 表示沿用全局默认规则
+   * （AppConfig.default_include）；数组表示项目自己的规则。
+   */
+  pack_include?: string[] | null
 }
 
 export interface ProjectGroup {
@@ -76,6 +97,8 @@ export interface AppConfig {
   vpn_active_profile_id: string
   /** 全局默认附件上传目录 */
   default_upload_dir: string | null
+  /** 开发者模式：开启后接收内测版（beta）更新；缺省 / false = 只收正式版 */
+  developer_mode?: boolean
 }
 
 export interface PackResult {

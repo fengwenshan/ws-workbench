@@ -4,11 +4,11 @@
 //! 前端只调这里的命令，不直接碰窗口 API —— 这样不必为了 hide/show 去开一堆
 //! `core:window` 权限，面板与主窗口的行为也集中在一处。
 
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::{
     panel_origin_at, show_main_window, QUICK_PANEL_ANCHOR, QUICK_PANEL_LABEL,
-    QUICK_PANEL_MAX_HEIGHT, QUICK_PANEL_MIN_HEIGHT, QUICK_PANEL_WIDTH,
+    QUICK_PANEL_MAX_HEIGHT, QUICK_PANEL_MESSAGES_MODE, QUICK_PANEL_MIN_HEIGHT, QUICK_PANEL_WIDTH,
 };
 
 fn hide_quick_panel(app: &AppHandle) {
@@ -31,6 +31,38 @@ pub fn quick_panel_hide(app: AppHandle) {
 pub fn quick_panel_show_main(app: AppHandle) {
     hide_quick_panel(&app);
     show_main_window(&app);
+}
+
+/// 取快捷面板当前模式。
+///
+/// 面板懒创建：首次挂载时还没有收到过 `quick-panel://mode` 事件，靠这里拿初值。
+/// 只读不重置——复位会让「首次创建面板那次点击」之后的左键多走一次切页签分支。
+#[tauri::command]
+pub fn quick_panel_take_mode() -> String {
+    let messages = QUICK_PANEL_MESSAGES_MODE.load(std::sync::atomic::Ordering::Relaxed);
+    if messages {
+        "messages".to_string()
+    } else {
+        "quick".to_string()
+    }
+}
+
+/// 前端手动切换页签时回报模式，保证「面板可见且普通模式 → 左键切消息页签」判断准确。
+#[tauri::command]
+pub fn quick_panel_set_mode(mode: String) {
+    let messages = mode == "messages";
+    QUICK_PANEL_MESSAGES_MODE.store(messages, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// 托盘消息列表点选会话：收起面板 → 显示主界面 → 通知主窗口定位该会话。
+#[tauri::command]
+pub fn quick_panel_open_chat(app: AppHandle, peer_id: String) {
+    hide_quick_panel(&app);
+    show_main_window(&app);
+    let _ = app.emit(
+        crate::lanshare::EVENT_OPEN_CHAT,
+        crate::lanshare::OpenChatEvent { peer_id },
+    );
 }
 
 /// 面板底部「退出」：和原来的托盘菜单退出完全同一条路径。

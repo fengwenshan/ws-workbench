@@ -19,6 +19,7 @@ import type {
   VpnSnapshotPayload,
   VpnStatus,
 } from '@/types/vpn'
+import type { SessionOwnerView } from '@/types/vpn'
 import { BUSY_PHASES, RETIRED_RULE_KINDS } from '@/types/vpn'
 
 const RETIRED_KINDS: readonly string[] = RETIRED_RULE_KINDS
@@ -118,6 +119,10 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
 
   /** 运行期「当前生效配置」；同通道切换后指向切过去的那份 */
   const policyProfileId = ref('')
+  /** 当前这条连接归谁：另一个窗口连的时候本窗口只能看 */
+  const owner = ref<SessionOwnerView | null>(null)
+  /** 能不能操作（连接 / 断开 / 改规则）：不是自己连的就只能看 */
+  const canControl = computed(() => !owner.value || owner.value.mine)
   /** 配置 id -> 通道身份哈希，用于渲染「共用通道」 */
   const identities = ref<Record<string, string>>({})
 
@@ -276,6 +281,7 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
       const payload = await invoke<VpnSnapshotPayload>('vpn_get_snapshot')
       status.value = payload.status
       policyProfileId.value = payload.policy_profile_id || payload.status.profile_id || ''
+      owner.value = payload.owner ?? null
       if (payload.elevation) {
         elevation.value = { ...(elevation.value ?? ({} as ElevationInfo)), hint: payload.elevation } as ElevationInfo
       }
@@ -441,31 +447,66 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
       created_at: now,
       updated_at: now,
     }
-    config.value.vpn_profiles.push(profile)
+    // 先乐观显示、再落盘；写盘失败必须整体退回去 —— 否则列表里会留下一条
+    // 根本没存下的配置，重启后凭空消失，用户只看到「创建成功但弹窗不关」。
+    const previousProfiles = config.value.vpn_profiles
+    const previousActive = config.value.vpn_active_profile_id
+    const previousSelected = selectedProfileId.value
+    config.value.vpn_profiles = [...previousProfiles, profile]
     config.value.vpn_active_profile_id = profile.id
     selectedProfileId.value = profile.id
-    await saveConfig()
+    try {
+      await saveConfig()
+    } catch (err) {
+      config.value.vpn_profiles = previousProfiles
+      config.value.vpn_active_profile_id = previousActive
+      selectedProfileId.value = previousSelected
+      throw err
+    }
     return profile
   }
 
   async function updateProfile(id: string, patch: Partial<VpnProfile>) {
     const profile = profiles.value.find((p) => p.id === id)
     if (!profile) return
+    const previous = { ...profile }
     Object.assign(profile, patch, { updated_at: nowIso() })
-    await saveConfig()
+    try {
+      await saveConfig()
+    } catch (err) {
+      // 同 addProfile：存不下就把界面上的改动退回去
+      Object.assign(profile, previous)
+      throw err
+    }
   }
 
   async function deleteProfile(id: string) {
     const profile = profiles.value.find((p) => p.id === id)
     if (!profile) return
-    config.value.vpn_profiles = profiles.value.filter((p) => p.id !== id)
+    // 只有「正在用这份配置连接」时才拦：连着 A 想删 B 是正常操作，
+    // 删掉之后 A 的隧道不受影响（worker 用的参数已经拿到手了）
+    if (isConnected.value && status.value.profile_id === id) {
+      throw new Error('这份配置正在连接中，先断开再删除')
+    }
+    const previousProfiles = config.value.vpn_profiles
+    const previousActive = config.value.vpn_active_profile_id
+    const previousSelected = selectedProfileId.value
+    const remaining = profiles.value.filter((p) => p.id !== id)
+    config.value.vpn_profiles = remaining
     if (config.value.vpn_active_profile_id === id) {
-      config.value.vpn_active_profile_id = config.value.vpn_profiles[0]?.id ?? ''
+      config.value.vpn_active_profile_id = remaining[0]?.id ?? ''
     }
     if (selectedProfileId.value === id) {
-      selectedProfileId.value = config.value.vpn_profiles[0]?.id ?? ''
+      selectedProfileId.value = remaining[0]?.id ?? ''
     }
-    await saveConfig()
+    try {
+      await saveConfig()
+    } catch (err) {
+      config.value.vpn_profiles = previousProfiles
+      config.value.vpn_active_profile_id = previousActive
+      selectedProfileId.value = previousSelected
+      throw err
+    }
   }
 
   /**
@@ -671,6 +712,7 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
         status.value = event.payload.status
         policyProfileId.value =
           event.payload.policy_profile_id || event.payload.status.profile_id || ''
+        owner.value = event.payload.owner ?? null
         if (event.payload.elevation) {
           elevation.value = { ...(elevation.value ?? ({} as ElevationInfo)), hint: event.payload.elevation }
         }
@@ -713,6 +755,8 @@ export function useVpn(config: Ref<AppConfig>, saveConfig: () => Promise<void>) 
     selectedProfile,
     proxyMode,
     policyProfileId,
+    owner,
+    canControl,
     identities,
     sharesTunnel,
     switchToProfile,

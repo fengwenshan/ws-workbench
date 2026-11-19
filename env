@@ -1,0 +1,7 @@
+# 可提交的空占位 / 默认值；本机真实令牌与密码放 env.local
+# （.gitignore 里的 *.local 会忽略它，不会推到远端）
+GITEE_TOKEN=
+
+# 更新签名私钥的密码：私钥设了密码时，把真实密码写进 env.local，不要写在这里。
+  # mac 电脑位置 ~/.tauri/ws-workbench.key
+# TAURI_SIGNING_PRIVATE_KEY_PASSWORD=

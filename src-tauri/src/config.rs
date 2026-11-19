@@ -1,7 +1,7 @@
 use std::sync::Mutex;
 
-use tauri::{AppHandle, Manager};
-use tauri_plugin_store::StoreExt;
+use tauri::{AppHandle, Manager, Wry};
+use tauri_plugin_store::{Store, StoreBuilder};
 
 use crate::db::DbData;
 use crate::models::{AppConfig, AppSettings};
@@ -16,6 +16,18 @@ static DB_SNAPSHOT: Mutex<Option<DbData>> = Mutex::new(None);
 
 /// 设置读取失败只提示一次：load_config 启动时会被多处调用，避免刷屏
 static SETTINGS_WARNED: std::sync::Once = std::sync::Once::new();
+
+/// 打开设置存储，路径固定为数据目录里的 `config.json`。
+///
+/// 不能用 `app.store("config.json")`：插件按 `app_config_dir` 解析相对路径，
+/// 数据目录一落到回退候选（用户目录不可写），设置就会和数据库、主密钥分家 ——
+/// 读的是老目录里的旧文件（甚至解不开），写的却是另一个文件，重启后设置全丢。
+fn open_store(app: &AppHandle) -> Result<std::sync::Arc<Store<Wry>>, String> {
+    let path = find_writable_file_path(app).ok_or_else(|| "没有可写的设置目录".to_string())?;
+    StoreBuilder::new(app, path)
+        .build()
+        .map_err(|e| format!("打开设置存储失败: {}", e))
+}
 
 fn get_settings_cache() -> AppSettings {
     SETTINGS_CACHE
@@ -50,6 +62,7 @@ impl AppSettings {
             vpn_worker_session_dir: config.vpn_worker_session_dir.clone(),
             default_upload_dir: config.default_upload_dir.clone(),
             tree_order: config.tree_order.clone(),
+            developer_mode: config.developer_mode,
         }
     }
 
@@ -66,6 +79,7 @@ impl AppSettings {
             vpn_worker_session_dir: self.vpn_worker_session_dir,
             default_upload_dir: self.default_upload_dir,
             tree_order: self.tree_order,
+            developer_mode: self.developer_mode,
         }
     }
 }
@@ -76,7 +90,7 @@ impl AppSettings {
 /// - `Ok(None)`：Store 中没有设置
 /// - `Err`：Store 中存在数据但无法解密/解析，调用方绝不能覆盖回写
 fn load_settings_from_store(app: &AppHandle) -> Result<Option<(AppSettings, bool)>, String> {
-    let store = match app.store("config.json") {
+    let store = match open_store(app) {
         Ok(store) => store,
         Err(_) => return Ok(None),
     };
@@ -107,9 +121,7 @@ fn load_settings_from_store(app: &AppHandle) -> Result<Option<(AppSettings, bool
 
 /// 使用 Store 插件保存设置（以 SM4 密文信封写入）
 fn save_settings_to_store(app: &AppHandle, settings: &AppSettings) -> Result<(), String> {
-    let store = app
-        .store("config.json")
-        .map_err(|e| format!("创建 store 失败: {}", e))?;
+    let store = open_store(app)?;
     let json = serde_json::to_string(settings).map_err(|e| format!("序列化失败: {}", e))?;
     let envelope = crate::crypto::encrypt_str(app, &json)?;
     store.set(STORE_KEY, serde_json::Value::String(envelope));
@@ -336,19 +348,27 @@ fn test_writable(dir: &std::path::PathBuf) -> bool {
     crate::util::fs::is_writable_dir(dir)
 }
 
-/// 找到第一个可写的文件路径
-fn find_writable_file_path(app: &AppHandle) -> Option<std::path::PathBuf> {
+/// 实际在用的数据目录：候选里第一个可写的那个。
+///
+/// 数据库、附件、设置、**主密钥**都放这里。主密钥必须和数据同目录：数据目录
+/// 回退（用户目录被沙箱/企业策略/杀软锁死）后，密钥要是还留在原来那份候选目录
+/// 里，读出来全是「数据已被篡改」，写盘也会全部失败。Windows 侧的主密钥解析见
+/// `crypto/windows.rs`。
+pub(crate) fn data_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
     for (_, dir) in storage_candidates(app) {
-        if !dir.exists() {
-            if crate::util::fs::create_dir_all(&dir).is_err() {
-                continue;
-            }
+        if !dir.exists() && crate::util::fs::create_dir_all(&dir).is_err() {
+            continue;
         }
         if test_writable(&dir) {
-            return Some(dir.join("config.json"));
+            return Ok(dir);
         }
     }
-    None
+    Err("没有可写的本地存储目录".to_string())
+}
+
+/// 找到第一个可写的文件路径
+fn find_writable_file_path(app: &AppHandle) -> Option<std::path::PathBuf> {
+    data_dir(app).ok().map(|dir| dir.join("config.json"))
 }
 
 /// 加载完整配置：设置 + 数据库业务实体
@@ -441,6 +461,12 @@ mod tests {
     }
 
     #[test]
+    fn developer_mode_defaults_to_false() {
+        let settings: AppSettings = serde_json::from_str("{}").unwrap();
+        assert!(!settings.developer_mode);
+    }
+
+    #[test]
     fn app_settings_roundtrip_from_config() {
         let config = AppConfig {
             default_include: vec!["*.js".to_string()],
@@ -449,10 +475,13 @@ mod tests {
             vpn_worker_session_dir: "/tmp/session".to_string(),
             default_upload_dir: Some("/tmp/upload".to_string()),
             tree_order: vec!["g1".to_string(), "r1".to_string()],
+            developer_mode: true,
             ..Default::default()
         };
         let settings = AppSettings::from_config(&config);
+        assert!(settings.developer_mode);
         let merged = settings.into_config(crate::db::DbData::default());
+        assert!(merged.developer_mode);
         assert_eq!(merged.default_include, config.default_include);
         assert_eq!(merged.default_include_version, 7);
         assert_eq!(merged.vpn_active_profile_id, "p1");
@@ -474,6 +503,7 @@ mod tests {
             updated_at: String::new(),
             note: String::new(),
             attachments: vec![],
+            pack_include: None,
         });
         let merged = AppSettings::default().into_config(data);
         assert_eq!(merged.projects.len(), 1);

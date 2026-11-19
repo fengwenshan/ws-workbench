@@ -1,4 +1,5 @@
 import { createApp } from 'vue'
+import { installBrowserTauriShim } from '@/dev/browserTauriShim'
 import App from './App.vue'
 import { applyDocumentTitle } from './api/app'
 import 'ant-design-vue/dist/reset.css'
@@ -28,6 +29,9 @@ function blockFileDropDefault(event: DragEvent) {
 for (const type of ['dragenter', 'dragover', 'drop'] as const) {
   window.addEventListener(type, blockFileDropDefault, true)
 }
+
+// 浏览器里 `pnpm dev` 预览界面时补一份假 Tauri 后端；桌面应用里是空操作
+if (import.meta.env.DEV) installBrowserTauriShim()
 
 createApp(App).mount('#app')
 

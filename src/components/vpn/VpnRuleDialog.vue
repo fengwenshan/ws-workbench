@@ -435,11 +435,10 @@ async function closeDialog() {
   align-items: center;
   justify-content: center;
   gap: 8px;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: color-mix(in srgb, var(--bg-primary) 82%, transparent);
   color: var(--text-secondary);
   font-size: 14px;
-  backdrop-filter: blur(1px);
 }
 .btn-spinner {
   display: inline-block;
@@ -462,7 +461,7 @@ async function closeDialog() {
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
 }
 .form-field {
   display: flex;
@@ -501,7 +500,7 @@ async function closeDialog() {
   display: flex;
   flex-direction: column;
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   overflow: hidden;
 }
 .rule-list-head {
@@ -521,7 +520,7 @@ async function closeDialog() {
   flex: 1;
   overflow-y: auto;
   max-height: 380px;
-  padding: 6px;
+  padding: 8px;
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -537,7 +536,7 @@ async function closeDialog() {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 8px;
+  padding: 8px 8px;
   border-radius: 6px;
   border: 1px solid transparent;
   font-size: 14px;
@@ -580,12 +579,12 @@ async function closeDialog() {
 .row-meta {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   min-width: 0;
 }
 .row-kind {
   flex-shrink: 0;
-  font-size: 10px;
+  font-size: 12px;
   color: var(--text-muted);
   border: 1px solid var(--border-color);
   border-radius: 4px;
@@ -594,11 +593,11 @@ async function closeDialog() {
 }
 .row-retired {
   flex-shrink: 0;
-  font-size: 10px;
-  color: #b45309;
+  font-size: 12px;
+  color: var(--warning-text);
   background: rgba(245, 158, 11, 0.12);
   border-radius: 4px;
-  padding: 1px 6px;
+  padding: 1px 8px;
   white-space: nowrap;
 }
 .row-switch {
@@ -607,12 +606,12 @@ async function closeDialog() {
 }
 .row-policy {
   flex-shrink: 0;
-  font-size: 10px;
+  font-size: 12px;
   border-radius: 4px;
-  padding: 1px 6px;
+  padding: 1px 8px;
 }
 .row-policy.vpn {
-  color: #2563eb;
+  color: var(--primary);
   background: rgba(59, 130, 246, 0.1);
 }
 .row-policy.direct {
@@ -621,7 +620,7 @@ async function closeDialog() {
 }
 .row-actions {
   display: flex;
-  gap: 2px;
+  gap: 4px;
   flex-shrink: 0;
   opacity: 0.45;
   transition: opacity 0.12s;
@@ -669,6 +668,6 @@ async function closeDialog() {
   border-top: 1px solid var(--border-color);
 }
 .rule-editor-footer .btn-spinner {
-  margin-right: 6px;
+  margin-right: 8px;
 }
 </style>

@@ -1,7 +1,7 @@
 name: CI
 
 # 日常护栏：push 到 main、pull request 与手动 workflow_dispatch 都会跑。
-# 发版仍只由 tag 触发 release.yml，这里只做编译与单测。
+# 发版由 push main 触发 release.yml（preflight 按版本号判断），这里只做编译与单测。
 #
 # 两个 job 各自在原生平台编译并跑本平台用例（macOS → macos-latest，
 # Windows → windows-latest）：VPN 实现按 cfg 整文件选择，单平台跑不到对面

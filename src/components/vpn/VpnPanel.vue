@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { Modal } from 'ant-design-vue'
+import { message, Modal } from 'ant-design-vue'
 import type { VpnApi } from '@/composables/useVpn'
 import type {
   NewVpnProfileInput,
@@ -78,7 +78,43 @@ const connectionBusy = computed(
   () => vpn.connecting || vpn.disconnecting || vpn.phaseBusy,
 )
 
+/**
+ * 连接是另一个窗口开的（开发版 + 安装包同时开着，会话目录是共享的）：
+ * 状态照常显示，但按钮只能置灰 —— 只有开它的那个窗口能断开 / 改规则。
+ */
+const readonlyOwner = computed(() => (vpn.canControl ? null : vpn.owner))
+
+/**
+ * 删除按钮的禁用条件：只有「选中的这份正在用它连接」才需要先断开，
+ * 连着 A 去删 B 是正常操作（隧道参数 worker 已经拿到手，删配置不影响连接）。
+ */
+const deleteBlockedReason = computed(() => {
+  if (vpn.phaseBusy) return '连接状态正在切换，稍后再试'
+  if (vpn.isConnected && vpn.status.profile_id === vpn.selectedProfile?.id) {
+    return '这份配置正在连接中，先断开再删除'
+  }
+  return ''
+})
+
+// ============================ 布线提示 ============================
+
+/**
+ * worker 布线时算出来的提示（目前是「系统代理会绕开按域名分流」）。
+ *
+ * 关闭只对这次连接有效：换隧道后重新出现，避免旧提示一直挂着。
+ */
+const warningsDismissed = ref(false)
+const warnings = computed(() => vpn.status.warnings ?? [])
+const warningText = computed(() => warnings.value.join('；'))
+watch(
+  () => vpn.status.conn_identity,
+  () => {
+    warningsDismissed.value = false
+  },
+)
+
 const connectLabel = computed(() => {
+  if (readonlyOwner.value) return '由另一个窗口连接'
   if (vpn.disconnecting) return '断开中…'
   if (vpn.connecting || vpn.phaseBusy) return '处理中…'
   if (!vpn.isConnected) return '连接'
@@ -96,6 +132,38 @@ const activeProfileId = computed(() => vpn.status.profile_id || vpn.selectedProf
 const policyOwnerId = computed(() => vpn.policyProfileId || vpn.status.profile_id)
 const isPolicyOwner = computed(
   () => !!vpn.selectedProfile && vpn.selectedProfile.id === policyOwnerId.value,
+)
+
+/**
+ * 选中的配置是不是在用当前这条隧道。
+ *
+ * 同一时间只有一条连接：通道参数不同的配置要先断开重连，它自己没有隧道状态。
+ * 把正在生效那份的隧道地址、服务端下发范围、布线提示挂在它下面，看起来就会像
+ * 「第二份配置连着第一条隧道」。
+ */
+const selectedOwnsTunnel = computed(() => {
+  const profile = vpn.selectedProfile
+  if (!profile || !vpn.isConnected) return false
+  if (profile.id === policyOwnerId.value) return true
+  // 打开隧道的那份、以及同通道共用这条隧道的配置，状态本来就是同一条
+  if (profile.id === vpn.status.profile_id) return true
+  const active = vpn.status.conn_identity
+  return !!active && vpn.identities[profile.id] === active
+})
+
+/** 真正在生效的那份配置：未连接的详情页用它说明隧道归谁 */
+const effectiveProfileLabel = computed(() => {
+  const activeId = vpn.status.profile_id || policyOwnerId.value
+  const profile = vpn.profiles.find((item) => item.id === activeId)
+  const name = vpn.status.profile_name || profile?.name || ''
+  const server = profile?.server || ''
+  if (name && server) return `${name}（${server}）`
+  return name || server || '另一份配置'
+})
+
+/** 提示属于正在生效的那条隧道，不能挂在另一份未连接的配置下面 */
+const showWarnings = computed(
+  () => selectedOwnsTunnel.value && warnings.value.length > 0 && !warningsDismissed.value,
 )
 
 function profileDotState(profile: VpnProfile): ProfileDotState {
@@ -163,6 +231,7 @@ const modeLocked = computed(
     vpn.connecting ||
     vpn.disconnecting ||
     vpn.modeSwitching ||
+    !vpn.canControl ||
     (vpn.isConnected && !isPolicyOwner.value),
 )
 
@@ -171,6 +240,9 @@ const modeLockText = computed(() => {
   if (vpn.modeSwitching) return ''
   if (vpn.disconnecting) return '正在断开连接，暂时不能切换代理模式。'
   if (vpn.phaseBusy || vpn.connecting) return '正在连接中，暂时不能切换代理模式。'
+  if (!vpn.canControl) {
+    return `VPN 正由「${vpn.owner?.name ?? '另一个窗口'}」连接，只有那个窗口能切换代理模式。`
+  }
   if (vpn.isConnected && !isPolicyOwner.value) {
     return '这份配置当前没有生效，切过去之后才能改它的代理模式。'
   }
@@ -244,6 +316,14 @@ function settleOptimistic(mode: VpnProxyMode) {
 
 async function handleConnect() {
   if (vpn.connecting || vpn.disconnecting) return
+  // 另一个窗口连着的：按钮已经置灰，这里再挡一道（键盘 / 旧渲染状态）
+  if (!vpn.canControl) {
+    vpn.pushLog(
+      'warn',
+      `VPN 正由「${vpn.owner?.name ?? '另一个窗口'}」连接，请到那个窗口断开`,
+    )
+    return
+  }
   // 未连接或收尾中：走原来的连接/断开逻辑
   if (!vpn.isConnected || vpn.phaseBusy) {
     await vpn.toggleConnection()
@@ -352,7 +432,10 @@ async function handleProfileSubmit(input: NewVpnProfileInput) {
     profileDialogOpen.value = false
     editingProfile.value = null
   } catch (err: any) {
+    // 写盘失败（例如数据目录不可用）时弹窗留在原地，表单内容不丢；
+    // 但光留弹窗等于静默失败 —— 列表里刚冒出来的那条也要退回去，再明确报错。
     vpn.pushLog('error', `${isEdit ? '更新' : '新建'} VPN 配置失败: ${err}`)
+    message.error(`${isEdit ? '保存' : '创建'} VPN 配置失败：${err}`)
   } finally {
     savingProfile.value = false
   }
@@ -364,8 +447,17 @@ function askDelete(profile: VpnProfile) {
 
 async function confirmDeleteProfile() {
   if (!confirmDelete.value) return
-  await vpn.deleteProfile(confirmDelete.value.id)
+  const target = confirmDelete.value
+  const name = target.name
   confirmDelete.value = null
+  try {
+    await vpn.deleteProfile(target.id)
+  } catch (err: any) {
+    const text = err instanceof Error ? err.message : String(err)
+    // 删除也要落盘，失败时配置还在，必须说清楚而不是静默留在列表里
+    vpn.pushLog('error', `删除 VPN 配置「${name}」失败: ${text}`)
+    Modal.error({ title: '删除配置失败', content: text })
+  }
 }
 
 /** 切回 VPN 页时刷新连接器与快照，保证看到的是当前机器状态 */
@@ -381,12 +473,42 @@ watch(
 
 <template>
   <div class="vpn-layout">
-    <div class="vpn-body">
+    <div class="vpn-body" :class="{ 'is-collapsed': menuCollapsed }">
       <!-- 左侧：配置列表（再次点击左侧「代理」导航可收起） -->
       <aside id="vpn-profile-menu" v-show="!menuCollapsed" class="profile-list">
         <div class="list-head">
-          <span>VPN 配置</span>
-          <button class="list-add" @click="openCreateProfile">+ 新建</button>
+          <span class="head-icon" aria-hidden="true">
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.8"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <path d="M12 3l7 3v5.2c0 4.5-3 7.9-7 9.8-4-1.9-7-5.3-7-9.8V6z" />
+              <path d="M9.5 12.2l1.8 1.9 3.4-3.7" />
+            </svg>
+          </span>
+          <span class="head-title">VPN 配置</span>
+          <button
+            class="head-action"
+            type="button"
+            title="新建 VPN 配置"
+            aria-label="新建 VPN 配置"
+            @click="openCreateProfile"
+          >
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.8"
+              stroke-linecap="round"
+              aria-hidden="true"
+            >
+              <path d="M12 5v14M5 12h14" />
+            </svg>
+          </button>
         </div>
         <div class="list-body">
           <div
@@ -471,8 +593,9 @@ watch(
                   vpn.isConnected || vpn.phaseBusy ? 'btn-danger' : 'btn-primary',
                   { 'is-loading': connectionBusy },
                 ]"
-                :disabled="vpn.disconnecting || (!canConnect && !vpn.isConnected)"
+                :disabled="vpn.disconnecting || (!canConnect && !vpn.isConnected) || !vpn.canControl"
                 :aria-busy="connectionBusy"
+                :title="readonlyOwner ? `VPN 正由「${readonlyOwner.name}」连接，只有那个窗口能断开` : ''"
                 @click="handleConnect"
               >
                 <span v-if="connectionBusy" class="btn-spinner" aria-hidden="true" />
@@ -480,7 +603,8 @@ watch(
               </button>
               <button
                 class="btn btn-secondary"
-                :disabled="!vpn.selectedProfile || vpn.rulesApplying"
+                :disabled="!vpn.selectedProfile || vpn.rulesApplying || !vpn.canControl"
+                :title="readonlyOwner ? `VPN 正由「${readonlyOwner.name}」连接，只有那个窗口能改规则` : ''"
                 :aria-busy="vpn.rulesApplying"
                 @click="ruleDialogOpen = true"
               >
@@ -497,12 +621,35 @@ watch(
               <button class="btn btn-secondary" @click="logDrawerOpen = true">日志</button>
               <button
                 class="btn btn-danger-ghost"
-                :disabled="vpn.isConnected || vpn.phaseBusy"
+                :disabled="!!deleteBlockedReason"
+                :title="deleteBlockedReason || undefined"
                 @click="askDelete(vpn.selectedProfile!)"
               >
                 删除
               </button>
             </div>
+          </div>
+
+          <!-- 连接是另一个窗口开的：状态照常看，按钮全部置灰 -->
+          <div v-if="readonlyOwner" class="owner-banner" role="status">
+            <span class="owner-banner-dot" aria-hidden="true" />
+            <span>
+              VPN 正由「{{ readonlyOwner.name }}」连接，这个窗口只能看状态；
+              断开、切换配置、改规则请到那个窗口操作。
+            </span>
+          </div>
+
+          <!-- 布线时后端算出来的提示：系统代理会把按域名分流绕过去（现场踩过） -->
+          <div v-if="showWarnings" class="warn-banner" role="status">
+            <span class="warn-banner-text">{{ warningText }}</span>
+            <button
+              type="button"
+              class="warn-banner-close"
+              aria-label="关闭提示"
+              @click="warningsDismissed = true"
+            >
+              ×
+            </button>
           </div>
 
           <!-- 只有 Linux 还允许手动指定 openconnect 才显示位置：macOS / Windows 都用安装包内置副本，
@@ -622,7 +769,10 @@ watch(
             </p>
           </section>
 
-          <VpnRoutePreview :status="vpn.status" />
+          <VpnRoutePreview
+            :status="vpn.status"
+            :detached-from="vpn.isConnected && !selectedOwnsTunnel ? effectiveProfileLabel : ''"
+          />
         </template>
 
         <div v-else class="detail-empty detail-empty-create">
@@ -705,7 +855,7 @@ watch(
   justify-content: space-between;
   gap: 12px 16px;
   flex-wrap: wrap;
-  padding: 2px 0 2px;
+  padding: 4px 0 4px;
 }
 .profile-identity {
   display: flex;
@@ -725,7 +875,7 @@ watch(
 .identity-name-row {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   min-width: 0;
 }
 .identity-edit {
@@ -773,65 +923,97 @@ watch(
 }
 
 /* 主体 */
+/* 左列表 + 右详情：工作区就是外框，两栏中间留 12px 间隙，卡片只做朝中间的两只圆角 */
 .vpn-body {
   flex: 1;
   display: flex;
+  gap: 4px;
   overflow: hidden;
 }
+/* 配置列表收起后左侧没有栏了，卡片自己补上和 rail 之间的 4px 间隙 */
+.vpn-body.is-collapsed .detail {
+  margin-left: 4px;
+}
 .profile-list {
-  width: 232px;
-  border-right: 1px solid var(--border-color);
+  width: var(--pane-left-width);
+  margin-bottom: 8px;
+  border: 1px solid var(--border-color);
+  border-left: 0;
+  border-radius: 0 var(--radius-lg) var(--radius-lg) 0;
   background: var(--bg-primary);
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
   overflow: hidden;
 }
+/* 页头：图标 + 标题 + 右侧新建，参考 LANLink 左栏页头 */
 .list-head {
   flex-shrink: 0;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  height: var(--panel-header-height);
-  padding: 0 16px;
-  font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 0.2px;
-  color: #000;
-  border-bottom: 1px solid var(--border-color);
+  gap: 8px;
+  height: var(--pane-head-height);
+  padding: 0 12px 0 20px;
+  color: var(--text-primary);
 }
-.list-add {
+.head-icon {
+  display: inline-flex;
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  color: var(--primary);
+}
+.head-icon svg {
+  width: 20px;
+  height: 20px;
+}
+.head-title {
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+}
+/* 右侧操作：和 LANLink 页头的齿轮同一套图标按钮尺寸 */
+.head-action {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
   padding: 0;
   border: none;
+  border-radius: var(--radius-md);
   background: transparent;
-  color: var(--primary);
-  font-size: 12px;
-  font-weight: 500;
-  line-height: 1;
+  color: var(--text-muted);
   cursor: pointer;
+  flex-shrink: 0;
+  transition: background-color 0.2s ease, color 0.2s ease;
 }
-.list-add:hover {
-  color: var(--primary-hover);
-  text-decoration: underline;
-  text-underline-offset: 2px;
+.head-action:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
 }
-.list-add:focus-visible {
+.head-action:focus-visible {
   outline: 1px solid var(--primary);
   outline-offset: 1px;
+}
+.head-action svg {
+  width: 17px;
+  height: 17px;
 }
 .list-body {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 6px 8px 8px;
+  padding: 8px 8px 8px;
 }
 .list-item {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 8px 8px 10px;
-  margin-bottom: 2px;
-  border-radius: 8px;
+  padding: 8px 8px 8px 12px;
+  margin-bottom: 4px;
+  border-radius: var(--radius-md);
   color: var(--text-secondary);
   user-select: none;
   cursor: pointer;
@@ -852,11 +1034,11 @@ watch(
   color: var(--text-muted);
 }
 .item-shared {
-  margin-left: 6px;
+  margin-left: 8px;
   padding: 0 4px;
   border: 1px solid var(--border-color);
   border-radius: 4px;
-  font-size: 10px;
+  font-size: 12px;
   font-style: normal;
   color: var(--text-muted);
   white-space: nowrap;
@@ -868,7 +1050,7 @@ watch(
   grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
   column-gap: 8px;
-  row-gap: 2px;
+  row-gap: 4px;
 }
 .item-dot {
   grid-column: 1;
@@ -934,19 +1116,24 @@ watch(
   cursor: not-allowed;
 }
 .list-empty {
-  padding: 18px 8px;
+  padding: 20px 8px;
   font-size: 12px;
   color: var(--text-muted);
   text-align: center;
 }
 
+/* 详情内容区：独立卡片，顶部贴住标题栏，右/下留 8px，整圈 1px 边框 + 12px 圆角 */
 .detail {
   flex: 1;
   overflow-y: auto;
+  margin: 0 4px 8px 0;
   padding: 16px 20px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 24px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  background: var(--bg-primary);
 }
 .import-hint {
   font-size: 12px;
@@ -958,12 +1145,61 @@ watch(
 .import-hint.is-error {
   color: var(--danger);
 }
+/* 连接被另一个窗口持有：说清「只能看」，别让人以为是坏了 */
+.owner-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--warning-border, rgba(245, 158, 11, 0.35));
+  border-radius: var(--radius-md);
+  background: var(--warning-soft, rgba(245, 158, 11, 0.1));
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+.owner-banner-dot {
+  width: 7px;
+  height: 7px;
+  margin-top: 4px;
+  border-radius: 50%;
+  background: var(--warning);
+  flex-shrink: 0;
+}
+/* 布线提示：系统代理会绕开按域名分流时出现，可关闭，只对本次连接有效 */
+.warn-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 12px;
+  border-left: 2px solid var(--warning);
+  border-radius: var(--radius-md);
+  background: var(--warning-soft);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--warning-text);
+}
+.warn-banner-text {
+  flex: 1;
+  min-width: 0;
+  word-break: break-word;
+}
+.warn-banner-close {
+  flex-shrink: 0;
+  padding: 0 2px;
+  border: none;
+  background: none;
+  color: inherit;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
 /* 手动指定的 openconnect 位置：长期显示，路径再长也要能一眼看全 */
 .connector-location {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
-  gap: 6px;
+  gap: 8px;
   font-size: 12px;
   color: var(--text-secondary);
 }
@@ -971,7 +1207,7 @@ watch(
   white-space: nowrap;
 }
 .connector-location-path {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   color: var(--text-primary);
   word-break: break-all;
@@ -982,8 +1218,8 @@ watch(
 /* 指定之后还能改：做成文字链接，别抢路径的视线 */
 .connector-location-actions {
   display: inline-flex;
-  gap: 10px;
-  margin-left: 2px;
+  gap: 12px;
+  margin-left: 4px;
 }
 .connector-location-action {
   border: none;
@@ -1004,14 +1240,14 @@ watch(
 }
 .card {
   border: 1px solid var(--border-color);
-  border-radius: 8px;
-  padding: 14px;
+  border-radius: var(--radius-md);
+  padding: 16px;
   background: var(--bg-primary);
 }
 .rule-empty {
   border: 1px solid var(--border-color);
-  border-radius: 8px;
-  padding: 14px;
+  border-radius: var(--radius-md);
+  padding: 16px;
   text-align: center;
   font-size: 14px;
   color: var(--text-muted);
@@ -1019,16 +1255,14 @@ watch(
 }
 
 /* 代理模式 */
+/* 代理模式：不再单独套卡片，直接铺在详情页上，靠标题和分段控件分层 */
 .proxy-mode-card {
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
-  padding: 14px;
-  background: var(--bg-primary);
+  padding: 0;
 }
 .proxy-mode-head {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
 }
 .proxy-mode-icon {
   width: 34px;
@@ -1036,7 +1270,7 @@ watch(
   display: grid;
   place-items: center;
   flex-shrink: 0;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: color-mix(in srgb, var(--primary) 14%, transparent);
   color: var(--primary);
 }
@@ -1049,7 +1283,7 @@ watch(
   min-width: 0;
 }
 .proxy-mode-title h4 {
-  margin: 0 0 2px;
+  margin: 0 0 4px;
   font-size: 14px;
   color: var(--text-primary);
 }
@@ -1071,7 +1305,7 @@ watch(
   gap: 8px;
   height: 40px;
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--bg-secondary);
   color: var(--text-secondary);
   font-size: 14px;
@@ -1084,21 +1318,18 @@ watch(
 .proxy-mode-option.active {
   border-color: var(--primary);
   background: var(--primary);
-  color: #fff;
+  color: var(--on-primary);
   box-shadow: 0 4px 12px color-mix(in srgb, var(--primary) 22%, transparent);
 }
 /* 选中项 hover 时不要再改文字颜色（上面那条 hover 会把白字压成深色，
    蓝底上很难看），轻微压暗表示可点即可 */
 .proxy-mode-option.active:hover:not(:disabled) {
-  color: #fff;
+  color: var(--on-primary);
   opacity: 0.8;
 }
 .proxy-mode-option:disabled {
   cursor: not-allowed;
   opacity: 0.72;
-}
-.proxy-mode-card.is-switching {
-  border-color: var(--primary);
 }
 .proxy-mode-card.is-switching .proxy-mode-icon {
   opacity: 1;
@@ -1106,7 +1337,7 @@ watch(
 .mode-label {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
 }
 .mode-icon {
   display: grid;
@@ -1127,7 +1358,7 @@ watch(
   vertical-align: -2px;
 }
 .btn-spinner {
-  margin-right: 6px;
+  margin-right: 8px;
 }
 .mode-spinner {
   width: 12px;
@@ -1152,18 +1383,18 @@ watch(
   display: block;
 }
 .proxy-mode-lock {
-  margin: 6px 0 0;
+  margin: 8px 0 0;
   font-size: 12px;
   color: var(--warning);
 }
 .proxy-mode-hint {
-  margin: 6px 0 0;
+  margin: 8px 0 0;
   font-size: 12px;
   color: var(--text-muted);
 }
 
 .mono {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--font-mono);
 }
 .detail-empty {
   flex: 1;
@@ -1175,7 +1406,7 @@ watch(
 }
 .detail-empty-create {
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
   text-align: center;
 }
 .empty-title {
@@ -1189,7 +1420,7 @@ watch(
   color: var(--text-muted);
 }
 .btn-xs {
-  padding: 4px 10px;
+  padding: 4px 12px;
   font-size: 12px;
 }
 

@@ -32,7 +32,7 @@ export function useProjectForm(options: Options) {
 
   const showCreateModal = ref(false)
   const createTab = ref<CreateTab>('group')
-  // 顶部「+ 新建」显示类型切换；分组底部「+ 添加项目」只显示项目表单
+  // 顶部「+ 新建」显示类型切换；分组行悬浮「+」只显示项目表单
   const createTabsVisible = ref(true)
 
   // ---- 新建分组 ----
@@ -70,7 +70,7 @@ export function useProjectForm(options: Options) {
     newProjectOutput.value = ''
   }
 
-  /** 打开「新建」弹窗：tab 决定顶部选中的类型，groupId 为分组底部「+ 添加项目」预置的所属分组 */
+  /** 打开「新建」弹窗：tab 决定顶部选中的类型，groupId 为分组行悬浮「+」预置的所属分组 */
   function openCreateModal(tab: CreateTab, groupId: string | null = null) {
     newGroupName.value = ''
     resetProjectDraft(tab === 'project' ? groupId : null)
@@ -83,7 +83,7 @@ export function useProjectForm(options: Options) {
     createTab.value = tab
   }
 
-  // 分组底部「+ 添加项目」：先选项目目录，选好再弹出新建项目表单（目录已带出）
+  // 分组行悬浮「+」：先选项目目录，选好再弹出新建项目表单（目录已带出）
   async function openAddForm(groupId: string | null) {
     if (pickingProjectPath.value) return
     pickingProjectPath.value = true

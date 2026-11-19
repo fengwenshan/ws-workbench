@@ -1,23 +1,41 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
+import type { UnlistenFn } from '@tauri-apps/api/event'
 import { useConfig } from '@/composables/useConfig'
 import { useVpn } from '@/composables/useVpn'
 import { useKeepAwake } from '@/composables/useKeepAwake'
+import { useLanShareUnread } from '@/composables/useLanShareUnread'
 import { isDevBuild } from '@/api/app'
+import {
+  getLanShareConversations,
+  getLanShareSnapshot,
+  onLanShareChat,
+  type LanShareConversation,
+} from '@/api/lanshare'
+import {
+  openQuickPanelChat,
+  onQuickPanelMode,
+  setQuickPanelMode,
+  takeQuickPanelMode,
+  type QuickPanelMode,
+} from '@/api/quick'
 import type { VpnProxyMode } from '@/types/vpn'
+import QuickMessages from './QuickMessages.vue'
 
 /**
  * 托盘快捷面板（独立窗口 /quick.html），布局参考腾讯柠檬的悬浮面板：
- * 顶部两个页签（VPN / 休眠），下面是紧凑卡片，点面板外部或再点一次托盘图标收起。
+ * 顶部三个页签（VPN / 休眠 / 消息），下面是紧凑卡片，点面板外部或再点一次托盘图标收起。
  *
  * 这里只做「快速查看 + 快速动作」：卸载、残留清理、规则编辑仍然回主窗口。
+ * 「消息」页签是托盘左键有未读时的入口（钉钉式消息列表），点会话调
+ * quick_panel_open_chat 由后端收起面板、显示主界面并发 lan-share://open-chat 定位。
  */
 const { config, saveConfig } = useConfig()
 const vpn = useVpn(config, saveConfig)
 const keepAwake = useKeepAwake()
 
-type Tab = 'vpn' | 'sleep'
+type Tab = 'vpn' | 'sleep' | 'messages'
 const tab = ref<Tab>('vpn')
 
 /** 开发构建时在页签右侧挂一个 dev 标记，和安装版的面板区分开 */
@@ -39,26 +57,84 @@ const SLEEP_PRESETS: Array<{ label: string; seconds: number | null }> = [
 const sleepPreset = ref<number | null>(15 * 60)
 const sleepBusy = computed(() => keepAwake.starting || keepAwake.stopping)
 
+/** 最近一次拿到后端状态的本地时刻：把剩余时长加回来还原会话总时长 */
+const statusAtMs = ref(Date.now())
+watch(
+  () => keepAwake.status,
+  () => {
+    statusAtMs.value = Date.now()
+  },
+)
+
+/** 保持中时反推会话开始时长（主窗口里选的是 1 小时，这里也要高亮 1 小时） */
+const activeSeconds = computed<number | null>(() => {
+  const status = keepAwake.status
+  if (!status?.active) return null
+  if (status.remaining_secs == null || status.started_at_ms == null) return null
+  return status.remaining_secs + (statusAtMs.value - status.started_at_ms) / 1000
+})
+
+const unlimitedActive = computed(
+  () => keepAwake.active && keepAwake.status?.remaining_secs == null,
+)
+
+/** 未开启时高亮面板里选中的时长；保持中时高亮真正在跑的时长 */
+function presetSelected(seconds: number | null): boolean {
+  if (!keepAwake.active) return sleepPreset.value === seconds
+  if (seconds === null) return unlimitedActive.value
+  return activeSeconds.value != null && Math.abs(activeSeconds.value - seconds) <= 5
+}
+
+/** 秒数转「x 小时 y 分 / x 分钟」 */
+function formatSleepDuration(totalSecs: number): string {
+  const secs = Math.max(0, Math.round(totalSecs))
+  const hours = Math.floor(secs / 3600)
+  const minutes = Math.round((secs % 3600) / 60)
+  if (hours > 0) return minutes > 0 ? `${hours} 小时 ${minutes} 分` : `${hours} 小时`
+  return `${Math.max(1, minutes)} 分钟`
+}
+
 /** 面板里只显示「大概还剩多久」，精确到分钟，避免每秒刷一遍 */
 const sleepRemaining = computed(() => {
   const status = keepAwake.status
   if (!status?.active) return ''
   if (status.remaining_secs == null) return '不限时，到点手动停止'
   const minutes = Math.max(1, Math.ceil(status.remaining_secs / 60))
-  return `剩余约 ${minutes} 分钟`
+  const total = activeSeconds.value
+  return total == null
+    ? `剩余约 ${minutes} 分钟`
+    : `剩余约 ${minutes} 分钟 · 共 ${formatSleepDuration(total)}`
 })
 
 async function toggleSleep() {
   if (keepAwake.active) {
-    await keepAwake.stop()
-  } else {
-    await keepAwake.start(sleepPreset.value, false)
+    // 停止后把面板选中的时长设为刚才那场，下次开启沿用
+    const current = SLEEP_PRESETS.find((preset) => presetSelected(preset.seconds))
+    const ok = await keepAwake.stop()
+    if (ok && current) sleepPreset.value = current.seconds
+    return
   }
+  await keepAwake.start(sleepPreset.value, false)
+}
+
+/**
+ * 点时长快捷项：未开启时只是选中（点「开启」才生效）；
+ * 保持中点其它时长等于切换会话时长，和主窗口的交互一致。
+ */
+async function chooseSleepPreset(seconds: number | null): Promise<void> {
+  if (sleepBusy.value) return
+  if (!keepAwake.active) {
+    sleepPreset.value = seconds
+    return
+  }
+  // 点当前正在跑的时长不重置计时
+  if (presetSelected(seconds)) return
+  await keepAwake.start(seconds, keepAwake.status?.allow_display_sleep ?? false)
 }
 
 function sleepHint(): string {
   const hint = keepAwake.status?.platform_hint
-  return hint || '开启后系统不会因空闲睡眠，屏幕保持常亮。'
+  return hint || '开启后系统不会因空闲睡眠，显示器保持常亮。'
 }
 
 // ============================== VPN ==============================
@@ -81,7 +157,7 @@ const PHASE_TEXT: Record<string, string> = {
 }
 
 const activeMode = computed<VpnProxyMode>(() => (vpn.proxyMode as VpnProxyMode) ?? 'rule')
-const modeLocked = computed(() => vpn.phaseBusy || vpn.connecting)
+const modeLocked = computed(() => vpn.phaseBusy || vpn.connecting || !vpn.canControl)
 const statusText = computed(
   () => PHASE_TEXT[vpn.status.phase as string] ?? (vpn.isConnected ? '已连接' : '未连接'),
 )
@@ -93,6 +169,8 @@ const modeError = ref('')
 
 async function toggleVpn() {
   modeError.value = ''
+  // 另一个窗口连着的：按钮已置灰，这里再挡一道
+  if (!vpn.canControl) return
   await vpn.toggleConnection()
 }
 
@@ -103,6 +181,73 @@ async function pickMode(mode: VpnProxyMode) {
   if (!ok) modeError.value = '模式切换失败，请稍后重试'
 }
 
+// ============================== 消息 ==============================
+
+const conversations = ref<LanShareConversation[]>([])
+/** 本机备注 fingerprint -> 备注（显示名备注优先，和主窗口一致） */
+const remarks = ref<Record<string, string>>({})
+const messagesLoading = ref(false)
+const messagesError = ref('')
+/** 时间基准：面板打开 / 刷新时更新，formatListTime 用它判断今天 / 昨天 */
+const messagesNow = ref(Date.now())
+
+/** 未读角标：走 lan-share://unread 订阅（后端唯一事实源），不再用当前窗口的会话列表求和 */
+const { unread: unreadTotal } = useLanShareUnread()
+
+let messagesSeq = 0
+let messagesTimer: ReturnType<typeof setTimeout> | null = null
+
+function errorText(err: unknown): string {
+  if (typeof err === 'string') return err
+  if (err instanceof Error) return err.message
+  return String(err)
+}
+
+/** 拉会话 + 备注：面板打开、窗口聚焦、收到 chat 事件、切到消息页签时刷新 */
+async function refreshMessages(): Promise<void> {
+  const seq = ++messagesSeq
+  messagesLoading.value = true
+  messagesError.value = ''
+  try {
+    const [list, snapshot] = await Promise.all([
+      getLanShareConversations(),
+      getLanShareSnapshot(),
+    ])
+    if (seq !== messagesSeq) return
+    conversations.value = list
+    remarks.value = snapshot.peer_remarks ?? {}
+    messagesNow.value = Date.now()
+  } catch (err) {
+    if (seq !== messagesSeq) return
+    messagesError.value = `读取聊天记录失败：${errorText(err)}`
+  } finally {
+    if (seq === messagesSeq) messagesLoading.value = false
+  }
+}
+
+/** chat 事件可能连发（收到多条消息）：合并 200ms 内的一次刷新 */
+function scheduleMessagesRefresh(): void {
+  if (messagesTimer) return
+  messagesTimer = setTimeout(() => {
+    messagesTimer = null
+    void refreshMessages()
+  }, 200)
+}
+
+/** 点某条会话：后端收起面板 + 显示主界面 + 发 lan-share://open-chat */
+async function openChat(peerId: string): Promise<void> {
+  try {
+    await openQuickPanelChat(peerId)
+  } catch {
+    // 面板马上就要收起，命令失败不弹错打扰
+  }
+}
+
+/** 面板模式：'messages' 切消息页签，其余回 VPN */
+function handlePanelMode(mode: QuickPanelMode): void {
+  tab.value = mode === 'messages' ? 'messages' : 'vpn'
+}
+
 // ============================== 面板高度 ==============================
 
 /** 窗口高度跟着当前页签的内容走，两个页签都不留一大片空白 */
@@ -110,7 +255,12 @@ const panelEl = ref<HTMLElement | null>(null)
 const footEl = ref<HTMLElement | null>(null)
 const vpnPaneEl = ref<HTMLElement | null>(null)
 const sleepPaneEl = ref<HTMLElement | null>(null)
-const activePaneEl = computed(() => (tab.value === 'vpn' ? vpnPaneEl.value : sleepPaneEl.value))
+const messagesPaneEl = ref<HTMLElement | null>(null)
+const activePaneEl = computed(() => {
+  if (tab.value === 'vpn') return vpnPaneEl.value
+  if (tab.value === 'sleep') return sleepPaneEl.value
+  return messagesPaneEl.value
+})
 
 let paneObserver: ResizeObserver | null = null
 let heightScheduled = false
@@ -182,12 +332,50 @@ onMounted(() => {
   }
   observeActivePane()
   schedulePanelHeightSync()
+  // 主窗口里也能开启/切换/停止保持唤醒，托盘面板必须自己轮询才能跟上；
+  // 页面隐藏时 useKeepAwake 会暂停节拍，重新显示后补拉。
+  keepAwake.startPolling()
   // 面板隐藏期间状态可能变化（比如托盘点连接后提示条变长），
   // 重新显示拿到焦点时再量一次，避免按旧高度弹出。
-  window.addEventListener('focus', schedulePanelHeightSync)
+  window.addEventListener('focus', handlePanelFocus)
   document.addEventListener('visibilitychange', handleVisibilityChange)
   document.addEventListener('keydown', handleKeydown)
+
+  // 快捷面板模式：首次创建时后端原子量决定初始页签（托盘左键有未读 → 消息）；
+  // 已存在的面板通过 quick-panel://mode 事件切页签。
+  void (async () => {
+    try {
+      const mode = await takeQuickPanelMode()
+      tab.value = mode === 'messages' ? 'messages' : 'vpn'
+    } catch {
+      // 命令不可用（非 Tauri / 后端未就绪）时保持默认页签
+    }
+    void refreshMessages()
+    try {
+      quickModeUnlisten = await onQuickPanelMode(handlePanelMode)
+    } catch {
+      /* 注册失败只影响模式切换的即时响应，下次显示时 take_mode 仍能取到 */
+    }
+    try {
+      lanShareChatUnlisten = await onLanShareChat(() => scheduleMessagesRefresh())
+    } catch {
+      /* 收不到 chat 事件时，聚焦 / 切页签仍会刷新 */
+    }
+  })()
 })
+
+// 面板打开期间可能切换模式（托盘左键再点一次收起、右键重置），监听放在
+// onMounted 外部声明，onUnmounted 统一清理。
+let quickModeUnlisten: UnlistenFn | null = null
+let lanShareChatUnlisten: UnlistenFn | null = null
+
+/** 面板重新弹出：立刻补一次状态，避免先闪一下旧状态再等 5 秒轮询 */
+function handlePanelFocus(): void {
+  schedulePanelHeightSync()
+  keepAwake.wake()
+  // 面板可能是在主窗口收消息时隐藏的，重新聚焦补一次消息列表
+  if (tab.value === 'messages') void refreshMessages()
+}
 
 /** Esc 收起面板：除了点外面/再点托盘，给键盘留一条确定的关闭路径 */
 function handleKeydown(event: KeyboardEvent): void {
@@ -199,20 +387,38 @@ function handleKeydown(event: KeyboardEvent): void {
 }
 
 function handleVisibilityChange(): void {
-  if (document.visibilityState === 'visible') schedulePanelHeightSync()
+  if (document.visibilityState !== 'visible') return
+  schedulePanelHeightSync()
+  // visibilitychange 恢复时 useKeepAwake 会自己排下一次轮询，这里再唤醒一次
+  keepAwake.wake()
+  if (tab.value === 'messages') void refreshMessages()
 }
 
 watch(tab, () => {
+  // 手动切页签后回报模式：托盘左键据此决定「切消息页签」还是「收起」
+  void setQuickPanelMode(tab.value === 'messages' ? 'messages' : 'quick').catch(() => {})
   observeActivePane()
   schedulePanelHeightSync()
+  // 切到休眠页签时可能刚在别处开关过会话，先拉一次再展示
+  if (tab.value === 'sleep') keepAwake.wake()
+  // 消息列表可能在主窗口里已经读过 / 有新消息，切过来重新拉一次
+  if (tab.value === 'messages') void refreshMessages()
 })
 
 onUnmounted(() => {
   paneObserver?.disconnect()
-  window.removeEventListener('focus', schedulePanelHeightSync)
+  window.removeEventListener('focus', handlePanelFocus)
   document.removeEventListener('visibilitychange', handleVisibilityChange)
   document.removeEventListener('keydown', handleKeydown)
   keepAwake.stopPolling()
+  quickModeUnlisten?.()
+  quickModeUnlisten = null
+  lanShareChatUnlisten?.()
+  lanShareChatUnlisten = null
+  if (messagesTimer) {
+    clearTimeout(messagesTimer)
+    messagesTimer = null
+  }
 })
 </script>
 
@@ -242,6 +448,20 @@ onUnmounted(() => {
           休眠
           <span class="qp-dot" :class="keepAwake.active ? 'on' : 'off'" aria-hidden="true" />
         </button>
+        <button
+          type="button"
+          class="qp-tab"
+          :class="{ active: tab === 'messages' }"
+          role="tab"
+          :aria-selected="tab === 'messages'"
+          @click="tab = 'messages'"
+        >
+          消息
+          <!-- 未读总数红点：0 时隐藏，托盘左键据此判断要不要弹消息列表 -->
+          <span v-if="unreadTotal > 0" class="qp-unread-badge">
+            {{ unreadTotal > 99 ? '99+' : unreadTotal }}
+          </span>
+        </button>
       </div>
       <span v-if="devBuild" class="qp-dev-tag" title="开发构建">dev</span>
     </header>
@@ -259,12 +479,17 @@ onUnmounted(() => {
             type="button"
             class="qp-conn"
             :class="{ connected: vpn.isConnected }"
-            :disabled="vpnBusy"
+            :disabled="vpnBusy || !vpn.canControl"
+            :title="vpn.canControl ? '' : `VPN 正由「${vpn.owner?.name ?? '另一个窗口'}」连接，只有那个窗口能断开`"
             @click="toggleVpn"
           >
-            {{ vpn.isConnected ? '断开' : '连接' }}
+            {{ vpn.canControl ? (vpn.isConnected ? '断开' : '连接') : '另一窗口' }}
           </button>
         </div>
+
+        <p v-if="vpn.owner && !vpn.owner.mine" class="qp-tip warn">
+          VPN 正由「{{ vpn.owner.name }}」连接，这里只能看；断开请到那个窗口。
+        </p>
 
         <p v-if="vpn.status.error" class="qp-tip warn">{{ vpn.status.error }}</p>
 
@@ -298,7 +523,7 @@ onUnmounted(() => {
           <span class="vpn-status-dot" :class="{ on: keepAwake.active }" aria-hidden="true" />
           <div class="vpn-meta">
             <strong>{{ keepAwake.active ? '保持唤醒中' : '未开启' }}</strong>
-            <p>{{ keepAwake.active ? sleepRemaining : '屏幕保持常亮，不做登录级保活' }}</p>
+            <p>{{ keepAwake.active ? sleepRemaining : '显示器保持常亮，不做登录级保活' }}</p>
           </div>
           <button
             type="button"
@@ -326,17 +551,29 @@ onUnmounted(() => {
             :key="preset.label"
             type="button"
             class="mode-btn"
-            :class="{ active: sleepPreset === preset.seconds }"
+            :class="{ active: presetSelected(preset.seconds) }"
             role="radio"
-            :aria-checked="sleepPreset === preset.seconds"
-            :disabled="keepAwake.active"
-            @click="sleepPreset = preset.seconds"
+            :aria-checked="presetSelected(preset.seconds)"
+            :disabled="sleepBusy"
+            @click="chooseSleepPreset(preset.seconds)"
           >
             {{ preset.label }}
           </button>
         </div>
 
         <p class="qp-tip">{{ sleepHint() }}</p>
+      </section>
+
+      <!-- 消息：最近会话列表，点一条打开主界面并定位到该会话 -->
+      <section v-show="tab === 'messages'" ref="messagesPaneEl" class="qp-pane">
+        <QuickMessages
+          :conversations="conversations"
+          :remarks="remarks"
+          :now="messagesNow"
+          :loading="messagesLoading"
+          :error="messagesError"
+          @open="openChat"
+        />
       </section>
     </div>
 
@@ -372,7 +609,7 @@ html body,
   height: 100%;
   overflow: hidden;
   border: 1px solid var(--border-color);
-  border-radius: 14px;
+  border-radius: var(--radius-lg);
   background: var(--bg-primary);
   color: var(--text-primary);
   font-size: 13px;
@@ -385,7 +622,7 @@ html body,
   align-items: center;
   gap: 8px;
   height: 46px;
-  padding: 0 14px;
+  padding: 0 16px;
   border-bottom: 1px solid var(--border-color);
   background: var(--bg-primary);
   flex-shrink: 0;
@@ -403,7 +640,7 @@ html body,
   position: relative;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   height: 46px;
   padding: 0 8px;
   border: 0;
@@ -418,6 +655,18 @@ html body,
   font-weight: 600;
 }
 
+.qp-unread-badge {
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: var(--radius-md);
+  background: var(--danger);
+  color: var(--on-primary);
+  font-size: 12px;
+  line-height: 16px;
+  text-align: center;
+}
+
 .qp-tab.active::after {
   content: '';
   position: absolute;
@@ -425,7 +674,7 @@ html body,
   right: 8px;
   bottom: 0;
   height: 2px;
-  border-radius: 2px;
+  border-radius: var(--radius-sm);
   background: var(--primary);
 }
 
@@ -435,11 +684,11 @@ html body,
   display: inline-flex;
   align-items: center;
   height: 18px;
-  padding: 0 7px;
-  border-radius: 9px;
+  padding: 0 8px;
+  border-radius: var(--radius-md);
   background: var(--bg-tag);
   color: var(--text-tag);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.02em;
   user-select: none;
@@ -463,19 +712,19 @@ html body,
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 14px;
+  padding: 16px;
 }
 
 .qp-pane {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
 }
 
 .qp-tip {
   margin: 0;
-  padding: 7px 10px;
-  border-radius: 8px;
+  padding: 8px 12px;
+  border-radius: var(--radius-md);
   background: var(--bg-secondary);
   color: var(--text-secondary);
   font-size: 12px;
@@ -483,13 +732,13 @@ html body,
 }
 
 .qp-tip.ok {
-  background: #ecfdf5;
-  color: #047857;
+  background: var(--success-soft);
+  color: var(--success-text);
 }
 
 .qp-tip.warn {
-  background: #fffbeb;
-  color: #b45309;
+  background: var(--warning-soft);
+  color: var(--warning-text);
 }
 
 .qp-section {
@@ -508,10 +757,10 @@ html body,
 .vpn-card {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   padding: 12px;
   border: 1px solid var(--border-color);
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   background: var(--bg-secondary);
 }
 
@@ -539,7 +788,7 @@ html body,
 }
 
 .vpn-meta p {
-  margin: 2px 0 0;
+  margin: 4px 0 0;
   overflow: hidden;
   color: var(--text-secondary);
   text-overflow: ellipsis;
@@ -552,9 +801,9 @@ html body,
   height: 30px;
   padding: 0 16px;
   border: 0;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--primary);
-  color: #fff;
+  color: var(--on-primary);
   font-size: 13px;
   cursor: pointer;
 }
@@ -575,14 +824,14 @@ html body,
 
 .mode-group {
   display: flex;
-  gap: 6px;
+  gap: 8px;
 }
 
 .mode-btn {
   flex: 1;
   height: 32px;
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--bg-input);
   color: var(--text-secondary);
   font-size: 12px;
@@ -599,6 +848,10 @@ html body,
 .mode-btn:disabled {
   opacity: 0.6;
   cursor: default;
+}
+/* 保持中时「当前时长」不可再点，但仍然要看清是它 */
+.mode-btn.active:disabled {
+  opacity: 1;
 }
 
 .qp-muted {
@@ -619,14 +872,14 @@ html body,
   flex-shrink: 0;
   justify-content: space-between;
   gap: 16px;
-  padding: 6px 14px 10px;
+  padding: 8px 16px 12px;
   border-top: 1px solid var(--border-color);
   background: var(--bg-secondary);
 }
 
 /* 纯文本按钮：不要边框和底色，只留文字；hover 只变色，不影响布局高度 */
 .qp-foot-btn {
-  padding: 2px 0;
+  padding: 4px 0;
   border: 0;
   border-radius: 6px;
   background: transparent;

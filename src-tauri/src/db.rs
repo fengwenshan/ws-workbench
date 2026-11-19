@@ -20,7 +20,7 @@ use crate::vpn::models::{VpnProfile, VpnRuleSet};
 pub const DB_FILE: &str = "ws-workbench.db";
 
 /// 表结构版本
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 /// v1：分组 / 项目 / VPN 配置 / 规则集
 const SCHEMA_SQL_V1: &str = r#"
@@ -87,30 +87,43 @@ CREATE INDEX IF NOT EXISTS idx_clipboard_attachments_item
   ON clipboard_attachments(item_id, seq);
 "#;
 
-/// 解析出可写的存储目录，优先创建 app_data_dir 等候选目录
-fn resolve_storage_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    for (_, dir) in crate::config::storage_candidates(app) {
-        if !dir.exists() && crate::util::fs::create_dir_all(&dir).is_err() {
-            continue;
-        }
-        if crate::util::fs::is_writable_dir(&dir) {
-            return Ok(dir);
-        }
-    }
-    Err("没有可写的本地存储目录".to_string())
-}
+/// v4：局域网分享聊天（会话 + 消息；消息载荷 / 会话预览都是密文信封）
+const SCHEMA_SQL_V4: &str = r#"
+CREATE TABLE IF NOT EXISTS lan_share_conversations (
+  id              TEXT PRIMARY KEY NOT NULL,
+  alias           TEXT NOT NULL,
+  last_activity_ms INTEGER NOT NULL,
+  last_preview_enc TEXT NOT NULL,
+  unread          INTEGER NOT NULL DEFAULT 0,
+  created_at_ms   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_lan_share_conversations_activity
+  ON lan_share_conversations(last_activity_ms DESC);
+
+CREATE TABLE IF NOT EXISTS lan_share_messages (
+  id            TEXT PRIMARY KEY NOT NULL,
+  peer_id       TEXT NOT NULL,
+  direction     TEXT NOT NULL,
+  kind          TEXT NOT NULL,
+  created_at_ms INTEGER NOT NULL,
+  payload_enc   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_lan_share_messages_peer_created
+  ON lan_share_messages(peer_id, created_at_ms);
+"#;
 
 /// 数据文件目录（数据库、剪贴板图片附件等都放这里）。
 ///
 /// 不能直接用 `app_data_dir()`：目录不可写时会回退到别的候选目录，附件必须跟着数据库走，
-/// 否则数据库写成功、图片写失败，图文条目就会被整条跳过。
+/// 否则数据库写成功、图片写失败，图文条目就会被整条跳过。回退顺序由
+/// [`crate::config::data_dir`] 统一决定 —— 主密钥也按同一个目录解析，两者不能分开算。
 pub(crate) fn storage_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    resolve_storage_dir(app)
+    crate::config::data_dir(app)
 }
 
 /// 数据库文件的绝对路径
 pub fn db_path(app: &AppHandle) -> Result<PathBuf, String> {
-    Ok(resolve_storage_dir(app)?.join(DB_FILE))
+    Ok(storage_dir(app)?.join(DB_FILE))
 }
 
 /// 打开（必要时创建）数据库并确保表结构就绪
@@ -144,6 +157,10 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
         conn.execute_batch(SCHEMA_SQL_V3)
             .map_err(|e| format!("增加剪贴板富文本列失败: {}", e))?;
     }
+    if version < 4 {
+        conn.execute_batch(SCHEMA_SQL_V4)
+            .map_err(|e| format!("创建局域网分享聊天表失败: {}", e))?;
+    }
     if version < SCHEMA_VERSION {
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)
             .map_err(|e| format!("写入数据库版本失败: {}", e))?;
@@ -151,10 +168,16 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
-/// 校验数据库可打开并返回路径（供 `storage_info` 使用）
+/// 校验数据库可打开、内容能解开，并返回路径（供 `storage_info` 使用）。
+///
+/// 只 `open` 不够：主密钥和数据目录对不上时表结构照样能读，但每一行 payload
+/// 都会「数据已被篡改」。设置页必须看到这种状态，否则界面只是安静地空掉，
+/// 用户根本不知道数据还在、只是解不开。
 pub fn check(app: &AppHandle) -> Result<PathBuf, String> {
     let path = db_path(app)?;
-    open(&path)?;
+    let keys = crate::crypto::vault_keys(app)?;
+    let conn = open(&path)?;
+    load_all(&conn, &keys)?;
     Ok(path)
 }
 
@@ -517,21 +540,22 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
         let count: i64 = conn
             .query_row(
                 "SELECT count(*) FROM sqlite_master WHERE type = 'table' \
                  AND name IN ('groups', 'projects', 'vpn_profiles', 'vpn_rule_sets', \
-                              'clipboard_items', 'clipboard_attachments')",
+                              'clipboard_items', 'clipboard_attachments', \
+                              'lan_share_conversations', 'lan_share_messages')",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(count, 6);
+        assert_eq!(count, 8);
     }
 
     #[test]
-    fn migrates_v1_db_to_v3_and_creates_clipboard_tables() {
+    fn migrates_v1_db_to_v4_and_creates_all_tables() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("v1.db");
         {
@@ -544,7 +568,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
         // v3 给剪贴板条目加了富文本私有表示列
         let has_extra: i64 = conn
             .query_row(
@@ -554,7 +578,12 @@ mod tests {
             )
             .unwrap();
         assert_eq!(has_extra, 1);
-        for table in ["clipboard_items", "clipboard_attachments"] {
+        for table in [
+            "clipboard_items",
+            "clipboard_attachments",
+            "lan_share_conversations",
+            "lan_share_messages",
+        ] {
             let count: i64 = conn
                 .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0))
                 .unwrap();
@@ -563,7 +592,7 @@ mod tests {
     }
 
     #[test]
-    fn migrates_v2_db_to_v3_keeps_existing_items() {
+    fn migrates_v2_db_to_v4_keeps_existing_items() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("v2.db");
         {
@@ -583,7 +612,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
         let extra: String = conn
             .query_row(
                 "SELECT extra_enc FROM clipboard_items WHERE id = 'old'",
@@ -592,12 +621,77 @@ mod tests {
             )
             .unwrap();
         assert!(extra.is_empty(), "旧记录迁移后 extra_enc 应为空");
+        let tables: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'table' \
+                 AND name IN ('lan_share_conversations', 'lan_share_messages')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(tables, 2);
+    }
+
+    #[test]
+    fn migrates_v3_db_to_v4_creates_chat_tables() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("v3.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(SCHEMA_SQL_V1).unwrap();
+            conn.execute_batch(SCHEMA_SQL_V2).unwrap();
+            conn.execute_batch(SCHEMA_SQL_V3).unwrap();
+            conn.execute(
+                "INSERT INTO clipboard_items
+                 (id, kind, created_at, content_hash, text_enc, html_enc, image_count, byte_size)
+                 VALUES ('old3', 'text', 2, 'hash', 'v1.a.b.c', '', 0, 0)",
+                [],
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 3i64).unwrap();
+        }
+
+        let conn = open(&path).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 4);
+        // v4 只新增表，不改旧表：v3 时代的剪贴板记录原样保留
+        let text_enc: String = conn
+            .query_row(
+                "SELECT text_enc FROM clipboard_items WHERE id = 'old3'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(text_enc, "v1.a.b.c");
+        for table in ["lan_share_conversations", "lan_share_messages"] {
+            let count: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(count, 0);
+        }
+        // 索引也跟着建好
+        let indexes: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'index' \
+                 AND name IN ('idx_lan_share_conversations_activity', \
+                              'idx_lan_share_messages_peer_created')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(indexes, 2);
+        // 重复打开不会重复建表 / 报错（幂等）
+        drop(conn);
+        let conn = open(&path).unwrap();
+        assert_eq!(init_schema(&conn), Ok(()));
     }
 
     #[test]
     fn init_schema_rejects_newer_version() {
         let conn = memory_conn();
-        conn.pragma_update(None, "user_version", 4i64).unwrap();
+        conn.pragma_update(None, "user_version", 5i64).unwrap();
         let err = init_schema(&conn).unwrap_err();
         assert!(err.contains("版本过新"), "实际错误：{}", err);
     }
@@ -629,6 +723,7 @@ mod tests {
                 created_at: 0,
                 dir: "/tmp".to_string(),
             }],
+            pack_include: None,
         }
     }
 

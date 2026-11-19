@@ -1,6 +1,6 @@
 import { decryptText, encryptText } from '@/api/config'
 
-/** 后端密文信封前缀，与 Rust crypto.rs 的 PREFIX 保持一致 */
+/** 后端密文信封前缀，与 Rust `crypto/mod.rs` 的 PREFIX 保持一致 */
 const ENCRYPTED_PREFIX = 'v1.'
 
 /**

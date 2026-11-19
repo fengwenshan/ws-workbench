@@ -150,7 +150,7 @@ async function save() {
   height: 56px;
   padding: 0 12px;
   border: 1px dashed var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--bg-secondary);
   color: var(--text-primary);
   font-size: 17px;
@@ -178,7 +178,7 @@ async function save() {
 
 .sd-error {
   margin: 0;
-  color: #dc2626;
+  color: var(--danger-text);
   font-size: 12px;
   line-height: 1.5;
 }

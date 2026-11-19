@@ -710,7 +710,7 @@ function scopeDetail(rule: PopupRule): string {
 
 <style scoped>
 .btn-sm {
-  padding: 3px 12px;
+  padding: 4px 12px;
   font-size: 12px;
 }
 
@@ -719,8 +719,8 @@ function scopeDetail(rule: PopupRule): string {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 12px 20px 14px;
+  gap: 12px;
+  padding: 12px 20px 16px;
   overflow: hidden;
 }
 
@@ -729,16 +729,16 @@ function scopeDetail(rule: PopupRule): string {
   flex-shrink: 0;
   display: flex;
   align-items: center;
-  gap: 14px;
-  padding: 14px 18px;
+  gap: 16px;
+  padding: 16px 20px;
   border: 1px solid var(--border-color);
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   background: var(--bg-secondary);
 }
 
 .hero.on {
   border-color: rgba(59, 130, 246, 0.35);
-  background: linear-gradient(90deg, rgba(59, 130, 246, 0.06), var(--bg-secondary) 60%);
+  background: var(--bg-secondary);
 }
 
 .hero-text {
@@ -759,11 +759,11 @@ function scopeDetail(rule: PopupRule): string {
 }
 
 .hero-state {
-  padding: 1px 7px;
-  border-radius: 999px;
+  padding: 1px 8px;
+  border-radius: var(--radius-sm);
   background: var(--bg-tag);
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .hero-state.on {
@@ -781,7 +781,7 @@ function scopeDetail(rule: PopupRule): string {
 .hero-switch {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   flex-shrink: 0;
 }
 
@@ -800,9 +800,9 @@ function scopeDetail(rule: PopupRule): string {
   display: flex;
   align-items: stretch;
   gap: 0;
-  padding: 6px 6px;
+  padding: 8px 8px;
   border: 1px solid var(--border-color);
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   background: var(--bg-primary);
 }
 
@@ -831,7 +831,7 @@ function scopeDetail(rule: PopupRule): string {
 
 .stat span {
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .stat-wide {
@@ -859,16 +859,16 @@ function scopeDetail(rule: PopupRule): string {
 
 .segmented {
   display: inline-flex;
-  gap: 2px;
-  padding: 2px;
-  border-radius: 8px;
+  gap: 4px;
+  padding: 4px;
+  border-radius: var(--radius-md);
   background: var(--bg-hover);
 }
 
 .segmented-item {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   height: 28px;
   padding: 0 12px;
   border: none;
@@ -893,10 +893,10 @@ function scopeDetail(rule: PopupRule): string {
 .segmented-count {
   min-width: 16px;
   padding: 0 4px;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--bg-tag);
   color: var(--text-secondary);
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 400;
   line-height: 16px;
   text-align: center;
@@ -920,7 +920,7 @@ function scopeDetail(rule: PopupRule): string {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 8px 14px;
+  padding: 8px 16px;
   border-bottom: 1px solid var(--border-color);
   background: var(--bg-primary);
 }
@@ -928,15 +928,15 @@ function scopeDetail(rule: PopupRule): string {
 .records-hint {
   flex-shrink: 0;
   margin: 0;
-  padding: 8px 14px;
+  padding: 8px 16px;
   border-bottom: 1px solid var(--border-color);
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .rules-summary {
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .rule-table {
@@ -950,8 +950,8 @@ function scopeDetail(rule: PopupRule): string {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 96px 88px 150px;
   align-items: center;
-  gap: 10px;
-  padding: 9px 14px;
+  gap: 12px;
+  padding: 8px 16px;
 }
 
 .rule-head {
@@ -961,7 +961,7 @@ function scopeDetail(rule: PopupRule): string {
   border-bottom: 1px solid var(--border-color);
   background: var(--bg-secondary);
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .rule-head span:nth-child(3),
@@ -981,7 +981,7 @@ function scopeDetail(rule: PopupRule): string {
 .app-cell {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   min-width: 0;
 }
 
@@ -1004,14 +1004,14 @@ function scopeDetail(rule: PopupRule): string {
 
 .app-process {
   color: var(--text-muted);
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 400;
 }
 
 .app-sub {
-  margin-top: 2px;
+  margin-top: 4px;
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .chevron {
@@ -1049,7 +1049,7 @@ function scopeDetail(rule: PopupRule): string {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 10px;
+  gap: 12px;
   flex-shrink: 0;
 }
 
@@ -1059,8 +1059,8 @@ function scopeDetail(rule: PopupRule): string {
 }
 
 .rule-line {
-  padding-top: 7px;
-  padding-bottom: 7px;
+  padding-top: 8px;
+  padding-bottom: 8px;
   border-bottom: 1px solid var(--border-color);
 }
 
@@ -1088,11 +1088,11 @@ function scopeDetail(rule: PopupRule): string {
 .rule-meta {
   display: flex;
   align-items: center;
-  gap: 6px;
-  margin-top: 2px;
+  gap: 8px;
+  margin-top: 4px;
   overflow: hidden;
   color: var(--text-muted);
-  font-size: 10px;
+  font-size: 12px;
   white-space: nowrap;
 }
 
@@ -1109,7 +1109,7 @@ function scopeDetail(rule: PopupRule): string {
   flex-direction: column;
   overflow-y: auto;
   border: 1px solid var(--border-color);
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   background: var(--bg-primary);
 }
 
@@ -1121,8 +1121,8 @@ function scopeDetail(rule: PopupRule): string {
 .row {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 10px 14px;
+  gap: 12px;
+  padding: 12px 16px;
   border-bottom: 1px solid var(--border-color);
 }
 
@@ -1150,10 +1150,10 @@ function scopeDetail(rule: PopupRule): string {
 .row-sub {
   display: flex;
   align-items: center;
-  gap: 6px;
-  margin-top: 3px;
+  gap: 8px;
+  margin-top: 4px;
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 12px;
   overflow: hidden;
   white-space: nowrap;
 }
@@ -1171,7 +1171,7 @@ function scopeDetail(rule: PopupRule): string {
 .row-time {
   flex-shrink: 0;
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 12px;
   font-variant-numeric: tabular-nums;
 }
 
@@ -1188,7 +1188,7 @@ function scopeDetail(rule: PopupRule): string {
 .row-actions {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   flex-shrink: 0;
 }
 
@@ -1198,9 +1198,9 @@ function scopeDetail(rule: PopupRule): string {
 
 .tag {
   flex-shrink: 0;
-  padding: 1px 7px;
+  padding: 1px 8px;
   border-radius: 4px;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 18px;
 }
 
@@ -1226,11 +1226,11 @@ function scopeDetail(rule: PopupRule): string {
 
 .score {
   flex-shrink: 0;
-  padding: 2px 8px;
-  border-radius: 10px;
+  padding: 4px 8px;
+  border-radius: var(--radius-md);
   background: rgba(245, 158, 11, 0.12);
-  color: #b45309;
-  font-size: 11px;
+  color: var(--warning-text);
+  font-size: 12px;
   font-weight: 600;
 }
 
@@ -1293,7 +1293,7 @@ function scopeDetail(rule: PopupRule): string {
 .empty-actions {
   display: flex;
   gap: 8px;
-  margin-top: 6px;
+  margin-top: 8px;
 }
 
 /* ---------------------------- 忽略名单 ---------------------------- */
@@ -1302,16 +1302,16 @@ function scopeDetail(rule: PopupRule): string {
   align-items: center;
   flex-wrap: wrap;
   gap: 8px;
-  margin: 0 14px 12px;
-  padding: 10px 12px;
+  margin: 0 16px 12px;
+  padding: 12px 12px;
   border: 1px dashed var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--bg-secondary);
 }
 
 .ignored-label {
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .ignored-chip {
@@ -1319,11 +1319,11 @@ function scopeDetail(rule: PopupRule): string {
   align-items: center;
   gap: 4px;
   padding: 1px 4px 1px 8px;
-  border-radius: 999px;
+  border-radius: var(--radius-sm);
   background: var(--bg-primary);
   border: 1px solid var(--border-color);
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .ignored-chip button {
@@ -1345,7 +1345,7 @@ function scopeDetail(rule: PopupRule): string {
 
 .ignored-hint {
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 /* ---------------------------- 设置条 / 说明 ---------------------------- */
@@ -1354,10 +1354,10 @@ function scopeDetail(rule: PopupRule): string {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 10px 18px;
+  gap: 12px 20px;
   padding: 8px 12px;
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--bg-secondary);
 }
 
@@ -1374,7 +1374,7 @@ function scopeDetail(rule: PopupRule): string {
 
 .config-muted {
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .config-spacer {
@@ -1385,7 +1385,7 @@ function scopeDetail(rule: PopupRule): string {
   flex-shrink: 0;
   margin: 0;
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.6;
 }
 
@@ -1393,7 +1393,7 @@ function scopeDetail(rule: PopupRule): string {
 .popup-error {
   flex-shrink: 0;
   margin: 0;
-  padding: 8px 10px;
+  padding: 8px 12px;
   border-radius: 6px;
   background: rgba(239, 68, 68, 0.08);
   color: var(--danger);

@@ -459,8 +459,37 @@ function toggleCollapse(groupId: string) {
 <template>
   <div class="project-list">
     <div class="list-header">
-      <span>项目</span>
-      <button class="add-group-btn" @click="emit('create')">+ 新建</button>
+      <span class="head-icon" aria-hidden="true">
+        <svg
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.8"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        >
+          <path d="M3 7a2 2 0 0 1 2-2h4.2a2 2 0 0 1 1.6.8L12 7h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+        </svg>
+      </span>
+      <span class="head-title">项目</span>
+      <button
+        class="head-action"
+        type="button"
+        title="新建分组"
+        aria-label="新建分组"
+        @click="emit('create')"
+      >
+        <svg
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.8"
+          stroke-linecap="round"
+          aria-hidden="true"
+        >
+          <path d="M12 5v14M5 12h14" />
+        </svg>
+      </button>
     </div>
     <div ref="listBodyEl" class="list-body" :class="{ dragging: Boolean(dragKind) }">
       <template v-for="item in displayRootItems" :key="item.id">
@@ -516,7 +545,19 @@ function toggleCollapse(groupId: string) {
               class="group-default-badge"
               title="默认分组不可删除、不可重命名"
             >默认</span>
-            <template v-else>
+            <!-- 添加项目收进分组行的悬浮操作里，不再在分组下面占一整行 -->
+            <button
+              class="group-add"
+              @click.stop="emit('addProject', item.group.id)"
+              title="添加项目"
+              aria-label="添加项目"
+            >
+              <svg viewBox="64 64 896 896" aria-hidden="true">
+                <path d="M482 152h60q8 0 8 8v704q0 8-8 8h-60q-8 0-8-8V160q0-8 8-8z" />
+                <path d="M176 474h672q8 0 8 8v60q0 8-8 8H176q-8 0-8-8v-60q0-8 8-8z" />
+              </svg>
+            </button>
+            <template v-if="!item.group.is_default">
               <button
                 class="group-rename"
                 @click.stop="startRename(item.group)"
@@ -573,8 +614,6 @@ function toggleCollapse(groupId: string) {
                 </button>
               </div>
             </template>
-
-            <button class="add-project-btn" @click="emit('addProject', item.group.id)">+ 添加项目</button>
           </div>
 
         </div>
@@ -622,22 +661,36 @@ function toggleCollapse(groupId: string) {
   flex: 1;
   min-height: 0;
 }
+/* 页头：图标 + 标题 + 右侧新建，参考 LANLink 左栏页头 */
 .list-header {
   flex-shrink: 0;
   display: flex;
   align-items: center;
-  height: var(--panel-header-height);
-  padding: 0 16px;
-  font-size: 12px;
-  font-weight: 600;
+  gap: 8px;
+  height: var(--pane-head-height);
+  padding: 0 12px 0 20px;
+  color: var(--text-primary);
+}
+.head-icon {
+  display: inline-flex;
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  color: var(--primary);
+}
+.head-icon svg {
+  width: 20px;
+  height: 20px;
+}
+.head-title {
+  font-size: 14px;
+  font-weight: 700;
   letter-spacing: 0.2px;
-  color: #000;
-  border-bottom: 1px solid var(--border-color);
 }
 .list-body {
   flex: 1;
   overflow-y: auto;
-  padding: 6px 8px 8px;
+  padding: 8px 8px 8px;
 }
 .group-section {
   margin-bottom: 4px;
@@ -656,7 +709,7 @@ function toggleCollapse(groupId: string) {
   align-items: center;
   gap: 4px;
   height: 28px;
-  padding: 0 6px;
+  padding: 0 8px;
   border-radius: 6px;
   font-size: 12px;
   font-weight: 600;
@@ -721,7 +774,7 @@ function toggleCollapse(groupId: string) {
   flex: 1;
   min-width: 0;
   height: 22px;
-  padding: 2px 4px;
+  padding: 4px 4px;
   border: 1px solid var(--primary);
   border-radius: 4px;
   font-size: 12px;
@@ -735,15 +788,16 @@ function toggleCollapse(groupId: string) {
 .group-default-badge {
   flex-shrink: 0;
   height: 16px;
-  padding: 0 6px;
+  padding: 0 8px;
   border-radius: 4px;
   background: var(--bg-tag);
   color: var(--text-muted);
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 500;
   line-height: 16px;
   user-select: none;
 }
+.group-add,
 .group-rename,
 .group-delete {
   display: grid;
@@ -763,19 +817,26 @@ function toggleCollapse(groupId: string) {
   pointer-events: none;
   transition: opacity 0.12s, background 0.12s, color 0.12s;
 }
+.group-header:hover .group-add,
 .group-header:hover .group-rename,
 .group-header:hover .group-delete,
+.group-header:focus-within .group-add,
 .group-header:focus-within .group-rename,
 .group-header:focus-within .group-delete {
   opacity: 1;
   pointer-events: auto;
 }
+.group-add svg,
 .group-rename svg,
 .group-delete svg,
 .item-delete svg {
   width: 14px;
   height: 14px;
   fill: currentColor;
+}
+.group-add:hover {
+  background: rgba(59, 130, 246, 0.12);
+  color: var(--primary);
 }
 .group-rename:hover {
   background: var(--bg-tag);
@@ -785,6 +846,7 @@ function toggleCollapse(groupId: string) {
   background: rgba(239, 68, 68, 0.12);
   color: var(--danger);
 }
+.group-add:focus-visible,
 .group-rename:focus-visible,
 .group-delete:focus-visible {
   outline: 1px solid var(--primary);
@@ -792,7 +854,7 @@ function toggleCollapse(groupId: string) {
 /* 项目列表：左侧一条细竖线表达层级，行高统一，长名称省略 */
 .group-projects {
   margin-left: 12px;
-  padding: 0 0 2px 8px;
+  padding: 0 0 4px 8px;
   border-left: 1px solid var(--border-color);
 }
 .list-item {
@@ -800,7 +862,7 @@ function toggleCollapse(groupId: string) {
   align-items: center;
   gap: 4px;
   height: 30px;
-  padding: 0 6px 0 16px;
+  padding: 0 8px 0 16px;
   border-radius: 6px;
   font-size: 14px;
   color: var(--text-secondary);
@@ -858,63 +920,46 @@ function toggleCollapse(groupId: string) {
 .item-delete:focus-visible {
   outline: 1px solid var(--primary);
 }
-.add-project-btn {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  width: 100%;
-  height: 28px;
-  margin: 2px 0;
-  padding: 0 6px;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--text-muted);
-  font-size: 12px;
-  text-align: left;
-  cursor: pointer;
-  opacity: 0.75;
-  transition: opacity 0.12s, background 0.12s, color 0.12s;
-}
-.add-project-btn:hover {
-  opacity: 1;
-  background: var(--bg-hover);
-  color: var(--primary);
-}
 .empty-tip {
-  padding: 18px 12px;
+  padding: 20px 12px;
   text-align: center;
   color: var(--text-muted);
   font-size: 12px;
 }
-.add-group-btn {
+/* 右侧操作：和 LANLink 页头的齿轮同一套图标按钮尺寸 */
+.head-action {
+  margin-left: auto;
   display: inline-flex;
   align-items: center;
-  flex-shrink: 0;
-  margin-left: auto;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
   padding: 0;
   border: none;
+  border-radius: var(--radius-md);
   background: transparent;
-  color: var(--primary);
-  font-size: 12px;
-  font-weight: 500;
-  line-height: 1;
+  color: var(--text-muted);
   cursor: pointer;
+  flex-shrink: 0;
+  transition: background-color 0.2s ease, color 0.2s ease;
 }
-.add-group-btn:hover {
-  color: var(--primary-hover);
-  text-decoration: underline;
-  text-underline-offset: 2px;
+.head-action:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
 }
-.add-group-btn:focus-visible {
+.head-action:focus-visible {
   outline: 1px solid var(--primary);
   outline-offset: 1px;
+}
+.head-action svg {
+  width: 17px;
+  height: 17px;
 }
 
 /* 根级项目行：和分组标题的名称列对齐，像文件管理器里的文件 */
 .root-item {
   height: 28px;
-  padding: 0 6px 0 26px;
+  padding: 0 8px 0 28px;
   margin-bottom: 4px;
 }
 

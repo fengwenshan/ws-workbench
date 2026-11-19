@@ -1,4 +1,5 @@
 import { createApp } from 'vue'
+import { installBrowserTauriShim } from '@/dev/browserTauriShim'
 import './styles.css'
 import UninstallWindow from './UninstallWindow.vue'
 import { platform } from '@/platform'
@@ -10,6 +11,8 @@ import { platform } from '@/platform'
  * 视觉按设计稿自己画。macOS 用 hiddenTitle + 红绿灯浮层，需要给内容让出顶部
  * 36px 安全区，用 platform 同步兜底值（userAgent）加 body class，浏览器预览同样生效。
  */
+if (import.meta.env.DEV) installBrowserTauriShim()
+
 const isMac = platform.is_macos
 document.body.classList.toggle('is-macos', isMac)
 document.body.classList.toggle('is-windows', platform.is_windows)

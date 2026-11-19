@@ -21,6 +21,7 @@ release/
 *.key
 *.key.pub
 *.sig
+*.local
 
 # 本地构建工具链（Rust + MSYS2/MinGW，仅本机验证用，体积很大，切勿提交）
 .toolchain/
